@@ -30,6 +30,8 @@ try:
 except ImportError:
     from session_utils import get_random_user, find_user_by_ip, get_user_by_name, rand_ip_from_network
 
+last_threat_event_time = 0
+
 NAME        = "Cisco ASA Firewall"
 DESCRIPTION = "Simulates Cisco ASA syslog messages for the XSIAM cisco_asa_raw dataset."
 XSIAM_PARSER = "Cisco ASA"
