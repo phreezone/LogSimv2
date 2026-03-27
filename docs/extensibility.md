@@ -28,7 +28,7 @@ Adding a new log source is simple:
        return log_string
    ```
 
-4. Add a new section to config.json for your module's settings:
+4. Add a new section to `config.json` for your module's non-secret settings (hostname, port, event mix, simulated environment data):
    ```json
    "my_new_firewall_config": {
      "transport": "syslog",
@@ -36,5 +36,7 @@ Adding a new log source is simple:
      "hostname": "MY-FW-01"
    }
    ```
+
+   If your module requires transport credentials or API keys (e.g., an HTTP Collector URL and key), add those to `.env` and reference them via `http_collectors` in `config.json` — never put secrets directly in `config.json`. See [Configuration](configuration.md#b-transport-configuration) for the full `http_collectors` schema.
 
 5. Run log_simulator.py. Your new module will automatically appear in the list.
