@@ -1,0 +1,1802 @@
+# modules/google_workspace.py
+# Simulates Google Workspace Admin SDK Reports API activity events.
+#
+# Applications covered (Phase 1):
+#   login         → google_workspace_login_raw      (XSIAM built-in)
+#   drive         → google_workspace_drive_raw       (GoogleDrive_1_3.xif)
+#   admin         → google_workspace_admin_raw       (XSIAM built-in)
+#   user_accounts → google_workspace_user_accounts_raw (XSIAM built-in)
+#   token         → google_workspace_token_raw       (XSIAM built-in)
+#
+# JSON format: exact Google Admin SDK Reports API Activity resource.
+# Each event is a complete Activity object with all documented fields.
+# Parameter types match Google spec: value/intValue/boolValue/multiValue.
+#
+# Transport: self-contained HTTP with per-application collector routing.
+# Collector IDs come from google_workspace_config.collector_routing.
+# Module sends internally and returns (json_str, event_name) — the orchestrator's
+# send_http_message exits cleanly (no collector_id in CONFIG_KEY config),
+# while the throughput counter still increments.
+#
+# XIF compliance (GoogleDrive_1_3.xif):
+#   Required top-level: kind, etag, ownerDomain, ipAddress, id, actor, events,
+#                       _vendor="Google", _product="Drive"
+#   Required parameters: doc_id, doc_title, doc_type, owner
+#   XDM map: events[0].name → xdm.event.operation
+#             events[0].type → xdm.event.type
+#             doc_title      → xdm.target.file.filename
+#             owner          → xdm.target.user.username
+#             actor.email    → xdm.source.user.username
+#             actor.profileId → xdm.source.user.identifier
+#             ipAddress      → xdm.source.ipv4
+
+import random
+import time
+import json
+import hashlib
+import os
+import base64
+import string
+from datetime import datetime, timezone, timedelta
+from ipaddress import ip_network, ip_address
+
+try:
+    import requests
+    _REQUESTS_AVAILABLE = True
+except ImportError:
+    _REQUESTS_AVAILABLE = False
+
+try:
+    from modules.session_utils import (
+        get_random_user, get_user_by_name, get_all_emails, rand_ip_from_network
+    )
+except ImportError:
+    from session_utils import (
+        get_random_user, get_user_by_name, get_all_emails, rand_ip_from_network
+    )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Module metadata
+# ──────────────────────────────────────────────────────────────────────────────
+
+NAME        = "google_workspace"
+DESCRIPTION = ("Simulates Google Workspace Admin SDK Reports API events "
+               "(Drive, Login, Admin, User Accounts, Token).")
+XSIAM_VENDOR = "Google"
+XSIAM_PRODUCT = "Workspace"
+CONFIG_KEY   = "google_workspace_config"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Module-level state
+# ──────────────────────────────────────────────────────────────────────────────
+
+last_threat_event_time = 0
+_gw_cb_state = {}   # {collector_id: {"fails": int, "open_since": float|None}}
+
+_HTTP_CB_THRESHOLD   = 3
+_HTTP_CB_COOLDOWN    = 60
+_HTTP_CB_POST_TIMEOUT = 15
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Constants
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Same first octets used across all LogSim modules
+_FIRST_OCTETS = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 194, 212, 213]
+
+# Login event parameters
+_LOGIN_TYPES = ["saml", "saml", "saml", "google_password", "exchange", "reauth", "unknown"]
+
+_LOGIN_CHALLENGE_METHODS = [
+    "password", "password", "security_key", "passkey",
+    "totp", "push", "push", "sms_otp", "email_otp", "none",
+]
+
+_LOGIN_FAILURE_TYPES = [
+    "wrong_password", "wrong_password", "wrong_password",
+    "denied_by_policy", "unknown_error",
+]
+
+# Drive document types
+_DRIVE_DOC_TYPES = [
+    "document", "document", "document",
+    "spreadsheet", "spreadsheet",
+    "presentation",
+    "form",
+    "pdf", "pdf",
+    "image",
+    "archive",
+    "drawing",
+    "third_party",
+]
+
+# Realistic document titles keyed by type (for programmatic generation)
+_DRIVE_TITLES = {
+    "document": [
+        "Project Phoenix Design Doc", "Engineering Specification v3",
+        "Vendor SLA Agreement - Acme Corp", "IT Security Audit Report 2025",
+        "M&A Target Analysis - Project Phoenix", "Legal Review - Contract 2025",
+        "HR Policy Handbook 2025", "Incident Response Runbook",
+        "Architecture Decision Record - Auth Service", "Meeting Notes - Board Q4",
+        "Product Requirements Document - Platform v2", "Competitive Analysis Report",
+        "Employee Onboarding Checklist", "Budget Justification - Cloud Infrastructure",
+        "Security Awareness Training Guide", "Data Retention Policy",
+        "Supplier Evaluation Matrix", "Executive Summary - Strategic Plan 2025",
+        "Operations Manual - Tier 1 Support", "Acceptable Use Policy",
+    ],
+    "spreadsheet": [
+        "Q4 Revenue Projections", "Employee PII Master List",
+        "Sales Pipeline Q4", "Budget vs Actuals 2025",
+        "AWS Cost Allocation Report", "Headcount Planning 2025-2026",
+        "Vendor Contracts Tracker", "IT Asset Inventory",
+        "Security Findings Tracker", "Customer Churn Analysis",
+        "Commission Structure 2025", "SLA Compliance Metrics",
+        "Open Positions Pipeline", "Project Timeline Tracker",
+        "License Utilization Report", "Incident Log Q4",
+    ],
+    "presentation": [
+        "Marketing Campaign Brief Q1", "Engineering Roadmap 2025",
+        "Board Presentation - Q4 Results", "Sales Kickoff Deck 2025",
+        "Product Demo - Platform v2", "Investor Update - Series B",
+        "Security Posture Review", "All Hands Deck - March 2025",
+        "Partner Program Overview", "Customer Success QBR Template",
+    ],
+    "pdf": [
+        "Signed NDA - TechCorp Inc.pdf", "W-9 Form - Vendor.pdf",
+        "Insurance Certificate 2025.pdf", "Patent Application Draft.pdf",
+        "Audit Report - External 2024.pdf", "Press Release - Product Launch.pdf",
+    ],
+    "archive": [
+        "Customer Database Backup", "Code Repository Export - main",
+        "Email Archive Q3 2024", "Log Archive - Production",
+    ],
+    "form": [
+        "IT Access Request Form", "Employee Feedback Survey Q4",
+        "Vendor Onboarding Form", "Security Incident Report Form",
+    ],
+    "image": [
+        "Company Logo Assets", "Product Screenshots v2",
+        "Architecture Diagram - Network", "Org Chart 2025",
+    ],
+    "drawing": [
+        "System Architecture Diagram", "Network Topology Map",
+        "Data Flow Diagram - Auth", "UI Wireframes v3",
+    ],
+    "third_party": [
+        "Salesforce Export", "Workday Report", "Jira Ticket Export",
+    ],
+}
+
+_DRIVE_VISIBILITY = [
+    "private", "private", "private", "private",
+    "shared_internally", "shared_internally",
+    "shared_externally",
+]
+
+# Admin roles
+_ADMIN_ROLES = [
+    "Super Admin", "User Management Admin", "Help Desk Admin",
+    "Services Admin", "Mobile Admin", "Storage Admin",
+    "Groups Admin", "Reports Admin",
+]
+
+# Admin org unit paths
+_ADMIN_ORG_UNITS = [
+    "/", "/Engineering", "/Finance", "/HR", "/Sales",
+    "/IT", "/Legal", "/Marketing", "/Operations", "/Executive",
+]
+
+# OAuth apps — benign (common enterprise SaaS)
+_OAUTH_APPS_BENIGN = [
+    ("Slack",       "100458665170", "WEB"),
+    ("Zoom",        "204492816552", "WEB"),
+    ("Salesforce",  "114827635284", "WEB"),
+    ("Workday",     "226491038317", "WEB"),
+    ("ServiceNow",  "312748059461", "WEB"),
+    ("DocuSign",    "456823179502", "WEB"),
+    ("Box",         "578934260614", "WEB"),
+    ("Dropbox",     "690145371726", "WEB"),
+    ("Atlassian",   "712256482837", "WEB"),
+    ("GitHub",      "834367593948", "WEB"),
+    ("Monday.com",  "956478604059", "WEB"),
+    ("Notion",      "178589715161", "WEB"),
+    ("Figma",       "290690826272", "WEB"),
+    ("Tableau",     "402701937383", "WEB"),
+    ("HubSpot",     "514812048494", "WEB"),
+]
+
+# OAuth apps — suspicious (unusual or broad-access apps)
+_OAUTH_APPS_SUSPICIOUS = [
+    ("DriveBackupPro",   "666666666666", "WEB"),
+    ("BulkMailExporter", "777777777777", "WEB"),
+    ("GMirror",          "888888888888", "NATIVE_ANDROID"),
+    ("AllAccessSync",    "999999999999", "WEB"),
+    ("DataHarvester",    "111111111111", "WEB"),
+    ("OmniExport",       "222222222222", "WEB"),
+    ("CloudSync Lite",   "333333333333", "NATIVE_ANDROID"),
+    ("GmailDump",        "444444444444", "WEB"),
+]
+
+# OAuth scopes — benign (narrow, specific)
+_OAUTH_SCOPES_BENIGN = [
+    ["calendar.readonly"],
+    ["drive.file"],
+    ["gmail.send"],
+    ["gmail.compose"],
+    ["drive.appdata"],
+    ["calendar.events"],
+    ["directory.readonly"],
+    ["spreadsheets.readonly"],
+    ["presentations.readonly"],
+]
+
+# OAuth scopes — suspicious (broad read access — common in data exfil OAuth attacks)
+_OAUTH_SCOPES_SUSPICIOUS = [
+    ["gmail.readonly", "drive.readonly"],
+    ["gmail.readonly", "contacts.readonly"],
+    ["drive.readonly", "contacts.readonly", "calendar.readonly"],
+    ["gmail.readonly", "drive.readonly", "contacts.readonly", "admin.directory.user.readonly"],
+    ["drive.readonly", "spreadsheets.readonly", "presentations.readonly"],
+]
+
+# Privileged group names used in group manipulation threat
+_ADMIN_GROUPS = [
+    "it-admins", "security-admins", "helpdesk-team",
+    "vault-admins", "devops-team", "sre-team", "domain-admins",
+]
+
+# Suspicious/unknown OAuth client IDs for domain-wide delegation threat
+_SUSPICIOUS_CLIENT_IDS = [
+    "927384710293", "847291038475", "193847201938",
+    "574839201847", "920183748291", "381920473856",
+]
+
+# Broad OAuth scopes used in malicious domain-wide delegation
+_DELEGATION_SCOPES_MALICIOUS = [
+    "https://www.googleapis.com/auth/admin.directory.user",
+    "https://www.googleapis.com/auth/admin.directory.group",
+    "https://mail.google.com/",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/gmail.readonly",
+]
+
+# Threat-country IP ranges (≠ benign_ingress_sources)
+_THREAT_COUNTRY_RANGES = [
+    ("RU", "91.108.4.0/22"),
+    ("RU", "185.220.101.0/24"),
+    ("CN", "110.160.0.0/16"),
+    ("KP", "175.45.176.0/22"),
+    ("IR", "5.61.24.0/22"),
+    ("NG", "197.210.0.0/16"),
+    ("PK", "182.180.0.0/14"),
+    ("RO", "91.187.0.0/16"),
+]
+
+# External personal/freemail domains for email forwarding threat
+_PERSONAL_DOMAINS = [
+    "gmail.com", "yahoo.com", "hotmail.com", "protonmail.com",
+    "outlook.com", "icloud.com", "tutanota.com", "mail.com",
+]
+
+# Alphabet for synthetic Drive IDs — alphanumeric only, matching real curated Drive IDs
+# in config.json (e.g. "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms")
+_DRIVE_ID_CHARS = string.ascii_letters + string.digits
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Config helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _gw_conf(config):
+    return config.get("google_workspace_config", {})
+
+def _primary_domain(config):
+    domains = _gw_conf(config).get("domains", ["examplecorp.com"])
+    return domains[0] if domains else "examplecorp.com"
+
+def _customer_id(config):
+    return _gw_conf(config).get("customer_id", "C0a1b2c3d")
+
+def _drive_files(config):
+    return _gw_conf(config).get("drive_files", [])
+
+def _shared_drives(config):
+    return _gw_conf(config).get("shared_drives", [])
+
+def _get_threat_interval(threat_level, config):
+    levels = config.get("threat_generation_levels", {})
+    return levels.get(threat_level, 7200)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ID / timestamp helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _etag():
+    """Google-format ETag: quoted 20-char alphanumeric string."""
+    chars = random.choices(string.ascii_letters + string.digits, k=20)
+    return '"' + "".join(chars) + '"'
+
+def _unique_qualifier():
+    """Random signed int64 as string (can be negative — Google does this)."""
+    val = random.randint(-(2**63), 2**63 - 1)
+    return str(val)
+
+def _profile_id(email):
+    """
+    Deterministic 21-digit numeric profile ID from email.
+    Uses SHA-1 seeded integer → same technique as Okta's _stable_user_id.
+    Google profile IDs are 21-digit numeric strings.
+    """
+    n = int(hashlib.sha1(email.lower().encode()).hexdigest(), 16)
+    digits = []
+    for _ in range(21):
+        n, r = divmod(n, 10)
+        digits.append(str(r))
+    # Ensure first digit is never 0
+    result = "".join(reversed(digits))
+    if result[0] == "0":
+        result = "1" + result[1:]
+    return result
+
+def _ts(dt=None):
+    """RFC 3339 timestamp with .000Z precision (Google's standard format)."""
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+def _ts_offset(hours=0, minutes=0):
+    """Timestamp offset by hours/minutes (negative = past, for impossible travel)."""
+    dt = datetime.now(timezone.utc) + timedelta(hours=hours, minutes=minutes)
+    return _ts(dt)
+
+def _drive_id():
+    """44-char Google Drive document ID (alphanumeric, matching real Drive ID format)."""
+    return "1" + "".join(random.choices(_DRIVE_ID_CHARS, k=43))
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Network helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _random_external_ip():
+    """Realistic external IP using same first_octets as other modules."""
+    o1 = random.choice(_FIRST_OCTETS)
+    return f"{o1}.{random.randint(0,255)}.{random.randint(1,254)}.{random.randint(1,254)}"
+
+def _benign_login_ip(config):
+    """
+    IP from benign_ingress_sources (real ISP ranges — US/EU home/office workers).
+    Falls back to internal IP if no sources configured.
+    """
+    sources = config.get("benign_ingress_sources", [])
+    us_eu_sources = [
+        s for s in sources if s.get("country") in ("US", "GB", "DE", "FR", "AU", "CA", "ES", "IT", "NL")
+    ]
+    source = random.choice(us_eu_sources) if us_eu_sources else None
+    if source:
+        ip_range = source.get("ip_range")
+        if ip_range:
+            try:
+                return rand_ip_from_network(ip_range)
+            except Exception:
+                pass
+    return _random_external_ip()
+
+def _threat_country_ip():
+    """IP from a known threat-country range (RU, CN, KP, IR, NG, PK)."""
+    country, cidr = random.choice(_THREAT_COUNTRY_RANGES)
+    try:
+        return rand_ip_from_network(cidr)
+    except Exception:
+        return f"91.{random.randint(100,250)}.{random.randint(1,254)}.{random.randint(1,254)}"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# User helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _get_user(session_context, config, email=None):
+    """
+    Resolve actor info from session_context.
+    Returns (email, profileId, ip, display_name).
+    If email is provided, look up that specific user.
+    """
+    user_info = None
+    if email and session_context:
+        # Find by email in populated session_context
+        for uname, profile in session_context.items():
+            if profile.get("email", "").lower() == email.lower():
+                user_info = get_user_by_name(session_context, uname)
+                break
+
+    # Email was specified but not found (session empty OR user not present) — synthesize.
+    # Must be checked before get_random_user so the caller's intent is respected.
+    if email and not user_info:
+        return email, _profile_id(email), _benign_login_ip(config), email.split("@")[0]
+
+    if not user_info:
+        user_info = get_random_user(session_context)
+
+    if not user_info:
+        domain = _primary_domain(config)
+        fallback_email = f"user.one@{domain}"
+        return fallback_email, _profile_id(fallback_email), "10.0.0.1", "User One"
+
+    actor_email    = user_info.get("email") or f"{user_info['username']}@{_primary_domain(config)}"
+    actor_pid      = _profile_id(actor_email)
+    actor_ip       = user_info.get("ip") or _benign_login_ip(config)
+    actor_display  = user_info.get("display_name") or user_info.get("username", "")
+    return actor_email, actor_pid, actor_ip, actor_display
+
+def _get_all_user_emails(session_context, config):
+    """All user emails from session_context, with domain fallback."""
+    if session_context:
+        emails = get_all_emails(session_context)
+        if emails:
+            return emails
+    domain = _primary_domain(config)
+    return [f"user.{i}@{domain}" for i in range(1, 6)]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Core activity builder
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _build_activity(app_name, actor_email, ip, event_type, event_name,
+                    parameters, config, ts=None, product=None):
+    """
+    Build a complete Google Admin SDK Reports API Activity resource.
+    Every field Google produces is populated.
+    """
+    domain   = _primary_domain(config)
+    cid      = _customer_id(config)
+    pid      = _profile_id(actor_email)
+    ts_str   = ts if ts else _ts()
+    prod     = product or app_name.replace("_", " ").title().replace(" ", "")
+
+    return {
+        "kind":        "admin#reports#activity",
+        "etag":        _etag(),
+        "ownerDomain": domain,
+        "ipAddress":   ip,
+        "id": {
+            "time":             ts_str,
+            "uniqueQualifier":  _unique_qualifier(),
+            "applicationName":  app_name,
+            "customerId":       cid,
+        },
+        "actor": {
+            "email":      actor_email,
+            "profileId":  pid,
+            "callerType": "USER",
+        },
+        "events": [
+            {
+                "type":       event_type,
+                "name":       event_name,
+                "parameters": parameters,
+            }
+        ],
+        # Required by GoogleDrive_1_3.xif for xdm.observer.vendor/product mapping
+        "_vendor":  "Google",
+        "_product": prod,
+    }
+
+def _activity_json(app_name, actor_email, ip, event_type, event_name,
+                   parameters, config, ts=None, product=None):
+    """Return JSON string of a complete Activity resource."""
+    activity = _build_activity(
+        app_name, actor_email, ip, event_type, event_name,
+        parameters, config, ts=ts, product=product
+    )
+    return json.dumps(activity)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Self-contained HTTP transport
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _post_to_application(app_name, json_str, config):
+    """
+    Send a Google Workspace event to the correct XSIAM HTTP collector.
+    Reads collector routing from google_workspace_config.collector_routing.
+    Implements same auth logic as log_simulator.send_http_message.
+    Uses per-collector circuit breaker (_gw_cb_state).
+    Returns None (fire-and-forget).
+    """
+    if not _REQUESTS_AVAILABLE:
+        return
+
+    gw_conf = _gw_conf(config)
+    routing = gw_conf.get("collector_routing", {})
+    collector_id = routing.get(app_name)
+    if not collector_id:
+        return  # No collector configured for this application
+
+    collector_conf = config.get("http_collectors", {}).get(collector_id)
+    if not collector_conf:
+        return
+
+    # ── URL ──────────────────────────────────────────────────────────────────
+    url_env_var = collector_conf.get("url_env_var")
+    url = (os.getenv(url_env_var) if url_env_var else None) or os.getenv("HTTP_COLLECTOR_URL")
+    if not url:
+        return
+
+    # ── Auth type ─────────────────────────────────────────────────────────────
+    auth_type_env_var = collector_conf.get("auth_type_env_var")
+    auth_type = (os.getenv(auth_type_env_var) if auth_type_env_var else None) or "xsiam"
+    auth_type = auth_type.lower().strip()
+
+    api_key_env_var = collector_conf.get("api_key_env_var")
+    api_key = os.getenv(api_key_env_var) if api_key_env_var else None
+
+    # ── Build headers ─────────────────────────────────────────────────────────
+    ct = collector_conf.get("content_type", "application/json")
+    headers = {"Content-Type": ct}
+    payload = json_str
+
+    if auth_type == "xsiam":
+        if not api_key:
+            return
+        headers["Authorization"] = api_key
+        headers["x-palo-alto-networks-vendor"]  = "Google"
+        headers["x-palo-alto-networks-product"] = app_name.replace("_", " ").title()
+
+    elif auth_type == "splunk_hec":
+        if not api_key:
+            return
+        headers["Authorization"] = f"Splunk {api_key}"
+        try:
+            payload = json.dumps({"event": json.loads(json_str)})
+        except (json.JSONDecodeError, TypeError):
+            payload = json.dumps({"event": json_str})
+
+    elif auth_type == "basic":
+        if not api_key:
+            return
+        headers["Authorization"] = "Basic " + base64.b64encode(api_key.encode()).decode()
+
+    elif auth_type == "none":
+        pass
+
+    # ── Circuit breaker ───────────────────────────────────────────────────────
+    cb = _gw_cb_state.setdefault(collector_id, {"fails": 0, "open_since": None})
+    now = time.time()
+    if cb["open_since"] is not None:
+        if now - cb["open_since"] < _HTTP_CB_COOLDOWN:
+            return
+        cb["fails"] = 0
+        cb["open_since"] = None
+
+    try:
+        resp = requests.post(url, headers=headers, data=payload,
+                             verify=False, timeout=_HTTP_CB_POST_TIMEOUT)
+        if resp.status_code not in (200, 202, 204):
+            cb["fails"] += 1
+        else:
+            cb["fails"] = 0
+    except Exception:
+        cb["fails"] += 1
+
+    if cb["fails"] >= _HTTP_CB_THRESHOLD and cb["open_since"] is None:
+        cb["open_since"] = now
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Drive file helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _pick_drive_file(config, sensitive=None):
+    """
+    Pick a drive file from config (with optional sensitive filter) or generate synthetic.
+    Returns dict with id, title, type, owner.
+    """
+    files = _drive_files(config)
+    if files:
+        if sensitive is True:
+            candidates = [f for f in files if f.get("sensitive")]
+        elif sensitive is False:
+            candidates = [f for f in files if not f.get("sensitive")]
+        else:
+            candidates = files
+        if candidates:
+            f = random.choice(candidates)
+            return {
+                "id":    f.get("id", _drive_id()),
+                "title": f.get("title", "Untitled Document"),
+                "type":  f.get("type", "document"),
+            }
+
+    # Generate a synthetic file
+    doc_type = random.choice(_DRIVE_DOC_TYPES)
+    titles = _DRIVE_TITLES.get(doc_type, _DRIVE_TITLES["document"])
+    return {
+        "id":    _drive_id(),
+        "title": random.choice(titles),
+        "type":  doc_type,
+    }
+
+def _pick_owner_email(session_context, config, exclude=None):
+    """Pick a random user email to be the document owner."""
+    emails = _get_all_user_emails(session_context, config)
+    if exclude:
+        emails = [e for e in emails if e != exclude]
+    return random.choice(emails) if emails else f"owner@{_primary_domain(config)}"
+
+def _drive_params(file_dict, owner_email, visibility=None, extra=None):
+    """Build the standard core parameter list for all drive events."""
+    vis = visibility or random.choice(_DRIVE_VISIBILITY)
+    params = [
+        {"name": "doc_id",                       "value":     file_dict["id"]},
+        {"name": "doc_title",                     "value":     file_dict["title"]},
+        {"name": "doc_type",                      "value":     file_dict["type"]},
+        {"name": "owner",                         "value":     owner_email},
+        {"name": "owner_is_shared_drive",         "boolValue": False},
+        {"name": "visibility",                    "value":     vis},
+        {"name": "primary_event",                 "boolValue": True},
+        {"name": "billable",                      "boolValue": True},
+        {"name": "actor_is_collaborator_account", "boolValue": False},
+        {"name": "is_encrypted",                  "boolValue": False},
+    ]
+    if extra:
+        params.extend(extra)
+    return params
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LOGIN generators
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _gen_login_success(config, sc, ip=None, email=None, login_type=None, ts=None):
+    """Generate a login_success event. Returns (json_str, event_name)."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config, email=email)
+    use_ip = ip or actor_ip
+
+    login_type = login_type or random.choice(_LOGIN_TYPES)
+
+    # When login_type is "saml", authentication was handled by the IdP (e.g. Okta).
+    # Google defers MFA to the IdP — no secondary challenge occurs on the Google side.
+    if login_type == "saml":
+        challenge = "none"
+        is_2sv    = False
+    else:
+        challenge = random.choice(_LOGIN_CHALLENGE_METHODS)
+        is_2sv    = challenge not in ("password", "none")
+
+    params = [
+        {"name": "login_type",              "value":     login_type},
+        {"name": "login_challenge_method",  "value":     challenge},
+        {"name": "login_challenge_status",  "value":     "Passed"},
+        {"name": "is_suspicious",           "boolValue": False},
+        {"name": "is_second_factor",        "boolValue": is_2sv},
+        {"name": "affected_email_address",  "value":     actor_email},
+    ]
+
+    j = _activity_json("login", actor_email, use_ip, "login", "login_success",
+                        params, config, ts=ts, product="Login")
+    _post_to_application("login", j, config)
+    return j, "Google Workspace Login Success"
+
+
+def _gen_login_failure(config, sc, ip=None, email=None):
+    """Generate a login_failure event."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config, email=email)
+    use_ip = ip or actor_ip
+
+    challenge    = random.choice(_LOGIN_CHALLENGE_METHODS)
+    failure_type = random.choice(_LOGIN_FAILURE_TYPES)
+    params = [
+        {"name": "login_type",              "value":     random.choice(_LOGIN_TYPES)},
+        {"name": "login_challenge_method",  "value":     challenge},
+        {"name": "login_challenge_status",  "value":     "Failed"},
+        {"name": "login_failure_type",      "value":     failure_type},
+        {"name": "is_suspicious",           "boolValue": False},
+        {"name": "is_second_factor",        "boolValue": False},
+        {"name": "affected_email_address",  "value":     actor_email},
+    ]
+
+    j = _activity_json("login", actor_email, use_ip, "login", "login_failure",
+                        params, config, product="Login")
+    _post_to_application("login", j, config)
+    return j, "Google Workspace Login Failure"
+
+
+def _gen_logout(config, sc):
+    """Generate a logout event."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    params = [
+        {"name": "login_type",             "value": random.choice(_LOGIN_TYPES)},
+        {"name": "affected_email_address", "value": actor_email},
+    ]
+    j = _activity_json("login", actor_email, actor_ip, "login", "logout",
+                        params, config, product="Login")
+    _post_to_application("login", j, config)
+    return j, "Google Workspace Logout"
+
+
+def _gen_login_verification(config, sc):
+    """Generate a login_verification (2FA challenge) event."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    challenge = random.choice(["push", "security_key", "totp", "sms_otp"])
+    params = [
+        {"name": "login_type",             "value":     random.choice(_LOGIN_TYPES)},
+        {"name": "login_challenge_method", "value":     challenge},
+        {"name": "login_challenge_status", "value":     "Passed"},
+        {"name": "is_second_factor",       "boolValue": True},
+        {"name": "affected_email_address", "value":     actor_email},
+    ]
+    j = _activity_json("login", actor_email, actor_ip, "login", "login_verification",
+                        params, config, product="Login")
+    _post_to_application("login", j, config)
+    return j, "Google Workspace 2FA Verification"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DRIVE generators
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _gen_drive_view(config, sc, file=None, ip=None, email=None):
+    """Generate a drive view event."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config, email=email)
+    use_ip = ip or actor_ip
+    f = file or _pick_drive_file(config)
+    if isinstance(f, dict) and "title" not in f and "id" in f:
+        # Minimal file dict from scenario context
+        f = {"id": f.get("id", _drive_id()), "title": f.get("title", "Document"), "type": f.get("type", "document")}
+    owner = _pick_owner_email(sc, config, exclude=actor_email)
+    params = _drive_params(f, owner)
+
+    j = _activity_json("drive", actor_email, use_ip, "access", "view",
+                        params, config, product="Drive")
+    _post_to_application("drive", j, config)
+    return j, "Google Workspace Drive View"
+
+
+def _gen_drive_download(config, sc, file=None, ip=None, email=None):
+    """Generate a drive download event."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config, email=email)
+    use_ip = ip or actor_ip
+    f = file or _pick_drive_file(config)
+    if isinstance(f, dict) and "title" not in f:
+        f = {"id": f.get("id", _drive_id()), "title": f.get("title", "Document"), "type": f.get("type", "document")}
+    owner = _pick_owner_email(sc, config, exclude=actor_email)
+    params = _drive_params(f, owner)
+
+    j = _activity_json("drive", actor_email, use_ip, "access", "download",
+                        params, config, product="Drive")
+    _post_to_application("drive", j, config)
+    return j, "Google Workspace Drive Download"
+
+
+def _gen_drive_edit(config, sc, file=None, ip=None, email=None):
+    """Generate a drive edit event."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config, email=email)
+    use_ip = ip or actor_ip
+    f = file or _pick_drive_file(config)
+    if isinstance(f, dict) and "title" not in f:
+        f = {"id": f.get("id", _drive_id()), "title": f.get("title", "Document"), "type": f.get("type", "document")}
+    owner = _pick_owner_email(sc, config, exclude=actor_email)
+    params = _drive_params(f, owner)
+
+    j = _activity_json("drive", actor_email, use_ip, "edit", "edit",
+                        params, config, product="Drive")
+    _post_to_application("drive", j, config)
+    return j, "Google Workspace Drive Edit"
+
+
+def _gen_drive_create(config, sc):
+    """Generate a drive create event (user creates a new document)."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    doc_type = random.choice(["document", "spreadsheet", "presentation", "form"])
+    titles   = _DRIVE_TITLES.get(doc_type, _DRIVE_TITLES["document"])
+    f = {"id": _drive_id(), "title": random.choice(titles), "type": doc_type}
+    params = _drive_params(f, actor_email, visibility="private")  # owner = creator
+
+    j = _activity_json("drive", actor_email, actor_ip, "create", "create",
+                        params, config, product="Drive")
+    _post_to_application("drive", j, config)
+    return j, "Google Workspace Drive Create"
+
+
+def _gen_drive_move(config, sc):
+    """Generate a drive move event."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    f     = _pick_drive_file(config)
+    owner = _pick_owner_email(sc, config)
+    drives = _shared_drives(config)
+    dest_drive = random.choice(drives) if drives else {"id": _drive_id()[:20], "name": "Team Drive"}
+
+    extra = [
+        {"name": "source_folder_id",    "value": _drive_id()},
+        {"name": "source_folder_title", "value": "My Drive"},
+        {"name": "destination_folder_id",    "value": dest_drive["id"]},
+        {"name": "destination_folder_title", "value": dest_drive["name"]},
+    ]
+    params = _drive_params(f, owner, extra=extra)
+
+    j = _activity_json("drive", actor_email, actor_ip, "move", "move",
+                        params, config, product="Drive")
+    _post_to_application("drive", j, config)
+    return j, "Google Workspace Drive Move"
+
+
+def _gen_drive_change_acls(config, sc, file=None, new_visibility=None, ip=None, email=None):
+    """Generate a change_document_visibility event (sharing/unsharing)."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config, email=email)
+    use_ip = ip or actor_ip
+    f = file or _pick_drive_file(config)
+    if isinstance(f, dict) and "title" not in f:
+        f = {"id": f.get("id", _drive_id()), "title": f.get("title", "Document"), "type": f.get("type", "document")}
+    owner = _pick_owner_email(sc, config, exclude=actor_email)
+
+    old_vis = "private"
+    new_vis = new_visibility or random.choice(["shared_internally", "shared_externally"])
+
+    extra = [
+        {"name": "old_visibility", "value": old_vis},
+        {"name": "new_visibility", "value": new_vis},
+    ]
+    params = _drive_params(f, owner, visibility=new_vis, extra=extra)
+
+    j = _activity_json("drive", actor_email, use_ip, "acl_change", "change_document_visibility",
+                        params, config, product="Drive")
+    _post_to_application("drive", j, config)
+    return j, "Google Workspace Drive Share"
+
+
+def _gen_drive_delete(config, sc, ip=None, email=None):
+    """Generate a drive trash event."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config, email=email)
+    use_ip = ip or actor_ip
+    f     = _pick_drive_file(config)
+    owner = _pick_owner_email(sc, config, exclude=actor_email)
+    params = _drive_params(f, owner)
+
+    j = _activity_json("drive", actor_email, use_ip, "delete", "trash",
+                        params, config, product="Drive")
+    _post_to_application("drive", j, config)
+    return j, "Google Workspace Drive Delete"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ADMIN generators
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _admin_email(sc, config):
+    """Pick an admin actor — prefer IT/Security department users."""
+    emails = _get_all_user_emails(sc, config)
+    return random.choice(emails) if emails else f"admin@{_primary_domain(config)}"
+
+def _gen_admin_user_create(config, sc):
+    """USER_CREATION admin event."""
+    actor_email = _admin_email(sc, config)
+    domain      = _primary_domain(config)
+    # Generate a plausible new employee name
+    first_names = ["alex", "jordan", "taylor", "morgan", "casey", "riley", "drew"]
+    last_names  = ["smith", "johnson", "williams", "brown", "jones", "garcia", "davis"]
+    new_user    = f"{random.choice(first_names)}.{random.choice(last_names)}@{domain}"
+    ou          = random.choice(_ADMIN_ORG_UNITS)
+
+    params = [
+        {"name": "USER_EMAIL",    "value": new_user},
+        {"name": "ORG_UNIT_NAME", "value": ou},
+        {"name": "DOMAIN_NAME",   "value": domain},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        "USER_SETTINGS", "USER_CREATION", params, config, product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin User Create"
+
+
+def _gen_admin_password_reset(config, sc):
+    """ADMIN_USER_PASSWORD_RESET admin event."""
+    actor_email  = _admin_email(sc, config)
+    target_email = random.choice(_get_all_user_emails(sc, config))
+    params = [
+        {"name": "USER_EMAIL",    "value": target_email},
+        {"name": "ORG_UNIT_NAME", "value": random.choice(_ADMIN_ORG_UNITS)},
+        {"name": "DOMAIN_NAME",   "value": _primary_domain(config)},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        "USER_SETTINGS", "ADMIN_USER_PASSWORD_RESET", params, config,
+                        product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin Password Reset"
+
+
+def _gen_admin_role_grant(config, sc, target_email=None, role=None):
+    """GRANT_ADMIN_ROLE_TO_USER admin event."""
+    actor_email  = _admin_email(sc, config)
+    target_email = target_email or random.choice(_get_all_user_emails(sc, config))
+    role_name    = role or random.choice(_ADMIN_ROLES)
+
+    params = [
+        {"name": "USER_EMAIL",    "value": target_email},
+        {"name": "ROLE_NAME",     "value": role_name},
+        {"name": "ORG_UNIT_NAME", "value": _primary_domain(config)},
+        {"name": "NEW_VALUE",     "value": role_name},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        "DELEGATED_ADMIN", "GRANT_ADMIN_ROLE_TO_USER", params, config,
+                        product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin Role Grant"
+
+
+def _gen_admin_role_revoke(config, sc):
+    """REVOKE_ADMIN_ROLE_FROM_USER admin event."""
+    actor_email  = _admin_email(sc, config)
+    target_email = random.choice(_get_all_user_emails(sc, config))
+    role_name    = random.choice(_ADMIN_ROLES)
+
+    params = [
+        {"name": "USER_EMAIL",    "value": target_email},
+        {"name": "ROLE_NAME",     "value": role_name},
+        {"name": "ORG_UNIT_NAME", "value": _primary_domain(config)},
+        {"name": "OLD_VALUE",     "value": role_name},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        "DELEGATED_ADMIN", "REVOKE_ADMIN_ROLE_FROM_USER", params, config,
+                        product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin Role Revoke"
+
+
+def _gen_admin_2sv_status(config, sc, status="Enabled"):
+    """UPDATE_2SV_STATUS admin event."""
+    actor_email  = _admin_email(sc, config)
+    target_email = random.choice(_get_all_user_emails(sc, config))
+    old_status   = "Disabled" if status == "Enabled" else "Enforced"
+
+    params = [
+        {"name": "USER_EMAIL",    "value": target_email},
+        {"name": "NEW_VALUE",     "value": status},
+        {"name": "OLD_VALUE",     "value": old_status},
+        {"name": "SETTING_NAME",  "value": "2-step verification"},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        "SECURITY_SETTINGS", "UPDATE_2SV_STATUS", params, config,
+                        product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin 2SV Status Change"
+
+
+def _gen_admin_settings_change(config, sc):
+    """Generic low-noise admin settings change."""
+    actor_email = _admin_email(sc, config)
+    settings = [
+        ("ORG_SETTINGS",      "TOGGLE_SERVICE_ENABLED",      "Google Drive"),
+        ("DOMAIN_SETTINGS",   "CHANGE_DOMAIN_DEFAULT_LOCALE","en-US"),
+        ("EMAIL_SETTINGS",    "CHANGE_EMAIL_SETTING",        "retention_policy"),
+        ("MOBILE_SETTINGS",   "CHANGE_MOBILE_SETTING",       "device_management"),
+        ("CALENDAR_SETTINGS", "CHANGE_CALENDAR_SETTING",     "sharing"),
+    ]
+    event_type, event_name, setting_val = random.choice(settings)
+
+    params = [
+        {"name": "ORG_UNIT_NAME", "value": "/"},
+        {"name": "SETTING_NAME",  "value": setting_val},
+        {"name": "NEW_VALUE",     "value": "enabled"},
+        {"name": "OLD_VALUE",     "value": "disabled"},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        event_type, event_name, params, config, product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin Settings Change"
+
+
+def _gen_admin_oauth_allow(config, sc):
+    """ALLOW_SERVICE_FOR_OAUTH2_ACCESS — admin allows an OAuth2 app."""
+    actor_email  = _admin_email(sc, config)
+    app_name, client_id, _ = random.choice(_OAUTH_APPS_BENIGN)
+    params = [
+        {"name": "APP_NAME",   "value": app_name},
+        {"name": "CLIENT_ID",  "value": f"{client_id}.apps.googleusercontent.com"},
+        {"name": "NEW_VALUE",  "value": "Trusted"},
+        {"name": "OLD_VALUE",  "value": "Restricted"},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        "SECURITY_SETTINGS", "ALLOW_SERVICE_FOR_OAUTH2_ACCESS",
+                        params, config, product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin OAuth Allow"
+
+
+def _gen_admin_group_member_add(config, sc):
+    """ADD_GROUP_MEMBER — routine group membership management (onboarding etc.)."""
+    actor_email  = _admin_email(sc, config)
+    target_email = random.choice(_get_all_user_emails(sc, config))
+    domain       = _primary_domain(config)
+    group        = random.choice(_ADMIN_GROUPS)
+    params = [
+        {"name": "GROUP_EMAIL",   "value": f"{group}@{domain}"},
+        {"name": "USER_EMAIL",    "value": target_email},
+        {"name": "DOMAIN_NAME",   "value": domain},
+        {"name": "ROLE",          "value": "MEMBER"},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        "GROUP_SETTINGS", "ADD_GROUP_MEMBER", params, config,
+                        product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin Group Member Add"
+
+
+def _gen_admin_group_member_remove(config, sc):
+    """REMOVE_GROUP_MEMBER — routine group membership management (offboarding etc.)."""
+    actor_email  = _admin_email(sc, config)
+    target_email = random.choice(_get_all_user_emails(sc, config))
+    domain       = _primary_domain(config)
+    group        = random.choice(_ADMIN_GROUPS)
+    params = [
+        {"name": "GROUP_EMAIL",   "value": f"{group}@{domain}"},
+        {"name": "USER_EMAIL",    "value": target_email},
+        {"name": "DOMAIN_NAME",   "value": domain},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        "GROUP_SETTINGS", "REMOVE_GROUP_MEMBER", params, config,
+                        product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin Group Member Remove"
+
+
+def _gen_admin_ou_move(config, sc):
+    """MOVE_USER_TO_ORG_UNIT — routine OU assignment (onboarding, team changes)."""
+    actor_email  = _admin_email(sc, config)
+    target_email = random.choice(_get_all_user_emails(sc, config))
+    org_units    = _gw_conf(config).get("org_units", _ADMIN_ORG_UNITS)
+    dest_ou      = random.choice(org_units)
+    src_ou       = random.choice([ou for ou in org_units if ou != dest_ou] or ["/"])
+    params = [
+        {"name": "USER_EMAIL",    "value": target_email},
+        {"name": "ORG_UNIT_NAME", "value": dest_ou},
+        {"name": "OLD_VALUE",     "value": src_ou},
+        {"name": "NEW_VALUE",     "value": dest_ou},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        "ORG_SETTINGS", "MOVE_USER_TO_ORG_UNIT", params, config,
+                        product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin OU Move"
+
+
+def _gen_admin_domain_delegation(config, sc):
+    """AUTHORIZE_API_CLIENT_ACCESS — admin grants API access to a trusted app."""
+    actor_email        = _admin_email(sc, config)
+    domain             = _primary_domain(config)
+    app_name, client_id, _ = random.choice(_OAUTH_APPS_BENIGN)
+    scopes_benign = [
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/gmail.send",
+    ]
+    params = [
+        {"name": "API_CLIENT_ID", "value": f"{client_id}.apps.googleusercontent.com"},
+        {"name": "DOMAIN_NAME",   "value": domain},
+        {"name": "APP_NAME",      "value": app_name},
+        {"name": "SCOPE_DATA",    "value": " ".join(scopes_benign)},
+    ]
+    j = _activity_json("admin", actor_email, _benign_login_ip(config),
+                        "DOMAIN_SETTINGS", "AUTHORIZE_API_CLIENT_ACCESS", params, config,
+                        product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Admin Domain Delegation"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# USER_ACCOUNTS generators
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _gen_user_password_change(config, sc):
+    """User self-service password change."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    strength = random.choice(["Strong", "Strong", "Strong", "Reasonable", "Reasonable", "Weak"])
+    params = [
+        {"name": "affected_email_address", "value": actor_email},
+        {"name": "password_strength",      "value": strength},
+    ]
+    j = _activity_json("user_accounts", actor_email, actor_ip,
+                        "password_change", "password_edit", params, config,
+                        product="UserAccounts")
+    _post_to_application("user_accounts", j, config)
+    return j, "Google Workspace User Password Change"
+
+
+def _gen_user_email_forwarding(config, sc):
+    """User enables email forwarding out of domain."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    username = actor_email.split("@")[0]
+    dest_domain = random.choice(_PERSONAL_DOMAINS)
+    dest = f"{username}@{dest_domain}"
+
+    params = [
+        {"name": "email_forwarding_destination_address", "value": dest},
+        {"name": "affected_email_address",               "value": actor_email},
+    ]
+    j = _activity_json("user_accounts", actor_email, actor_ip,
+                        "email_forwarding_change", "email_forwarding_out_of_domain",
+                        params, config, product="UserAccounts")
+    _post_to_application("user_accounts", j, config)
+    return j, "Google Workspace Email Forwarding Changed"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TOKEN generators
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _gen_token_authorize(config, sc, suspicious=False):
+    """User authorizes an OAuth2 application."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    if suspicious:
+        app_name, client_id, client_type = random.choice(_OAUTH_APPS_SUSPICIOUS)
+        scope_list = random.choice(_OAUTH_SCOPES_SUSPICIOUS)
+    else:
+        app_name, client_id, client_type = random.choice(_OAUTH_APPS_BENIGN)
+        scope_list = random.choice(_OAUTH_SCOPES_BENIGN)
+
+    scope_str = " ".join(f"https://www.googleapis.com/auth/{s}" for s in scope_list)
+
+    params = [
+        {"name": "app_name",    "value":      app_name},
+        {"name": "client_id",   "value":      f"{client_id}.apps.googleusercontent.com"},
+        {"name": "client_type", "value":      client_type},
+        {"name": "scope",       "value":      scope_str},
+        {"name": "scope_data",  "multiValue": scope_list},
+    ]
+    j = _activity_json("token", actor_email, actor_ip, "auth", "authorize",
+                        params, config, product="Token")
+    _post_to_application("token", j, config)
+    return j, "Google Workspace OAuth Authorize"
+
+
+def _gen_token_revoke(config, sc):
+    """User or admin revokes an OAuth2 token."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    app_name, client_id, client_type = random.choice(_OAUTH_APPS_BENIGN)
+    scope_list = random.choice(_OAUTH_SCOPES_BENIGN)
+    scope_str  = " ".join(f"https://www.googleapis.com/auth/{s}" for s in scope_list)
+
+    params = [
+        {"name": "app_name",    "value":      app_name},
+        {"name": "client_id",   "value":      f"{client_id}.apps.googleusercontent.com"},
+        {"name": "client_type", "value":      client_type},
+        {"name": "scope",       "value":      scope_str},
+        {"name": "scope_data",  "multiValue": scope_list},
+    ]
+    j = _activity_json("token", actor_email, actor_ip, "auth", "revoke",
+                        params, config, product="Token")
+    _post_to_application("token", j, config)
+    return j, "Google Workspace OAuth Revoke"
+
+
+def _gen_token_activity(config, sc):
+    """Regular OAuth API access — background app usage."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    app_name, client_id, client_type = random.choice(_OAUTH_APPS_BENIGN)
+
+    api_methods = [
+        ("admin.googleapis.com",   "admin.users.list",           "ADMIN_SDK"),
+        ("gmail.googleapis.com",   "gmail.users.messages.list",  "GMAIL"),
+        ("drive.googleapis.com",   "drive.files.list",           "DRIVE"),
+        ("calendar.googleapis.com","calendar.events.list",       "CALENDAR"),
+        ("sheets.googleapis.com",  "spreadsheets.values.get",    "SHEETS"),
+    ]
+    api_name, method_name, bucket = random.choice(api_methods)
+
+    params = [
+        {"name": "api_name",             "value":    api_name},
+        {"name": "app_name",             "value":    app_name},
+        {"name": "client_id",            "value":    f"{client_id}.apps.googleusercontent.com"},
+        {"name": "client_type",          "value":    client_type},
+        {"name": "method_name",          "value":    method_name},
+        {"name": "num_response_bytes",   "intValue": random.randint(512, 65536)},
+        {"name": "product_bucket",       "value":    bucket},
+    ]
+    j = _activity_json("token", actor_email, actor_ip, "auth", "activity",
+                        params, config, product="Token")
+    _post_to_application("token", j, config)
+    return j, "Google Workspace OAuth Activity"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# THREAT generators
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _threat_impossible_travel(config, sc):
+    """
+    Two login_success events for the same user from geographically distant IPs,
+    with timestamps 2-6 hours apart — impossible travel at commercial flight speed.
+
+    XSIAM reads id.time from the payload, not receipt time, so backdating works
+    even in short runs. Both events are sent within milliseconds of each other.
+
+    Event 1 = earlier login from US/EU ISP (backdated by 2-6h)
+    Event 2 = current login from threat country IP (timestamp = NOW)
+    """
+    actor_email, _, _, _ = _get_user(sc, config)
+
+    # Earlier login — corporate/home ISP, backdated
+    hours_back = random.uniform(2.5, 6.0)
+    ts_early   = _ts_offset(hours=-hours_back)
+    early_ip   = _benign_login_ip(config)
+
+    # Current login — threat country
+    threat_ip  = _threat_country_ip()
+    ts_now     = _ts()
+
+    params_early = [
+        {"name": "login_type",             "value":     "saml"},
+        {"name": "login_challenge_method", "value":     "none"},   # SAML: IdP handled MFA
+        {"name": "login_challenge_status", "value":     "Passed"},
+        {"name": "is_suspicious",          "boolValue": False},
+        {"name": "is_second_factor",       "boolValue": False},    # SAML: no Google 2FA
+        {"name": "affected_email_address", "value":     actor_email},
+    ]
+    params_threat = [
+        {"name": "login_type",             "value":     "google_password"},
+        {"name": "login_challenge_method", "value":     "none"},
+        {"name": "login_challenge_status", "value":     "Passed"},
+        {"name": "is_suspicious",          "boolValue": True},
+        {"name": "is_second_factor",       "boolValue": False},
+        {"name": "affected_email_address", "value":     actor_email},
+    ]
+
+    j1 = _activity_json("login", actor_email, early_ip, "login", "login_success",
+                         params_early, config, ts=ts_early, product="Login")
+    j2 = _activity_json("login", actor_email, threat_ip, "login", "login_success",
+                         params_threat, config, ts=ts_now, product="Login")
+
+    _post_to_application("login", j1, config)
+    _post_to_application("login", j2, config)
+    return [j1, j2], "Google Workspace Impossible Travel"
+
+
+def _threat_bulk_drive_download(config, sc):
+    """
+    20-50 drive download events by one user in a short window — data exfiltration.
+    Targets sensitive files in config; falls back to synthetic files for volume.
+    """
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    files = _drive_files(config)
+    if not files:
+        files = [_pick_drive_file(config) for _ in range(10)]
+
+    count   = random.randint(20, 50)
+    results = []
+
+    for i in range(count):
+        f = random.choice(files) if files else _pick_drive_file(config)
+        if not isinstance(f, dict) or "title" not in f:
+            f = _pick_drive_file(config)
+
+        owner  = _pick_owner_email(sc, config, exclude=actor_email)
+        params = _drive_params(f, owner)
+        # Spread timestamps across a 3-minute window
+        offset_sec = -(count - i) * (180 // count)
+        ts = _ts(datetime.now(timezone.utc) + timedelta(seconds=offset_sec))
+
+        j = _activity_json("drive", actor_email, actor_ip, "access", "download",
+                            params, config, ts=ts, product="Drive")
+        _post_to_application("drive", j, config)
+        results.append(j)
+
+    return results, "Google Workspace Bulk Drive Download (Exfil)"
+
+
+def _threat_external_share(config, sc):
+    """Single drive change_document_visibility to public_on_the_web — data staging."""
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    # Target a sensitive file if available; _pick_drive_file always returns a valid dict
+    f = _pick_drive_file(config, sensitive=True)
+    owner = _pick_owner_email(sc, config, exclude=actor_email)
+
+    extra = [
+        {"name": "old_visibility", "value": "private"},
+        {"name": "new_visibility", "value": "public_on_the_web"},
+    ]
+    params = _drive_params(f, owner, visibility="public_on_the_web", extra=extra)
+
+    j = _activity_json("drive", actor_email, actor_ip, "acl_change",
+                        "change_document_visibility", params, config, product="Drive")
+    _post_to_application("drive", j, config)
+    return j, "Google Workspace Drive External Share (Threat)"
+
+
+def _threat_admin_priv_escalation(config, sc):
+    """
+    Two events: USER_CREATION (new backdoor account) + GRANT_ADMIN_ROLE_TO_USER.
+    Models an attacker creating an admin account for persistence.
+    """
+    actor_email = _admin_email(sc, config)
+    domain      = _primary_domain(config)
+    # Suspicious new account name — chosen to blend in
+    decoy_user  = f"it.support{random.randint(10,99)}@{domain}"
+    role        = "Super Admin"
+
+    params_create = [
+        {"name": "USER_EMAIL",    "value": decoy_user},
+        {"name": "ORG_UNIT_NAME", "value": "/IT"},
+        {"name": "DOMAIN_NAME",   "value": domain},
+    ]
+    params_grant = [
+        {"name": "USER_EMAIL",    "value": decoy_user},
+        {"name": "ROLE_NAME",     "value": role},
+        {"name": "ORG_UNIT_NAME", "value": domain},
+        {"name": "NEW_VALUE",     "value": role},
+    ]
+
+    # Both events come from the same attacker IP (seconds apart in one session)
+    attacker_ip = _threat_country_ip()
+    j1 = _activity_json("admin", actor_email, attacker_ip,
+                         "USER_SETTINGS", "USER_CREATION", params_create, config,
+                         product="Admin")
+    j2 = _activity_json("admin", actor_email, attacker_ip,
+                         "DELEGATED_ADMIN", "GRANT_ADMIN_ROLE_TO_USER", params_grant,
+                         config, product="Admin")
+
+    _post_to_application("admin", j1, config)
+    _post_to_application("admin", j2, config)
+    return [j1, j2], "Google Workspace Admin Privilege Escalation"
+
+
+def _threat_mfa_disabled(config, sc):
+    """
+    Three events: ENFORCE_STRONG_AUTHENTICATION=false (org policy) +
+    UPDATE_2SV_STATUS=Disabled (per-user) + 2sv_disable (user_accounts).
+    The org-level event fires the XSIAM "MFA Disabled for Google Workspace" detector.
+    """
+    actor_email  = _admin_email(sc, config)
+    target_email = random.choice(_get_all_user_emails(sc, config))
+    threat_ip    = _threat_country_ip()
+
+    # Org-level policy change — what XSIAM "MFA Disabled" detector looks for
+    params_enforce = [
+        {"name": "USER_EMAIL",   "value": target_email},
+        {"name": "SETTING_NAME", "value": "ENFORCE_STRONG_AUTHENTICATION"},
+        {"name": "NEW_VALUE",    "value": "false"},
+        {"name": "OLD_VALUE",    "value": "true"},
+    ]
+    params_admin = [
+        {"name": "USER_EMAIL",   "value": target_email},
+        {"name": "NEW_VALUE",    "value": "Disabled"},
+        {"name": "OLD_VALUE",    "value": "Enforced"},
+        {"name": "SETTING_NAME", "value": "2-step verification"},
+    ]
+    params_user = [
+        {"name": "affected_email_address", "value": target_email},
+    ]
+
+    j0 = _activity_json("admin", actor_email, threat_ip,
+                         "SECURITY_SETTINGS", "ENFORCE_STRONG_AUTHENTICATION",
+                         params_enforce, config, product="Admin")
+    j1 = _activity_json("admin", actor_email, threat_ip,
+                         "SECURITY_SETTINGS", "UPDATE_2SV_STATUS", params_admin,
+                         config, product="Admin")
+    j2 = _activity_json("user_accounts", target_email, threat_ip,
+                         "2sv_change", "2sv_disable", params_user,
+                         config, product="UserAccounts")
+
+    _post_to_application("admin",         j0, config)
+    _post_to_application("admin",         j1, config)
+    _post_to_application("user_accounts", j2, config)
+    return [j0, j1, j2], "Google Workspace MFA Disabled (Threat)"
+
+
+def _threat_credential_stuffing(config, sc):
+    """
+    15-40 login_failure events from one external IP, then 1 login_success.
+    Same pattern as Cisco ASA auth_brute_force — models credential stuffing against
+    Google login.
+    """
+    emails    = _get_all_user_emails(sc, config)
+    attacker  = _random_external_ip()
+    count     = random.randint(15, 40)
+    results   = []
+
+    # Failures against many users
+    for _ in range(count):
+        target = random.choice(emails)
+        params = [
+            {"name": "login_type",              "value":     "google_password"},
+            {"name": "login_challenge_method",  "value":     "password"},
+            {"name": "login_challenge_status",  "value":     "Failed"},
+            {"name": "login_failure_type",      "value":     "wrong_password"},
+            {"name": "is_suspicious",           "boolValue": True},
+            {"name": "is_second_factor",        "boolValue": False},
+            {"name": "affected_email_address",  "value":     target},
+        ]
+        j = _activity_json("login", target, attacker, "login", "login_failure",
+                            params, config, product="Login")
+        _post_to_application("login", j, config)
+        results.append(j)
+
+    # One success — the attacker found a valid credential
+    victim = random.choice(emails)
+    params_success = [
+        {"name": "login_type",              "value":     "google_password"},
+        {"name": "login_challenge_method",  "value":     "none"},
+        {"name": "login_challenge_status",  "value":     "Passed"},
+        {"name": "is_suspicious",           "boolValue": True},
+        {"name": "is_second_factor",        "boolValue": False},
+        {"name": "affected_email_address",  "value":     victim},
+    ]
+    j_success = _activity_json("login", victim, attacker, "login", "login_success",
+                                params_success, config, product="Login")
+    _post_to_application("login", j_success, config)
+    results.append(j_success)
+
+    return results, f"Google Workspace Credential Stuffing ({count} failures + 1 success)"
+
+
+def _threat_oauth_malicious_app(config, sc):
+    """
+    User authorizes a suspicious OAuth app with broad scopes.
+    Models a malicious OAuth app gaining persistent access to mail + drive.
+    """
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    app_name, client_id, client_type = random.choice(_OAUTH_APPS_SUSPICIOUS)
+    scope_list = random.choice(_OAUTH_SCOPES_SUSPICIOUS)
+    scope_str  = " ".join(f"https://www.googleapis.com/auth/{s}" for s in scope_list)
+
+    params = [
+        {"name": "app_name",    "value":      app_name},
+        {"name": "client_id",   "value":      f"{client_id}.apps.googleusercontent.com"},
+        {"name": "client_type", "value":      client_type},
+        {"name": "scope",       "value":      scope_str},
+        {"name": "scope_data",  "multiValue": scope_list},
+    ]
+    j = _activity_json("token", actor_email, actor_ip, "auth", "authorize",
+                        params, config, product="Token")
+    _post_to_application("token", j, config)
+    return j, "Google Workspace Malicious OAuth App Authorized"
+
+
+def _threat_email_forward_persistence(config, sc):
+    """
+    User (or attacker acting as user) enables forwarding to an external domain.
+    Classic persistence mechanism post-compromise.
+    """
+    actor_email, _, _, _ = _get_user(sc, config)
+    threat_ip    = _threat_country_ip()
+    username     = actor_email.split("@")[0]
+    dest_domain  = random.choice(["gmail.com", "protonmail.com", "tutanota.com"])
+    dest         = f"{username}@{dest_domain}"
+
+    params = [
+        {"name": "email_forwarding_destination_address", "value": dest},
+        {"name": "affected_email_address",               "value": actor_email},
+    ]
+    j = _activity_json("user_accounts", actor_email, threat_ip,
+                        "email_forwarding_change", "email_forwarding_out_of_domain",
+                        params, config, product="UserAccounts")
+    _post_to_application("user_accounts", j, config)
+    return j, "Google Workspace Email Forward Persistence"
+
+
+def _threat_suspicious_admin_oauth(config, sc):
+    """
+    Two admin events for a malicious app being whitelisted org-wide:
+    1. CHANGE_APPLICATION_SETTING with ALLOW_ALL — fires "service configured as
+       unrestricted" and "app added to trusted OAuth list" detectors.
+    2. ALLOW_SERVICE_FOR_OAUTH2_ACCESS — explicit per-app trust grant.
+    """
+    actor_email = _admin_email(sc, config)
+    threat_ip   = _threat_country_ip()
+    app_name, client_id, _ = random.choice(_OAUTH_APPS_SUSPICIOUS)
+
+    # Primary — XSIAM "service configured as unrestricted" / "trusted OAuth list" detector
+    params_setting = [
+        {"name": "APP_NAME",      "value": app_name},
+        {"name": "ORG_UNIT_NAME", "value": "/"},
+        {"name": "SETTING_NAME",  "value": "Apps Access Setting Allowlist access"},
+        {"name": "NEW_VALUE",     "value": "ALLOW_ALL"},
+        {"name": "OLD_VALUE",     "value": "ALLOW_SPECIFIED"},
+    ]
+    j1 = _activity_json("admin", actor_email, threat_ip,
+                         "SECURITY_SETTINGS", "CHANGE_APPLICATION_SETTING",
+                         params_setting, config, product="Admin")
+
+    # Secondary — explicit app trust grant
+    params_allow = [
+        {"name": "APP_NAME",   "value": app_name},
+        {"name": "CLIENT_ID",  "value": f"{client_id}.apps.googleusercontent.com"},
+        {"name": "NEW_VALUE",  "value": "Trusted"},
+        {"name": "OLD_VALUE",  "value": "Blocked"},
+    ]
+    j2 = _activity_json("admin", actor_email, threat_ip,
+                         "SECURITY_SETTINGS", "ALLOW_SERVICE_FOR_OAUTH2_ACCESS",
+                         params_allow, config, product="Admin")
+
+    _post_to_application("admin", j1, config)
+    _post_to_application("admin", j2, config)
+    return [j1, j2], "Google Workspace Suspicious Admin OAuth Allow"
+
+
+def _threat_drive_mass_edit(config, sc):
+    """
+    30-60 rapid edit events across many files by one user.
+    Models ransomware-style mass document tampering or bulk data poisoning.
+    """
+    actor_email, _, actor_ip, _ = _get_user(sc, config)
+    files = _drive_files(config) or []
+    count   = random.randint(30, 60)
+    results = []
+
+    for i in range(count):
+        # Mix config files and synthetic files for volume
+        if files and random.random() < 0.4:
+            f = random.choice(files)
+            if not isinstance(f, dict) or "title" not in f:
+                f = _pick_drive_file(config)
+        else:
+            f = _pick_drive_file(config)
+
+        owner  = _pick_owner_email(sc, config, exclude=actor_email)
+        params = _drive_params(f, owner)
+        # Compress into ~5 minute window
+        offset_sec = -(count - i) * (300 // count)
+        ts = _ts(datetime.now(timezone.utc) + timedelta(seconds=offset_sec))
+
+        j = _activity_json("drive", actor_email, actor_ip, "edit", "edit",
+                            params, config, ts=ts, product="Drive")
+        _post_to_application("drive", j, config)
+        results.append(j)
+
+    return results, f"Google Workspace Drive Mass Edit ({count} files — ransomware pattern)"
+
+
+def _threat_service_unrestricted(config, sc):
+    """
+    CHANGE_APPLICATION_SETTING with ALLOW_ALL — attacker disables app access
+    controls org-wide to allow a malicious app to reach all users.
+    Fires 'A Google Workspace service was configured as unrestricted'.
+    """
+    actor_email = _admin_email(sc, config)
+    threat_ip   = _threat_country_ip()
+    app_name, _, _ = random.choice(_OAUTH_APPS_SUSPICIOUS)
+
+    params = [
+        {"name": "APP_NAME",      "value": app_name},
+        {"name": "ORG_UNIT_NAME", "value": "/"},
+        {"name": "SETTING_NAME",  "value": "Apps Access Setting Allowlist access"},
+        {"name": "NEW_VALUE",     "value": "ALLOW_ALL"},
+        {"name": "OLD_VALUE",     "value": "ALLOW_SPECIFIED"},
+    ]
+    j = _activity_json("admin", actor_email, threat_ip,
+                        "SECURITY_SETTINGS", "CHANGE_APPLICATION_SETTING",
+                        params, config, product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Service Unrestricted (Threat)"
+
+
+def _threat_group_manipulation(config, sc):
+    """
+    ADD_GROUP_MEMBER adding a user to a privileged group (it-admins, security-admins).
+    Fires 'A Google Workspace user was added to a group' detector.
+    """
+    actor_email  = _admin_email(sc, config)
+    target_email = random.choice(_get_all_user_emails(sc, config))
+    threat_ip    = _threat_country_ip()
+    domain       = _primary_domain(config)
+    group        = random.choice(_ADMIN_GROUPS)
+
+    params = [
+        {"name": "GROUP_EMAIL",   "value": f"{group}@{domain}"},
+        {"name": "USER_EMAIL",    "value": target_email},
+        {"name": "DOMAIN_NAME",   "value": domain},
+        {"name": "ROLE",          "value": "MEMBER"},
+    ]
+    j = _activity_json("admin", actor_email, threat_ip,
+                        "GROUP_SETTINGS", "ADD_GROUP_MEMBER", params, config,
+                        product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Group Manipulation (Threat)"
+
+
+def _threat_domain_wide_delegation(config, sc):
+    """
+    AUTHORIZE_API_CLIENT_ACCESS granting an unknown OAuth client broad API scopes
+    as domain-wide delegation — attacker gains persistent org-wide access.
+    Fires 'Google Workspace API Access Granted via Domain-Wide Delegation'.
+    """
+    actor_email = _admin_email(sc, config)
+    threat_ip   = _threat_country_ip()
+    domain      = _primary_domain(config)
+    client_id   = random.choice(_SUSPICIOUS_CLIENT_IDS)
+
+    params = [
+        {"name": "API_CLIENT_ID", "value": f"{client_id}.apps.googleusercontent.com"},
+        {"name": "DOMAIN_NAME",   "value": domain},
+        {"name": "SCOPE_DATA",    "value": " ".join(_DELEGATION_SCOPES_MALICIOUS)},
+    ]
+    j = _activity_json("admin", actor_email, threat_ip,
+                        "DOMAIN_SETTINGS", "AUTHORIZE_API_CLIENT_ACCESS",
+                        params, config, product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Domain-Wide Delegation (Threat)"
+
+
+def _threat_role_modified(config, sc):
+    """
+    ASSIGN_ROLE granting a custom or elevated role to an existing non-admin user.
+    Fires 'A Google Workspace identity created, assigned or modified a role'.
+    Distinct from admin_priv_escalation which creates a new backdoor account first.
+    """
+    actor_email  = _admin_email(sc, config)
+    target_email = random.choice(_get_all_user_emails(sc, config))
+    threat_ip    = _threat_country_ip()
+    role         = random.choice(_ADMIN_ROLES)
+
+    params = [
+        {"name": "USER_EMAIL",    "value": target_email},
+        {"name": "ROLE_NAME",     "value": role},
+        {"name": "ORG_UNIT_NAME", "value": _primary_domain(config)},
+        {"name": "NEW_VALUE",     "value": role},
+    ]
+    j = _activity_json("admin", actor_email, threat_ip,
+                        "DELEGATED_ADMIN", "ASSIGN_ROLE", params, config,
+                        product="Admin")
+    _post_to_application("admin", j, config)
+    return j, "Google Workspace Role Modified (Threat)"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main entry point
+# ──────────────────────────────────────────────────────────────────────────────
+
+def generate_log(config, scenario=None, threat_level="Realistic",
+                 benign_only=False, context=None, scenario_event=None):
+    """
+    Generate one Google Workspace log event (or a list for multi-event threats).
+
+    Returns (json_str, event_name) in all cases. The json_str is a fully
+    formed Activity resource JSON. The module has already POSTed it to the
+    appropriate XSIAM HTTP collector.
+
+    The orchestrator's send_http_message exits cleanly (no collector_id set
+    in google_workspace_config), while the throughput counter increments.
+
+    context keys:
+        session_context  – shared session state (user→device→IP)
+        ip               – override IP for scenario events
+        user_email       – specific user email for scenario events
+        file             – drive file dict for drive scenario events
+        scenario_event   – alternative routing (same as scenario_event param)
+    """
+    global last_threat_event_time
+
+    ctx        = context or {}
+    sc         = ctx.get("session_context") or {}
+    ip         = ctx.get("ip")
+    email      = ctx.get("user_email")
+    file       = ctx.get("file")
+    # login_type from context lets Okta/SAML flows force "saml" on the Google side,
+    # ensuring both modules agree on how authentication happened.
+    login_type = ctx.get("login_type")
+
+    # Resolve scenario_event from either param or context
+    s_event = scenario_event or ctx.get("scenario_event")
+
+    # ── Scenario routing ────────────────────────────────────────────────────
+    if s_event:
+        if s_event == "LOGIN_SUCCESS":
+            return _gen_login_success(config, sc, ip=ip, email=email,
+                                      login_type=login_type)
+
+        if s_event == "DRIVE_VIEW_SENSITIVE":
+            f = file or _pick_drive_file(config, sensitive=True)
+            return _gen_drive_view(config, sc, file=f, ip=ip, email=email)
+
+        if s_event == "DRIVE_PUBLIC_SHARE":
+            f = file or _pick_drive_file(config, sensitive=True)
+            return _gen_drive_change_acls(config, sc, file=f,
+                                          new_visibility="public_on_the_web",
+                                          ip=ip, email=email)
+
+        if s_event == "DRIVE_DOWNLOAD":
+            f = file or _pick_drive_file(config, sensitive=True)
+            return _gen_drive_download(config, sc, file=f, ip=ip, email=email)
+
+        # Unknown scenario events — return a benign login as safe fallback
+        return _gen_login_success(config, sc)
+
+    # ── Continuous mode ─────────────────────────────────────────────────────
+    gw_conf     = _gw_conf(config)
+    event_mix   = gw_conf.get("event_mix", {})
+
+    # Determine if threat event should fire
+    now = time.time()
+    if not benign_only and threat_level != "Benign Traffic Only":
+        interval = _get_threat_interval(threat_level, config)
+        if interval == 0 or (now - last_threat_event_time) >= interval:
+            last_threat_event_time = now
+            return _generate_threat_log(config, sc, event_mix)
+
+    return _generate_benign_log(config, sc, event_mix)
+
+
+def _generate_benign_log(config, sc, event_mix):
+    """Select and run a weighted random benign event generator."""
+    weights_cfg = event_mix.get("benign", {})
+    default_weights = {
+        "login_success":     35,
+        "login_failure":      4,
+        "logout":            12,
+        "login_verification": 8,
+        "drive_view":        14,
+        "drive_download":     8,
+        "drive_edit":        10,
+        "drive_create":       4,
+        "token_activity":        3,
+        "admin_settings_change": 2,
+        "admin_group_add":        1,
+        "admin_group_remove":     1,
+        "admin_ou_move":          1,
+        "admin_domain_deleg":     1,
+    }
+    weights = {**default_weights, **weights_cfg}
+
+    events = list(weights.keys())
+    probs  = [weights[e] for e in events]
+    choice = random.choices(events, weights=probs, k=1)[0]
+
+    generators = {
+        "login_success":        lambda: _gen_login_success(config, sc),
+        "login_failure":        lambda: _gen_login_failure(config, sc),
+        "logout":               lambda: _gen_logout(config, sc),
+        "login_verification":   lambda: _gen_login_verification(config, sc),
+        "drive_view":           lambda: _gen_drive_view(config, sc),
+        "drive_download":       lambda: _gen_drive_download(config, sc),
+        "drive_edit":           lambda: _gen_drive_edit(config, sc),
+        "drive_create":         lambda: _gen_drive_create(config, sc),
+        "token_activity":       lambda: _gen_token_activity(config, sc),
+        "admin_settings_change":lambda: _gen_admin_settings_change(config, sc),
+        "admin_group_add":      lambda: _gen_admin_group_member_add(config, sc),
+        "admin_group_remove":   lambda: _gen_admin_group_member_remove(config, sc),
+        "admin_ou_move":        lambda: _gen_admin_ou_move(config, sc),
+        "admin_domain_deleg":   lambda: _gen_admin_domain_delegation(config, sc),
+    }
+
+    gen = generators.get(choice, lambda: _gen_login_success(config, sc))
+    return gen()
+
+
+def _generate_threat_log(config, sc, event_mix):
+    """Select and run a weighted random threat event generator."""
+    weights_cfg = event_mix.get("threat", {})
+    default_weights = {
+        "impossible_travel":         20,
+        "bulk_drive_download":       15,
+        "external_share":            12,
+        "admin_priv_escalation":     10,
+        "mfa_disabled":              10,
+        "credential_stuffing":       10,
+        "oauth_malicious_app":        8,
+        "email_forward_persistence":  8,
+        "suspicious_admin_oauth":     5,
+        "drive_mass_edit":            2,
+        "service_unrestricted":       8,
+        "group_manipulation":         8,
+        "domain_wide_delegation":     6,
+        "role_modified":              6,
+    }
+    weights = {**default_weights, **weights_cfg}
+
+    events = list(weights.keys())
+    probs  = [weights[e] for e in events]
+    choice = random.choices(events, weights=probs, k=1)[0]
+
+    generators = {
+        "impossible_travel":         lambda: _threat_impossible_travel(config, sc),
+        "bulk_drive_download":       lambda: _threat_bulk_drive_download(config, sc),
+        "external_share":            lambda: _threat_external_share(config, sc),
+        "admin_priv_escalation":     lambda: _threat_admin_priv_escalation(config, sc),
+        "mfa_disabled":              lambda: _threat_mfa_disabled(config, sc),
+        "credential_stuffing":       lambda: _threat_credential_stuffing(config, sc),
+        "oauth_malicious_app":       lambda: _threat_oauth_malicious_app(config, sc),
+        "email_forward_persistence": lambda: _threat_email_forward_persistence(config, sc),
+        "suspicious_admin_oauth":    lambda: _threat_suspicious_admin_oauth(config, sc),
+        "drive_mass_edit":           lambda: _threat_drive_mass_edit(config, sc),
+        "service_unrestricted":      lambda: _threat_service_unrestricted(config, sc),
+        "group_manipulation":        lambda: _threat_group_manipulation(config, sc),
+        "domain_wide_delegation":    lambda: _threat_domain_wide_delegation(config, sc),
+        "role_modified":             lambda: _threat_role_modified(config, sc),
+    }
+
+    gen = generators.get(choice, lambda: _threat_impossible_travel(config, sc))
+    # All threat generators return (content, name) where content is str or list[str].
+    # Multi-event generators have already POSTed all events internally before returning.
+    return gen()

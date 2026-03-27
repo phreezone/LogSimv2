@@ -1,0 +1,15 @@
+# Copy this file to terraform.tfvars and fill in your values.
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# terraform.tfvars is listed in .gitignore — never commit it to source control.
+
+# Required: your GCP project ID (e.g. "my-org-siem-prod")
+project_id = "YOUR_GCP_PROJECT_ID"
+
+# Optional overrides — defaults shown below
+
+# region            = "us-central1"
+# topic_name        = "xsiam-audit-logs"
+# subscription_name = "xsiam-logsim-pull"
+# logsim_sa_name    = "logsim-publisher"
+# xsiam_sa_name     = "xsiam-subscriber"

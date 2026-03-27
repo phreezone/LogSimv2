@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Sets up the required AWS infrastructure for the XSIAM Log Simulator.
+  This includes an S3 bucket for logs, an SQS queue for notifications,
+  and two IAM users/roles with least-privilege permissions.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: A unique name for the S3 bucket where logs will be stored. Bucket names must be globally unique.
+  ExternalId:
+    Type: String
+    Description: A unique secret string required by XSIAM to assume the IAM role. Generate a UUID for this value.
+
+Resources:
+  # SQS Queue for S3 event notifications that XSIAM will poll
+  SQSNotificationQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Delete
+    Properties:
+      QueueName: !Sub "${BucketName}-sqs-queue"
+
+  # Policy that allows the S3 bucket to send messages to the SQS queue
+  SQSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SQSNotificationQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: "SQS:SendMessage"
+            Resource: !GetAtt SQSNotificationQueue.Arn
+            # The condition checking the bucket ARN is removed to break the circular dependency.
+            # The explicit 'DependsOn' on the S3 bucket now handles the creation order.
+
+  # S3 Bucket to store the gzipped CloudTrail logs
+  S3LogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    DependsOn: SQSQueuePolicy # Explicitly create the SQS policy before this bucket
+    Properties:
+      BucketName: !Ref BucketName
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Queue: !GetAtt SQSNotificationQueue.Arn
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # IAM User for the Python log simulator script (for uploading to S3)
+  LogSimulatorIAMUser:
+    Type: AWS::IAM::User
+    DeletionPolicy: Delete
+    Properties:
+      UserName: !Sub "xsiam-log-simulator-user-${BucketName}"
+      Policies:
+        - PolicyName: S3UploadPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                Resource: !Sub "arn:aws:s3:::${BucketName}/*"
+              - Effect: Allow
+                Action:
+                  - "s3:PutBucketNotification" # Required to add the SQS notification event
+                Resource: !Sub "arn:aws:s3:::${BucketName}"
+
+  # Access Keys for the Log Simulator IAM User
+  LogSimulatorIAMKeys:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref LogSimulatorIAMUser
+
+  # IAM Role for XSIAM to assume (for reading from SQS and S3)
+  XSIAMIAMRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    Properties:
+      RoleName: !Sub "XSIAM-S3-Collector-Role-${BucketName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "006742885340" # Palo Alto Networks' XSIAM AWS Account ID
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                "sts:ExternalId": !Ref ExternalId
+      Policies:
+        - PolicyName: XSIAMS3ReadPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                Resource: !Sub "arn:aws:s3:::${BucketName}/*"
+              - Effect: Allow
+                Action:
+                  - "sqs:ReceiveMessage"
+                  - "sqs:DeleteMessage"
+                  - "sqs:GetQueueAttributes"
+                Resource: !GetAtt SQSNotificationQueue.Arn
+
+Outputs:
+  S3BucketName:
+    Description: The name of the created S3 bucket.
+    Value: !Ref S3LogBucket
+
+  SQSQueueURL:
+    Description: The URL of the SQS queue for XSIAM configuration.
+    Value: !Ref SQSNotificationQueue
+
+  XSIAMRoleARN:
+    Description: The ARN of the IAM role for XSIAM to assume.
+    Value: !GetAtt XSIAMIAMRole.Arn
+  
+  XSIAMRoleExternalId:
+    Description: The External ID required by XSIAM to assume the IAM role.
+    Value: !Ref ExternalId
+
+  LogSimulatorAccessKeyId:
+    Description: The Access Key ID for the log simulator IAM user.
+    Value: !Ref LogSimulatorIAMKeys
+
+  LogSimulatorSecretAccessKey:
+    Description: The Secret Access Key for the log simulator IAM user.
+    Value: !GetAtt LogSimulatorIAMKeys.SecretAccessKey
+
