@@ -1310,6 +1310,46 @@ def run_infoblox_single_threat(scenario_event_name, all_modules, config):
     print(f"  Sent {count} log(s) for {name}.")
 
 
+# ---------------------------------------------------------------------------
+# Scenario helpers
+# ---------------------------------------------------------------------------
+
+_FW_MODULE_NAMES = [
+    "Cisco Firepower",
+    "Cisco ASA Firewall",
+    "Check Point Firewall",
+    "Fortinet FortiGate",
+    "Zscaler Web Gateway",
+]
+
+
+def _collect_fw_modules(all_modules):
+    """Returns all loaded network firewall modules in priority order."""
+    return [all_modules[n] for n in _FW_MODULE_NAMES if n in all_modules]
+
+
+def _send_to_all_fw(fw_modules, scenario_event, config, context, step_label):
+    """Sends a scenario event to every loaded firewall module.
+
+    If a module does not recognise the scenario_event (returns None), it falls
+    back to generating any threat-level event so the dataset is still populated.
+    """
+    if not fw_modules:
+        print(f"{step_label} No network firewall modules loaded — skipping.")
+        return
+    for fw_module in fw_modules:
+        result = fw_module.generate_log(config, scenario_event=scenario_event,
+                                        context=context, threat_level="Insane")
+        if result is None:
+            result = fw_module.generate_log(config, threat_level="Insane", context=context)
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, scenario_event
+        if log_content:
+            process_and_send(log_content, fw_module, config, event_name)
+
+
 def run_dns_c2_killchain_scenario(all_modules, config):
     """
     DNS C2 Kill Chain — 7-step scenario across Infoblox DNS/DHCP + network firewall.
@@ -1324,10 +1364,7 @@ def run_dns_c2_killchain_scenario(all_modules, config):
     print("\n--- Running 'DNS C2 Kill Chain' Scenario ---")
 
     infoblox_module = all_modules.get("Infoblox NIOS")
-    fw_module = (all_modules.get("Cisco Firepower") or
-                 all_modules.get("Cisco ASA Firewall") or
-                 all_modules.get("Check Point Firewall") or
-                 all_modules.get("Zscaler Web Gateway"))
+    fw_modules      = _collect_fw_modules(all_modules)
 
     if not infoblox_module:
         print("ERROR: This scenario requires the 'Infoblox NIOS' module.")
@@ -1354,10 +1391,12 @@ def run_dns_c2_killchain_scenario(all_modules, config):
     c2_domain_3 = f"new-c2-{random.randint(1000,9999)}.com"  # new infra, not yet blocked
 
     base_ctx = {"session_context": session_context}
+    fw_names = ", ".join(m.NAME for m in fw_modules) if fw_modules else "none"
 
-    print(f"  Victim:   {victim_host} ({victim_ip} / {victim_mac})")
+    print(f"  Victim:      {victim_host} ({victim_ip} / {victim_mac})")
     print(f"  C2 domain 1 (blocked by RPZ): {c2_domain_1}")
     print(f"  C2 domain 3 (new infra, resolves): {c2_domain_3}")
+    print(f"  Firewall modules: {fw_names}")
 
     try:
         # STEP 1 — DHCP: victim device joins the network
@@ -1397,19 +1436,10 @@ def run_dns_c2_killchain_scenario(all_modules, config):
             process_and_send(log_content, infoblox_module, config, event_name)
         time.sleep(1)
 
-        # STEP 5 — Firewall: Security Intel / URL block on second C2 domain
-        if fw_module and hasattr(fw_module, "generate_log"):
-            print(f"[STEP 5] {fw_module.NAME}: Security Intel block on C2 domain...")
-            fw_ctx = {**base_ctx, "src_ip": victim_ip}
-            result = fw_module.generate_log(config, scenario_event="THREAT_BLOCK", context=fw_ctx)
-            if isinstance(result, tuple):
-                log_content, event_name = result
-            else:
-                log_content, event_name = result, "THREAT_BLOCK"
-            if log_content:
-                process_and_send(log_content, fw_module, config, event_name)
-        else:
-            print("[STEP 5] No network firewall module loaded — skipping.")
+        # STEP 5 — ALL firewalls: Security Intel / URL block on second C2 domain
+        print(f"[STEP 5] All firewall modules: Security Intel block on C2 domain...")
+        _send_to_all_fw(fw_modules, "THREAT_BLOCK", config,
+                        {**base_ctx, "src_ip": victim_ip}, "[STEP 5]")
         time.sleep(1)
 
         # STEP 6 — DNS resolves: third C2 domain succeeds (new infra)
@@ -1418,19 +1448,10 @@ def run_dns_c2_killchain_scenario(all_modules, config):
         process_and_send(dns_logs, infoblox_module, config, dns_name)
         time.sleep(1)
 
-        # STEP 7 — Firewall: connection to C2 IP allowed (not yet on blocklist)
-        if fw_module and hasattr(fw_module, "generate_log"):
-            print(f"[STEP 7] {fw_module.NAME}: Outbound connection to C2 IP established...")
-            fw_ctx = {**base_ctx, "src_ip": victim_ip}
-            result = fw_module.generate_log(config, scenario_event="LARGE_EGRESS", context=fw_ctx)
-            if isinstance(result, tuple):
-                log_content, event_name = result
-            else:
-                log_content, event_name = result, "LARGE_EGRESS"
-            if log_content:
-                process_and_send(log_content, fw_module, config, event_name)
-        else:
-            print("[STEP 7] No network firewall module loaded — skipping.")
+        # STEP 7 — ALL firewalls: outbound connection to C2 IP allowed (not yet on blocklist)
+        print(f"[STEP 7] All firewall modules: Outbound connection to C2 IP established...")
+        _send_to_all_fw(fw_modules, "LARGE_EGRESS", config,
+                        {**base_ctx, "src_ip": victim_ip}, "[STEP 7]")
 
     except Exception as e:
         print(f"\nAn error occurred during scenario execution: {e}")
@@ -1459,10 +1480,7 @@ def run_device_compromise_scenario(all_modules, config):
     print("\n--- Running 'Device Compromise (Full Lifecycle)' Scenario ---")
 
     infoblox_module = all_modules.get("Infoblox NIOS")
-    fw_module = (all_modules.get("Cisco Firepower") or
-                 all_modules.get("Cisco ASA Firewall") or
-                 all_modules.get("Check Point Firewall") or
-                 all_modules.get("Zscaler Web Gateway"))
+    fw_modules      = _collect_fw_modules(all_modules)
 
     if not infoblox_module:
         print("ERROR: This scenario requires the 'Infoblox NIOS' module.")
@@ -1486,7 +1504,9 @@ def run_device_compromise_scenario(all_modules, config):
         victim_mac  = f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
 
     base_ctx = {"session_context": session_context}
-    print(f"  Device: {victim_host} ({victim_ip} / {victim_mac})")
+    fw_names = ", ".join(m.NAME for m in fw_modules) if fw_modules else "none"
+    print(f"  Device:           {victim_host} ({victim_ip} / {victim_mac})")
+    print(f"  Firewall modules: {fw_names}")
 
     try:
         # STEP 1 — DHCP: device joins network
@@ -1502,19 +1522,20 @@ def run_device_compromise_scenario(all_modules, config):
         process_and_send(dns_logs, infoblox_module, config, dns_name)
         time.sleep(1)
 
-        # STEP 3 — Firewall: normal outbound web browsing (benign baseline)
-        if fw_module and hasattr(fw_module, "generate_log"):
-            print(f"[STEP 3] {fw_module.NAME}: Normal outbound web browsing (benign baseline)...")
-            fw_ctx = {**base_ctx, "src_ip": victim_ip}
-            result = fw_module.generate_log(config, benign_only=True, context=fw_ctx)
-            if isinstance(result, tuple):
-                log_content, event_name = result
-            else:
-                log_content, event_name = result, "BENIGN_TRAFFIC"
-            if log_content:
-                process_and_send(log_content, fw_module, config, event_name)
+        # STEP 3 — ALL firewalls: normal outbound web browsing (benign baseline)
+        print(f"[STEP 3] All firewall modules: Normal outbound web browsing (benign baseline)...")
+        fw_ctx = {**base_ctx, "src_ip": victim_ip}
+        if fw_modules:
+            for fw_module in fw_modules:
+                result = fw_module.generate_log(config, benign_only=True, context=fw_ctx)
+                if isinstance(result, tuple):
+                    log_content, event_name = result
+                else:
+                    log_content, event_name = result, "BENIGN_TRAFFIC"
+                if log_content:
+                    process_and_send(log_content, fw_module, config, event_name)
         else:
-            print("[STEP 3] No network firewall module loaded — skipping.")
+            print("[STEP 3] No network firewall modules loaded — skipping.")
         time.sleep(1)
 
         # STEP 4 — RPZ NXDOMAIN: first C2 attempt blocked at DNS
@@ -1529,19 +1550,10 @@ def run_device_compromise_scenario(all_modules, config):
             process_and_send(log_content, infoblox_module, config, event_name)
         time.sleep(1)
 
-        # STEP 5 — Firewall: URL/Security Intel block on second C2 domain
-        if fw_module and hasattr(fw_module, "generate_log"):
-            print(f"[STEP 5] {fw_module.NAME}: URL/Security Intel block — second C2 attempt...")
-            fw_ctx = {**base_ctx, "src_ip": victim_ip}
-            result = fw_module.generate_log(config, scenario_event="THREAT_BLOCK", context=fw_ctx)
-            if isinstance(result, tuple):
-                log_content, event_name = result
-            else:
-                log_content, event_name = result, "THREAT_BLOCK"
-            if log_content:
-                process_and_send(log_content, fw_module, config, event_name)
-        else:
-            print("[STEP 5] No network firewall module loaded — skipping.")
+        # STEP 5 — ALL firewalls: URL/Security Intel block on second C2 domain
+        print(f"[STEP 5] All firewall modules: URL/Security Intel block — second C2 attempt...")
+        _send_to_all_fw(fw_modules, "THREAT_BLOCK", config,
+                        {**base_ctx, "src_ip": victim_ip}, "[STEP 5]")
         time.sleep(1)
 
         # STEP 6 — DNS NOERROR: third C2 domain resolves (not yet on any blocklist)
@@ -1577,56 +1589,54 @@ def run_device_compromise_scenario(all_modules, config):
 
 def select_scenario_mode(all_modules, config):
     """Handles the attack scenario generation mode."""
+    # NOTE: Scenario "Compromised Account & Data Exfiltration via Google Drive" is disabled
+    # until the Google Workspace module is restored. The function remains in the codebase.
     scenarios = {
         "1": {
-            "name": "Compromised Account & Data Exfiltration via Google Drive",
-            "func": run_compromised_account_gdrive_exfil_scenario
-        },
-        "2": {
             "name": "AWS Pentest & Defense Evasion",
             "func": run_aws_pentest_scenario
         },
-        "3": {
+        "2": {
             "name": "Phishing Kill Chain (Email → Click → DNS → C2 → Credential Theft)",
             "func": run_phishing_kill_chain_scenario
         },
-        "4": {
+        "3": {
             "name": "Insider Threat / Cloud Data Exfiltration (with DNS correlation)",
             "func": run_insider_threat_scenario
         },
-        "5": {
-            "name": "DNS C2 Kill Chain (Infoblox DHCP/DNS + Network Firewall) [requires Infoblox]",
+        "4": {
+            "name": "DNS C2 Kill Chain (Infoblox DHCP/DNS + All Network Firewalls) [requires Infoblox]",
             "func": run_dns_c2_killchain_scenario
         },
-        "6": {
+        "5": {
             "name": "Device Compromise — Full Lifecycle: DHCP → DNS → C2 → Threat Protect [requires Infoblox]",
             "func": run_device_compromise_scenario
         },
-        "7": {
+        "6": {
             "name": "Infoblox — C2 Beacon (DNS query to C2 domain → NXDOMAIN) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("C2_BEACON", m, c)
         },
-        "8": {
+        "7": {
             "name": "Infoblox — DNS Tunneling (TXT exfil subdomain → SERVFAIL) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("DNS_TUNNEL", m, c)
         },
-        "9": {
+        "8": {
             "name": "Infoblox — RPZ Block (named RPZ CEF NXDOMAIN/PASSTHRU event) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("RPZ_BLOCK", m, c)
         },
-        "10": {
+        "9": {
             "name": "Infoblox — Threat Protect Block (BloxOne CEF DROP event) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("THREAT_PROTECT", m, c)
         },
-        "11": {
+        "10": {
             "name": "Infoblox — NXDOMAIN Storm / DGA (20-50 query+NXDOMAIN pairs) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("NXDOMAIN_STORM", m, c)
         },
-        "12": {
+        "11": {
             "name": "Infoblox — DNS Flood (20-50 rapid queries, same source IP) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("DNS_FLOOD", m, c)
         },
-        "13": {
+        "12": {
             "name": "Infoblox — DHCP Starvation (20-50 DISCOVERs from spoofed MACs) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("DHCP_STARVATION", m, c)
         },

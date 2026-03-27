@@ -11,9 +11,9 @@ These settings control the simulator's overall behavior.
 ```json
 {
   "syslog_port": 514,
-  "base_event_interval_seconds": 2,
+  "base_event_interval_seconds": 1.5,
   "threat_generation_levels": {
-    "Benign Traffic Only": 0,
+    "Benign Traffic Only": 86400,
     "Realistic": 7200,
     "Elevated": 3600,
     "High": 1800,
@@ -23,9 +23,36 @@ These settings control the simulator's overall behavior.
 }
 ```
 
-* `syslog_port`: The global default port for Syslog (modules can override this).
-* `base_event_interval_seconds`: The global delay between *each* log event.
-* `threat_generation_levels`: Defines the *minimum time in seconds* between threat events. 0 means threats can generate on any cycle.
+**`syslog_port`** — The global default TCP port for Syslog transport. Individual modules can override this with their own `syslog_port` setting.
+
+---
+
+> ### ⚡ `base_event_interval_seconds` — Event Generation Rate
+>
+> **This is the most important tuning knob in the simulator.** It controls the sleep delay between every individual log event across all modules. A lower value means events are generated faster; a higher value means fewer events per second.
+>
+> **Lower bound: `0.01` seconds** (100 events/sec). Values below this are not effective — Python's sleep precision and socket overhead make sub-10ms intervals unreliable.
+>
+> **How to calculate throughput:**
+>
+> In **Serial mode** (round-robin), the interval is divided evenly across all running modules:
+> `events per second ≈ number_of_modules / base_event_interval_seconds`
+>
+> | `base_event_interval_seconds` | 3 modules | 6 modules | 12 modules |
+> |---|---|---|---|
+> | `0.01` | ~300 events/sec | ~600 events/sec | ~1,200 events/sec |
+> | `0.1` | ~30 events/sec | ~60 events/sec | ~120 events/sec |
+> | `0.5` | ~6 events/sec | ~12 events/sec | ~24 events/sec |
+> | `1.5` *(default)* | ~2 events/sec | ~4 events/sec | ~8 events/sec |
+> | `5.0` | ~0.6 events/sec | ~1.2 events/sec | ~2.4 events/sec |
+>
+> In **Parallel mode** (each module in its own thread), all modules fire simultaneously so throughput scales differently — each module independently sleeps for `base_event_interval_seconds` between its own events, giving approximately `1 / base_event_interval_seconds` events/sec *per module*.
+>
+> **Note:** Some threat generators (port scan, brute force, DGA storm) return bursts of 20–100 events at once — these are sent without inter-event sleep, so peak throughput will briefly spike above the steady-state rate during a threat injection.
+
+---
+
+**`threat_generation_levels`** — Defines the *minimum time in seconds* that must pass between threat events, per module. `0` means a threat can fire on any cycle. See [Threat Generation Levels](how-to-run.md#threat-generation-levels) for full details on each level.
 
 ## B. Transport Configuration
 
@@ -33,35 +60,72 @@ This section defines *how* logs are sent. Each module uses one of four transport
 
 ```json
 "http_collectors": {
+  "okta_collector": {
+    "url_env_var": "OKTA_COLLECTOR_URL",
+    "auth_type_env_var": "OKTA_AUTH_TYPE",
+    "api_key_env_var": "OKTA_KEY",
+    "content_type": "application/json"
+  },
   "proofpoint_collector": {
+    "url_env_var": "PROOFPOINT_COLLECTOR_URL",
+    "auth_type_env_var": "PROOFPOINT_AUTH_TYPE",
     "api_key_env_var": "PROOFPOINT_KEY",
     "content_type": "application/json"
   },
-  "okta_collector": {
-    "api_key_env_var": "OKTA_KEY",
+  "google_login_collector": {
+    "url_env_var": "GOOGLE_LOGIN_COLLECTOR_URL",
+    "auth_type_env_var": "GOOGLE_AUTH_TYPE",
+    "api_key_env_var": "GOOGLE_LOGIN_KEY",
+    "content_type": "application/json"
+  },
+  "google_drive_collector": {
+    "url_env_var": "GOOGLE_DRIVE_COLLECTOR_URL",
+    "auth_type_env_var": "GOOGLE_AUTH_TYPE",
+    "api_key_env_var": "GOOGLE_DRIVE_KEY",
+    "content_type": "application/json"
+  },
+  "google_admin_collector": {
+    "url_env_var": "GOOGLE_ADMIN_COLLECTOR_URL",
+    "auth_type_env_var": "GOOGLE_AUTH_TYPE",
+    "api_key_env_var": "GOOGLE_ADMIN_KEY",
+    "content_type": "application/json"
+  },
+  "google_user_accounts_collector": {
+    "url_env_var": "GOOGLE_USER_ACCOUNTS_COLLECTOR_URL",
+    "auth_type_env_var": "GOOGLE_AUTH_TYPE",
+    "api_key_env_var": "GOOGLE_USER_ACCOUNTS_KEY",
+    "content_type": "application/json"
+  },
+  "google_token_collector": {
+    "url_env_var": "GOOGLE_TOKEN_COLLECTOR_URL",
+    "auth_type_env_var": "GOOGLE_AUTH_TYPE",
+    "api_key_env_var": "GOOGLE_TOKEN_KEY",
     "content_type": "application/json"
   }
 },
 "aws_config": {
   "transport": "s3",
-  "aws_account_id": "<your_aws_account_id>",
-  "s3_bucket_name": "<your_s3_bucket_name>",
-  "aws_region": "us-east-1",
-  "aws_access_key_id": "<from_cloudformation_output>",
-  "aws_secret_access_key": "<from_cloudformation_output>"
+  "users_and_roles": [ ... ]
 },
 "gcp_config": {
   "transport": "pubsub",
   "gcp_project_id": "PLACEHOLDER_GCP_PROJECT_ID",
-  "pubsub_topic": "xsiam-audit-logs"
+  "pubsub_topic": "xsiam-audit-logs",
+  "organization_id": "PLACEHOLDER_ORG_ID"
 }
 ```
 
-**`http_collectors`** — required for HTTP-based modules (Okta, Proofpoint). Each entry's `api_key_env_var` names the `.env` variable that holds the XSIAM HTTP Collector API key. The base URL comes from `HTTP_COLLECTOR_URL` in `.env`. The dict key (e.g., `"okta_collector"`) is referenced by the module's `collector_id` setting.
+**`http_collectors`** — required for HTTP-based modules (Okta, Proofpoint, Google Workspace). Each entry has four fields:
+- `url_env_var` — names the `.env` variable holding the XSIAM HTTP Collector endpoint URL for this collector
+- `auth_type_env_var` — names the `.env` variable holding the authentication type (e.g., `"api_key"`)
+- `api_key_env_var` — names the `.env` variable holding the API key for this collector
+- `content_type` — MIME type sent in the `Content-Type` header (always `"application/json"`)
 
-**`aws_config`** — required for the AWS module. Populate with the outputs from the CloudFormation stack (see [AWS S3 Setup](#aws-s3-setup-cloudformation--recommended) below).
+The dict key (e.g., `"okta_collector"`) is referenced by the module's `collector_id` setting. The five `google_*` collectors are used by the Google Workspace module, which is currently not operational.
 
-**`gcp_config`** — required for the GCP module. `gcp_project_id` and `pubsub_topic` are fallbacks if the env vars `GCP_PROJECT_ID` and `GCP_PUBSUB_TOPIC` are not set. All other fields define the simulated GCP environment — replace every `PLACEHOLDER_GCP_PROJECT_ID` with your real project ID.
+**`aws_config`** — required for the AWS module. Contains `transport: "s3"` and a `users_and_roles` array defining the simulated IAM identities used to generate CloudTrail events. All AWS credentials (access key, secret key, bucket name, region, account ID) live in `.env` — see [Getting Started](getting-started.md) for the full `.env` reference.
+
+**`gcp_config`** — required for the GCP module. Contains `transport: "pubsub"`, the `gcp_project_id` and `pubsub_topic` (fallbacks if the env vars `GCP_PROJECT_ID` and `GCP_PUBSUB_TOPIC` are not set), plus extensive simulated environment data (regions, projects, service accounts, resources). Replace every `PLACEHOLDER_GCP_PROJECT_ID` with your real project ID. GCP credentials are set via `.env` — see [Getting Started](getting-started.md).
 
 ---
 
@@ -103,6 +167,7 @@ The `CloudFormation/S3LogSim.yaml` template creates all required AWS infrastruct
    - **Role ARN** — from `XSIAMRoleARN` output
    - **External ID** — from `XSIAMRoleExternalId` output (the UUID you chose)
    - **AWS Region** — the region you deployed the stack in
+   - **Select Audit logs and then check for use in Analytics**
 
 **Resources created by the CloudFormation stack:**
 
