@@ -42,15 +42,21 @@ Runs a single pre-built, multi-step kill chain one time and then returns to the 
 
 All 13 available scenarios are documented in detail in [Attack Scenarios](attack-scenarios.md). A summary:
 
-| # | Scenario | Primary Modules |
-|---|---|---|
-| 1 | Compromised Account & Data Exfiltration via Google Drive | Okta, Google Workspace, Proofpoint |
-| 2 | AWS Pentest & Defense Evasion | AWS CloudTrail |
-| 3 | Phishing Kill Chain (Email → Click → DNS → C2 → Credential Theft) | Proofpoint, Zscaler, Infoblox, Okta |
-| 4 | Insider Threat / Cloud Data Exfiltration (with DNS correlation) | Proofpoint, Zscaler, Infoblox, AWS |
-| 5 | DNS C2 Kill Chain (Infoblox DHCP/DNS + Network Firewall) | Infoblox, Zscaler/Firewall |
-| 6 | Device Compromise — Full Lifecycle: DHCP → DNS → C2 → Threat Protect | Infoblox |
-| 7–13 | Infoblox standalone events (C2 Beacon, DNS Tunnel, RPZ Block, Threat Protect, NXDOMAIN Storm, DNS Flood, DHCP Starvation) | Infoblox |
+| # | Scenario | Primary Modules | Notes |
+|---|---|---|---|
+| 1 | Compromised Account & Data Exfiltration via Google Drive | Okta, Google Workspace, Cisco ASA | Google Workspace currently not operational — steps 2–5 skipped until restored |
+| 2 | AWS Cloud Pentest — Privilege Escalation & Defense Evasion | AWS CloudTrail | Single-module; traces a complete attacker kill chain through CloudTrail |
+| 3 | Phishing Kill Chain — Email → Click → DNS → C2 → Credential Theft | Proofpoint, Infoblox *(optional)*, Zscaler or Check Point, Firepower / ASA / Check Point, Okta | Infoblox DNS steps activate automatically if the module is loaded |
+| 4 | Insider Threat — Cloud Data Exfiltration with DNS Correlation | Okta, AWS CloudTrail, Infoblox *(optional)*, Zscaler, Firepower / ASA / Check Point | Infoblox DNS steps activate automatically if the module is loaded |
+| 5 | DNS C2 Kill Chain — DHCP, RPZ Block, DGA Storm, Firewall Block, Establish | Infoblox, Firepower / ASA / Check Point | Requires Infoblox NIOS module loaded |
+| 6 | Device Compromise — Full Lifecycle: DHCP → DNS → C2 → Threat Protect | Infoblox, Firepower / ASA / Check Point | Requires Infoblox NIOS module; spans 4 XSIAM datasets across both modules |
+| 7 | Infoblox — C2 Beacon | Infoblox | DNS query to C2 domain → NXDOMAIN pair |
+| 8 | Infoblox — DNS Tunneling | Infoblox | TXT exfil subdomain → SERVFAIL pair |
+| 9 | Infoblox — RPZ Block | Infoblox | `named` RPZ CEF NXDOMAIN/PASSTHRU event |
+| 10 | Infoblox — Threat Protect Block | Infoblox | BloxOne `threat-protect-log` CEF DROP event |
+| 11 | Infoblox — NXDOMAIN Storm / DGA | Infoblox | 20–50 query+NXDOMAIN pairs from one source IP |
+| 12 | Infoblox — DNS Flood | Infoblox | 20–50 rapid queries across diverse domains and record types |
+| 13 | Infoblox — DHCP Starvation | Infoblox | 20–50 DHCPDISCOVER events from spoofed random MACs |
 
 **When to use:** Testing XSIAM correlation rules, incident response playbook validation, SOC analyst training exercises.
 

@@ -16,7 +16,7 @@ A modular, high-fidelity log simulation tool for **Palo Alto Networks Cortex XSI
 1. [Install dependencies and configure your environment](docs/getting-started.md)
 2. [Set up config.json](docs/configuration.md)
 3. Run: `python log_simulator.py`
-4. Select **Mode 1** (continuous background + threats) or **Mode 2** (single attack scenario)
+4. Select **Mode 1** (continuous background + threats), **Mode 2** (single attack scenario), or **Mode 3** (specific named threat)
 
 See [How to Run](docs/how-to-run.md) for full details.
 
@@ -32,17 +32,17 @@ See [How to Run](docs/how-to-run.md) for full details.
 
 ## Module Reference
 
-| Module | Transport | Benign Events | Threat Events | Reference |
+| Module | Transport | Benign Event Types | Threat Event Types | Reference |
 |---|---|---|---|---|
-| AWS CloudTrail | S3 | Yes | Yes | [docs/modules/aws.md](docs/modules/aws.md) |
-| GCP Cloud Audit Logs | Pub/Sub | 38 types | 71 types | [docs/modules/gcp.md](docs/modules/gcp.md) |
-| Check Point Firewall | Syslog (TCP) | Yes | Yes | [docs/modules/checkpoint.md](docs/modules/checkpoint.md) |
-| Cisco ASA Firewall | Syslog (TCP) | Yes | Yes | [docs/modules/cisco-asa.md](docs/modules/cisco-asa.md) |
-| Cisco Firepower | Syslog (TCP) | Yes | Yes | [docs/modules/cisco-firepower.md](docs/modules/cisco-firepower.md) |
-| Fortinet FortiGate | Syslog (TCP) | Yes | Yes | [docs/modules/fortinet.md](docs/modules/fortinet.md) |
-| Apache httpd | Syslog (TCP) | Yes | Yes | [docs/modules/httpd.md](docs/modules/httpd.md) |
+| AWS CloudTrail | S3 | 66+ event types across 15 AWS services | 17 attack scenarios | [docs/modules/aws.md](docs/modules/aws.md) |
+| GCP Cloud Audit Logs | Pub/Sub | 38 event types | 15 attack scenarios | [docs/modules/gcp.md](docs/modules/gcp.md) |
+| Check Point Firewall | Syslog (TCP) | 4 types | 20 types | [docs/modules/checkpoint.md](docs/modules/checkpoint.md) |
+| Cisco ASA Firewall | Syslog (TCP) | 4 types | 21 types | [docs/modules/cisco-asa.md](docs/modules/cisco-asa.md) |
+| Cisco Firepower | Syslog (TCP) | 4 types | 17 types | [docs/modules/cisco-firepower.md](docs/modules/cisco-firepower.md) |
+| Fortinet FortiGate | Syslog (TCP) | 7 types | 19 types | [docs/modules/fortinet.md](docs/modules/fortinet.md) |
+| Apache httpd | Syslog (TCP) | 5 types | 12 attack types | [docs/modules/httpd.md](docs/modules/httpd.md) |
 | Infoblox NIOS | Syslog (TCP) | 15 types | 11 types | [docs/modules/infoblox.md](docs/modules/infoblox.md) |
-| Okta SSO | HTTP Collector | ~100 types | 88 types | [docs/modules/okta.md](docs/modules/okta.md) |
-| Proofpoint Email | HTTP Collector | Yes | Yes | [docs/modules/proofpoint.md](docs/modules/proofpoint.md) |
-| Zscaler Web Gateway | Syslog (TCP) | Yes | Yes | [docs/modules/zscaler.md](docs/modules/zscaler.md) |
-| Google Workspace | HTTP Collector | Yes | Yes | [docs/modules/google-workspace.md](docs/modules/google-workspace.md) |
+| Okta SSO | HTTP Collector | ~100 event types | 88 types | [docs/modules/okta.md](docs/modules/okta.md) |
+| Proofpoint Email | HTTP Collector | 1 type | 11 types | [docs/modules/proofpoint.md](docs/modules/proofpoint.md) |
+| Zscaler Web Gateway | Syslog (TCP) | 4 types | 16 types | [docs/modules/zscaler.md](docs/modules/zscaler.md) |
+| Google Workspace | HTTP Collector | *(not operational)* | *(not operational)* | [docs/modules/google-workspace.md](docs/modules/google-workspace.md) |
