@@ -6,9 +6,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code and default config
 COPY log_simulator.py .
 COPY modules/ ./modules/
+COPY config.json .
 
-# config.json and .env are mounted at runtime — not baked into the image
 CMD ["python", "-u", "log_simulator.py"]
