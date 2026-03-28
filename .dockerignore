@@ -1,0 +1,23 @@
+# Credentials — never bake into image
+.env
+*.json.key
+*_credentials.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+modules/__pycache__/
+
+# Docs and extras
+docs/
+terraform/
+CloudFormation/
+"XSIAM imports"/
+*.docx
+*.md
+.env.example
+
+# Git
+.git/
+.gitignore

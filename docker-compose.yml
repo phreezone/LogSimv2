@@ -1,0 +1,7 @@
+services:
+  logsim:
+    build: .
+    env_file: .env                          # credentials/endpoints — never committed
+    volumes:
+      - ./config.json:/app/config.json:ro   # mount config so users can edit without rebuilding
+    restart: "no"                           # run once and exit; change to "unless-stopped" for continuous mode
