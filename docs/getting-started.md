@@ -117,7 +117,7 @@ SYSLOG_HOST=10.0.0.1
 # Format: https://api-<tenant>.xdr.<region>.paloaltonetworks.com/logs/v1/event
 HTTP_COLLECTOR_URL=https://api-myorg.xdr.us.paloaltonetworks.com/logs/v1/event
 
-# API key for the Okta HTTP Collector (generated in XSIAM when you create the collector)
+# API key for the Okta HTTP Collector (generated in XSIAM when you create the HTTP collector)
 OKTA_KEY=your-okta-collector-api-key-here
 
 # API key for the Proofpoint HTTP Collector

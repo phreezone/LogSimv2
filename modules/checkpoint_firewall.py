@@ -234,8 +234,8 @@ def _generate_benign_log(config, session_context=None):
             user, shost = 'unknown', None
 
     log_type = random.choices(
-        ['traffic', 'inbound_block', 'dns', 'icmp'],
-        weights=[60, 24, 12, 4],
+        ['traffic', 'inbound_block', 'dns', 'icmp', 'smtp', 'ntp', 'smb_internal'],
+        weights=[52, 22, 10, 4, 5, 4, 3],
         k=1,
     )[0]
 
@@ -304,6 +304,73 @@ def _generate_benign_log(config, session_context=None):
             "action_reason": "Policy",
             "ifname": "eth0",
             "msg": f"{act} inbound {service.upper()} from {ext_src_ip} to {target_ip}:{target_port}",
+            "cefDeviceEventClassId": "traffic",
+        }
+
+    elif log_type == 'smtp':
+        # Outbound email from internal mail relay to external MX — SMTP/25 or SMTPS/587
+        smtp_port   = random.choice([25, 587])
+        smtp_server = random.choice(config.get('internal_servers', [src_ip]))
+        mail_dest   = random.choice(["74.125.0.0/16", "40.76.0.0/14", "207.46.0.0/16"])
+        try:
+            mail_dest_ip = rand_ip_from_network(ip_network(mail_dest, strict=False))
+        except Exception:
+            mail_dest_ip = dest_ip
+        extensions = {
+            "act": "Accept",
+            "src": smtp_server, "dst": mail_dest_ip,
+            "spt": random.randint(49152, 65535), "dpt": smtp_port,
+            "proto": "6",
+            "suser": user, "shost": shost,
+            "inzone": "Internal", "outzone": "External",
+            "service_id": "smtp" if smtp_port == 25 else "submission",
+            "app": "SMTP",
+            "cs1": "Allow_SMTP_Relay", "cs1Label": "Rule Name",
+            "out": random.randint(1_000, 500_000),
+            "in":  random.randint(200, 5_000),
+            "ifname": "eth0",
+            "msg": f"Accept SMTP relay from {smtp_server} to {mail_dest_ip}:{smtp_port}",
+            "cefDeviceEventClassId": "traffic",
+        }
+
+    elif log_type == 'ntp':
+        # Outbound NTP time sync from internal host to public NTP pool — UDP/123
+        ntp_servers = ["216.239.35.0", "129.6.15.28", "132.163.96.1", "198.60.22.240",
+                       "17.253.52.125", "162.159.200.1"]
+        ntp_dest = random.choice(ntp_servers)
+        extensions = {
+            "act": "Accept",
+            "src": src_ip, "dst": ntp_dest,
+            "spt": 123, "dpt": 123,
+            "proto": "17",  # UDP
+            "suser": user, "shost": shost,
+            "inzone": "Internal", "outzone": "External",
+            "service_id": "ntp",
+            "cs1": "Allow_NTP_Outbound", "cs1Label": "Rule Name",
+            "out": random.randint(48, 76),
+            "in":  random.randint(48, 76),
+            "ifname": "eth0",
+            "msg": f"Accept NTP sync from {src_ip} to {ntp_dest}",
+            "cefDeviceEventClassId": "traffic",
+        }
+
+    elif log_type == 'smb_internal':
+        # Internal SMB file-share access — workstation to file server (intra-zone, both Internal)
+        file_server = random.choice(config.get('internal_servers', [src_ip]))
+        extensions = {
+            "act": "Accept",
+            "src": src_ip, "dst": file_server,
+            "spt": random.randint(49152, 65535), "dpt": 445,
+            "proto": "6",
+            "suser": user, "shost": shost,
+            "inzone": "Internal", "outzone": "Internal",
+            "service_id": "microsoft-ds",
+            "app": "SMB",
+            "cs1": "Allow_Internal_SMB", "cs1Label": "Rule Name",
+            "out": random.randint(10_000, 5_000_000),
+            "in":  random.randint(10_000, 50_000_000),
+            "ifname": "eth1",
+            "msg": f"Accept internal SMB from {src_ip} to {file_server}:445",
             "cefDeviceEventClassId": "traffic",
         }
 

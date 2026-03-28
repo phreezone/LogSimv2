@@ -656,6 +656,120 @@ def _generate_vpn_event(config, session_context=None):
         return _format_fortinet_cef(config, "0101039428", "event", "vpn", "warning", fields)
 
 
+def _generate_ntp_sync(config, src_ip, user, shost):
+    """NTP time synchronisation — UDP/123 to a public NTP server (traffic:forward).
+
+    Short duration, tiny byte counts.  Represents routine clock sync from workstations,
+    servers, and network appliances.  Logged by FortiGate as a standard traffic forward event.
+    """
+    ntp_servers = ["216.239.35.0", "129.6.15.28", "132.163.96.1",
+                   "17.253.52.125", "162.159.200.1", "198.60.22.240"]
+    ntp_dest = random.choice(ntp_servers)
+
+    fields = _base_traffic_fields(
+        config, src_ip, shost, user, ntp_dest, "pool.ntp.org", "17", 123, "accept",
+        duration_s=random.randint(0, 1)
+    )
+    fields.update({
+        "app":             "NTP",
+        "FTNTFGTapp":      "NTP",
+        "FTNTFGTappid":    "16195",
+        "FTNTFGTappcat":   "Network.Service",
+        "FTNTFGTapprisk":  "low",
+        "out":             random.randint(48, 76),
+        "in":              random.randint(48, 76),
+        "msg":             f"NTP sync from {src_ip} to {ntp_dest}:123",
+    })
+    return _format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields)
+
+
+def _generate_antivirus_allow(config, src_ip, user, shost):
+    """FortiAV scan: clean file passed through — utm:antivirus virustype=clean.
+
+    Represents the normal background of AV inspection events where files are
+    inspected and found clean.  File downloads, email attachments, and web content
+    all pass through FortiAV; the vast majority result in a clean verdict.
+    """
+    destinations = config.get("benign_egress_destinations") or [{}]
+    dest         = random.choice(destinations)
+    dst_ip       = rand_ip_from_network(ip_network(dest.get("ip_range", "40.96.0.0/13"), strict=False))
+    domain       = dest.get("name", "microsoft.com").lower().replace(" ", "")
+
+    file_extensions = ["exe", "dll", "zip", "docx", "xlsx", "pdf", "msi", "cab"]
+    file_ext   = random.choice(file_extensions)
+    file_size  = random.randint(10_000, 50_000_000)
+    profile    = _get_config(config).get("av_profile", "default")
+
+    fields = _base_traffic_fields(
+        config, src_ip, shost, user, dst_ip, domain, "6", 443, "accept"
+    )
+    fields.update({
+        "app":                  "HTTPS",
+        "FTNTFGTeventtype":     "viruscleaned",
+        "FTNTFGTvirusname":     "Clean",
+        "FTNTFGTvirusstatus":   "Pass",
+        "FTNTFGTprofile":       profile,
+        "FTNTFGTdtype":         "File",
+        "FTNTFGTfiletype":      file_ext.upper(),
+        "FTNTFGTfilesize":      file_size,
+        "FTNTFGTfilename":      f"download.{file_ext}",
+        "FTNTFGTurl":           f"https://{domain}/download.{file_ext}",
+        "FTNTFGTprofile":       profile,
+        "msg":                  f"File download inspected by AV: clean ({file_ext.upper()}, {file_size} bytes)",
+    })
+    return _format_fortinet_cef(config, "0211008192", "utm", "antivirus", "information", fields)
+
+
+def _generate_ipsec_vpn_event(config):
+    """IPSec VPN Phase-1 / Phase-2 negotiation event — event:vpn ipsec.
+
+    Distinct from SSL VPN (_generate_vpn_event).  Represents site-to-site IPSec
+    tunnels or remote-access IPSec clients negotiating IKE phase-1 (ISAKMP) and
+    phase-2 (IPSec SA).  Uses UDP/500 (IKE) or UDP/4500 (NAT-T).
+    """
+    forti_conf   = _get_config(config)
+    peer_gws     = forti_conf.get("ipsec_peer_gateways", [])
+    if peer_gws:
+        peer_ip = random.choice(peer_gws)
+    else:
+        peer_ip = _random_external_ip()
+    geo          = _ext_geo()
+    gw_ip        = forti_conf.get("vpn_gateway_ip", "203.0.113.20")
+    tunnel_name  = random.choice(["Site-to-HQ", "Branch-VPN", "Azure-IPSec", "Remote-Access"])
+    ike_port     = random.choices([500, 4500], weights=[70, 30], k=1)[0]
+    phase        = random.choices(["phase1", "phase2"], weights=[40, 60], k=1)[0]
+    is_up        = random.random() > 0.1
+
+    if phase == "phase1":
+        logid     = "0101037127"
+        eventtype = "ike-negotiate"
+        msg_text  = f"IKE Phase-1 {'completed' if is_up else 'failed'} with {peer_ip}"
+    else:
+        logid     = "0101037141"
+        eventtype = "ipsec-negotiate"
+        msg_text  = f"IPSec Phase-2 SA {'established' if is_up else 'failed'} for tunnel {tunnel_name}"
+
+    fields = {
+        "src":                  peer_ip,
+        "dst":                  gw_ip,
+        "spt":                  ike_port,
+        "dpt":                  ike_port,
+        "proto":                "17",
+        "FTNTFGTeventtype":     eventtype,
+        "FTNTFGTvpntunnel":     tunnel_name,
+        "FTNTFGTtunneltype":    "ipsec",
+        "FTNTFGTremotegw":      peer_ip,
+        "FTNTFGTsrccountry":    geo["country"],
+        "FTNTFGTsrccity":       geo["city"],
+        "FTNTFGTsrcregion":     geo["region"],
+        "act":                  "negotiate",
+        "outcome":              "success" if is_up else "failed",
+        "msg":                  msg_text,
+        "externalId":           _session_id(),
+    }
+    return _format_fortinet_cef(config, logid, "event", "vpn", "notice" if is_up else "warning", fields)
+
+
 def _generate_ssl_inspection(config, src_ip, user, shost):
     """SSL deep-packet inspection certificate event — utm:ssl."""
     destinations = config.get("benign_egress_destinations") or [{}]
@@ -692,14 +806,18 @@ def _generate_benign_log(config, session_context=None):
         events  = [e["event"]  for e in benign_cfg]
         weights = [e["weight"] for e in benign_cfg]
     else:
-        events  = ["traffic_forward", "inbound_block", "webfilter_allow", "dns_query", "admin_event", "vpn_event", "ssl_inspection"]
-        weights = [50,               20,              12,                8,            4,             4,            2]
+        events  = ["traffic_forward", "inbound_block", "webfilter_allow", "dns_query",
+                   "admin_event", "vpn_event", "ssl_inspection",
+                   "ntp_sync", "antivirus_allow", "ipsec_vpn"]
+        weights = [45,               18,              11,                7,
+                   4,             4,            2,
+                   4,           3,              2]
 
     chosen = random.choices(events, weights=weights, k=1)[0]
 
     # Resolve user/IP for events that need an internal source
     user, src_ip, shost = "unknown", "192.168.1.100", None
-    if chosen not in ("inbound_block", "admin_event", "vpn_event"):
+    if chosen not in ("inbound_block", "admin_event", "vpn_event", "ipsec_vpn"):
         if session_context:
             user_info = get_random_user(session_context, preferred_device_type="workstation")
             if user_info:
@@ -724,6 +842,12 @@ def _generate_benign_log(config, session_context=None):
         return _generate_admin_event(config)
     elif chosen == "vpn_event":
         return _generate_vpn_event(config, session_context)
+    elif chosen == "ntp_sync":
+        return _generate_ntp_sync(config, src_ip, user, shost)
+    elif chosen == "antivirus_allow":
+        return _generate_antivirus_allow(config, src_ip, user, shost)
+    elif chosen == "ipsec_vpn":
+        return _generate_ipsec_vpn_event(config)
     else:  # ssl_inspection
         return _generate_ssl_inspection(config, src_ip, user, shost)
 

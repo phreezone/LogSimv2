@@ -249,6 +249,160 @@ def _generate_benign_inbound_block(config, user, dept, internal_host_ip, device_
     return _format_nss_log_as_cef(fields, user, dept, 'nssfwlog')
 
 
+def _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_info):
+    """Cloud storage / SaaS sync upload — PUT/POST with large bytesOut (nssweblog).
+
+    Simulates OneDrive, Box, or Dropbox sync traffic where the client pushes data
+    to a cloud storage endpoint.  bytesOut is intentionally large (client-to-server)
+    while bytesIn is small (server acknowledgement).
+    """
+    zscaler_conf = config.get('zscaler_config', {})
+    saas_destinations = [
+        ("onedrive.live.com",    "40.99.0.0/16",  "Cloud Storage"),
+        ("d.docs.live.net",      "40.99.0.0/16",  "Cloud Storage"),
+        ("content.dropboxapi.com","162.125.0.0/16","Cloud Storage"),
+        ("upload.box.com",       "74.112.186.0/24","Cloud Storage"),
+        ("www.googleapis.com",   "142.250.0.0/15", "Cloud Storage"),
+        ("sharepoint.com",       "40.96.0.0/13",  "Office 365"),
+    ]
+    dest_name, dest_cidr, url_cat = random.choice(saas_destinations)
+    try:
+        dest_ip = rand_ip_from_network(ip_network(dest_cidr, strict=False))
+    except Exception:
+        dest_ip = "40.99.1.1"
+    method = random.choice(["PUT", "POST"])
+    fields = {
+        "action": "Allow",
+        "urlcat":      url_cat,
+        "urlsupercat": "Technology",
+        "urlclass":    "Business and Productivity",
+        "riskscore":   str(random.randint(1, 15)),
+        "responsecode": random.choice(["200", "201", "204"]),
+        "reason":      "Allowed",
+        "reqmethod":   method,
+        "useragent":   random.choice(config.get('user_agents', ["Microsoft OneDrive/22.0"])),
+        "appname":     "Cloud Storage",
+        "appclass":    "Web",
+        "contenttype": "application/octet-stream",
+        "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
+        "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
+        "eurl":  f"https://{dest_name}/upload",
+        "ehost": dest_name,
+        "cip":   internal_host_ip,
+        "sip":   dest_ip,
+        "proto": "HTTPS",
+        # bytesout = client→server (large: uploading files); bytesin = server→client (small: ACK)
+        "bytesout": random.randint(500_000, 50_000_000),
+        "bytesin":  random.randint(200, 2_000),
+        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
+        "cefSeverity": "2",
+    }
+    return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
+
+
+def _generate_benign_software_update(config, user, dept, internal_host_ip, device_info):
+    """Software update download — Windows Update, antivirus definitions, or OS patches (nssweblog).
+
+    Very large bytesIn (server→client) with small bytesOut. Low risk score.
+    Represents routine patch management traffic seen on every corporate network.
+    """
+    zscaler_conf = config.get('zscaler_config', {})
+    update_sources = [
+        ("windowsupdate.com",        "13.107.4.0/24",   "Computer and Internet Info"),
+        ("download.windowsupdate.com","13.107.4.0/24",   "Computer and Internet Info"),
+        ("update.microsoft.com",     "40.76.0.0/14",    "Computer and Internet Info"),
+        ("download.microsoft.com",   "23.102.0.0/18",   "Computer and Internet Info"),
+        ("definitions.avast.com",    "185.8.54.0/24",   "Computer and Internet Info"),
+        ("content.symantec.com",     "198.188.200.0/22","Computer and Internet Info"),
+        ("update.nai.com",           "161.69.0.0/16",   "Computer and Internet Info"),
+    ]
+    dest_name, dest_cidr, url_cat = random.choice(update_sources)
+    try:
+        dest_ip = rand_ip_from_network(ip_network(dest_cidr, strict=False))
+    except Exception:
+        dest_ip = "13.107.4.1"
+    fields = {
+        "action": "Allow",
+        "urlcat":      url_cat,
+        "urlsupercat": "Technology",
+        "urlclass":    "Business and Productivity",
+        "riskscore":   str(random.randint(1, 10)),
+        "responsecode": "200",
+        "reason":      "Allowed",
+        "reqmethod":   "GET",
+        "useragent":   "Microsoft-CryptoAPI/10.0",
+        "appname":     "Windows Update",
+        "appclass":    "Software Updates",
+        "contenttype": "application/octet-stream",
+        "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
+        "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
+        "eurl":  f"https://{dest_name}/update",
+        "ehost": dest_name,
+        "cip":   internal_host_ip,
+        "sip":   dest_ip,
+        "proto": "HTTPS",
+        # bytesin = client←server (large: downloading patch); bytesout = client→server (small: request)
+        "bytesin":  random.randint(5_000_000, 200_000_000),
+        "bytesout": random.randint(300, 2_000),
+        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
+        "cefSeverity": "1",
+    }
+    return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
+
+
+def _generate_benign_video_streaming(config, user, dept, internal_host_ip, device_info):
+    """Video streaming — YouTube, Teams video, Webex, or Zoom (nssweblog).
+
+    Characterised by very large bytesIn (sustained video download) and a streaming
+    content-type.  Represents training, meetings, and conference calls during business
+    hours — a dominant traffic type in modern corporate environments.
+    """
+    zscaler_conf = config.get('zscaler_config', {})
+    streaming_destinations = [
+        ("googlevideo.com",      "216.58.0.0/17",   "Streaming Media",     "video/webm"),
+        ("youtube.com",          "216.58.192.0/19", "Streaming Media",     "video/mp4"),
+        ("teams.microsoft.com",  "52.112.0.0/14",   "Web Conferencing",    "application/octet-stream"),
+        ("webex.com",            "170.133.128.0/18","Web Conferencing",    "application/octet-stream"),
+        ("zoom.us",              "170.114.0.0/16",  "Web Conferencing",    "application/octet-stream"),
+        ("nflxvideo.net",        "45.57.0.0/17",    "Streaming Media",     "video/mp4"),
+    ]
+    dest_name, dest_cidr, url_cat, content_type = random.choice(streaming_destinations)
+    try:
+        dest_ip = rand_ip_from_network(ip_network(dest_cidr, strict=False))
+    except Exception:
+        dest_ip = "216.58.1.1"
+    fields = {
+        "action": "Allow",
+        "urlcat":      url_cat,
+        "urlsupercat": "Entertainment",
+        "urlclass":    "Business and Productivity",
+        "riskscore":   str(random.randint(1, 20)),
+        "responsecode": "200",
+        "reason":      "Allowed",
+        "reqmethod":   "GET",
+        "useragent":   random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "appname":     url_cat,
+        "appclass":    "Web",
+        "contenttype": content_type,
+        "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
+        "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
+        "eurl":  f"https://www.{dest_name}/",
+        "ehost": dest_name,
+        "cip":   internal_host_ip,
+        "sip":   dest_ip,
+        "proto": "HTTPS",
+        # bytesin = sustained video stream (very large); bytesout = small client requests
+        "bytesin":  random.randint(10_000_000, 500_000_000),
+        "bytesout": random.randint(1_000, 10_000),
+        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
+        "cefSeverity": "2",
+    }
+    return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
+
+
 # ---------------------------------------------------------------------------
 # THREAT WEB GENERATORS
 # ---------------------------------------------------------------------------
@@ -951,10 +1105,15 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     if not internal_host_ip:
         internal_host_ip = _get_random_internal_ip(config)
 
-    # Benign pool — weighted so web traffic dominates, matching real Zscaler proportions
+    # Benign pool — weighted so web traffic dominates, matching real Zscaler proportions.
+    # web_traffic×3 + firewall_traffic×2 + video_streaming×2 + saas_upload×1 + software_update×1
+    # + dns_query×1 + inbound_block×1 = 11 slots → ~27/18/18/9/9/9/9 %
     benign_pool = (
         [lambda: _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_info)] * 3 +
         [lambda: _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, device_info)] * 2 +
+        [lambda: _generate_benign_video_streaming(config, user, dept, internal_host_ip, device_info)] * 2 +
+        [lambda: _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_info)] +
+        [lambda: _generate_benign_software_update(config, user, dept, internal_host_ip, device_info)] +
         [lambda: _generate_benign_dns_query(config, user, dept, internal_host_ip, device_info)] +
         [lambda: _generate_benign_inbound_block(config, user, dept, internal_host_ip, device_info)]
     )

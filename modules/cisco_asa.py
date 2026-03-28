@@ -493,6 +493,135 @@ def _simulate_inbound_block(config):
     return _generate_full_syslog_message(config, message)
 
 
+def _simulate_ntp_sync(config):
+    """NTP time synchronisation — %ASA-7-609001 + 609002 (Built/Teardown) for UDP/123.
+
+    Represents routine clock-sync traffic from internal hosts and network devices
+    to public NTP pool servers.  Short duration (< 1 second), tiny byte counts.
+
+    XDM fields:
+      xdm.network.ip_protocol    ← UDP (17)
+      xdm.source.ipv4            ← internal host / device
+      xdm.target.ipv4            ← public NTP server
+      xdm.target.port            ← 123
+      xdm.source.sent_bytes      ← ~48 bytes (NTP request)
+      xdm.target.sent_bytes      ← ~48 bytes (NTP response)
+    """
+    ntp_servers = ["216.239.35.0", "129.6.15.28", "132.163.96.1",
+                   "17.253.52.125", "162.159.200.1", "198.60.22.240"]
+    ntp_dest = random.choice(ntp_servers)
+
+    internal_networks = config.get('internal_networks', ['192.168.1.0/24'])
+    try:
+        net    = ip_network(random.choice(internal_networks), strict=False)
+        src_ip = rand_ip_from_network(net)
+    except (ValueError, AddressValueError, TypeError):
+        src_ip = "192.168.1.100"
+
+    return _generate_connection_session(
+        config, "UDP", src_ip, ntp_dest, 123,
+        user="", bytes_sent=random.randint(48, 76), bytes_received=random.randint(48, 76),
+        duration_sec=0
+    )
+
+
+def _simulate_internal_traffic(config, session_context=None):
+    """East-west LAN traffic — workstation to file/print/app server on inside interface.
+
+    Simulates normal internal lateral connectivity (not a threat).  Both source
+    and destination are inside, so the ASA routes the packet but neither interface
+    is the outside.  Uses 302013/302014 (TCP) messages with src/dest both inside.
+
+    XDM fields:
+      xdm.source.interface       ← "inside"
+      xdm.target.interface       ← "inside"
+      xdm.network.ip_protocol    ← TCP
+      xdm.source.ipv4            ← workstation
+      xdm.target.ipv4            ← server / printer
+      xdm.target.port            ← common internal service port
+    """
+    if session_context:
+        user_info = get_random_user(session_context, preferred_device_type='workstation')
+        if user_info:
+            user   = user_info['username']
+            src_ip = user_info['ip']
+        else:
+            return None
+    else:
+        user_ip_map = _get_user_ip_map(config)
+        if not user_ip_map:
+            return None
+        user, src_ip = random.choice(list(user_ip_map.items()))
+
+    # Pick an internal server as the destination
+    internal_servers = config.get('internal_servers', [])
+    if internal_servers:
+        dest_ip = random.choice(internal_servers)
+    else:
+        internal_networks = config.get('internal_networks', ['192.168.1.0/24'])
+        try:
+            net     = ip_network(random.choice(internal_networks), strict=False)
+            dest_ip = rand_ip_from_network(net)
+        except (ValueError, AddressValueError, TypeError):
+            dest_ip = "192.168.1.50"
+
+    # Common internal service ports
+    service_cfg = random.choices(
+        [("SMB/CIFS", 445), ("RPC", 135), ("LDAP", 389), ("HTTP-internal", 8080),
+         ("MSSQL", 1433), ("Print", 9100), ("HTTPS-internal", 8443)],
+        weights=[30, 15, 15, 15, 10, 10, 5],
+        k=1,
+    )[0]
+    service_name, dest_port = service_cfg
+
+    bytes_sent = random.randint(1_000, 500_000)
+    bytes_recv = random.randint(1_000, 50_000_000)
+    duration   = random.randint(1, 300)
+
+    return _generate_connection_session(
+        config, "TCP", src_ip, dest_ip, dest_port,
+        user, bytes_sent, bytes_recv, duration,
+        src_interface="inside", dest_interface="inside"
+    )
+
+
+def _simulate_dhcp_log(config):
+    """DHCP address assignment log — %ASA-6-305011 (NAT entry built for DHCP client).
+
+    ASAs with DHCP server or relay enabled emit 305011/305012 messages when a client
+    obtains / releases an address.  Short-lived, small byte counts.
+
+    XDM fields:
+      xdm.event.description      ← DHCP lease detail
+      xdm.source.ipv4            ← DHCP client IP (newly assigned)
+      xdm.target.ipv4            ← DHCP server / relay target
+    """
+    internal_networks = config.get('internal_networks', ['192.168.1.0/24'])
+    try:
+        net       = ip_network(random.choice(internal_networks), strict=False)
+        client_ip = rand_ip_from_network(net)
+    except (ValueError, AddressValueError, TypeError):
+        client_ip = "192.168.1.101"
+
+    asa_config   = config.get(CONFIG_KEY, {})
+    outside_ip   = asa_config.get('outside_ip', '203.0.113.1')
+    event_type   = random.choices(["built", "teardown"], weights=[70, 30], k=1)[0]
+    mapped_port  = random.randint(1024, 65535)
+    hash1        = random.randint(0, 0xFFFFFFFF)
+
+    if event_type == "built":
+        message = (
+            f"%ASA-6-305011: Built dynamic TCP translation from inside:{client_ip}/68 "
+            f"to outside:{outside_ip}/{mapped_port} flags {{}}"
+        )
+    else:
+        message = (
+            f"%ASA-6-305012: Teardown dynamic TCP translation from inside:{client_ip}/68 "
+            f"to outside:{outside_ip}/{mapped_port} duration 0:01:00 [0x{hash1:08x}]"
+        )
+    return _generate_full_syslog_message(config, message)
+
+
 # ---------------------------------------------------------------------------
 # Threat event generators
 # ---------------------------------------------------------------------------
@@ -1235,10 +1364,13 @@ def generate_log(config, scenario=None, threat_level="Realistic",
     event_mix     = module_config.get('event_mix', {})
 
     benign_events   = event_mix.get('benign', [
-        {"event": "benign_session",  "weight": 60},
-        {"event": "inbound_block",   "weight": 24},
-        {"event": "anyconnect_vpn",  "weight": 10},
-        {"event": "aaa_auth",        "weight": 6},
+        {"event": "benign_session",    "weight": 50},
+        {"event": "inbound_block",     "weight": 22},
+        {"event": "anyconnect_vpn",    "weight": 9},
+        {"event": "aaa_auth",          "weight": 5},
+        {"event": "ntp_sync",          "weight": 6},
+        {"event": "internal_traffic",  "weight": 5},
+        {"event": "dhcp_log",          "weight": 3},
     ])
     benign_functions = [e['event'] for e in benign_events]
     benign_weights   = [e['weight'] for e in benign_events]
@@ -1271,7 +1403,10 @@ def generate_log(config, scenario=None, threat_level="Realistic",
     no_internal_ip_needed = {
         "anyconnect_vpn", "vpn_bruteforce", "vpn_impossible_travel",
         "server_outbound_http", "inbound_block", "auth_brute_force", "aaa_auth",
-        "vpn_tor_login",  # resolves its own user/IP from TOR nodes config
+        "vpn_tor_login",    # resolves its own user/IP from TOR nodes config
+        "ntp_sync",         # picks IP from internal_networks directly
+        "internal_traffic", # resolves user/IP from session_context itself
+        "dhcp_log",         # picks IP from internal_networks directly
     }
     internal_host_ip = "192.168.1.100"
     if log_choice not in no_internal_ip_needed:
@@ -1296,6 +1431,15 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     elif log_choice == "aaa_auth":
         return _generate_aaa_auth_log(config, session_context=session_context)
+
+    elif log_choice == "ntp_sync":
+        return _simulate_ntp_sync(config)
+
+    elif log_choice == "internal_traffic":
+        return _simulate_internal_traffic(config, session_context)
+
+    elif log_choice == "dhcp_log":
+        return _simulate_dhcp_log(config)
 
     elif log_choice == "large_single_upload_session":
         print("    - ASA Module simulating: Large Single Upload Session")

@@ -530,23 +530,133 @@ def _generate_dns_benign_event(config, src_ip, user, shost=None):
     return fields, "Connection Statistics"
 
 
-def _generate_benign_log(config, session_context=None):
-    """Generates a benign log from one of four event categories.
+def _generate_email_traffic_event(config, src_ip, user, shost=None):
+    """Outbound email client connection — SMTP/SMTPS/IMAPS to a mail server.
 
-    Distribution (matching ASA/Checkpoint baseline proportions):
-      connection     55%  — outbound web browsing (allow 85% / block suspicious 15%)
-      internal_tier  15%  — user → app server → database connection chain
-      inbound_block  25%  — external probe blocked at perimeter (expected background noise)
-      dns_query       5%  — outbound DNS resolution to external resolver
+    Covers three common mail protocols:
+      IMAPS/993  — client pulling mail from server (large bytesIn)
+      SMTPS/465  — client submission (large bytesOut)
+      SMTP/587   — mail relay submission (medium bytesOut)
+    """
+    mail_servers = ["74.125.0.0/16", "40.76.0.0/14", "207.46.128.0/18",
+                    "198.2.128.0/19", "209.85.128.0/17"]
+    mail_cidr  = random.choice(mail_servers)
+    mail_ip    = rand_ip_from_network(ip_network(mail_cidr, strict=False))
+    proto_cfg  = random.choices(
+        [("IMAPS", 993, "imaps"), ("SMTPS", 465, "smtps"), ("SMTP", 587, "smtp-alt")],
+        weights=[50, 30, 20],
+        k=1,
+    )[0]
+    app_name, dest_port, rule_label = proto_cfg
+
+    start_ms, end_ms = _conn_timing(random.randint(5_000, 120_000))
+    fields = _base_fields(config, src_ip, user, shost)
+    fields.update({
+        "_syslog_id": SYSLOG_IDS["CONNECTION"],
+        "act": "Allow", "app": app_name,
+        "dst": mail_ip, "dpt": dest_port,
+        "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
+        "cs2": f"Allow_{app_name}",      "cs2Label": "fwRule",
+        "cs6": "Trustworthy",            "cs6Label": "URLReputation",
+        "cefSeverity": "3",
+        # IMAPS = mostly downloading (large bytesIn); SMTP* = mostly sending (large bytesOut)
+        "bytesOut": random.randint(1_000, 300_000) if dest_port in (465, 587) else random.randint(500, 5_000),
+        "bytesIn":  random.randint(1_000, 300_000) if dest_port == 993 else random.randint(200, 3_000),
+        "outcome": "SUCCESS", "reason": "Traffic Allowed",
+        "msg":    f"Email {app_name} connection from {src_ip} to {mail_ip}:{dest_port}",
+        "start": start_ms, "end": end_ms,
+    })
+    return fields, "Connection Statistics"
+
+
+def _generate_ntp_sync_event(config, src_ip, user, shost=None):
+    """NTP time synchronisation — UDP/123 to a public time server.
+
+    Very short duration (single request/response) with tiny byte counts.
+    Represents routine system clock sync from workstations and servers.
+    """
+    ntp_servers = ["216.239.35.0", "129.6.15.28", "132.163.96.1",
+                   "17.253.52.125", "162.159.200.1", "198.60.22.240"]
+    ntp_ip = random.choice(ntp_servers)
+    start_ms, end_ms = _conn_timing(random.randint(5, 100))
+
+    fields = _base_fields(config, src_ip, user, shost)
+    fields['proto'] = "17"  # UDP
+    fields.update({
+        "_syslog_id": SYSLOG_IDS["CONNECTION"],
+        "act": "Allow", "app": "NTP",
+        "dst": ntp_ip, "dpt": 123,
+        "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
+        "cs2": "Allow_NTP_Outbound",    "cs2Label": "fwRule",
+        "cs6": "Trustworthy",           "cs6Label": "URLReputation",
+        "cefSeverity": "3",
+        "bytesOut": random.randint(48, 76),
+        "bytesIn":  random.randint(48, 76),
+        "outcome": "SUCCESS", "reason": "Traffic Allowed",
+        "msg":   f"NTP sync from {src_ip} to {ntp_ip}:123",
+        "start": start_ms, "end": end_ms,
+    })
+    return fields, "Connection Statistics"
+
+
+def _generate_software_update_event(config, src_ip, user, shost=None):
+    """Software update download — Windows Update or AV definitions (large bytesIn).
+
+    Represents routine patch management traffic: client sends a small HTTP GET,
+    server returns a large payload (patch/definition file).
+    """
+    update_servers = [
+        ("13.107.4.0/24",   "windowsupdate.com",      "Windows Update"),
+        ("40.76.0.0/14",    "update.microsoft.com",   "Windows Update"),
+        ("185.8.54.0/24",   "definitions.avast.com",  "AV Definitions"),
+        ("161.69.0.0/16",   "update.nai.com",         "AV Definitions"),
+        ("198.188.200.0/22","content.symantec.com",   "AV Definitions"),
+    ]
+    cidr, domain, update_type = random.choice(update_servers)
+    server_ip  = rand_ip_from_network(ip_network(cidr, strict=False))
+    # Large download, long duration
+    duration_ms = random.randint(30_000, 600_000)
+    start_ms, end_ms = _conn_timing(duration_ms)
+
+    fields = _base_fields(config, src_ip, user, shost)
+    fields.update({
+        "_syslog_id": SYSLOG_IDS["CONNECTION"],
+        "act": "Allow", "app": "HTTPS",
+        "dst": server_ip, "dpt": 443,
+        "dhost": domain,
+        "cs1": _ac_policy(config),         "cs1Label": "fwPolicy",
+        "cs2": "Allow_Software_Updates",   "cs2Label": "fwRule",
+        "cs6": "Trustworthy",              "cs6Label": "URLReputation",
+        "cefSeverity": "3",
+        "bytesOut": random.randint(300, 2_000),
+        "bytesIn":  random.randint(5_000_000, 200_000_000),
+        "outcome": "SUCCESS", "reason": "Traffic Allowed",
+        "msg":   f"{update_type} download from {src_ip} to {domain}",
+        "start": start_ms, "end": end_ms,
+    })
+    return fields, "Connection Statistics"
+
+
+def _generate_benign_log(config, session_context=None):
+    """Generates a benign log from one of seven event categories.
+
+    Distribution:
+      connection       50%  — outbound web browsing (allow 85% / block suspicious 15%)
+      internal_tier    13%  — user → app server → database connection chain
+      inbound_block    22%  — external probe blocked at perimeter (expected background noise)
+      dns_query         5%  — outbound DNS resolution to external resolver
+      email_traffic     5%  — SMTP/SMTPS/IMAPS mail client connections
+      ntp_sync          3%  — UDP/123 NTP time synchronisation
+      software_update   2%  — large HTTPS download (Windows Update / AV definitions)
     """
     user, src_ip, shost = _get_user_and_ip(config, session_context)
     roll = random.random()
 
-    if roll < 0.55:  # 55% — outbound web connection
+    if roll < 0.50:  # 50% — outbound web connection
         fields, cef_name = _generate_connection_event(config, src_ip, user, shost)
         return _format_firepower_cef(config, fields, cef_name) if fields else None
 
-    elif roll < 0.70:  # 15% — internal app tier chain
+    elif roll < 0.63:  # 13% — internal app tier chain
         logs = []
         fields, cef_name = _generate_user_to_app_server_event(config, src_ip, user, shost)
         if fields:
@@ -557,12 +667,24 @@ def _generate_benign_log(config, session_context=None):
                 logs.append(_format_firepower_cef(config, db_fields, db_cef))
         return logs if logs else None
 
-    elif roll < 0.95:  # 25% — inbound perimeter block
+    elif roll < 0.85:  # 22% — inbound perimeter block
         fields, cef_name = _generate_inbound_block_event(config)
         return _format_firepower_cef(config, fields, cef_name)
 
-    else:  # 5% — outbound DNS query
+    elif roll < 0.90:  # 5% — outbound DNS query
         fields, cef_name = _generate_dns_benign_event(config, src_ip, user, shost)
+        return _format_firepower_cef(config, fields, cef_name)
+
+    elif roll < 0.95:  # 5% — email traffic
+        fields, cef_name = _generate_email_traffic_event(config, src_ip, user, shost)
+        return _format_firepower_cef(config, fields, cef_name)
+
+    elif roll < 0.98:  # 3% — NTP sync
+        fields, cef_name = _generate_ntp_sync_event(config, src_ip, user, shost)
+        return _format_firepower_cef(config, fields, cef_name)
+
+    else:  # 2% — software update download
+        fields, cef_name = _generate_software_update_event(config, src_ip, user, shost)
         return _format_firepower_cef(config, fields, cef_name)
 
 
