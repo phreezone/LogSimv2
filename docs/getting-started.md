@@ -179,6 +179,17 @@ GCP_SERVICE_ACCOUNT_KEY_JSON={"type":"service_account","project_id":"my-org-siem
 
 > **Security note:** The `.env` file contains credentials. Protect it with `chmod 600 .env` on Linux/macOS. Never commit it to source control.
 
+
+Inside XSIAM you will need to configure your BrokerVM Syslog applets with the following config (adjust ports to match the config in the Json.config)
+
+Port / Protocol / Format / Vendor / Product
+
+    Port 1513 /   TCP     Autodetect
+    Port 1514 /   TCP   / CISCO /  Cisco   / ASA
+    Port 1515 /   TCP   / RAW   /  apache  / httpd
+    Port 1516 /   TCP   / RAW   /  infoblox / infoblox
+    Port 514  /   TCP    Autodetect
+
 ---
 
 ### Quick Verification
