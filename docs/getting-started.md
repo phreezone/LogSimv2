@@ -130,23 +130,25 @@ PROOFPOINT_KEY=your-proofpoint-collector-api-key-here
 # outputs — see docs/configuration.md for setup instructions.
 # =============================================================================
 
+# Your 12-digit AWS account ID.
+# Used to build CloudTrail S3 key paths AND to substitute PLACEHOLDER_AWS_ACCOUNT_ID
+# throughout config.json (KMS key ARNs, ELB ARNs, etc.) at startup.
+AWS_ACCOUNT_ID=123456789012
+
 # S3 bucket name where simulated CloudTrail logs are written
 # CloudFormation output: S3BucketName
-s3_bucket_name=my-logsim-cloudtrail-bucket
-
-# Your 12-digit AWS account ID (used to build the correct S3 key path)
-aws_account_id=123456789012
+S3_BUCKET_NAME=my-logsim-cloudtrail-bucket
 
 # AWS region where the bucket lives (e.g. us-east-1, eu-west-1)
-aws_region=us-east-1
+AWS_REGION=us-east-1
 
 # IAM access key for the LogSimulator IAM user
 # CloudFormation output: LogSimulatorAccessKeyId
-aws_access_key_id=AKIAIOSFODNN7EXAMPLE
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
 
 # IAM secret key for the LogSimulator IAM user
 # CloudFormation output: LogSimulatorSecretAccessKey
-aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 
 
 # =============================================================================
@@ -155,8 +157,17 @@ aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 # Terraform apply_and_configure.sh script — see docs/configuration.md.
 # =============================================================================
 
-# GCP project ID that owns the Pub/Sub topic (short project ID, not project number)
+# GCP project ID (short name, not the numeric project number).
+# Used for the Pub/Sub transport destination AND to substitute
+# PLACEHOLDER_GCP_PROJECT_ID throughout config.json at startup (service account
+# emails, resource paths, bucket names, secret IDs, etc.)
 GCP_PROJECT_ID=my-org-siem-prod
+
+# GCP project number (12-digit integer, distinct from the project ID).
+# Find it with: gcloud projects describe YOUR_PROJECT_ID --format='value(projectNumber)'
+# Used to substitute PLACEHOLDER_GCP_PROJECT_NUMBER in config.json (serverless
+# service account emails such as 123456789012-compute@developer.gserviceaccount.com).
+GCP_PROJECT_NUMBER=123456789012
 
 # Pub/Sub topic name only — NOT the full resource path
 # Correct:   xsiam-audit-logs
@@ -178,6 +189,26 @@ GCP_SERVICE_ACCOUNT_KEY_JSON={"type":"service_account","project_id":"my-org-siem
 ```
 
 > **Security note:** The `.env` file contains credentials. Protect it with `chmod 600 .env` on Linux/macOS. Never commit it to source control.
+
+---
+
+### Broker VM Syslog Applet Configuration
+
+Syslog-based modules (Cisco ASA, Apache httpd, Infoblox, Check Point, Cisco Firepower, Fortinet FortiGate, Zscaler) send logs over TCP to your XSIAM Broker VM. You must create a **Syslog applet** in XSIAM for each port in use.
+
+> **Note:** The port numbers below are defined in `config.json` under each module's `syslog_port` setting (and the global `syslog_port` for modules that share the default). If you want to use different ports, change the values in `config.json` — then update your Broker VM applets to match.
+
+In XSIAM, navigate to **Settings → Data Sources → Add Data Source → Syslog** and create one applet per row:
+
+| Port | Protocol | Format | Vendor | Product | Module |
+|------|----------|--------|--------|---------|--------|
+| 514 | TCP | Autodetect | *(any)* | *(any)* | Check Point, Cisco Firepower, Fortinet FortiGate, Zscaler (shared default) |
+| 1513 | TCP | Autodetect | *(any)* | *(any)* | *(reserved — assign to any additional syslog module you add)* |
+| 1514 | TCP | CISCO | Cisco | ASA | Cisco ASA |
+| 1515 | TCP | RAW | apache | httpd | Apache httpd |
+| 1516 | TCP | RAW | infoblox | infoblox | Infoblox NIOS |
+
+> **Tip:** Giving each module its own port keeps parsers isolated and makes it easier to enable or disable individual sources in XSIAM without affecting others. The global port 514 works for vendors whose CEF headers carry enough product identity for XSIAM to auto-detect the parser.
 
 ---
 

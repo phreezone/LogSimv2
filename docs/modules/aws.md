@@ -102,7 +102,7 @@ Context-dependent events that are common in legitimate admin workflows but also 
 
 ---
 
-## Threat Scenarios
+## Threat Scenarios (34 Types)
 
 ### Reconnaissance
 

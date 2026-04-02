@@ -4168,7 +4168,7 @@
   },
   "gcp_config": {
     "transport": "pubsub",
-    "gcp_project_id": "example-xsiam",
+    "gcp_project_id": "PLACEHOLDER_GCP_PROJECT_ID",
     "pubsub_topic": "xsiam-audit-logs",
     "organization_id": "123456789012",
     "gcp_regions": [
@@ -4179,16 +4179,16 @@
       "asia-east1"
     ],
     "service_accounts": [
-      "terraform-runner@example-xsiam.iam.gserviceaccount.com",
-      "gke-node-sa@example-xsiam.iam.gserviceaccount.com",
-      "ci-cd-deployer@example-xsiam.iam.gserviceaccount.com",
-      "data-pipeline-sa@example-xsiam.iam.gserviceaccount.com",
-      "monitoring-agent@example-xsiam.iam.gserviceaccount.com"
+      "terraform-runner@PLACEHOLDER_GCP_PROJECT_ID.iam.gserviceaccount.com",
+      "gke-node-sa@PLACEHOLDER_GCP_PROJECT_ID.iam.gserviceaccount.com",
+      "ci-cd-deployer@PLACEHOLDER_GCP_PROJECT_ID.iam.gserviceaccount.com",
+      "data-pipeline-sa@PLACEHOLDER_GCP_PROJECT_ID.iam.gserviceaccount.com",
+      "monitoring-agent@PLACEHOLDER_GCP_PROJECT_ID.iam.gserviceaccount.com"
     ],
     "serverless_service_accounts": [
-      "PLACEHOLDER_AWS_ACCOUNT_ID-compute@developer.gserviceaccount.com",
-      "example-xsiam@appspot.gserviceaccount.com",
-      "PLACEHOLDER_AWS_ACCOUNT_ID@cloudbuild.gserviceaccount.com"
+      "PLACEHOLDER_GCP_PROJECT_NUMBER-compute@developer.gserviceaccount.com",
+      "PLACEHOLDER_GCP_PROJECT_ID@appspot.gserviceaccount.com",
+      "PLACEHOLDER_GCP_PROJECT_NUMBER@cloudbuild.gserviceaccount.com"
     ],
     "gce_instances": [
       "prod-web-01",
@@ -4199,10 +4199,10 @@
       "db-replica-01"
     ],
     "gcs_buckets": [
-      "example-xsiam-backups",
-      "example-xsiam-artifacts",
-      "example-xsiam-logs",
-      "example-xsiam-public-assets"
+      "PLACEHOLDER_GCP_PROJECT_ID-backups",
+      "PLACEHOLDER_GCP_PROJECT_ID-artifacts",
+      "PLACEHOLDER_GCP_PROJECT_ID-logs",
+      "PLACEHOLDER_GCP_PROJECT_ID-public-assets"
     ],
     "gke_clusters": [
       "prod-cluster-us-central1",
@@ -4259,8 +4259,8 @@
       "user-auth-db"
     ],
     "artifact_registries": [
-      "us-central1-docker.pkg.dev/example-xsiam/app-images",
-      "us-central1-docker.pkg.dev/example-xsiam/base-images"
+      "us-central1-docker.pkg.dev/PLACEHOLDER_GCP_PROJECT_ID/app-images",
+      "us-central1-docker.pkg.dev/PLACEHOLDER_GCP_PROJECT_ID/base-images"
     ],
     "cloudbuild_triggers": [
       "main-branch-deploy",
@@ -4277,47 +4277,47 @@
       "cdn-edge-policy"
     ],
     "pubsub_topics": [
-      "projects/example-xsiam/topics/app-events",
-      "projects/example-xsiam/topics/audit-export",
-      "projects/example-xsiam/topics/data-pipeline-ingest",
-      "projects/example-xsiam/topics/siem-log-export"
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/topics/app-events",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/topics/audit-export",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/topics/data-pipeline-ingest",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/topics/siem-log-export"
     ],
     "pubsub_subscriptions": [
-      "projects/example-xsiam/subscriptions/app-events-worker",
-      "projects/example-xsiam/subscriptions/audit-export-sub",
-      "projects/example-xsiam/subscriptions/data-pipeline-consumer",
-      "projects/example-xsiam/subscriptions/xsiam-gcp-pull"
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/subscriptions/app-events-worker",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/subscriptions/audit-export-sub",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/subscriptions/data-pipeline-consumer",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/subscriptions/xsiam-gcp-pull"
     ],
     "vertex_ai_endpoints": [
-      "projects/example-xsiam/locations/us-central1/endpoints/1111111111",
-      "projects/example-xsiam/locations/us-central1/endpoints/2222222222",
-      "projects/example-xsiam/locations/us-central1/endpoints/3333333333"
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/locations/us-central1/endpoints/1111111111",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/locations/us-central1/endpoints/2222222222",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/locations/us-central1/endpoints/3333333333"
     ],
     "vertex_ai_index_endpoints": [
-      "projects/example-xsiam/locations/us-central1/indexEndpoints/4444444444"
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/locations/us-central1/indexEndpoints/4444444444"
     ],
     "vertex_ai_models": [
-      "projects/example-xsiam/locations/us-central1/models/fraud-detection-v2",
-      "projects/example-xsiam/locations/us-central1/models/customer-churn-v1"
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/locations/us-central1/models/fraud-detection-v2",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/locations/us-central1/models/customer-churn-v1"
     ],
     "vertex_ai_datasets": [
-      "projects/example-xsiam/locations/us-central1/datasets/training-data-2024",
-      "projects/example-xsiam/locations/us-central1/datasets/labeled-images-v3"
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/locations/us-central1/datasets/training-data-2024",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/locations/us-central1/datasets/labeled-images-v3"
     ],
     "vertex_ai_labeling_jobs": [
-      "projects/example-xsiam/locations/us-central1/dataLabelingJobs/classify-support-tickets"
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/locations/us-central1/dataLabelingJobs/classify-support-tickets"
     ],
     "sensitive_secret_ids": [
-      "projects/example-xsiam/secrets/db-prod-password",
-      "projects/example-xsiam/secrets/api-signing-key",
-      "projects/example-xsiam/secrets/payment-gateway-credentials"
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/secrets/db-prod-password",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/secrets/api-signing-key",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/secrets/payment-gateway-credentials"
     ],
     "dlp_inspect_templates": [
-      "projects/example-xsiam/inspectTemplates/pii-detection",
-      "projects/example-xsiam/inspectTemplates/credit-card-scan"
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/inspectTemplates/pii-detection",
+      "projects/PLACEHOLDER_GCP_PROJECT_ID/inspectTemplates/credit-card-scan"
     ]
   },
-  "account_id": "PLACEHOLDER_AWS_ACCOUNT_ID",
+  "account_id": "PLACEHOLDER_GCP_PROJECT_NUMBER",
   "user_profiles": {
     "a.tucker": {
       "display_name": "Adam Tucker",

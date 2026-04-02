@@ -1331,8 +1331,12 @@ def _collect_fw_modules(all_modules):
 def _send_to_all_fw(fw_modules, scenario_event, config, context, step_label):
     """Sends a scenario event to every loaded firewall module.
 
-    If a module does not recognise the scenario_event (returns None), it falls
-    back to generating any threat-level event so the dataset is still populated.
+    Dispatch order:
+      1. scenario_event path — works for modules that handle it natively (Zscaler, Check Point LARGE_EGRESS, etc.)
+      2. event_mix config override — forces the named threat via the module's internal dispatcher
+         (works for cisco_asa, cisco_firepower, checkpoint, fortinet which use event_mix)
+      3. Random Insane-level threat fallback — ensures the dataset is populated even if the
+         threat name doesn't exist in that module's threat pool
     """
     if not fw_modules:
         print(f"{step_label} No network firewall modules loaded — skipping.")
@@ -1340,6 +1344,16 @@ def _send_to_all_fw(fw_modules, scenario_event, config, context, step_label):
     for fw_module in fw_modules:
         result = fw_module.generate_log(config, scenario_event=scenario_event,
                                         context=context, threat_level="Insane")
+        if result is None:
+            # Fallback: override event_mix to force the named threat type
+            module_key = getattr(fw_module, 'CONFIG_KEY', None)
+            if module_key:
+                forced_config = copy.deepcopy(config)
+                forced_config.setdefault(module_key, {}).setdefault("event_mix", {})["threat"] = [
+                    {"event": scenario_event, "weight": 1}
+                ]
+                result = fw_module.generate_log(forced_config, threat_level="Insane",
+                                                benign_only=False, context=context)
         if result is None:
             result = fw_module.generate_log(config, threat_level="Insane", context=context)
         if isinstance(result, tuple):
@@ -1587,11 +1601,633 @@ def run_device_compromise_scenario(all_modules, config):
     print(f"  4. Correlate MAC from step 2 with other devices — did this MAC appear on multiple IPs?")
 
 
+def run_gcp_cloud_pentest_scenario(modules, config):
+    """
+    GCP Cloud Pentest — Privilege Escalation + Defense Evasion + Data Staging.
+
+    Story: Attacker accesses GCP API from a Tor exit node, escalates privileges via IAM,
+    creates a persistent service account key, disables audit logging and SCC, then makes
+    a GCS bucket public and exfiltrates a disk snapshot for offline analysis.
+
+    Datasets: google_cloud_logging_raw
+    Hunt: Chain on protoPayload.authenticationInfo.principalEmail + callerIp (Tor) across
+          SetIamPolicy → CreateServiceAccountKey → UpdateSink → UpdateNotificationConfig →
+          SetBucketAcl → CreateSnapshot events within the same session window.
+    """
+    print("\n--- Running 'GCP Cloud Pentest' Scenario ---")
+
+    gcp_module = modules.get("Google Cloud Compute")
+    if not gcp_module:
+        print("ERROR: This scenario requires the 'Google Cloud Compute (GCP)' module.")
+        return
+
+    attacker_ip = random.choice(config.get('tor_exit_nodes', [{}])).get('ip', '185.220.101.28')
+
+    try:
+        from modules.session_utils import build_session_context, get_random_user
+        session_context = build_session_context(config)
+        user_info = get_random_user(session_context)
+    except Exception:
+        session_context = {}
+        user_info = None
+
+    attacker_email = (user_info.get("email") if user_info else None) or "attacker@external.com"
+
+    context = {
+        "session_context": session_context,
+        "ip_address":      attacker_ip,
+        "principal_email": attacker_email,
+    }
+
+    print(f"  Attacker IP:    {attacker_ip} (Tor exit node)")
+    print(f"  Attacker email: {attacker_email}")
+
+    try:
+        print("\n[STEP 1] GCP: API access from Tor exit node (reconnaissance)...")
+        result = gcp_module.generate_log(config, scenario_event="TOR_API_ACCESS", context=context)
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "TOR_API_ACCESS"
+        if log_content:
+            process_and_send(log_content, gcp_module, config, event_name)
+        time.sleep(2)
+
+        print("[STEP 2] GCP: IAM privilege escalation (SetIamPolicy → roles/owner)...")
+        result = gcp_module.generate_log(config, scenario_event="IAM_PRIVILEGE_ESCALATION", context=context)
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "IAM_PRIVILEGE_ESCALATION"
+        if log_content:
+            process_and_send(log_content, gcp_module, config, event_name)
+        time.sleep(1)
+
+        print("[STEP 3] GCP: Create service account key (persistence)...")
+        result = gcp_module.generate_log(config, scenario_event="CREATE_SA_KEY", context=context)
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "CREATE_SA_KEY"
+        if log_content:
+            process_and_send(log_content, gcp_module, config, event_name)
+        time.sleep(1)
+
+        print("[STEP 4] GCP: Disable Cloud Audit Logging (defense evasion)...")
+        result = gcp_module.generate_log(config, scenario_event="DISABLE_AUDIT_LOGGING", context=context)
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "DISABLE_AUDIT_LOGGING"
+        if log_content:
+            process_and_send(log_content, gcp_module, config, event_name)
+        time.sleep(1)
+
+        print("[STEP 5] GCP: Disable Security Command Center (defense evasion)...")
+        result = gcp_module.generate_log(config, scenario_event="DISABLE_SCC", context=context)
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "DISABLE_SCC"
+        if log_content:
+            process_and_send(log_content, gcp_module, config, event_name)
+        time.sleep(1)
+
+        print("[STEP 6] GCP: Make GCS bucket public (data staging)...")
+        result = gcp_module.generate_log(config, scenario_event="MAKE_GCS_PUBLIC", context=context)
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "MAKE_GCS_PUBLIC"
+        if log_content:
+            process_and_send(log_content, gcp_module, config, event_name)
+        time.sleep(1)
+
+        print("[STEP 7] GCP: Snapshot exfiltration (copy disk snapshot to attacker project)...")
+        result = gcp_module.generate_log(config, scenario_event="SNAPSHOT_EXFIL", context=context)
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "SNAPSHOT_EXFIL"
+        if log_content:
+            process_and_send(log_content, gcp_module, config, event_name)
+
+    except Exception as e:
+        print(f"\nAn error occurred during scenario execution: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n--- GCP Cloud Pentest Scenario Complete ---")
+    print("\nHunt queries to run in XSIAM:")
+    print(f"  1. dataset=google_cloud_logging_raw | filter protoPayload.requestMetadata.callerIp=\"{attacker_ip}\"")
+    print(f"  2. Sequence: same principalEmail performs SetIamPolicy → CreateKey → UpdateSink → SetIamPolicy(GCS) within 15 min")
+    print(f"  3. Filter protoPayload.methodName contains \"setIamPolicy\" and resource.type=\"gcs_bucket\" — public bucket pivots")
+
+
+def run_web_app_compromise_scenario(modules, config):
+    """
+    Web Application Compromise → Server-Side C2.
+
+    Story: Attacker scans the web application for vulnerabilities, exploits a web shell,
+    executes malicious payloads, then the compromised server initiates anomalous outbound
+    connections (post-exploit beacon) — visible across all loaded network firewalls.
+
+    Datasets: apache_httpd_raw + all loaded firewall datasets
+    Hunt: Find server IP appearing as *source* (not destination) in firewall outbound Allow
+          events shortly after webshell_execution in apache_httpd_raw.
+    """
+    print("\n--- Running 'Web Application Compromise → Server C2' Scenario ---")
+
+    httpd_module = modules.get("Apache httpd")
+    fw_modules   = _collect_fw_modules(modules)
+
+    if not httpd_module:
+        print("ERROR: This scenario requires the 'Apache httpd' module.")
+        return
+
+    try:
+        from modules.session_utils import build_session_context, get_random_user
+        session_context = build_session_context(config)
+    except Exception:
+        session_context = {}
+
+    # Pick a server IP from config (not a workstation — this is a server-side attack)
+    server_networks = config.get('httpd_config', {}).get('server_ips', [])
+    server_ip = (random.choice(server_networks) if server_networks
+                 else f"10.{random.randint(1,5)}.100.{random.randint(1,20)}")
+    attacker_ip = f"{random.choice([45,52,91,104,185,193])}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+
+    base_ctx = {"session_context": session_context}
+    fw_names = ", ".join(m.NAME for m in fw_modules) if fw_modules else "none"
+
+    print(f"  Target server:  {server_ip}")
+    print(f"  Attacker IP:    {attacker_ip}")
+    print(f"  Firewall modules: {fw_names}")
+
+    try:
+        print("\n[STEP 1] Apache HTTPD: Attacker reconnaissance scan against web server...")
+        result = httpd_module.generate_log(config, scenario_event="recon_scan",
+                                           context={**base_ctx, "src_ip": attacker_ip})
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "recon_scan"
+        if log_content:
+            process_and_send(log_content, httpd_module, config, event_name)
+        time.sleep(2)
+
+        print("[STEP 2] Apache HTTPD: Web shell execution detected (POST to upload path)...")
+        result = httpd_module.generate_log(config, scenario_event="webshell_execution",
+                                           context={**base_ctx, "src_ip": attacker_ip})
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "webshell_execution"
+        if log_content:
+            process_and_send(log_content, httpd_module, config, event_name)
+        time.sleep(2)
+
+        print("[STEP 3] Apache HTTPD: Malicious payload delivery via web shell...")
+        result = httpd_module.generate_log(config, scenario_event="malicious_payload",
+                                           context={**base_ctx, "src_ip": attacker_ip})
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "malicious_payload"
+        if log_content:
+            process_and_send(log_content, httpd_module, config, event_name)
+        time.sleep(2)
+
+        print(f"[STEP 4] All firewall modules: Anomalous outbound connection from server IP (post-exploit beacon)...")
+        _send_to_all_fw(fw_modules, "server_outbound_http", config,
+                        {**base_ctx, "src_ip": server_ip}, "[STEP 4]")
+
+    except Exception as e:
+        print(f"\nAn error occurred during scenario execution: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n--- Web Application Compromise Scenario Complete ---")
+    print("\nHunt queries to run in XSIAM:")
+    print(f"  1. dataset=apache_httpd_raw | filter src_ip=\"{attacker_ip}\" | sort _time")
+    print(f"  2. Pivot: find server IP \"{server_ip}\" as *source* in firewall outbound Allow events (anomalous — servers don't initiate)")
+    print(f"  3. Sequence: apache webshell_execution → firewall server_outbound_http from same server IP within 5 min")
+
+
+def run_vpn_compromise_scenario(modules, config):
+    """
+    VPN Credential Compromise → Lateral Movement.
+
+    Story: Attacker brute-forces VPN credentials, then authenticates with impossible travel
+    (same user VPN login from two geographically distant IPs). Once inside, attacker enumerates
+    SMB shares and moves laterally to high-value targets. Okta logs impossible travel from the
+    attacker's VPN-assigned IP authenticating to SSO.
+
+    Datasets: cisco_asa_raw + all loaded firewall datasets + okta_raw
+    Hunt: Find same username in ASA vpn_bruteforce AND Okta impossible_travel within 30 min.
+          Join on VPN-assigned IP across ASA VPN session logs → firewall SMB lateral events.
+    """
+    print("\n--- Running 'VPN Compromise → Lateral Movement' Scenario ---")
+
+    asa_module  = modules.get("Cisco ASA Firewall")
+    okta_module = modules.get("Okta SSO")
+    fw_modules  = _collect_fw_modules(modules)
+
+    if not asa_module:
+        print("ERROR: This scenario requires the 'Cisco ASA Firewall' module.")
+        return
+
+    try:
+        from modules.session_utils import build_session_context, get_random_user
+        session_context = build_session_context(config)
+        victim_info = get_random_user(session_context)
+    except Exception:
+        session_context = {}
+        victim_info = None
+
+    if victim_info:
+        victim_user = victim_info.get("username", "jsmith")
+        victim_ip   = victim_info.get("ip", f"10.200.{random.randint(1,254)}.{random.randint(1,254)}")
+    else:
+        victim_user = "jsmith"
+        victim_ip   = f"10.200.{random.randint(1,254)}.{random.randint(1,254)}"
+
+    attacker_ip = f"{random.choice([45,52,91,104,185,193])}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+    base_ctx    = {"session_context": session_context}
+    fw_names    = ", ".join(m.NAME for m in fw_modules) if fw_modules else "none"
+
+    print(f"  Target user:      {victim_user} ({victim_ip})")
+    print(f"  Attacker IP:      {attacker_ip}")
+    print(f"  Firewall modules: {fw_names}")
+
+    def _asa_threat(threat_name, ctx):
+        """Force a named ASA threat via event_mix override."""
+        asa_key = getattr(asa_module, 'CONFIG_KEY', 'cisco_asa_config')
+        forced   = copy.deepcopy(config)
+        forced.setdefault(asa_key, {}).setdefault("event_mix", {})["threat"] = [
+            {"event": threat_name, "weight": 1}
+        ]
+        return asa_module.generate_log(forced, threat_level="Insane", benign_only=False, context=ctx)
+
+    try:
+        print("\n[STEP 1] Cisco ASA: VPN credential brute-force (many failed auth attempts)...")
+        result = _asa_threat("vpn_bruteforce",
+                             {**base_ctx, "src_ip": attacker_ip, "user": victim_user})
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "vpn_bruteforce"
+        if log_content:
+            process_and_send(log_content, asa_module, config, event_name)
+        time.sleep(2)
+
+        print("[STEP 2] Cisco ASA: Impossible travel — VPN login from geographically distant IP...")
+        result = _asa_threat("vpn_impossible_travel",
+                             {**base_ctx, "src_ip": attacker_ip, "user": victim_user})
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "vpn_impossible_travel"
+        if log_content:
+            process_and_send(log_content, asa_module, config, event_name)
+        time.sleep(2)
+
+        print(f"[STEP 3] All firewall modules: SMB share enumeration from VPN-assigned IP...")
+        _send_to_all_fw(fw_modules, "smb_share_enumeration", config,
+                        {**base_ctx, "src_ip": victim_ip}, "[STEP 3]")
+        time.sleep(2)
+
+        print(f"[STEP 4] All firewall modules: SMB lateral movement to new host...")
+        _send_to_all_fw(fw_modules, "smb_new_host_lateral", config,
+                        {**base_ctx, "src_ip": victim_ip}, "[STEP 4]")
+        time.sleep(2)
+
+        if okta_module:
+            print("[STEP 5] Okta: Impossible travel — SSO login from attacker IP after VPN session...")
+            result = okta_module.generate_log(config, scenario_event="impossible_travel",
+                                              context={**base_ctx, "ip": attacker_ip, "user": victim_user})
+            if isinstance(result, tuple):
+                log_content, event_name = result
+            else:
+                log_content, event_name = result, "impossible_travel"
+            if log_content:
+                process_and_send(log_content, okta_module, config, event_name)
+        else:
+            print("[STEP 5] Okta module not loaded — skipping impossible travel event.")
+
+    except Exception as e:
+        print(f"\nAn error occurred during scenario execution: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n--- VPN Compromise → Lateral Movement Scenario Complete ---")
+    print("\nHunt queries to run in XSIAM:")
+    print(f"  1. dataset=cisco_asa_raw | filter xdm.source.user.username=\"{victim_user}\" and event_type in (\"vpn_bruteforce\",\"vpn_impossible_travel\")")
+    print(f"  2. Pivot: find IP \"{victim_ip}\" (VPN-assigned) in firewall SMB lateral events")
+    print(f"  3. Correlate ASA VPN session for \"{victim_user}\" → Okta impossible_travel for same user within 30 min")
+
+
+def run_aitm_session_hijack_scenario(modules, config):
+    """
+    AiTM Phishing → Session Hijack → Cloud Abuse.
+
+    Story: Attacker delivers a QR-code phishing email that bypasses MFA. Victim authenticates
+    through an attacker-controlled reverse proxy (AiTM), session cookie is stolen. Attacker
+    replays the token (token_reuse) and the session appears from a new IP/device (session_roaming).
+    Attacker then pivots to AWS using the hijacked cloud session to assume a cross-account role
+    and disable Security Hub to evade detection.
+
+    Datasets: proofpoint_tap_raw + okta_raw + amazon_aws_raw
+    Hunt: Correlate Okta aitm_phishing event → token_reuse from new IP → AWS API calls from same
+          access key within 10 min. Find Okta user matching AWS principalEmail within session window.
+    OOB Detections: Proofpoint phishing delivered; Okta impossible travel may fire.
+    """
+    print("\n--- Running 'AiTM Session Hijack → Cloud Abuse' Scenario ---")
+
+    pp_module   = modules.get("Proofpoint Email Gateway")
+    okta_module = modules.get("Okta SSO")
+    aws_module  = modules.get("aws")
+
+    if not okta_module:
+        print("ERROR: This scenario requires the 'Okta SSO' module.")
+        return
+
+    try:
+        from modules.session_utils import build_session_context, get_random_user
+        session_context = build_session_context(config)
+        victim_info = get_random_user(session_context)
+    except Exception:
+        session_context = {}
+        victim_info = None
+
+    if victim_info:
+        victim_email = victim_info.get("email", "victim@examplecorp.com")
+        victim_user  = victim_info.get("username", "victim.user")
+    else:
+        victim_email = "victim@examplecorp.com"
+        victim_user  = "victim.user"
+
+    attacker_ip = random.choice(config.get('tor_exit_nodes', [{}])).get('ip', '185.220.101.45')
+    base_ctx    = {"session_context": session_context}
+
+    print(f"  Victim:      {victim_email} ({victim_user})")
+    print(f"  Attacker IP: {attacker_ip}")
+
+    try:
+        if pp_module:
+            print("\n[STEP 1] Proofpoint: QR-code phishing email delivered to victim (bypasses link scan)...")
+            result = pp_module.generate_log(config, scenario_event="qr_code_phishing",
+                                            context={**base_ctx, "target_email": victim_email,
+                                                     "sender_ip": attacker_ip})
+            if isinstance(result, tuple):
+                log_content, event_name = result
+            else:
+                log_content, event_name = result, "qr_code_phishing"
+            if log_content:
+                process_and_send(log_content, pp_module, config, event_name)
+            time.sleep(2)
+        else:
+            print("\n[STEP 1] Proofpoint module not loaded — skipping QR-code phishing delivery.")
+
+        print("[STEP 2] Okta: AiTM phishing — victim authenticates through attacker reverse proxy...")
+        result = okta_module.generate_log(config, scenario_event="aitm_phishing",
+                                          context={**base_ctx, "ip": attacker_ip, "user": victim_user})
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "aitm_phishing"
+        if log_content:
+            process_and_send(log_content, okta_module, config, event_name)
+        time.sleep(2)
+
+        print("[STEP 3] Okta: Token reuse — stolen session cookie replayed from attacker IP...")
+        result = okta_module.generate_log(config, scenario_event="token_reuse",
+                                          context={**base_ctx, "ip": attacker_ip, "user": victim_user})
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "token_reuse"
+        if log_content:
+            process_and_send(log_content, okta_module, config, event_name)
+        time.sleep(1)
+
+        print("[STEP 4] Okta: Session roaming — session active from new device/IP (hijacked)...")
+        result = okta_module.generate_log(config, scenario_event="session_roaming",
+                                          context={**base_ctx, "ip": attacker_ip, "user": victim_user})
+        if isinstance(result, tuple):
+            log_content, event_name = result
+        else:
+            log_content, event_name = result, "session_roaming"
+        if log_content:
+            process_and_send(log_content, okta_module, config, event_name)
+        time.sleep(2)
+
+        if aws_module:
+            aws_conf = config.get('aws_config', {})
+            all_users = aws_conf.get('users_and_roles', [])
+            user_template = next(
+                (u for u in all_users if u.get('type') == 'IAMUser'), None
+            ) or {"type": "IAMUser", "name": victim_user, "arn_suffix": f"user/{victim_user}"}
+            aws_context = {
+                **base_ctx,
+                "ip_address":    attacker_ip,
+                "user_identity": _get_random_user_from_template(config, user_template),
+            }
+
+            print("[STEP 5] AWS: Cross-account role assumption using hijacked session credentials...")
+            result = aws_module.generate_log(config, scenario_event="CROSS_ACCOUNT_ASSUME_ROLE",
+                                             context=aws_context)
+            if isinstance(result, tuple):
+                log_content, event_name = result
+            else:
+                log_content, event_name = result, "CROSS_ACCOUNT_ASSUME_ROLE"
+            if log_content:
+                process_and_send(log_content, aws_module, config, event_name)
+            time.sleep(1)
+
+            print("[STEP 6] AWS: Disable Security Hub (defense evasion — suppress GuardDuty findings)...")
+            result = aws_module.generate_log(config, scenario_event="DISABLE_SECURITY_HUB",
+                                             context=aws_context)
+            if isinstance(result, tuple):
+                log_content, event_name = result
+            else:
+                log_content, event_name = result, "DISABLE_SECURITY_HUB"
+            if log_content:
+                process_and_send(log_content, aws_module, config, event_name)
+        else:
+            print("[STEP 5-6] AWS module not loaded — skipping cloud abuse steps.")
+
+    except Exception as e:
+        print(f"\nAn error occurred during scenario execution: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n--- AiTM Session Hijack → Cloud Abuse Scenario Complete ---")
+    print("\nHunt queries to run in XSIAM:")
+    print(f"  1. dataset=okta_raw | filter user=\"{victim_user}\" and event_type in (\"aitm_phishing\",\"token_reuse\",\"session_roaming\") | sort _time")
+    print(f"  2. Correlate Okta session start IP → AWS API calls from same IP or access key within 10 min")
+    print(f"  3. dataset=amazon_aws_raw | filter callerIp=\"{attacker_ip}\" and eventName in (\"AssumeRole\",\"DisableSecurityHub\")")
+    print(f"  OOB: Okta aitm_phishing and impossible_travel may fire; all other steps need custom correlation rules.")
+
+
+def run_ransomware_precursor_scenario(modules, config):
+    """
+    Ransomware Precursor Kill Chain.
+
+    Story: Attacker delivers a malware attachment via email. Uses harvested credentials to
+    authenticate to Okta (bypassing MFA). Once on network, enumerates SMB shares, moves
+    laterally, and transfers suspicious files. Disables AWS security controls. Finally,
+    large egress sessions are observed from multiple hosts — consistent with pre-encryption
+    data staging.
+
+    Datasets: proofpoint_tap_raw + okta_raw + all loaded firewall datasets + amazon_aws_raw
+    Hunt: Timeline from Proofpoint delivery → Okta auth → firewall SMB enumeration → AWS
+          defense evasion → LARGE_EGRESS across all firewall datasets on same day.
+    OOB: Proofpoint malware_attachment delivered; Okta brute_force / mfa_bypass may fire.
+    """
+    print("\n--- Running 'Ransomware Precursor Kill Chain' Scenario ---")
+
+    pp_module   = modules.get("Proofpoint Email Gateway")
+    okta_module = modules.get("Okta SSO")
+    aws_module  = modules.get("aws")
+    fw_modules  = _collect_fw_modules(modules)
+
+    try:
+        from modules.session_utils import build_session_context, get_random_user
+        session_context = build_session_context(config)
+        victim_info = get_random_user(session_context)
+    except Exception:
+        session_context = {}
+        victim_info = None
+
+    if victim_info:
+        victim_email = victim_info.get("email", "victim@examplecorp.com")
+        victim_user  = victim_info.get("username", "victim.user")
+        victim_ip    = victim_info.get("ip", f"10.{random.randint(1,10)}.{random.randint(1,254)}.{random.randint(2,254)}")
+    else:
+        victim_email = "victim@examplecorp.com"
+        victim_user  = "victim.user"
+        victim_ip    = f"10.{random.randint(1,10)}.{random.randint(1,254)}.{random.randint(2,254)}"
+
+    attacker_ip = f"{random.choice([45,52,91,104,185,193])}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+    base_ctx    = {"session_context": session_context}
+    fw_names    = ", ".join(m.NAME for m in fw_modules) if fw_modules else "none"
+
+    print(f"  Victim:           {victim_email} / {victim_user} ({victim_ip})")
+    print(f"  Attacker IP:      {attacker_ip}")
+    print(f"  Firewall modules: {fw_names}")
+
+    try:
+        if pp_module:
+            print("\n[STEP 1] Proofpoint: Malware attachment delivered to victim mailbox...")
+            result = pp_module.generate_log(config, scenario_event="MALWARE_ATTACHMENT",
+                                            context={**base_ctx, "target_email": victim_email,
+                                                     "sender_ip": attacker_ip})
+            if isinstance(result, tuple):
+                log_content, event_name = result
+            else:
+                log_content, event_name = result, "MALWARE_ATTACHMENT"
+            if log_content:
+                process_and_send(log_content, pp_module, config, event_name)
+            time.sleep(2)
+        else:
+            print("\n[STEP 1] Proofpoint module not loaded — skipping email delivery step.")
+
+        if okta_module:
+            print("[STEP 2] Okta: Credential brute-force — attacker cycling passwords from harvested list...")
+            result = okta_module.generate_log(config, scenario_event="brute_force",
+                                              context={**base_ctx, "ip": attacker_ip, "user": victim_user})
+            if isinstance(result, tuple):
+                log_content, event_name = result
+            else:
+                log_content, event_name = result, "brute_force"
+            if log_content:
+                process_and_send(log_content, okta_module, config, event_name)
+            time.sleep(1)
+
+            print("[STEP 3] Okta: MFA bypass — attacker bypasses second factor after credential success...")
+            result = okta_module.generate_log(config, scenario_event="mfa_bypass",
+                                              context={**base_ctx, "ip": attacker_ip, "user": victim_user})
+            if isinstance(result, tuple):
+                log_content, event_name = result
+            else:
+                log_content, event_name = result, "mfa_bypass"
+            if log_content:
+                process_and_send(log_content, okta_module, config, event_name)
+            time.sleep(2)
+        else:
+            print("[STEP 2-3] Okta module not loaded — skipping credential compromise steps.")
+
+        print(f"[STEP 4] All firewall modules: SMB share enumeration (discovering file shares)...")
+        _send_to_all_fw(fw_modules, "smb_share_enumeration", config,
+                        {**base_ctx, "src_ip": victim_ip}, "[STEP 4]")
+        time.sleep(2)
+
+        print(f"[STEP 5] All firewall modules: SMB lateral movement + rare file transfer (staging)...")
+        _send_to_all_fw(fw_modules, "smb_rare_file_transfer", config,
+                        {**base_ctx, "src_ip": victim_ip}, "[STEP 5]")
+        time.sleep(2)
+
+        if aws_module:
+            aws_conf = config.get('aws_config', {})
+            all_users = aws_conf.get('users_and_roles', [])
+            user_template = next(
+                (u for u in all_users if u.get('type') == 'IAMUser'), None
+            ) or {"type": "IAMUser", "name": victim_user, "arn_suffix": f"user/{victim_user}"}
+            aws_context = {
+                **base_ctx,
+                "ip_address":    attacker_ip,
+                "user_identity": _get_random_user_from_template(config, user_template),
+            }
+
+            print("[STEP 6] AWS: Stop Config Recorder (prevent change tracking before encryption)...")
+            result = aws_module.generate_log(config, scenario_event="STOP_CONFIG_RECORDER",
+                                             context=aws_context)
+            if isinstance(result, tuple):
+                log_content, event_name = result
+            else:
+                log_content, event_name = result, "STOP_CONFIG_RECORDER"
+            if log_content:
+                process_and_send(log_content, aws_module, config, event_name)
+            time.sleep(1)
+
+            print("[STEP 7] AWS: Delete WAF rule (remove inbound protection before staging)...")
+            result = aws_module.generate_log(config, scenario_event="DELETE_WAF_RULE",
+                                             context=aws_context)
+            if isinstance(result, tuple):
+                log_content, event_name = result
+            else:
+                log_content, event_name = result, "DELETE_WAF_RULE"
+            if log_content:
+                process_and_send(log_content, aws_module, config, event_name)
+            time.sleep(1)
+        else:
+            print("[STEP 6-7] AWS module not loaded — skipping defense evasion steps.")
+
+        print(f"[STEP 8] All firewall modules: Large egress sessions (data staging before encryption)...")
+        _send_to_all_fw(fw_modules, "LARGE_EGRESS", config,
+                        {**base_ctx, "src_ip": victim_ip}, "[STEP 8]")
+
+    except Exception as e:
+        print(f"\nAn error occurred during scenario execution: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n--- Ransomware Precursor Kill Chain Scenario Complete ---")
+    print("\nHunt queries to run in XSIAM:")
+    print(f"  1. dataset=proofpoint_tap_raw | filter recipient=\"{victim_email}\" and disposition=\"delivered\"")
+    print(f"  2. dataset=okta_raw | filter user=\"{victim_user}\" and event_type in (\"brute_force\",\"mfa_bypass\") | sort _time")
+    print(f"  3. Join victim IP \"{victim_ip}\" across firewall datasets: smb_share_enumeration → smb_rare_file_transfer → LARGE_EGRESS sequence")
+    print(f"  4. dataset=amazon_aws_raw | filter eventName in (\"StopConfigurationRecorder\",\"DeleteWebACL\") | same time window")
+    print(f"  OOB: Proofpoint malware delivered; Okta brute_force / mfa_bypass may fire. All other steps need custom correlation rules.")
+
+
 def select_scenario_mode(all_modules, config):
     """Handles the attack scenario generation mode."""
     # NOTE: Scenario "Compromised Account & Data Exfiltration via Google Drive" is disabled
     # until the Google Workspace module is restored. The function remains in the codebase.
     scenarios = {
+        # ── High-value multi-module scenarios (no Infoblox required) ──────────
         "1": {
             "name": "AWS Pentest & Defense Evasion",
             "func": run_aws_pentest_scenario
@@ -1605,38 +2241,60 @@ def select_scenario_mode(all_modules, config):
             "func": run_insider_threat_scenario
         },
         "4": {
+            "name": "GCP Cloud Pentest (Privilege Escalation + Defense Evasion + Data Staging)",
+            "func": run_gcp_cloud_pentest_scenario
+        },
+        "5": {
+            "name": "Web App Compromise → Server C2 (HTTPD + All Network Firewalls)",
+            "func": run_web_app_compromise_scenario
+        },
+        "6": {
+            "name": "VPN Compromise → Lateral Movement (ASA + All Firewalls + Okta)",
+            "func": run_vpn_compromise_scenario
+        },
+        "7": {
+            "name": "AiTM Session Hijack → Cloud Abuse (Proofpoint + Okta + AWS)",
+            "func": run_aitm_session_hijack_scenario
+        },
+        "8": {
+            "name": "Ransomware Precursor Kill Chain (Proofpoint + Okta + All Firewalls + AWS)",
+            "func": run_ransomware_precursor_scenario
+        },
+        # ── Infoblox kill chains (require Infoblox NIOS module) ───────────────
+        "9": {
             "name": "DNS C2 Kill Chain (Infoblox DHCP/DNS + All Network Firewalls) [requires Infoblox]",
             "func": run_dns_c2_killchain_scenario
         },
-        "5": {
+        "10": {
             "name": "Device Compromise — Full Lifecycle: DHCP → DNS → C2 → Threat Protect [requires Infoblox]",
             "func": run_device_compromise_scenario
         },
-        "6": {
+        # ── Infoblox standalone validation tests ──────────────────────────────
+        "11": {
             "name": "Infoblox — C2 Beacon (DNS query to C2 domain → NXDOMAIN) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("C2_BEACON", m, c)
         },
-        "7": {
+        "12": {
             "name": "Infoblox — DNS Tunneling (TXT exfil subdomain → SERVFAIL) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("DNS_TUNNEL", m, c)
         },
-        "8": {
+        "13": {
             "name": "Infoblox — RPZ Block (named RPZ CEF NXDOMAIN/PASSTHRU event) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("RPZ_BLOCK", m, c)
         },
-        "9": {
+        "14": {
             "name": "Infoblox — Threat Protect Block (BloxOne CEF DROP event) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("THREAT_PROTECT", m, c)
         },
-        "10": {
+        "15": {
             "name": "Infoblox — NXDOMAIN Storm / DGA (20-50 query+NXDOMAIN pairs) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("NXDOMAIN_STORM", m, c)
         },
-        "11": {
+        "16": {
             "name": "Infoblox — DNS Flood (20-50 rapid queries, same source IP) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("DNS_FLOOD", m, c)
         },
-        "12": {
+        "17": {
             "name": "Infoblox — DHCP Starvation (20-50 DISCOVERs from spoofed MACs) [Infoblox standalone]",
             "func": lambda m, c: run_infoblox_single_threat("DHCP_STARVATION", m, c)
         },
@@ -1662,7 +2320,25 @@ def main():
     config = {}
     try:
         with open(CONFIG_FILE_PATH, 'r') as f:
-            config = json.load(f)
+            config_str = f.read()
+
+        # Substitute PLACEHOLDER_* values from environment variables so that
+        # setting GCP_PROJECT_ID / GCP_PROJECT_NUMBER / AWS_ACCOUNT_ID in .env
+        # propagates into ALL config values (log content, resource names, ARNs),
+        # not just the transport-layer lookups that already read os.getenv().
+        _placeholders = {
+            'PLACEHOLDER_GCP_PROJECT_ID':     os.getenv('GCP_PROJECT_ID', ''),
+            'PLACEHOLDER_GCP_PROJECT_NUMBER': os.getenv('GCP_PROJECT_NUMBER', ''),
+            'PLACEHOLDER_AWS_ACCOUNT_ID':     os.getenv('AWS_ACCOUNT_ID', ''),
+        }
+        for _placeholder, _value in _placeholders.items():
+            if _value:
+                config_str = config_str.replace(_placeholder, _value)
+            else:
+                print(f"--- WARNING: {_placeholder} not set in .env — "
+                      f"config.json values using this placeholder will be literal. ---")
+
+        config = json.loads(config_str)
         print(f"--- Diagnostic: Successfully loaded '{CONFIG_FILE_PATH}'. ---")
     except FileNotFoundError:
         print(f"FATAL ERROR: The configuration file '{CONFIG_FILE_PATH}' was not found.")

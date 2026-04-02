@@ -1,6 +1,8 @@
 # Configuration (config.json)
 
-This file is the engine of the simulator. You must configure it with your environment's details. **Do not** check sensitive keys or IPs into public source control.
+`config.json` is the engine of the simulator — it defines all simulated environment data, event mixes, and transport settings. **You do not need to edit `config.json`** for a standard deployment. All environment-specific values (project IDs, account IDs, credentials) are set in your `.env` file and automatically substituted into `config.json` at startup. See [Getting Started](getting-started.md) for the full `.env` reference.
+
+**Do not** commit credentials or real IP addresses to source control.
 
 Here is a breakdown of the key sections:
 
@@ -125,7 +127,15 @@ The dict key (e.g., `"okta_collector"`) is referenced by the module's `collector
 
 **`aws_config`** — required for the AWS module. Contains `transport: "s3"` and a `users_and_roles` array defining the simulated IAM identities used to generate CloudTrail events. All AWS credentials (access key, secret key, bucket name, region, account ID) live in `.env` — see [Getting Started](getting-started.md) for the full `.env` reference.
 
-**`gcp_config`** — required for the GCP module. Contains `transport: "pubsub"`, the `gcp_project_id` and `pubsub_topic` (fallbacks if the env vars `GCP_PROJECT_ID` and `GCP_PUBSUB_TOPIC` are not set), plus extensive simulated environment data (regions, projects, service accounts, resources). Replace every `PLACEHOLDER_GCP_PROJECT_ID` with your real project ID. GCP credentials are set via `.env` — see [Getting Started](getting-started.md).
+**`gcp_config`** — required for the GCP module. Contains `transport: "pubsub"`, the `gcp_project_id` and `pubsub_topic` (fallbacks if `GCP_PROJECT_ID` / `GCP_PUBSUB_TOPIC` env vars are not set), plus extensive simulated environment data (regions, service accounts, clusters, buckets, secrets, etc.). The `config.json` file ships with three placeholder strings that are automatically substituted at startup from your `.env` — **you do not need to edit `config.json` manually**:
+
+| Placeholder | Replaced by env var | What it populates |
+|---|---|---|
+| `PLACEHOLDER_GCP_PROJECT_ID` | `GCP_PROJECT_ID` | Service account emails, resource paths, bucket names, secret IDs, Pub/Sub topics |
+| `PLACEHOLDER_GCP_PROJECT_NUMBER` | `GCP_PROJECT_NUMBER` | Serverless service account emails (`NNN-compute@developer.gserviceaccount.com`) |
+| `PLACEHOLDER_AWS_ACCOUNT_ID` | `AWS_ACCOUNT_ID` | KMS key ARNs, ELB ARNs, target group ARNs in `aws_config` |
+
+GCP credentials are set via `.env` — see [Getting Started](getting-started.md).
 
 ---
 
@@ -156,7 +166,7 @@ The `CloudFormation/S3LogSim.yaml` template creates all required AWS infrastruct
    |---|---|
    | `LogSimulatorAccessKeyId` | `.env` → `aws_access_key_id` |
    | `LogSimulatorSecretAccessKey` | `.env` → `aws_secret_access_key` |
-   | `S3BucketName` | `.env` → `s3_bucket_name` AND `config.json` → `aws_config.s3_bucket_name` |
+   | `S3BucketName` | `.env` → `S3_BUCKET_NAME` |
    | `SQSQueueURL` | XSIAM data source configuration (SQS URL field) |
    | `XSIAMRoleARN` | XSIAM data source configuration (Role ARN field) |
    | `XSIAMRoleExternalId` | XSIAM data source configuration (External ID field) — same as the `ExternalId` parameter you entered |
@@ -188,7 +198,7 @@ The `CloudFormation/S3LogSim.yaml` template creates all required AWS infrastruct
 2. Create an SQS queue. Add an S3 event notification on the bucket to send `s3:ObjectCreated:*` events to the queue.
 3. Create an IAM user for LogSim with an inline policy granting `s3:PutObject` on `arn:aws:s3:::<bucket>/*`.
 4. Create an IAM role with a trust policy allowing `006742885340` (Palo Alto Networks XSIAM account) to `sts:AssumeRole` with your chosen External ID. Attach a policy granting `s3:GetObject` on the bucket and `sqs:ReceiveMessage`/`sqs:DeleteMessage`/`sqs:GetQueueAttributes` on the queue.
-5. Populate `.env` with the IAM user access key/secret and `config.json` with the bucket name and region.
+5. Populate `.env` with the IAM user access key/secret, bucket name, and region (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `AWS_REGION`). No edits to `config.json` are needed — `AWS_ACCOUNT_ID` in `.env` automatically substitutes `PLACEHOLDER_AWS_ACCOUNT_ID` throughout the configuration at startup.
 
 ---
 
@@ -259,9 +269,9 @@ terraform -chdir=terraform/gcp_pubsub output -raw xsiam_sa_key_json
 2. Create a pull subscription on that topic (e.g., `xsiam-logsim-pull`).
 3. Create a service account for LogSim. Grant it `roles/pubsub.publisher` on the topic. Download its JSON key.
 4. Create a second service account for XSIAM. Grant it `roles/pubsub.subscriber` on the subscription and `roles/pubsub.viewer` on the topic. Download its JSON key.
-5. In `.env`, set `GCP_PROJECT_ID` and `GCP_PUBSUB_TOPIC`.
+5. In `.env`, set `GCP_PROJECT_ID`, `GCP_PROJECT_NUMBER`, and `GCP_PUBSUB_TOPIC`.
 6. Set `GCP_SERVICE_ACCOUNT_KEY_JSON` to the LogSim service account key **collapsed to a single line** (no literal newlines; `\n` escape sequences in `private_key` must remain as two-character sequences).
-7. In `config.json`, replace all `PLACEHOLDER_GCP_PROJECT_ID` values with your real project ID.
+7. The simulator substitutes all `PLACEHOLDER_GCP_*` values from your `.env` at startup — no manual edits to `config.json` are needed.
 8. In XSIAM, create a **GCP Pub/Sub** data source: enter your project ID, the subscription name, and paste the XSIAM service account key JSON.
 
 ## C. Module-Specific Configuration
