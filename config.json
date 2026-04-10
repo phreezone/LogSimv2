@@ -1,6 +1,6 @@
 {
   "syslog_port": 514,
-  "base_event_interval_seconds": 1.5,
+  "base_event_interval_seconds": 1.0,
   "threat_generation_levels": {
     "Benign Traffic Only": 86400,
     "Realistic": 7200,
