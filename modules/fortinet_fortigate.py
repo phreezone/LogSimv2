@@ -1767,52 +1767,52 @@ def _generate_threat_log(config, session_context=None):
 
     chosen = random.choices(events, weights=weights, k=1)[0]
 
-    # --- Multi-event generators — return list directly ---
+    # --- Multi-event generators — return (list, event_name) ---
     if chosen == "port_scan":
         user_info = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
         if user_info:
-            return _simulate_port_scan(config, user_info["ip"], user_info["username"], user_info.get("hostname"))
-        return _simulate_port_scan(config, "192.168.1.100", "unknown", None)
+            return (_simulate_port_scan(config, user_info["ip"], user_info["username"], user_info.get("hostname")), chosen)
+        return (_simulate_port_scan(config, "192.168.1.100", "unknown", None), chosen)
 
     if chosen == "auth_brute_force":
-        return _simulate_auth_brute_force(config)
+        return (_simulate_auth_brute_force(config), chosen)
 
     if chosen == "vpn_brute_force":
-        return _simulate_vpn_brute_force(config)
+        return (_simulate_vpn_brute_force(config), chosen)
 
     if chosen == "vpn_impossible_travel":
-        return _simulate_vpn_impossible_travel(config, session_context)
+        return (_simulate_vpn_impossible_travel(config, session_context), chosen)
 
     if chosen == "vpn_tor_login":
-        return _simulate_vpn_tor_login(config, session_context)
+        return (_simulate_vpn_tor_login(config, session_context), chosen)
 
     if chosen == "lateral_movement":
         user_info = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
         if user_info:
-            return _simulate_lateral_movement(config, user_info["ip"], user_info["username"],
-                                              user_info.get("hostname"))
+            return (_simulate_lateral_movement(config, user_info["ip"], user_info["username"],
+                                              user_info.get("hostname")), chosen)
         src = random.choice(config.get("internal_servers", ["192.168.1.100"]))
-        return _simulate_lateral_movement(config, src, "unknown", None)
+        return (_simulate_lateral_movement(config, src, "unknown", None), chosen)
 
     if chosen == "dns_c2_beacon":
         user_info = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
         if user_info:
-            return _simulate_dns_c2_beacon(config, user_info["ip"], user_info["username"], user_info.get("hostname"))
-        return _simulate_dns_c2_beacon(config, "192.168.1.100", "unknown", None)
+            return (_simulate_dns_c2_beacon(config, user_info["ip"], user_info["username"], user_info.get("hostname")), chosen)
+        return (_simulate_dns_c2_beacon(config, "192.168.1.100", "unknown", None), chosen)
 
     if chosen == "smb_new_host_lateral":
         user_info = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
         if user_info:
-            return _simulate_smb_new_host_lateral(config, user_info["ip"], user_info["username"],
-                                                   user_info.get("hostname"), session_context)
-        return _simulate_smb_new_host_lateral(config, "192.168.1.100", "unknown", None)
+            return (_simulate_smb_new_host_lateral(config, user_info["ip"], user_info["username"],
+                                                   user_info.get("hostname"), session_context), chosen)
+        return (_simulate_smb_new_host_lateral(config, "192.168.1.100", "unknown", None), chosen)
 
     if chosen == "smb_share_enumeration":
         user_info = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
         if user_info:
-            return _simulate_smb_share_enumeration(config, user_info["ip"], user_info["username"],
-                                                    user_info.get("hostname"))
-        return _simulate_smb_share_enumeration(config, "192.168.1.100", "unknown", None)
+            return (_simulate_smb_share_enumeration(config, user_info["ip"], user_info["username"],
+                                                    user_info.get("hostname")), chosen)
+        return (_simulate_smb_share_enumeration(config, "192.168.1.100", "unknown", None), chosen)
 
     # --- Single-event generators — resolve user/IP then dispatch ---
     user, src_ip, shost = "unknown", "192.168.1.100", None
@@ -1829,27 +1829,27 @@ def _generate_threat_log(config, session_context=None):
             shost = _get_user_and_host_info(config, src_ip)[1]
 
     if chosen == "ips":
-        return _simulate_ips_attack(config)
+        return (_simulate_ips_attack(config), chosen)
     elif chosen == "antivirus":
-        return _simulate_antivirus(config, src_ip, user, shost)
+        return (_simulate_antivirus(config, src_ip, user, shost), chosen)
     elif chosen == "webfilter_block":
-        return _simulate_webfilter_block(config, src_ip, user, shost)
+        return (_simulate_webfilter_block(config, src_ip, user, shost), chosen)
     elif chosen == "large_upload":
-        return _simulate_large_upload(config, src_ip, user, shost)
+        return (_simulate_large_upload(config, src_ip, user, shost), chosen)
     elif chosen == "waf_attack":
-        return _simulate_waf_attack(config, src_ip, user, shost)
+        return (_simulate_waf_attack(config, src_ip, user, shost), chosen)
     elif chosen == "tor_connection":
-        return _simulate_tor_connection(config, src_ip, user, shost)
+        return (_simulate_tor_connection(config, src_ip, user, shost), chosen)
     elif chosen == "server_outbound_http":
-        return _simulate_server_outbound_http(config)
+        return (_simulate_server_outbound_http(config), chosen)
     elif chosen == "rdp_lateral":
-        return _simulate_rdp_lateral(config, src_ip, user, shost, session_context)
+        return (_simulate_rdp_lateral(config, src_ip, user, shost, session_context), chosen)
     elif chosen == "app_control_block":
-        return _simulate_app_control_block(config, src_ip, user, shost)
+        return (_simulate_app_control_block(config, src_ip, user, shost), chosen)
     elif chosen == "smb_rare_file_transfer":
-        return _simulate_smb_rare_file_transfer(config, src_ip, user, shost)
+        return (_simulate_smb_rare_file_transfer(config, src_ip, user, shost), chosen)
     else:
-        return _simulate_ips_attack(config)
+        return (_simulate_ips_attack(config), chosen)
 
 
 # ---------------------------------------------------------------------------

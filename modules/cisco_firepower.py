@@ -1589,17 +1589,17 @@ def _generate_threat_log(config, session_context=None):
 
     print(f"    - Firepower Module simulating: {chosen} from {src_ip}")
 
-    # --- Multi-event generators — return list of logs directly ---
+    # --- Multi-event generators — return (list, event_name) ---
     if chosen == 'port_scan':
-        return _generate_port_scan_event(config)
+        return (_generate_port_scan_event(config), chosen)
     elif chosen == 'brute_force':
-        return _generate_brute_force_event(config)
+        return (_generate_brute_force_event(config), chosen)
     elif chosen == 'dns_c2_beacon':
-        return _generate_dns_c2_beacon(config, src_ip, user, shost)
+        return (_generate_dns_c2_beacon(config, src_ip, user, shost), chosen)
     elif chosen == 'smb_new_host_lateral':
-        return _generate_smb_new_host_lateral(config, src_ip, user, session_context, shost)
+        return (_generate_smb_new_host_lateral(config, src_ip, user, session_context, shost), chosen)
     elif chosen == 'smb_share_enumeration':
-        return _generate_smb_share_enumeration(config, src_ip, user, shost)
+        return (_generate_smb_share_enumeration(config, src_ip, user, shost), chosen)
 
     # --- Single-event generators — return via (fields, cef_name) path ---
     elif chosen == 'ips':
@@ -1631,7 +1631,7 @@ def _generate_threat_log(config, session_context=None):
 
     if not fields:
         return None
-    return _format_firepower_cef(config, fields, cef_name)
+    return (_format_firepower_cef(config, fields, cef_name), chosen)
 
 
 # ---------------------------------------------------------------------------
