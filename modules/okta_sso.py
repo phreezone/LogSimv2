@@ -5708,7 +5708,7 @@ def _generate_threat_log(config, session_context=None, override=None):
     user_info = _get_random_user_info(config, session_context)
     threats   = _make_threat_dict(config, user_info, session_context)
     label = override if (override and override in threats) else random.choice(list(threats.keys()))
-    return threats[label]()
+    return (threats[label](), label)
 
 
 # --- SCENARIO SUPPORT ---

@@ -1254,39 +1254,39 @@ def _generate_threat_log(config, session_context=None):
 
     # --- multi-event generators ---
     if threat_type == 'large_upload':
-        return _simulate_large_upload(config, src_ip, user, shost)
+        return (_simulate_large_upload(config, src_ip, user, shost), threat_type)
     if threat_type == 'port_scan':
-        return _simulate_port_scan(config, src_ip, user, shost)
+        return (_simulate_port_scan(config, src_ip, user, shost), threat_type)
     if threat_type == 'auth_brute_force':
-        return _simulate_auth_brute_force(config, src_ip, user, shost)
+        return (_simulate_auth_brute_force(config, src_ip, user, shost), threat_type)
     if threat_type == 'lateral_movement':
-        return _simulate_lateral_movement(config, src_ip, user, shost)
+        return (_simulate_lateral_movement(config, src_ip, user, shost), threat_type)
     if threat_type == 'rare_ssh':
-        return _simulate_rare_ssh(config, src_ip, user, shost)
+        return (_simulate_rare_ssh(config, src_ip, user, shost), threat_type)
     if threat_type == 'tor_connection':
-        return _simulate_tor_connection(config, src_ip, user, shost)
+        return (_simulate_tor_connection(config, src_ip, user, shost), threat_type)
     if threat_type == 'vpn_brute_force':
-        return _simulate_vpn_brute_force(config, src_ip, user, shost)
+        return (_simulate_vpn_brute_force(config, src_ip, user, shost), threat_type)
     if threat_type == 'vpn_impossible_travel':
-        return _simulate_vpn_impossible_travel(config, src_ip, user, shost)
+        return (_simulate_vpn_impossible_travel(config, src_ip, user, shost), threat_type)
     if threat_type == 'dns_c2_beacon':
-        return _simulate_dns_c2_beacon(config, src_ip, user, shost)
+        return (_simulate_dns_c2_beacon(config, src_ip, user, shost), threat_type)
     if threat_type == 'server_outbound_http':
-        return _simulate_server_outbound_http(config)
+        return (_simulate_server_outbound_http(config), threat_type)
     if threat_type == 'workstation_rdp':
-        return _simulate_workstation_rdp(config, src_ip, user, shost)
+        return (_simulate_workstation_rdp(config, src_ip, user, shost), threat_type)
     if threat_type == 'smartdefense':
-        return _simulate_smartdefense_event(config, src_ip, user, shost)
+        return (_simulate_smartdefense_event(config, src_ip, user, shost), threat_type)
     if threat_type == 'app_control':
-        return _simulate_app_control_block(config, src_ip, user, shost)
+        return (_simulate_app_control_block(config, src_ip, user, shost), threat_type)
     if threat_type == 'vpn_tor_login':
-        return _simulate_vpn_tor_login(config, src_ip, user, shost)
+        return (_simulate_vpn_tor_login(config, src_ip, user, shost), threat_type)
     if threat_type == 'smb_new_host_lateral':
-        return _simulate_smb_new_host_lateral(config, src_ip, user, shost)
+        return (_simulate_smb_new_host_lateral(config, src_ip, user, shost), threat_type)
     if threat_type == 'smb_rare_file_transfer':
-        return _simulate_smb_rare_file_transfer(config, src_ip, user, shost)
+        return (_simulate_smb_rare_file_transfer(config, src_ip, user, shost), threat_type)
     if threat_type == 'smb_share_enumeration':
-        return _simulate_smb_share_enumeration(config, src_ip, user, shost)
+        return (_simulate_smb_share_enumeration(config, src_ip, user, shost), threat_type)
 
     # --- single-event generators: IPS, URL block, identity ---
     # Each builds its own complete extensions dict with correct src/dst/zones/blade.
@@ -1335,7 +1335,7 @@ def _generate_threat_log(config, session_context=None):
             "msg": f"IPS block: {protection_name} from {attacker_ip} to {victim_ip}:{attack_dport}",
             "cefDeviceEventClassId": "threat",
         }
-        return _format_checkpoint_cef(config, extensions)
+        return (_format_checkpoint_cef(config, extensions), threat_type)
 
     if threat_type == 'url_block':
         # URL filtering: internal user attempts to reach a blocked external domain.
@@ -1363,7 +1363,7 @@ def _generate_threat_log(config, session_context=None):
             "msg": f"URL blocked: {domain} (category: {cat})",
             "cefDeviceEventClassId": "url_filtering",
         }
-        return _format_checkpoint_cef(config, extensions, device_product="URL Filtering")
+        return (_format_checkpoint_cef(config, extensions, device_product="URL Filtering"), threat_type)
 
     # identity – single failed login (internal user → DC)
     print(f"    - Check Point Module simulating: Failed Login from {src_ip}")
@@ -1387,7 +1387,7 @@ def _generate_threat_log(config, session_context=None):
         "msg": f"Authentication failed for {user} from {src_ip}",
         "cefDeviceEventClassId": "identity",
     }
-    return _format_checkpoint_cef(config, extensions, device_product="Identity Awareness")
+    return (_format_checkpoint_cef(config, extensions, device_product="Identity Awareness"), threat_type)
 
 
 # ---------------------------------------------------------------------------

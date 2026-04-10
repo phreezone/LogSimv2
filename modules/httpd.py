@@ -629,7 +629,7 @@ def _generate_attack_burst(config, session_context=None, forced_type=None):
 
         time.sleep(random.uniform(0.1, 0.3))
 
-    return logs
+    return (logs, attack_type)
 
 
 # =============================================================================

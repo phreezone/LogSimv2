@@ -1141,12 +1141,14 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         ("smb_rare_file_transfer", 3, lambda: _generate_smb_rare_file_transfer(config, user, dept, internal_host_ip, device_info)),
         ("smb_share_enumeration",  5, lambda: _generate_smb_share_enumeration(config, user, dept, internal_host_ip, device_info)),
     ]
+    labels    = [t[0] for t in _threat_map]
     weights   = [t[1] for t in _threat_map]
     callables = [t[2] for t in _threat_map]
 
     def _pick_threat():
-        fn = random.choices(callables, weights=weights, k=1)[0]
-        return fn()
+        idx    = random.choices(range(len(callables)), weights=weights, k=1)[0]
+        result = callables[idx]()
+        return (result, labels[idx]) if result is not None else None
 
     if threat_level == "Insane":
         if random.random() < 0.6:

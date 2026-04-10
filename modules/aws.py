@@ -6037,8 +6037,9 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
         logger.warning("Failed to generate events after attempts (or scenario failed).")
         return None
 
-    # Determine event name for return tuple
-    event_name_for_return = scenario_event if scenario_event else getattr(chosen_func, "__name__", "unknown_generator")
+    # Determine event name for return tuple — use scenario key if available
+    _func_to_key = {fn: k for k, fn in SCENARIO_FUNCTIONS.items()}
+    event_name_for_return = scenario_event if scenario_event else _func_to_key.get(chosen_func, getattr(chosen_func, "__name__", "unknown_generator"))
 
     logger.info("Generated events from: %s (count=%d)", event_name_for_return, len(events))
 

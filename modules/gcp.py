@@ -5284,7 +5284,6 @@ SCENARIO_FUNCTIONS = {
     "VERTEX_DISABLE_MODEL_LOGGING":  _gen_vertex_disable_model_logging,
     # New event types (Step 9)
     "VPN_ROUTE_CREATE":              _gen_vpn_route_create,
-    "CREATE_SERVICE_ACCOUNT":        _gen_create_service_account,
     "PUBSUB_SUBSCRIPTION_DELETE":    _gen_pubsub_subscription_delete,
     "PUBSUB_TOPIC_DELETE":           _gen_pubsub_topic_delete,
     "SA_IMPERSONATION_FAILED":       _gen_sa_impersonation_failed,
@@ -5430,7 +5429,8 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
     if not entries:
         return None
 
-    event_name = scenario_event if scenario_event else getattr(chosen_func, "__name__", "gcp_event")
+    _func_to_key = {fn: k for k, fn in SCENARIO_FUNCTIONS.items()}
+    event_name = scenario_event if scenario_event else _func_to_key.get(chosen_func, getattr(chosen_func, "__name__", "gcp_event"))
 
     # Serialize each entry to a JSON string
     try:

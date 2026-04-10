@@ -1128,7 +1128,7 @@ def _select_threat(config, session_context):
     threat_type = random.choices(choices, weights=weights, k=1)[0]
 
     fn = _THREAT_GENERATORS.get(threat_type, _generate_phishing_url)
-    return fn(config, session_context)
+    return (fn(config, session_context), threat_type)
 
 
 # ---------------------------------------------------------------------------
