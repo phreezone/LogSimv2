@@ -1,0 +1,1380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LogSim Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d1117;
+      --surface:   #161b22;
+      --surface2:  #1e2530;
+      --border:    #30363d;
+      --text:      #e6edf3;
+      --text-muted:#8b949e;
+      --accent:    #1f9cf0;
+      --accent2:   #388bfd;
+      --green:     #3fb950;
+      --red:       #f85149;
+      --yellow:    #d29922;
+      --purple:    #a371f7;
+      --card-r:    10px;
+      --shadow:    0 4px 20px rgba(0,0,0,.4);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Header ──────────────────────────────────────────────────────────────── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 28px;
+      height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 18px;
+      letter-spacing: -.3px;
+    }
+    .logo svg { color: var(--accent); }
+    .logo .sub { font-weight: 400; font-size: 13px; color: var(--text-muted); margin-left: 4px; }
+
+    .header-actions { display: flex; align-items: center; gap: 10px; }
+    .global-level   { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); }
+
+    /* ── Buttons ─────────────────────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 14px; border-radius: 6px; border: 1px solid transparent;
+      font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: opacity .15s, background .15s, border-color .15s;
+      white-space: nowrap;
+    }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-primary  { background: var(--accent); color: #fff; border-color: var(--accent2); }
+    .btn-primary:hover:not(:disabled) { background: var(--accent2); }
+    .btn-danger   { background: var(--red); color: #fff; }
+    .btn-danger:hover:not(:disabled)  { opacity: .85; }
+    .btn-ghost    { background: transparent; color: var(--text-muted); border-color: var(--border); }
+    .btn-ghost:hover:not(:disabled)   { background: var(--surface2); color: var(--text); }
+    .btn-sm       { padding: 4px 10px; font-size: 12px; }
+    .btn-start    { background: var(--green); color: #000; font-weight: 600; }
+    .btn-start:hover:not(:disabled) { opacity: .85; }
+    .btn-stop     { background: var(--red); color: #fff; }
+    .btn-stop:hover:not(:disabled)  { opacity: .85; }
+
+    /* ── Layout ──────────────────────────────────────────────────────────────── */
+    main { padding: 28px; max-width: 1600px; margin: 0 auto; }
+
+    .section-title {
+      font-size: 13px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: .8px; color: var(--text-muted); margin-bottom: 14px;
+    }
+
+    /* ── Summary bar ─────────────────────────────────────────────────────────── */
+    .summary-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 14px; margin-bottom: 32px;
+    }
+    .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-r); padding: 18px 20px; }
+    .stat-card .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 6px; }
+    .stat-card .value { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+    .stat-card .value.green  { color: var(--green); }
+    .stat-card .value.accent { color: var(--accent); }
+    .stat-card .value.red    { color: var(--red); }
+
+    /* ── Module cards ────────────────────────────────────────────────────────── */
+    #modules-section { margin-bottom: 36px; }
+    .modules-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 16px;
+    }
+
+    .module-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--card-r); padding: 18px 20px;
+      display: flex; flex-direction: column; gap: 12px;
+      transition: border-color .2s;
+    }
+    .module-card.running { border-color: var(--green); box-shadow: 0 0 0 1px rgba(63,185,80,.15), var(--shadow); }
+    .module-card.error   { border-color: var(--red); }
+
+    .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .card-title-group { flex: 1; min-width: 0; }
+    .card-title { font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+
+    .status-dot {
+      width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+      background: var(--border); transition: background .3s;
+    }
+    .status-dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; }
+    .status-dot.error   { background: var(--red);   box-shadow: 0 0 6px var(--red); }
+    .status-dot.stopped { background: var(--text-muted); }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+
+    .card-description { font-size: 12px; color: var(--text-muted); margin-top: 3px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+    .status-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; text-transform: uppercase; letter-spacing: .5px; flex-shrink: 0; }
+    .status-badge.running { background: rgba(63,185,80,.15); color: var(--green); }
+    .status-badge.stopped { background: rgba(139,148,158,.1); color: var(--text-muted); }
+    .status-badge.error   { background: rgba(248,81,73,.15);  color: var(--red); }
+
+    .card-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .mini-metric { background: var(--surface2); border-radius: 6px; padding: 8px 10px; text-align: center; }
+    .mini-metric .m-val { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; color: var(--text); }
+    .mini-metric .m-val.threat { color: var(--red); }
+    .mini-metric .m-val.rate   { color: var(--accent); }
+    .mini-metric .m-label { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+
+    .last-threat { font-size: 11px; color: var(--red); font-style: italic; padding: 0 2px; }
+
+    .card-error { font-size: 12px; color: var(--red); background: rgba(248,81,73,.08); border-radius: 6px; padding: 6px 10px; display: none; }
+    .card-error.visible { display: block; }
+
+    .card-controls { display: flex; align-items: center; gap: 8px; }
+    .level-select {
+      flex: 1; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); padding: 6px 10px; font-size: 12px;
+      cursor: pointer; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 8px center; padding-right: 28px;
+    }
+    .level-select:focus { outline: none; border-color: var(--accent); }
+    .level-select option { background: var(--surface2); }
+
+    /* ── Timeline chart ──────────────────────────────────────────────────────── */
+    #timeline-section { margin-bottom: 36px; }
+    .chart-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-r); padding: 20px 24px; }
+
+    /* ── Metrics table ───────────────────────────────────────────────────────── */
+    .metrics-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .metrics-table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-r); overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th { background: var(--surface2); padding: 10px 16px; text-align: left; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); border-bottom: 1px solid var(--border); white-space: nowrap; }
+    tbody tr { border-bottom: 1px solid var(--border); transition: background .1s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--surface2); }
+    tbody td { padding: 10px 16px; font-variant-numeric: tabular-nums; }
+    .td-name   { font-weight: 600; }
+    .td-status span { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; }
+    .td-status .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+    .dot.running { background: var(--green); }
+    .dot.stopped { background: var(--text-muted); }
+    .dot.error   { background: var(--red); }
+    .td-rate   { color: var(--accent); font-weight: 600; }
+    .td-threat { color: var(--red); }
+
+    /* ── Tabs ────────────────────────────────────────────────────────────────── */
+    .tab-nav { display: flex; gap: 4px; }
+    .tab-btn {
+      background: none; border: 1px solid transparent; border-radius: 6px;
+      color: var(--text-muted); cursor: pointer; font-size: 13px;
+      padding: 5px 14px; transition: background .15s, color .15s;
+    }
+    .tab-btn.active { background: var(--surface2); border-color: var(--border); color: var(--text); }
+    .tab-btn:hover:not(.active) { color: var(--text); }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* ── Rate slider ─────────────────────────────────────────────────────────── */
+    .rate-control { margin-top: 6px; }
+    .rate-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .rate-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; }
+    .rate-display { font-size: 12px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+    .rate-ticks { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+    .rate-slider {
+      width: 100%; height: 4px; appearance: none; -webkit-appearance: none;
+      background: var(--border); border-radius: 2px; cursor: pointer; outline: none;
+    }
+    .rate-slider::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+      background: var(--accent); cursor: pointer; transition: background .15s;
+    }
+    .rate-slider::-webkit-slider-thumb:hover { background: var(--accent2); }
+    .rate-slider::-moz-range-thumb {
+      width: 14px; height: 14px; border-radius: 50%; border: none;
+      background: var(--accent); cursor: pointer;
+    }
+
+    /* ── Threat breakdown (histogram) ───────────────────────────────────────── */
+    .breakdown-toggle {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; color: var(--text-muted); cursor: pointer;
+      background: none; border: none; padding: 0; text-align: left;
+      user-select: none;
+    }
+    .breakdown-toggle:hover { color: var(--text); }
+    .breakdown-toggle .arrow { font-size: 9px; transition: transform .2s; }
+    .breakdown-toggle.open .arrow { transform: rotate(90deg); }
+    .breakdown-body { display: none; margin-top: 8px; }
+    .breakdown-body.open { display: block; }
+    .bar-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; font-size: 11px; }
+    .bar-name { width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-muted); flex-shrink: 0; }
+    .bar-track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .bar-fill  { height: 100%; background: var(--red); border-radius: 3px; transition: width .4s ease; }
+    .bar-count { width: 28px; text-align: right; color: var(--text-muted); flex-shrink: 0; }
+
+    /* ── Threats & Scenarios tab ─────────────────────────────────────────────── */
+    .threats-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    @media (max-width: 900px) { .threats-layout { grid-template-columns: 1fr; } }
+    .threats-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-r); padding: 20px 22px; }
+    .panel-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .7px; color: var(--text-muted); margin-bottom: 16px; }
+    .form-row { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+    .form-group { display: flex; flex-direction: column; gap: 4px; }
+    .form-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; }
+    .scenario-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 13px;
+    }
+    .scenario-row:last-child { border-bottom: none; }
+    .scenario-row:hover { background: var(--surface2); border-radius: 6px; }
+    .result-msg { font-size: 12px; min-height: 20px; margin-top: 10px; }
+
+    /* ── Schedule tab ────────────────────────────────────────────────────────── */
+    .schedule-layout { display: grid; grid-template-columns: 380px 1fr; gap: 24px; }
+    @media (max-width: 900px) { .schedule-layout { grid-template-columns: 1fr; } }
+    .schedule-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-r); padding: 20px 22px; }
+    .sched-field { margin-bottom: 12px; }
+    .sched-field label { display: block; font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 5px; }
+    .sched-input {
+      width: 100%; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); padding: 7px 10px; font-size: 13px;
+    }
+    .sched-input:focus { outline: none; border-color: var(--accent); }
+    .sched-input option { background: var(--surface2); }
+    .sched-time-row { display: flex; gap: 10px; align-items: flex-end; }
+    .sched-time-row .sched-field { flex: 1; margin-bottom: 0; }
+    .sched-queue-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .sched-table-wrap { overflow-x: auto; }
+    table.sched-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.sched-table thead th { background: var(--surface2); padding: 8px 12px; text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); border-bottom: 1px solid var(--border); white-space: nowrap; }
+    table.sched-table tbody tr { border-bottom: 1px solid var(--border); }
+    table.sched-table tbody tr:last-child { border-bottom: none; }
+    table.sched-table tbody tr.done-row { opacity: .45; }
+    table.sched-table tbody td { padding: 8px 12px; vertical-align: middle; }
+    .sched-status-badge { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 20px; text-transform: uppercase; }
+    .sched-status-badge.pending  { background: rgba(31,156,240,.15); color: var(--accent); }
+    .sched-status-badge.running  { background: rgba(63,185,80,.15);  color: var(--green); }
+    .sched-status-badge.done     { background: rgba(139,148,158,.1); color: var(--text-muted); }
+    .sched-status-badge.error    { background: rgba(248,81,73,.15);  color: var(--red); }
+
+    /* ── Health tab ──────────────────────────────────────────────────────────── */
+    .health-group { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+    .health-group-header { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
+    .health-row { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 8px; padding: 7px 14px; border-bottom: 1px solid rgba(48,54,61,.5); font-size: 13px; }
+    .health-row:last-child { border-bottom: none; }
+    .health-icon { font-size: 14px; text-align: center; }
+    .health-detail { font-size: 11px; color: var(--text-muted); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
+
+    /* ── Toast ───────────────────────────────────────────────────────────────── */
+    #toast {
+      position: fixed; bottom: 24px; right: 24px;
+      background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text); border-radius: 8px; padding: 10px 16px;
+      font-size: 13px; opacity: 0; transform: translateY(8px);
+      transition: opacity .2s, transform .2s; pointer-events: none;
+      z-index: 999; max-width: 320px;
+    }
+    #toast.show { opacity: 1; transform: translateY(0); }
+
+    /* ── Live indicator ──────────────────────────────────────────────────────── */
+    .live-indicator { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+    .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 1.5s infinite; }
+
+    @media (max-width: 700px) {
+      main { padding: 16px; }
+      header { padding: 0 16px; }
+      .header-actions { gap: 6px; }
+      .global-level .label-text { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+    LogSim
+    <span class="sub">Dashboard</span>
+  </div>
+
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-tab="modules" onclick="switchTab('modules')">Modules</button>
+    <button class="tab-btn" data-tab="threats" onclick="switchTab('threats')">Threats &amp; Scenarios</button>
+    <button class="tab-btn" data-tab="schedule" onclick="switchTab('schedule')">Schedule</button>
+    <button class="tab-btn" data-tab="health" onclick="switchTab('health')">Health</button>
+  </nav>
+
+  <div class="header-actions">
+    <div class="live-indicator">
+      <div class="live-dot"></div>
+      <span id="live-ts">—</span>
+    </div>
+
+    <div class="global-level">
+      <span class="label-text">All modules:</span>
+      <select id="global-level-select" class="level-select" style="width:auto;font-size:13px;"></select>
+    </div>
+    <div class="global-level" style="gap:6px;">
+      <span class="label-text">Rate:</span>
+      <input type="range" id="global-rate-slider" class="rate-slider" min="0" max="100"
+             step="1" value="50" style="width:90px;"
+             oninput="updateGlobalRateDisplay(this)"
+             onchange="setGlobalRate(this.value)" />
+      <span id="global-rate-display" style="min-width:58px;font-size:13px;color:var(--text-muted);">1.0 / sec</span>
+    </div>
+
+    <button class="btn btn-primary" id="btn-start-all">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      Start All
+    </button>
+    <button class="btn btn-danger" id="btn-stop-all">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+      Stop All
+    </button>
+  </div>
+</header>
+
+<main>
+
+<!-- ── Modules tab ─────────────────────────────────────────────────────────── -->
+<div id="tab-modules" class="tab-content active">
+
+  <!-- Summary bar -->
+  <div class="summary-bar">
+    <div class="stat-card">
+      <div class="label">Modules Running</div>
+      <div class="value green" id="stat-running">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Total Logs Sent</div>
+      <div class="value accent" id="stat-total-logs">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Rate / Second</div>
+      <div class="value accent" id="stat-rate">0.00</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Threats Generated</div>
+      <div class="value red" id="stat-threats">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Session Time</div>
+      <div class="value" id="stat-session-time">—</div>
+    </div>
+  </div>
+
+  <!-- Module cards -->
+  <section id="modules-section">
+    <div class="section-title">Module Control</div>
+    <div class="modules-grid" id="modules-grid"></div>
+  </section>
+
+  <!-- Timeline chart -->
+  <section id="timeline-section">
+    <div class="section-title">Event Timeline — Rolling 2 Minutes</div>
+    <div class="chart-wrap">
+      <canvas id="timeline-chart" height="90"></canvas>
+      <div style="margin-top:10px;font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:6px;">
+        <svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="#f85149"/></svg>
+        Red dot = threat event generated on that line's module
+      </div>
+    </div>
+  </section>
+
+  <!-- Metrics table -->
+  <section id="metrics-section">
+    <div class="metrics-toolbar">
+      <div class="section-title" style="margin-bottom:0">Live Metrics</div>
+      <button class="btn btn-ghost btn-sm" id="btn-reset-all">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+        Reset All Counters
+      </button>
+    </div>
+    <div class="metrics-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Module</th>
+            <th>Status</th>
+            <th>Threat Level</th>
+            <th>Total Logs</th>
+            <th>Rate / sec</th>
+            <th>Threats</th>
+            <th>Threat %</th>
+            <th style="text-align:right">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="metrics-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+</div><!-- /tab-modules -->
+
+<!-- ── Threats & Scenarios tab ────────────────────────────────────────────── -->
+<div id="tab-threats" class="tab-content">
+
+  <div class="threats-layout">
+
+    <!-- Fire individual threat -->
+    <div class="threats-panel">
+      <div class="panel-title">Fire Individual Threat</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Module</label>
+          <select id="fire-module-select" class="level-select" style="width:200px;" onchange="loadThreats(this.value)">
+            <option value="">— select module —</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Threat Event</label>
+          <select id="fire-threat-select" class="level-select" style="width:220px;">
+            <option value="">— select threat —</option>
+          </select>
+        </div>
+        <button class="btn btn-stop" style="align-self:flex-end;" onclick="fireThreat()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          Fire
+        </button>
+      </div>
+      <div class="result-msg" id="fire-result"></div>
+    </div>
+
+    <!-- Run multi-module scenario -->
+    <div class="threats-panel">
+      <div class="panel-title">Run Attack Scenario</div>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px;">Scenarios run in a background thread and print progress to the terminal.</p>
+      <div id="scenarios-list"></div>
+      <div class="result-msg" id="scenario-result"></div>
+    </div>
+
+  </div>
+
+</div><!-- /tab-threats -->
+
+<!-- ── Schedule tab ───────────────────────────────────────────────────────── -->
+<div id="tab-schedule" class="tab-content">
+
+  <div class="schedule-layout">
+
+    <!-- Add Job panel -->
+    <div class="schedule-panel">
+      <div class="panel-title">Add Scheduled Job</div>
+
+      <div class="sched-field">
+        <label>Job Type</label>
+        <select id="sched-type" class="sched-input" onchange="updateSchedFields()">
+          <option value="module_start">Module Start</option>
+          <option value="module_stop">Module Stop</option>
+          <option value="global_start">Global Start</option>
+          <option value="global_stop">Global Stop</option>
+          <option value="scenario">Run Scenario</option>
+          <option value="rate_change">Change Rate</option>
+        </select>
+      </div>
+
+      <!-- Dynamic fields -->
+      <div id="sched-dynamic-fields"></div>
+
+      <!-- Time -->
+      <div class="sched-field" style="margin-top:4px;">
+        <label>When</label>
+        <div class="sched-time-row">
+          <div class="sched-field">
+            <label>In X minutes</label>
+            <input type="number" id="sched-delay-min" class="sched-input" min="0" step="1" value="1" placeholder="minutes" />
+          </div>
+          <div style="padding-bottom:2px;color:var(--text-muted);font-size:12px;">or</div>
+          <div class="sched-field">
+            <label>Exact time</label>
+            <input type="datetime-local" id="sched-abs-time" class="sched-input" />
+          </div>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" style="width:100%;margin-top:4px;" onclick="addScheduleJob()">Add to Schedule</button>
+      <div class="result-msg" id="sched-result"></div>
+    </div>
+
+    <!-- Queue panel -->
+    <div class="schedule-panel">
+      <div class="sched-queue-header">
+        <div class="panel-title" style="margin:0;">Scheduled Jobs</div>
+        <button class="btn btn-ghost btn-sm" onclick="clearPendingJobs()">Clear Pending</button>
+      </div>
+      <div class="sched-table-wrap">
+        <table class="sched-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Job</th>
+              <th>Details</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="sched-tbody"><tr><td colspan="5" style="color:var(--text-muted);text-align:center;padding:20px;">No scheduled jobs</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+</div><!-- /tab-schedule -->
+
+<!-- ── Health tab ─────────────────────────────────────────────────────────── -->
+<div id="tab-health" class="tab-content">
+
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+    <div class="section-title" style="margin:0;">Preflight Health Checks</div>
+    <button class="btn btn-ghost btn-sm" onclick="runHealthCheck()">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+      Refresh
+    </button>
+  </div>
+  <div id="health-overall" style="font-size:14px;font-weight:600;margin-bottom:18px;"></div>
+  <div id="health-groups"></div>
+
+</div><!-- /tab-health -->
+
+</main>
+
+<div id="toast"></div>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+  let modules      = [];
+  let threatLevels = [];
+  let _prevStatus  = {};   // { moduleName → last known status }
+  let timelineChart = null;
+  let _pollInterval = null;
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+  function fmt(n) {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+    if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  function fmtElapsed(startEpoch) {
+    if (!startEpoch) return '—';
+    const secs = Math.floor(Date.now() / 1000 - startEpoch);
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // ── Browser notifications ─────────────────────────────────────────────────
+  async function requestNotificationPermission() {
+    if ("Notification" in window && Notification.permission === "default") {
+      await Notification.requestPermission();
+    }
+  }
+
+  function notify(title, body) {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    new Notification(title, { body });
+  }
+
+  function cardSel(name) {
+    return `[data-module="${name.replace(/"/g, '\\"')}"]`;
+  }
+
+  function showToast(msg, dur = 2500) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), dur);
+  }
+
+  async function api(path, method = 'GET', body = null) {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(path, opts);
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ error: r.statusText }));
+      throw new Error(err.error || r.statusText);
+    }
+    return r.json();
+  }
+
+  // ── Chart colours — 11 hues spaced ~30° apart around the colour wheel ──────
+  const MODULE_COLORS = [
+    '#4dabf7',  //  210°  sky blue
+    '#51cf66',  //  134°  green
+    '#fcc419',  //   45°  yellow
+    '#cc5de8',  //  285°  purple
+    '#ff6b6b',  //    0°  coral red
+    '#20c997',  //  162°  teal
+    '#ff922b',  //   30°  orange
+    '#74c0fc',  //  205°  light blue
+    '#a9e34b',  //   83°  lime
+    '#f783ac',  //  330°  pink
+    '#63e6be',  //  165°  mint
+  ];
+  const THREAT_DOT  = '#f85149';   // red dot on threat buckets
+
+  function moduleColor(i) { return MODULE_COLORS[i % MODULE_COLORS.length]; }
+
+  // ── Chart init — one line per module, red dots mark threat buckets ─────────
+  function initChart(labels, names) {
+    const ctx = document.getElementById('timeline-chart').getContext('2d');
+    const empty = Array(labels.length).fill(0);
+
+    const datasets = names.map((name, i) => ({
+      label: name,
+      data: [...empty],
+      borderColor: moduleColor(i),
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      pointRadius:          [...empty],   // 0 normally, 5 on threat buckets
+      pointBackgroundColor: [...empty].map(() => THREAT_DOT),
+      pointBorderColor:     [...empty].map(() => THREAT_DOT),
+      pointHoverRadius: 6,
+      fill: false,
+      tension: 0.3,
+    }));
+
+    timelineChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets },
+      options: {
+        animation: false,
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            labels: { color: '#8b949e', boxWidth: 12, font: { size: 11 },
+                      generateLabels(chart) {
+                        return chart.data.datasets.map((ds, i) => ({
+                          text: ds.label,
+                          fillStyle: ds.borderColor,
+                          strokeStyle: ds.borderColor,
+                          lineWidth: 2,
+                          hidden: !chart.isDatasetVisible(i),
+                          datasetIndex: i,
+                        }));
+                      }
+                    },
+          },
+          tooltip: {
+            callbacks: {
+              // Use each module's line colour for the tooltip swatch
+              labelColor(ctx) {
+                const c = ctx.dataset.borderColor;
+                return { borderColor: c, backgroundColor: c };
+              },
+              // Append threat names when hovering a bucket that has threat dots
+              afterLabel(ctx) {
+                const names = ctx.dataset._threatNames && ctx.dataset._threatNames[ctx.dataIndex];
+                if (!names || names.length === 0) return '';
+                return names.map(n => `  ⚠ ${n}`).join('\n');
+              }
+            }
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: '#30363d' } },
+          y: { ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: '#30363d' }, beginAtZero: true },
+        },
+      },
+    });
+  }
+
+  async function updateChart() {
+    if (document.hidden) return;
+    try {
+      const data  = await api('/api/timeline');
+      const names = Object.keys(data.modules);
+
+      if (!timelineChart) {
+        initChart(data.labels, names);
+        return;
+      }
+
+      timelineChart.data.labels = data.labels;
+      names.forEach((name, i) => {
+        const ds = timelineChart.data.datasets[i];
+        if (!ds) return;
+        const benign       = data.modules[name].benign;
+        const threats      = data.modules[name].threats;
+        const threatNames  = data.modules[name].threat_names || [];
+        // Line height = total events; red dot where threats > 0
+        ds.data          = benign.map((b, j) => b + threats[j]);
+        ds.pointRadius   = threats.map(v => v > 0 ? 5 : 0);
+        ds._threatNames  = threatNames;  // stored for tooltip callback
+      });
+      timelineChart.update('none');
+    } catch (e) { /* silent */ }
+  }
+
+  // ── Poll ──────────────────────────────────────────────────────────────────
+  async function poll() {
+    try {
+      const [metrics] = await Promise.all([
+        api('/api/metrics'),
+        updateChart(),
+      ]);
+      modules = metrics.per_module;
+      renderAll(metrics);
+      document.getElementById('live-ts').textContent = new Date().toLocaleTimeString();
+    } catch (e) { /* silent */ }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  function renderAll(data) {
+    document.getElementById('stat-running').textContent       = data.modules_running;
+    document.getElementById('stat-total-logs').textContent    = fmt(data.total_logs);
+    document.getElementById('stat-rate').textContent          = data.total_rate_per_sec.toFixed(2);
+    document.getElementById('stat-threats').textContent       = fmt(data.total_threats);
+    document.getElementById('stat-session-time').textContent  = fmtElapsed(data.session_start);
+    renderCards(data.per_module);
+    renderTable(data.per_module);
+  }
+
+  function renderCards(mods) {
+    const grid = document.getElementById('modules-grid');
+    mods.forEach(m => {
+      const existing = grid.querySelector(cardSel(m.name));
+
+      if (!existing) {
+        grid.appendChild(buildCard(m));
+        _prevStatus[m.name] = m.status;
+        return;
+      }
+
+      // Always update live metrics
+      existing.querySelector('[data-metric="logs"]').textContent    = fmt(m.total_logs);
+      existing.querySelector('[data-metric="rate"]').textContent    = m.rate_per_sec.toFixed(2);
+      existing.querySelector('[data-metric="threats"]').textContent = fmt(m.total_threats);
+
+      // Update threat breakdown (bars) without collapsing open state
+      const bdSection = existing.querySelector('.threat-breakdown-section');
+      if (bdSection) {
+        bdSection.style.display = m.total_threats > 0 ? '' : 'none';
+        const bdBody = bdSection.querySelector('.breakdown-body');
+        if (bdBody) bdBody.innerHTML = buildBreakdownBars(m.threat_breakdown || {});
+      }
+
+      // Always update last-threat line
+      const ltEl = existing.querySelector('.last-threat');
+      if (ltEl) {
+        ltEl.textContent  = m.last_threat ? `Last threat: ${m.last_threat}` : '';
+        ltEl.style.display = m.last_threat ? 'block' : 'none';
+      }
+
+      // Always update error banner
+      const errEl = existing.querySelector('.card-error');
+      if (errEl) {
+        errEl.textContent = m.error || '';
+        errEl.classList.toggle('visible', !!m.error);
+      }
+
+      // Update rate slider only when user isn't actively dragging it
+      const rateSlider = existing.querySelector('.rate-slider');
+      if (rateSlider && document.activeElement !== rateSlider && m.event_interval) {
+        const eps = 1 / m.event_interval;
+        rateSlider.value = epsToSlider(eps);
+        const disp = existing.querySelector('.rate-display');
+        if (disp) disp.textContent = epsLabel(eps);
+      }
+
+      // Only touch controls when status actually changes
+      if (_prevStatus[m.name] === m.status) return;
+      if (_prevStatus[m.name] !== undefined && _prevStatus[m.name] !== 'error' && m.status === 'error') {
+        notify(`Module Error: ${m.name}`, m.error || 'Worker encountered an error');
+      }
+      _prevStatus[m.name] = m.status;
+
+      existing.className = `module-card ${m.status}`;
+      existing.querySelector('.status-dot').className = `status-dot ${m.status}`;
+      const badge = existing.querySelector('.status-badge');
+      badge.className   = `status-badge ${m.status}`;
+      badge.textContent = m.status;
+
+      const sel = existing.querySelector('.level-select');
+      if (sel) sel.disabled = (m.status === 'running');
+
+      const btn = existing.querySelector('.card-controls button');
+      if (btn) {
+        if (m.status === 'running') {
+          btn.className = 'btn btn-stop btn-sm';
+          btn.textContent = 'Stop';
+          btn.onclick = () => stopModule(m.name);
+        } else {
+          btn.className = 'btn btn-start btn-sm';
+          btn.textContent = 'Start';
+          btn.onclick = () => startModule(m.name);
+        }
+      }
+    });
+  }
+
+  function buildCard(m) {
+    const div = document.createElement('div');
+    div.className = `module-card ${m.status}`;
+    div.setAttribute('data-module', m.name);
+
+    div.innerHTML = `
+      <div class="card-header">
+        <div class="card-title-group">
+          <div class="card-title">
+            <span class="status-dot ${m.status}"></span>
+            ${escHtml(m.name)}
+          </div>
+          <div class="card-description">${escHtml(m.description)}</div>
+        </div>
+        <span class="status-badge ${m.status}">${m.status}</span>
+      </div>
+
+      <div class="card-metrics">
+        <div class="mini-metric">
+          <div class="m-val" data-metric="logs">${fmt(m.total_logs)}</div>
+          <div class="m-label">Logs Sent</div>
+        </div>
+        <div class="mini-metric">
+          <div class="m-val rate" data-metric="rate">${m.rate_per_sec.toFixed(2)}</div>
+          <div class="m-label">/ sec</div>
+        </div>
+        <div class="mini-metric">
+          <div class="m-val threat" data-metric="threats">${fmt(m.total_threats)}</div>
+          <div class="m-label">Threats</div>
+        </div>
+      </div>
+
+      <div class="last-threat" style="display:${m.last_threat ? 'block' : 'none'}">${m.last_threat ? `Last threat: ${escHtml(m.last_threat)}` : ''}</div>
+
+      <div class="card-error ${m.error ? 'visible' : ''}">${escHtml(m.error || '')}</div>
+
+      <div class="card-controls">
+        <select class="level-select" ${m.status === 'running' ? 'disabled' : ''}>
+          ${threatLevels.map(l => `<option value="${l}"${l === m.threat_level ? ' selected' : ''}>${l}</option>`).join('')}
+        </select>
+        ${m.status === 'running'
+          ? `<button class="btn btn-stop btn-sm" onclick="stopModule('${escHtml(m.name)}')">Stop</button>`
+          : `<button class="btn btn-start btn-sm" onclick="startModule('${escHtml(m.name)}')">Start</button>`}
+      </div>
+      <div class="rate-control">
+        <div class="rate-header">
+          <span class="rate-label">Event Rate</span>
+          <span class="rate-display">${epsLabel(1 / m.event_interval)}</span>
+        </div>
+        <input type="range" class="rate-slider" min="0" max="100" step="1"
+               value="${epsToSlider(1 / m.event_interval)}"
+               oninput="updateRateDisplay(this)"
+               onchange="setRate('${escHtml(m.name)}', this.value)" />
+        <div class="rate-ticks"><span>Slow</span><span>Normal</span><span>Fast</span></div>
+      </div>
+      <div class="threat-breakdown-section" style="${m.total_threats > 0 ? '' : 'display:none'}">
+        <button class="breakdown-toggle" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+          <span class="arrow">▶</span> Threat Breakdown
+        </button>
+        <div class="breakdown-body">${buildBreakdownBars(m.threat_breakdown)}</div>
+      </div>
+    `;
+    return div;
+  }
+
+  function buildBreakdownBars(breakdown) {
+    if (!breakdown || !Object.keys(breakdown).length) return '';
+    const entries = Object.entries(breakdown).sort((a, b) => b[1] - a[1]);
+    const max = entries[0][1];
+    return entries.map(([name, count]) => `
+      <div class="bar-row">
+        <span class="bar-name" title="${escHtml(name)}">${escHtml(name)}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${(count/max*100).toFixed(1)}%"></div></div>
+        <span class="bar-count">${count}</span>
+      </div>`).join('');
+  }
+
+  function renderTable(mods) {
+    const tbody = document.getElementById('metrics-tbody');
+    tbody.innerHTML = mods.map(m => {
+      const pct = m.total_logs > 0 ? ((m.total_threats / m.total_logs) * 100).toFixed(1) : '0.0';
+      return `
+        <tr>
+          <td class="td-name">${escHtml(m.name)}</td>
+          <td class="td-status"><span><span class="dot ${m.status}"></span>${m.status}</span></td>
+          <td>${escHtml(m.threat_level)}</td>
+          <td>${fmt(m.total_logs)}</td>
+          <td class="td-rate">${m.rate_per_sec.toFixed(2)}</td>
+          <td class="td-threat">${fmt(m.total_threats)}</td>
+          <td style="color:var(--${m.total_threats > 0 ? 'red' : 'text-muted'})">${pct}%</td>
+          <td style="text-align:right"><button class="btn btn-ghost btn-sm" onclick="resetModule('${escHtml(m.name)}')">Reset</button></td>
+        </tr>`;
+    }).join('');
+  }
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+  // ── Rate slider helpers ───────────────────────────────────────────────────
+  // Logarithmic scale: slider 0–100, midpoint 50 = 1 event/sec
+  // Formula: eps = 10^(pos/50 - 1)  →  0.1/sec … 1/sec … 10/sec
+  function sliderToEps(pos)  { return Math.pow(10, parseFloat(pos) / 50 - 1); }
+  function epsToSlider(eps)  { return Math.round((Math.log10(Math.max(0.01, eps)) + 1) * 50); }
+  function epsLabel(eps) {
+    if (eps < 1) return `${eps.toFixed(2)} / sec`;
+    if (eps < 10) return `${eps.toFixed(1)} / sec`;
+    return `${Math.round(eps)} / sec`;
+  }
+
+  function updateRateDisplay(slider) {
+    const eps  = sliderToEps(slider.value);
+    const disp = slider.closest('.rate-control').querySelector('.rate-display');
+    if (disp) disp.textContent = epsLabel(eps);
+  }
+
+  async function startModule(name) {
+    const card        = document.querySelector(cardSel(name));
+    const sel         = card ? card.querySelector('.level-select') : null;
+    const rateSlider  = card ? card.querySelector('.rate-slider') : null;
+    const level       = sel ? sel.value : 'Realistic';
+    const body        = { threat_level: level };
+    if (rateSlider) body.event_interval = 1 / sliderToEps(rateSlider.value);
+    try {
+      await api(`/api/modules/${encodeURIComponent(name)}/start`, 'POST', body);
+      showToast(`${name} started at "${level}"`);
+      await poll();
+    } catch (e) {
+      showToast(`Error starting ${name}: ${e.message}`, 4000);
+    }
+  }
+
+  async function setRate(name, sliderPos) {
+    const iv = 1 / sliderToEps(sliderPos);
+    try {
+      await api(`/api/modules/${encodeURIComponent(name)}/interval`, 'PATCH', { event_interval: iv });
+    } catch (e) {
+      showToast(`Error setting rate for ${name}: ${e.message}`, 4000);
+    }
+  }
+
+  function updateGlobalRateDisplay(slider) {
+    const eps  = sliderToEps(slider.value);
+    document.getElementById('global-rate-display').textContent = epsLabel(eps);
+  }
+
+  async function setGlobalRate(sliderPos) {
+    const iv = 1 / sliderToEps(sliderPos);
+    // Update all per-card sliders in the DOM to stay in sync
+    document.querySelectorAll('.modules-grid .rate-slider').forEach(s => {
+      s.value = sliderPos;
+      const disp = s.closest('.rate-control')?.querySelector('.rate-display');
+      if (disp) disp.textContent = epsLabel(sliderToEps(sliderPos));
+    });
+    // Send PATCH to every module
+    for (const m of modules) {
+      try {
+        await api(`/api/modules/${encodeURIComponent(m.name)}/interval`, 'PATCH', { event_interval: iv });
+      } catch (_) { /* best-effort */ }
+    }
+  }
+
+  async function stopModule(name) {
+    try {
+      await api(`/api/modules/${encodeURIComponent(name)}/stop`, 'POST');
+      showToast(`${name} stopped`);
+      await poll();
+    } catch (e) {
+      showToast(`Error stopping ${name}: ${e.message}`, 4000);
+    }
+  }
+
+  async function resetModule(name) {
+    try {
+      await api(`/api/modules/${encodeURIComponent(name)}/reset`, 'POST');
+      await poll();
+    } catch (e) {
+      showToast(`Error resetting ${name}: ${e.message}`, 4000);
+    }
+  }
+
+  document.getElementById('btn-start-all').addEventListener('click', async () => {
+    const level = document.getElementById('global-level-select').value;
+    try {
+      await api('/api/modules/start_all', 'POST', { threat_level: level });
+      showToast(`All modules started at "${level}"`);
+      await poll();
+    } catch (e) { showToast('Error: ' + e.message, 4000); }
+  });
+
+  document.getElementById('btn-stop-all').addEventListener('click', async () => {
+    try {
+      await api('/api/modules/stop_all', 'POST');
+      showToast('All modules stopped');
+      await poll();
+    } catch (e) { showToast('Error: ' + e.message, 4000); }
+  });
+
+  document.getElementById('btn-reset-all').addEventListener('click', async () => {
+    try {
+      await api('/api/reset_all', 'POST');
+      showToast('All counters reset');
+      await poll();
+    } catch (e) { showToast('Error: ' + e.message, 4000); }
+  });
+
+  // ── Tab switching ─────────────────────────────────────────────────────────
+  function switchTab(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.toggle('active', el.id === `tab-${tab}`));
+    if (tab === 'health') runHealthCheck();
+  }
+
+  // ── Threats tab — fire individual threat ──────────────────────────────────
+  async function loadThreats(moduleName) {
+    const sel = document.getElementById('fire-threat-select');
+    sel.innerHTML = '<option value="">loading…</option>';
+    if (!moduleName) { sel.innerHTML = '<option value="">— select threat —</option>'; return; }
+    try {
+      const data = await api(`/api/modules/${encodeURIComponent(moduleName)}/threats`);
+      sel.innerHTML = '<option value="">— select threat —</option>' +
+        data.threats.map(t => `<option value="${escHtml(t)}">${escHtml(t)}</option>`).join('');
+    } catch (e) {
+      sel.innerHTML = '<option value="">Error loading threats</option>';
+    }
+  }
+
+  async function fireThreat() {
+    const mod = document.getElementById('fire-module-select').value;
+    const ev  = document.getElementById('fire-threat-select').value;
+    const resultEl = document.getElementById('fire-result');
+    if (!mod || !ev) {
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = 'Select a module and a threat event first.';
+      return;
+    }
+    resultEl.style.color = 'var(--text-muted)';
+    resultEl.textContent = `Firing ${ev}…`;
+    try {
+      const data = await api(`/api/modules/${encodeURIComponent(mod)}/fire`, 'POST', { event: ev });
+      if (data.fired) {
+        resultEl.style.color = 'var(--green)';
+        resultEl.textContent = `✓ ${data.event} fired — ${data.log_count} log${data.log_count === 1 ? '' : 's'} sent`;
+      } else {
+        resultEl.style.color = 'var(--yellow)';
+        resultEl.textContent = data.reason || 'No logs generated';
+      }
+    } catch (e) {
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = `Error: ${e.message}`;
+    }
+  }
+
+  // ── Schedule tab ─────────────────────────────────────────────────────────
+  const SCHED_MODULE_TYPES  = new Set(["module_start", "module_stop", "rate_change"]);
+  const SCHED_LEVEL_TYPES   = new Set(["module_start", "global_start"]);
+  const SCHED_RATE_TYPES    = new Set(["module_start", "global_start", "rate_change"]);
+  const SCHED_SCENARIO_TYPES = new Set(["scenario"]);
+
+  function updateSchedFields() {
+    const type = document.getElementById('sched-type').value;
+    const el   = document.getElementById('sched-dynamic-fields');
+    let html = '';
+
+    if (SCHED_MODULE_TYPES.has(type)) {
+      const opts = modules.map(m => `<option value="${escHtml(m.name)}">${escHtml(m.name)}</option>`).join('');
+      const allOpt = type === 'rate_change' ? '<option value="">All modules</option>' : '';
+      html += `<div class="sched-field"><label>Module</label>
+        <select id="sched-mod" class="sched-input">${allOpt}${opts}</select></div>`;
+    }
+    if (SCHED_LEVEL_TYPES.has(type)) {
+      const opts = threatLevels.map(l => `<option value="${escHtml(l)}"${l==='Realistic'?' selected':''}>${escHtml(l)}</option>`).join('');
+      html += `<div class="sched-field"><label>Threat Level</label>
+        <select id="sched-level" class="sched-input">${opts}</select></div>`;
+    }
+    if (SCHED_RATE_TYPES.has(type)) {
+      const eps = sliderToEps(50);
+      html += `<div class="sched-field"><label>Rate override <span id="sched-rate-disp" style="color:var(--accent);font-weight:600;">${epsLabel(eps)}</span></label>
+        <input type="range" id="sched-rate-slider" class="rate-slider" min="0" max="100" step="1" value="50"
+          oninput="document.getElementById('sched-rate-disp').textContent=epsLabel(sliderToEps(this.value))"/>
+        <div class="rate-ticks"><span>Slow</span><span>Normal</span><span>Fast</span></div></div>`;
+    }
+    if (SCHED_SCENARIO_TYPES.has(type)) {
+      // populated after scenarios load
+      const scenList = window._schedScenarios || [];
+      const opts = scenList.length
+        ? scenList.map(s => `<option value="${escHtml(s.id)}">${escHtml(s.name)}</option>`).join('')
+        : '<option value="">Loading…</option>';
+      html += `<div class="sched-field"><label>Scenario</label>
+        <select id="sched-scenario" class="sched-input">${opts}</select></div>`;
+    }
+
+    el.innerHTML = html;
+  }
+
+  function _schedRunAt() {
+    const absEl = document.getElementById('sched-abs-time');
+    if (absEl && absEl.value) {
+      return new Date(absEl.value).getTime() / 1000;
+    }
+    const delayMin = parseFloat(document.getElementById('sched-delay-min').value) || 0;
+    return Date.now() / 1000 + delayMin * 60;
+  }
+
+  async function addScheduleJob() {
+    const type     = document.getElementById('sched-type').value;
+    const resultEl = document.getElementById('sched-result');
+    resultEl.style.color = 'var(--text-muted)';
+    resultEl.textContent = 'Adding…';
+
+    const params = {};
+    const modEl  = document.getElementById('sched-mod');
+    if (modEl && modEl.value) params.name = modEl.value;
+    const lvlEl  = document.getElementById('sched-level');
+    if (lvlEl) params.threat_level = lvlEl.value;
+    const rateSl = document.getElementById('sched-rate-slider');
+    if (rateSl) params.event_interval = 1 / sliderToEps(rateSl.value);
+    const scenEl = document.getElementById('sched-scenario');
+    if (scenEl && scenEl.value) params.scenario_id = scenEl.value;
+
+    // Label
+    const modName  = params.name || 'all';
+    const labelMap = {
+      module_start: `Start ${modName}`,
+      module_stop:  `Stop ${modName}`,
+      global_start: `Start all (${params.threat_level || 'Realistic'})`,
+      global_stop:  'Stop all',
+      scenario:     `Scenario: ${scenEl ? scenEl.options[scenEl.selectedIndex]?.text : ''}`,
+      rate_change:  `Rate → ${params.event_interval ? epsLabel(1/params.event_interval) : '?'} (${modName})`,
+    };
+
+    try {
+      const job = await api('/api/schedule', 'POST', {
+        type, params, label: labelMap[type] || type, run_at: _schedRunAt(),
+      });
+      resultEl.style.color = 'var(--green)';
+      resultEl.textContent = `✓ Job queued — runs at ${new Date(job.run_at * 1000).toLocaleTimeString()}`;
+      renderSchedule();
+    } catch (e) {
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = `Error: ${e.message}`;
+    }
+  }
+
+  async function cancelScheduleJob(id) {
+    try {
+      await api(`/api/schedule/${encodeURIComponent(id)}`, 'DELETE');
+      renderSchedule();
+    } catch (e) {
+      showToast(`Cancel failed: ${e.message}`, 4000);
+    }
+  }
+
+  async function clearPendingJobs() {
+    try {
+      const r = await api('/api/schedule', 'DELETE');
+      showToast(`Cleared ${r.cleared} pending job${r.cleared === 1 ? '' : 's'}`);
+      renderSchedule();
+    } catch (e) {
+      showToast(`Error: ${e.message}`, 4000);
+    }
+  }
+
+  async function renderSchedule() {
+    try {
+      const jobs = await api('/api/schedule');
+      const tbody = document.getElementById('sched-tbody');
+      if (!tbody) return;
+      if (!jobs.length) {
+        tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted);text-align:center;padding:20px;">No scheduled jobs</td></tr>';
+        return;
+      }
+      // Pending first, then done/error
+      const sorted = [...jobs].sort((a, b) => {
+        const order = {pending:0, running:1, done:2, error:3};
+        return (order[a.status]??2) - (order[b.status]??2) || a.run_at - b.run_at;
+      });
+      tbody.innerHTML = sorted.map(j => {
+        const isDone  = j.status === 'done' || j.status === 'error';
+        const timeStr = new Date(j.run_at * 1000).toLocaleTimeString();
+        const cancelBtn = j.status === 'pending'
+          ? `<button class="btn btn-ghost btn-sm" onclick="cancelScheduleJob('${escHtml(j.id)}')">Cancel</button>`
+          : '';
+        return `<tr class="${isDone ? 'done-row' : ''}">
+          <td style="white-space:nowrap;">${escHtml(timeStr)}</td>
+          <td>${escHtml(j.label)}</td>
+          <td style="font-size:11px;color:var(--text-muted);">${escHtml(j.result || '')}</td>
+          <td><span class="sched-status-badge ${j.status}">${j.status}</span></td>
+          <td>${cancelBtn}</td>
+        </tr>`;
+      }).join('');
+    } catch (_) { /* silent */ }
+  }
+
+  // Poll schedule queue every 2 s when tab is active
+  setInterval(() => {
+    if (document.getElementById('tab-schedule')?.classList.contains('active')) {
+      renderSchedule();
+    }
+  }, 2000);
+
+  // ── Threats tab — scenarios ────────────────────────────────────────────────
+  async function loadScenarios() {
+    try {
+      const data = await api('/api/scenarios');
+      window._schedScenarios = data;   // share with schedule tab
+      const list = document.getElementById('scenarios-list');
+      if (!data.length) {
+        list.innerHTML = '<p style="font-size:12px;color:var(--text-muted);">No scenarios available (log_simulator not reachable).</p>';
+        return;
+      }
+      list.innerHTML = data.map(s => `
+        <div class="scenario-row">
+          <span>${escHtml(s.name)}</span>
+          <button class="btn btn-ghost btn-sm" onclick="runScenario('${escHtml(s.id)}','${escHtml(s.name)}')">Run</button>
+        </div>`).join('');
+    } catch (e) {
+      document.getElementById('scenarios-list').innerHTML =
+        `<p style="font-size:12px;color:var(--red);">Failed to load scenarios: ${escHtml(e.message)}</p>`;
+    }
+  }
+
+  async function runScenario(id, name) {
+    const resultEl = document.getElementById('scenario-result');
+    resultEl.style.color = 'var(--text-muted)';
+    resultEl.textContent = `Starting "${name}"…`;
+    try {
+      const data = await api(`/api/scenarios/${encodeURIComponent(id)}/run`, 'POST');
+      if (data.started) {
+        resultEl.style.color = 'var(--green)';
+        resultEl.textContent = `✓ "${data.scenario}" started — check terminal for progress`;
+      } else {
+        resultEl.style.color = 'var(--red)';
+        resultEl.textContent = data.error || 'Failed to start';
+      }
+    } catch (e) {
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = `Error: ${e.message}`;
+    }
+  }
+
+  // ── Health tab ────────────────────────────────────────────────────────────
+  async function runHealthCheck() {
+    const overallEl = document.getElementById('health-overall');
+    const groupsEl  = document.getElementById('health-groups');
+    overallEl.textContent = 'Running checks…';
+    overallEl.style.color = 'var(--text-muted)';
+    groupsEl.innerHTML = '';
+
+    try {
+      const data = await api('/api/health?refresh=1');
+
+      const statusColor = { ok: 'var(--green)', warn: 'var(--yellow)', error: 'var(--red)', skip: 'var(--text-muted)' };
+      const statusIcon  = { ok: '✓', warn: '⚠', error: '✗', skip: '–' };
+
+      overallEl.style.color = statusColor[data.overall] || 'var(--text)';
+      overallEl.textContent  = `${statusIcon[data.overall] || ''} Overall status: ${data.overall.toUpperCase()}`;
+
+      // Group checks
+      const groups = {};
+      for (const c of data.checks) {
+        if (!groups[c.group]) groups[c.group] = [];
+        groups[c.group].push(c);
+      }
+
+      for (const [groupName, checks] of Object.entries(groups)) {
+        const worst = checks.some(c => c.status === 'error') ? 'error'
+                    : checks.some(c => c.status === 'warn')  ? 'warn'
+                    : checks.some(c => c.status === 'ok')    ? 'ok' : 'skip';
+        const rows = checks.map(c => `
+          <div class="health-row">
+            <div class="health-icon" style="color:${statusColor[c.status]}">${statusIcon[c.status]}</div>
+            <div style="font-size:13px;">${escHtml(c.check)}</div>
+            <div class="health-detail">${escHtml(c.detail)}</div>
+          </div>`).join('');
+
+        const card = document.createElement('div');
+        card.className = 'health-group';
+        card.innerHTML = `
+          <div class="health-group-header">
+            <span style="color:${statusColor[worst]}">${statusIcon[worst]}</span>
+            <span>${escHtml(groupName)}</span>
+          </div>${rows}`;
+        groupsEl.appendChild(card);
+      }
+    } catch (e) {
+      overallEl.style.color = 'var(--red)';
+      overallEl.textContent = `Error: ${e.message}`;
+    }
+  }
+
+  // ── Bootstrap ─────────────────────────────────────────────────────────────
+  async function init() {
+    requestNotificationPermission();
+    try {
+      threatLevels = await api('/api/threat_levels');
+      const sel = document.getElementById('global-level-select');
+      sel.innerHTML = threatLevels.map(l =>
+        `<option value="${l}"${l === 'Realistic' ? ' selected' : ''}>${l}</option>`
+      ).join('');
+      await poll();
+      // Populate fire-module-select from loaded modules
+      const fireModSel = document.getElementById('fire-module-select');
+      if (fireModSel && modules.length) {
+        fireModSel.innerHTML = '<option value="">— select module —</option>' +
+          modules.map(m => `<option value="${escHtml(m.name)}">${escHtml(m.name)}</option>`).join('');
+      }
+      loadScenarios();
+      updateSchedFields();
+      _pollInterval = setInterval(poll, 2000);
+    } catch (e) {
+      showToast('Failed to connect to API: ' + e.message, 5000);
+    }
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    clearInterval(_pollInterval);
+    if (document.hidden) {
+      _pollInterval = setInterval(poll, 10000);
+    } else {
+      _pollInterval = setInterval(poll, 2000);
+      poll();
+    }
+  });
+
+  // ── Health alert polling (10 s, separate from main poll) ─────────────────
+  setInterval(async () => {
+    try {
+      const data = await api('/api/health/alerts');
+      for (const a of data.alerts) {
+        const level = a.to === 'error' ? 'Health Alert' : 'Health Warning';
+        notify(`${level}: ${a.group}`, `${a.check} — ${a.detail}`);
+      }
+    } catch (_) { /* silent */ }
+  }, 10000);
+
+  init();
+</script>
+</body>
+</html>

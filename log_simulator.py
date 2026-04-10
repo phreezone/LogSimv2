@@ -2371,6 +2371,8 @@ def main():
         print("\nNo modules found. Exiting.")
         return
 
+    _start_dashboard()
+
     # --- Build session context: stable user→device→IP mapping for this run ---
     # Import here so the modules/ directory is already loaded
     try:
@@ -2415,6 +2417,81 @@ def main():
                 run_specific_threat(module, threat_name, config, session_context, repeat)
         else:
             print("Invalid selection.")
+
+def _kill_port(port):
+    """Kill any process currently listening on *port* (Windows taskkill)."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(['netstat', '-ano'], capture_output=True, text=True, timeout=5)
+        seen = set()
+        for line in r.stdout.splitlines():
+            if f':{port}' in line and 'LISTENING' in line:
+                parts = line.split()
+                try:
+                    pid = int(parts[-1])
+                except (ValueError, IndexError):
+                    continue
+                if pid > 4 and pid not in seen:
+                    seen.add(pid)
+                    _sp.run(['taskkill', '/F', '/PID', str(pid)],
+                            capture_output=True, timeout=3)
+                    print(f"[dashboard] Killed stale process PID {pid} on port {port}")
+    except Exception:
+        pass
+
+
+_dashboard_proc = None
+
+
+def _cleanup_dashboard():
+    global _dashboard_proc
+    if _dashboard_proc and _dashboard_proc.poll() is None:
+        _dashboard_proc.terminate()
+        try:
+            _dashboard_proc.wait(timeout=3)
+        except Exception:
+            _dashboard_proc.kill()
+
+
+def _start_dashboard():
+    """Launch the Flask dashboard as a child subprocess.
+
+    Kills any stale process already on the port, starts a fresh subprocess,
+    and registers an atexit handler so it is always cleaned up on exit.
+    """
+    import subprocess, atexit
+    global _dashboard_proc
+
+    dashboard_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'dashboard', 'app.py')
+    if not os.path.exists(dashboard_path):
+        print("Dashboard not found — skipping.")
+        return
+
+    port = int(os.getenv("DASHBOARD_PORT", "5000"))
+    project_root = os.path.dirname(os.path.abspath(__file__))
+
+    # Kill any leftover process from a previous run before binding the port.
+    _kill_port(port)
+    time.sleep(0.5)
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, dashboard_path],
+            cwd=project_root,
+            env={**os.environ, 'LOGSIM_PARENT_PID': str(os.getpid())},
+        )
+        _dashboard_proc = proc
+        atexit.register(_cleanup_dashboard)
+
+        time.sleep(2)  # Give Flask time to bind
+        if proc.poll() is None:
+            print(f"--- Dashboard started → http://localhost:{port} ---\n")
+        else:
+            print(f"WARNING: Dashboard process exited early (code {proc.returncode})")
+    except Exception as e:
+        print(f"WARNING: Could not start dashboard: {e}")
+
 
 if __name__ == "__main__":
     main()

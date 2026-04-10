@@ -1,0 +1,1024 @@
+"""
+LogSim Dashboard — Flask application for controlling and monitoring log generation modules.
+
+Run from the project root:
+    python dashboard/app.py
+
+Or with Flask CLI:
+    flask --app dashboard/app.py run --host 0.0.0.0 --port 5000
+"""
+
+import sys
+import os
+import threading
+import time
+import json
+import copy
+import ctypes
+import uuid as _uuid
+from collections import deque
+
+# ── Path setup — must run from project root ──────────────────────────────────
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# ── Parent-process watchdog ───────────────────────────────────────────────────
+# When log_simulator.py dies (normally, force-killed, or via IDE stop), this
+# watchdog detects the gone parent and shuts Flask down within ~5 seconds.
+
+def _parent_alive(pid: int) -> bool:
+    """Return True if the process with *pid* is still running (Windows)."""
+    try:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        exit_code = ctypes.c_ulong()
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        kernel32.CloseHandle(handle)
+        return exit_code.value == STILL_ACTIVE
+    except Exception:
+        return False
+
+
+def _start_watchdog():
+    parent_pid = int(os.environ.get('LOGSIM_PARENT_PID', '0'))
+    if not parent_pid:
+        return  # Running standalone — no watchdog needed
+
+    def _watch():
+        while True:
+            time.sleep(5)
+            if not _parent_alive(parent_pid):
+                print("[dashboard] Parent process gone — shutting down.", flush=True)
+                os._exit(0)
+
+    t = threading.Thread(target=_watch, daemon=True, name="dashboard-watchdog")
+    t.start()
+
+
+_start_watchdog()
+os.chdir(PROJECT_ROOT)
+sys.path.insert(0, PROJECT_ROOT)
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from flask import Flask, jsonify, render_template, request, make_response
+import importlib
+
+# ── Simulator helpers — imported lazily inside worker to avoid circular import
+# when this file is exec'd from within a running log_simulator.py process.
+def _get_process_and_send():
+    from log_simulator import process_and_send
+    return process_and_send
+
+app = Flask(__name__)
+app.config["JSON_SORT_KEYS"] = False
+app.jinja_env.auto_reload = True          # always read template from disk
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+# ── Load config ───────────────────────────────────────────────────────────────
+_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
+with open(_CONFIG_PATH) as _f:
+    CONFIG = json.load(_f)
+
+THREAT_LEVELS = list(CONFIG.get("threat_generation_levels", {
+    "Benign Traffic Only": 86400,
+    "Realistic": 7200,
+    "Elevated": 3600,
+    "High": 1800,
+    "Extreme": 600,
+    "Insane": 0,
+}).keys())
+
+
+# ── Load simulator modules ────────────────────────────────────────────────────
+def _load_modules():
+    modules = {}
+    module_dir = os.path.join(PROJECT_ROOT, "modules")
+    for filename in sorted(os.listdir(module_dir)):
+        if not filename.endswith(".py") or filename.startswith("__"):
+            continue
+        module_name = filename[:-3]
+        full_name = f"modules.{module_name}"
+        try:
+            if full_name in sys.modules:
+                mod = importlib.reload(sys.modules[full_name])
+            else:
+                mod = importlib.import_module(full_name)
+            if not hasattr(mod, "NAME"):
+                continue
+            modules[mod.NAME] = mod
+        except Exception as e:
+            print(f"[dashboard] Could not load module {module_name}: {e}")
+    return modules
+
+MODULES = _load_modules()
+
+# ── Build session context (stable user→IP map, same as parallel mode) ────────
+try:
+    from modules.session_utils import build_session_context as _build_session_context
+    SESSION_CONTEXT = _build_session_context(CONFIG)
+except Exception as _e:
+    print(f"[dashboard] Could not build session context: {_e}")
+    SESSION_CONTEXT = {}
+
+
+# ── Session timer ─────────────────────────────────────────────────────────────
+_session_start: float | None = None
+
+# ── Scheduler ─────────────────────────────────────────────────────────────────
+_schedule: list = []          # list of job dicts
+_schedule_lock = threading.Lock()
+
+
+# ── Per-module state ──────────────────────────────────────────────────────────
+class ModuleState:
+    """Holds runtime state and metrics for a single log-generation module."""
+
+    def __init__(self, module):
+        self.module = module
+        self.name = module.NAME
+        self.description = getattr(module, "DESCRIPTION", "")
+
+        # Control
+        self.status = "stopped"       # stopped | running | error
+        self.error_msg = ""
+        self._thread = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+
+        # Config
+        self.threat_level = "Realistic"
+        self.event_interval: float = CONFIG.get("base_event_interval_seconds", 1.0)
+
+        # Metrics
+        self.total_logs = 0
+        self.total_threats = 0
+        self.last_threat: str = ""
+        self._timestamps: deque = deque(maxlen=600)        # all events
+        self._benign_timestamps: deque = deque(maxlen=600) # non-threat events
+        self._threat_timestamps: deque = deque(maxlen=600) # threat events
+        self._threat_event_details: deque = deque(maxlen=600)  # (timestamp, event_name) pairs
+        self._threat_counts: dict = {}                         # {event_name: int} this session
+
+        # Build threat name set for classification
+        self.threat_names: set = set()
+        fn = getattr(module, "get_threat_names", None)
+        if callable(fn):
+            try:
+                self.threat_names = set(fn())
+            except Exception:
+                pass
+
+    # ── Metric helpers ────────────────────────────────────────────────────────
+
+    def record_log(self, event_name: str | None, log_count: int = 1):
+        """Record one event. log_count is the number of individual log lines in
+        the burst (e.g. 30 for a port-scan).  Threat counter increments by 1
+        regardless of burst size — a brute-force is one event, not 30."""
+        now = time.time()
+        with self._lock:
+            self.total_logs += log_count
+            self._timestamps.append(now)          # one per event, not per log line
+            if event_name and event_name in self.threat_names:
+                self.total_threats += 1           # one threat per event, not per log line
+                self._threat_timestamps.append(now)
+                self._threat_event_details.append((now, event_name))
+                self.last_threat = event_name
+                self._threat_counts[event_name] = self._threat_counts.get(event_name, 0) + 1
+            else:
+                self._benign_timestamps.append(now)  # one per event, not per log line
+
+    def get_rate(self, window: int = 10) -> float:
+        cutoff = time.time() - window
+        with self._lock:
+            recent = sum(1 for t in self._timestamps if t > cutoff)
+        return round(recent / window, 2)
+
+    def reset_metrics(self):
+        with self._lock:
+            self.total_logs = 0
+            self.total_threats = 0
+            self.last_threat = ""
+            self._timestamps.clear()
+            self._benign_timestamps.clear()
+            self._threat_timestamps.clear()
+            self._threat_event_details.clear()
+            self._threat_counts.clear()
+
+    # ── Serialisation ─────────────────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "status": self.status,
+            "error": self.error_msg,
+            "threat_level": self.threat_level,
+            "total_logs": self.total_logs,
+            "total_threats": self.total_threats,
+            "rate_per_sec": self.get_rate(),
+            "last_threat": self.last_threat,
+            "event_interval": self.event_interval,
+            "threat_breakdown": dict(self._threat_counts),
+        }
+
+
+# Instantiate states for every loaded module
+MODULE_STATES: dict[str, ModuleState] = {
+    name: ModuleState(mod) for name, mod in MODULES.items()
+}
+
+
+# ── Module worker thread ──────────────────────────────────────────────────────
+
+def _module_worker(state: ModuleState, config: dict):
+    """
+    Runs continuously, calling module.generate_log() and forwarding results
+    to the appropriate transport via process_and_send().  Stopped by setting
+    state._stop_event.
+    """
+    benign_only = (state.threat_level == "Benign Traffic Only")
+    context: dict = {"session_context": SESSION_CONTEXT}
+    process_and_send = _get_process_and_send()
+
+    # Every module initialises last_threat_event_time = 0 at import, which
+    # makes the very first generate_log call always fire a threat (since
+    # time.time() - 0 >> any interval).  Reset it to now so the module waits
+    # the correct interval before the first threat, matching the selected level.
+    if hasattr(state.module, "last_threat_event_time"):
+        state.module.last_threat_event_time = time.time()
+
+    while not state._stop_event.is_set():
+        try:
+            result = state.module.generate_log(
+                config=config,
+                threat_level=state.threat_level,
+                benign_only=benign_only,
+                context=context,
+            )
+            if result is not None:
+                if isinstance(result, tuple) and len(result) == 2:
+                    log_content, event_name = result
+                else:
+                    log_content, event_name = result, None
+
+                logs = log_content if isinstance(log_content, list) else [log_content]
+                valid = [m for m in logs if m]
+                for msg in valid:
+                    process_and_send(msg, state.module, config, event_name)
+                if valid:
+                    state.record_log(event_name, log_count=len(valid))
+
+        except Exception as exc:
+            state.status = "error"
+            state.error_msg = str(exc)
+            print(f"[{state.name}] worker error: {exc}")
+            # Brief pause before retry
+            state._stop_event.wait(timeout=5)
+            if not state._stop_event.is_set():
+                state.status = "running"
+                state.error_msg = ""
+            continue
+
+        state._stop_event.wait(timeout=state.event_interval)
+
+    state.status = "stopped"
+
+
+# ── REST API ──────────────────────────────────────────────────────────────────
+
+# ── Module start/stop helpers (shared by API endpoints and scheduler) ─────────
+
+def _start_module_state(state: ModuleState, threat_level: str,
+                        event_interval: float | None = None) -> None:
+    """Start *state* if not already running. Caller holds no locks."""
+    global _session_start
+    if state.status == "running":
+        return
+    if threat_level in THREAT_LEVELS:
+        state.threat_level = threat_level
+    if event_interval is not None and event_interval >= 0.01:
+        state.event_interval = event_interval
+    state._stop_event.clear()
+    state.error_msg = ""
+    if _session_start is None:
+        _session_start = time.time()
+    t = threading.Thread(
+        target=_module_worker,
+        args=(state, copy.deepcopy(CONFIG)),
+        daemon=True,
+        name=f"logsim-{state.name}",
+    )
+    state._thread = t
+    state.status = "running"
+    t.start()
+
+
+def _stop_module_state(state: ModuleState) -> None:
+    """Stop *state* and wait up to 5 s for the worker to exit."""
+    state._stop_event.set()
+    if state._thread and state._thread.is_alive():
+        state._thread.join(timeout=5)
+    state.status = "stopped"
+
+
+@app.get("/api/modules")
+def api_get_modules():
+    return jsonify([s.to_dict() for s in MODULE_STATES.values()])
+
+
+@app.get("/api/threat_levels")
+def api_threat_levels():
+    return jsonify(THREAT_LEVELS)
+
+
+@app.post("/api/modules/<name>/start")
+def api_start_module(name: str):
+    state = MODULE_STATES.get(name)
+    if not state:
+        return jsonify({"error": f"Module '{name}' not found"}), 404
+    if state.status == "running":
+        return jsonify({"error": "Module is already running"}), 409
+    body = request.get_json(silent=True) or {}
+    level = body.get("threat_level", state.threat_level)
+    if level not in THREAT_LEVELS:
+        return jsonify({"error": f"Unknown threat level '{level}'"}), 400
+    raw_iv = body.get("event_interval")
+    iv = None
+    if raw_iv is not None:
+        try:
+            iv = float(raw_iv)
+        except (ValueError, TypeError):
+            iv = None
+    _start_module_state(state, level, iv)
+    return jsonify(state.to_dict())
+
+
+@app.post("/api/modules/<name>/stop")
+def api_stop_module(name: str):
+    state = MODULE_STATES.get(name)
+    if not state:
+        return jsonify({"error": f"Module '{name}' not found"}), 404
+    _stop_module_state(state)
+    return jsonify(state.to_dict())
+
+
+@app.post("/api/modules/start_all")
+def api_start_all():
+    body = request.get_json(silent=True) or {}
+    level = body.get("threat_level", "Realistic")
+    for state in MODULE_STATES.values():
+        _start_module_state(state, level)
+    return jsonify([s.to_dict() for s in MODULE_STATES.values()])
+
+
+@app.post("/api/modules/stop_all")
+def api_stop_all():
+    for state in MODULE_STATES.values():
+        _stop_module_state(state)
+    return jsonify([s.to_dict() for s in MODULE_STATES.values()])
+
+
+@app.post("/api/modules/<name>/reset")
+def api_reset_metrics(name: str):
+    state = MODULE_STATES.get(name)
+    if not state:
+        return jsonify({"error": f"Module '{name}' not found"}), 404
+    state.reset_metrics()
+    return jsonify(state.to_dict())
+
+
+@app.post("/api/reset_all")
+def api_reset_all():
+    global _session_start
+    _session_start = None
+    for state in MODULE_STATES.values():
+        state.reset_metrics()
+    return jsonify([s.to_dict() for s in MODULE_STATES.values()])
+
+
+@app.route("/api/modules/<name>/interval", methods=["PATCH"])
+def api_set_interval(name: str):
+    state = MODULE_STATES.get(name)
+    if not state:
+        return jsonify({"error": f"Module '{name}' not found"}), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        iv = float(body.get("event_interval", 0))
+        if iv < 0.01:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"error": "event_interval must be a number >= 0.01"}), 400
+    state.event_interval = iv
+    return jsonify(state.to_dict())
+
+
+@app.get("/api/modules/<name>/threats")
+def api_get_threats(name: str):
+    state = MODULE_STATES.get(name)
+    if not state:
+        return jsonify({"error": f"Module '{name}' not found"}), 404
+    fn = getattr(state.module, "get_threat_names", None)
+    threats = sorted(fn()) if callable(fn) else []
+    return jsonify({"module": name, "threats": threats})
+
+
+@app.post("/api/modules/<name>/fire")
+def api_fire_threat(name: str):
+    state = MODULE_STATES.get(name)
+    if not state:
+        return jsonify({"error": f"Module '{name}' not found"}), 404
+    body = request.get_json(silent=True) or {}
+    event_name = body.get("event")
+    if not event_name:
+        return jsonify({"error": "event name required"}), 400
+    process_and_send = _get_process_and_send()
+    cfg = copy.deepcopy(CONFIG)
+    context = {"session_context": SESSION_CONTEXT}
+    try:
+        result = state.module.generate_log(
+            config=cfg,
+            threat_level="Insane",
+            benign_only=False,
+            context=context,
+            scenario_event=event_name,
+        )
+        if result is None:
+            return jsonify({"fired": False, "reason": "generate_log returned None"}), 200
+        log_content, ret_name = result if (isinstance(result, tuple) and len(result) == 2) else (result, event_name)
+        logs = log_content if isinstance(log_content, list) else [log_content]
+        valid = [m for m in logs if m]
+        for msg in valid:
+            process_and_send(msg, state.module, cfg, ret_name or event_name)
+        if valid:
+            state.record_log(ret_name or event_name, log_count=len(valid))
+        return jsonify({"fired": True, "event": event_name, "log_count": len(valid)})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+# ── Multi-module scenarios (imported lazily from log_simulator) ───────────────
+_SCENARIOS = None
+
+def _get_scenarios():
+    global _SCENARIOS
+    if _SCENARIOS is not None:
+        return _SCENARIOS
+    try:
+        from log_simulator import (
+            run_aws_pentest_scenario,
+            run_phishing_kill_chain_scenario,
+            run_insider_threat_scenario,
+            run_gcp_cloud_pentest_scenario,
+            run_web_app_compromise_scenario,
+            run_vpn_compromise_scenario,
+            run_aitm_session_hijack_scenario,
+            run_ransomware_precursor_scenario,
+            run_dns_c2_killchain_scenario,
+            run_device_compromise_scenario,
+            run_infoblox_single_threat,
+        )
+        _SCENARIOS = [
+            {"id": "1",  "name": "AWS Pentest & Defense Evasion",                          "func": run_aws_pentest_scenario},
+            {"id": "2",  "name": "Phishing Kill Chain (Email → DNS → C2 → Credential Theft)", "func": run_phishing_kill_chain_scenario},
+            {"id": "3",  "name": "Insider Threat / Cloud Data Exfiltration",               "func": run_insider_threat_scenario},
+            {"id": "4",  "name": "GCP Cloud Pentest (Privilege Escalation + Defense Evasion)", "func": run_gcp_cloud_pentest_scenario},
+            {"id": "5",  "name": "Web App Compromise → Server C2",                         "func": run_web_app_compromise_scenario},
+            {"id": "6",  "name": "VPN Compromise → Lateral Movement",                      "func": run_vpn_compromise_scenario},
+            {"id": "7",  "name": "AiTM Session Hijack → Cloud Abuse",                      "func": run_aitm_session_hijack_scenario},
+            {"id": "8",  "name": "Ransomware Precursor Kill Chain",                         "func": run_ransomware_precursor_scenario},
+            {"id": "9",  "name": "DNS C2 Kill Chain [requires Infoblox]",                  "func": run_dns_c2_killchain_scenario},
+            {"id": "10", "name": "Device Compromise Full Lifecycle [requires Infoblox]",   "func": run_device_compromise_scenario},
+            {"id": "11", "name": "Infoblox — C2 Beacon",                                   "func": lambda m, c: run_infoblox_single_threat("C2_BEACON", m, c)},
+            {"id": "12", "name": "Infoblox — DNS Tunneling",                               "func": lambda m, c: run_infoblox_single_threat("DNS_TUNNEL", m, c)},
+            {"id": "13", "name": "Infoblox — RPZ Block",                                   "func": lambda m, c: run_infoblox_single_threat("RPZ_BLOCK", m, c)},
+            {"id": "14", "name": "Infoblox — Threat Protect Block",                        "func": lambda m, c: run_infoblox_single_threat("THREAT_PROTECT", m, c)},
+            {"id": "15", "name": "Infoblox — NXDOMAIN Storm",                              "func": lambda m, c: run_infoblox_single_threat("NXDOMAIN_STORM", m, c)},
+            {"id": "16", "name": "Infoblox — DNS Flood",                                   "func": lambda m, c: run_infoblox_single_threat("DNS_FLOOD", m, c)},
+            {"id": "17", "name": "Infoblox — DHCP Starvation",                             "func": lambda m, c: run_infoblox_single_threat("DHCP_STARVATION", m, c)},
+        ]
+    except Exception as e:
+        print(f"[dashboard] Could not load scenarios from log_simulator: {e}")
+        _SCENARIOS = []
+    return _SCENARIOS
+
+
+@app.get("/api/scenarios")
+def api_get_scenarios():
+    scenarios = _get_scenarios()
+    return jsonify([{"id": s["id"], "name": s["name"]} for s in scenarios])
+
+
+@app.post("/api/scenarios/<scenario_id>/run")
+def api_run_scenario(scenario_id: str):
+    scenarios = _get_scenarios()
+    s = next((x for x in scenarios if x["id"] == scenario_id), None)
+    if not s:
+        return jsonify({"error": f"Scenario '{scenario_id}' not found"}), 404
+    cfg = copy.deepcopy(CONFIG)
+    modules = {name: state.module for name, state in MODULE_STATES.items()}
+    t = threading.Thread(
+        target=s["func"], args=(modules, cfg), daemon=True,
+        name=f"scenario-{scenario_id}-{int(time.time())}",
+    )
+    t.start()
+    return jsonify({"started": True, "scenario": s["name"]})
+
+
+# ── Scheduler ─────────────────────────────────────────────────────────────────
+
+def _execute_job(job: dict) -> None:
+    with _schedule_lock:
+        job["status"] = "running"
+    try:
+        t   = job["type"]
+        p   = job["params"]
+        if t == "module_start":
+            state = MODULE_STATES.get(p["name"])
+            if state:
+                _start_module_state(state, p.get("threat_level", state.threat_level),
+                                    p.get("event_interval"))
+        elif t == "module_stop":
+            state = MODULE_STATES.get(p["name"])
+            if state:
+                _stop_module_state(state)
+        elif t == "global_start":
+            for state in MODULE_STATES.values():
+                _start_module_state(state, p.get("threat_level", "Realistic"),
+                                    p.get("event_interval"))
+        elif t == "global_stop":
+            for state in MODULE_STATES.values():
+                _stop_module_state(state)
+        elif t == "scenario":
+            scenarios = _get_scenarios()
+            s = next((x for x in scenarios if x["id"] == p["scenario_id"]), None)
+            if s:
+                cfg = copy.deepcopy(CONFIG)
+                mods = {n: st.module for n, st in MODULE_STATES.items()}
+                threading.Thread(target=s["func"], args=(mods, cfg), daemon=True).start()
+        elif t == "rate_change":
+            targets = ([MODULE_STATES[p["name"]]] if p.get("name") and p["name"] in MODULE_STATES
+                       else list(MODULE_STATES.values()))
+            for state in targets:
+                try:
+                    state.event_interval = float(p["event_interval"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+        with _schedule_lock:
+            job["status"] = "done"
+            job["result"] = "executed"
+    except Exception as exc:
+        with _schedule_lock:
+            job["status"] = "error"
+            job["result"] = str(exc)
+
+
+def _scheduler_tick() -> None:
+    while True:
+        time.sleep(1)
+        now = time.time()
+        with _schedule_lock:
+            due = [j for j in _schedule if j["status"] == "pending" and j["run_at"] <= now]
+        for job in due:
+            _execute_job(job)
+        # Trim completed jobs: keep only last 20 finished ones
+        with _schedule_lock:
+            done = [j for j in _schedule if j["status"] in ("done", "error")]
+            pending = [j for j in _schedule if j["status"] in ("pending", "running")]
+            _schedule[:] = pending + done[-20:]
+
+
+threading.Thread(target=_scheduler_tick, daemon=True, name="scheduler").start()
+
+
+@app.get("/api/schedule")
+def api_schedule_list():
+    with _schedule_lock:
+        jobs = list(_schedule)
+    return jsonify(jobs)
+
+
+@app.post("/api/schedule")
+def api_schedule_add():
+    body = request.get_json(silent=True) or {}
+    job_type = body.get("type", "")
+    valid_types = {"module_start", "module_stop", "global_start", "global_stop",
+                   "scenario", "rate_change"}
+    if job_type not in valid_types:
+        return jsonify({"error": f"Unknown job type '{job_type}'"}), 400
+
+    # Resolve run_at
+    if "run_at" in body:
+        try:
+            run_at = float(body["run_at"])
+        except (ValueError, TypeError):
+            return jsonify({"error": "run_at must be a unix timestamp float"}), 400
+    elif "delay_seconds" in body:
+        try:
+            run_at = time.time() + float(body["delay_seconds"])
+        except (ValueError, TypeError):
+            return jsonify({"error": "delay_seconds must be numeric"}), 400
+    else:
+        return jsonify({"error": "provide run_at (epoch) or delay_seconds"}), 400
+
+    job = {
+        "id":     str(_uuid.uuid4()),
+        "label":  body.get("label", job_type),
+        "type":   job_type,
+        "params": body.get("params", {}),
+        "run_at": run_at,
+        "status": "pending",
+        "result": "",
+    }
+    with _schedule_lock:
+        _schedule.append(job)
+    return jsonify(job), 201
+
+
+@app.delete("/api/schedule/<job_id>")
+def api_schedule_cancel(job_id: str):
+    with _schedule_lock:
+        job = next((j for j in _schedule if j["id"] == job_id), None)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job["status"] != "pending":
+            return jsonify({"error": f"Cannot cancel job with status '{job['status']}'"}), 409
+        _schedule.remove(job)
+    return jsonify({"cancelled": job_id})
+
+
+@app.delete("/api/schedule")
+def api_schedule_clear():
+    with _schedule_lock:
+        before = len(_schedule)
+        _schedule[:] = [j for j in _schedule if j["status"] != "pending"]
+        removed = before - len(_schedule)
+    return jsonify({"cleared": removed})
+
+
+# ── Health / preflight checks ─────────────────────────────────────────────────
+_SKIP_COLLECTORS = {
+    "google_login_collector", "google_drive_collector", "google_admin_collector",
+    "google_user_accounts_collector", "google_token_collector",
+}
+
+# Health cache — populated by background monitor thread every 60 s
+_health_cache: dict = {}
+_health_ts: float = 0.0
+_health_prev: dict = {}   # {f"{group}|{check}": status} from last run
+_health_alerts: list = []
+_health_lock = threading.Lock()
+
+
+def _run_health_checks() -> dict:
+    """Execute all health checks and return the result dict (no Flask response)."""
+    import socket as _socket
+    import requests as _requests
+
+    results = []
+
+    # ── 1. .env variable presence ─────────────────────────────────────────────
+    ENV_VARS = {
+        "SYSLOG_HOST":            "Syslog",
+        "AWS_ACCESS_KEY_ID":      "AWS",
+        "AWS_SECRET_ACCESS_KEY":  "AWS",
+        "s3_bucket_name":         "AWS",
+        "aws_account_id":         "AWS",
+        "aws_region":             "AWS",
+        "GCP_PROJECT_ID":         "GCP",
+        "GCP_PUBSUB_TOPIC":       "GCP",
+    }
+    for var, group in ENV_VARS.items():
+        val = os.getenv(var, "")
+        results.append({
+            "group": group,
+            "check": f"{var} defined",
+            "status": "ok" if val else "warn",
+            "detail": "set" if val else "not set — transport will be skipped",
+        })
+
+    # Per-collector env vars (skip Google Workspace)
+    global_http_url = os.getenv("HTTP_COLLECTOR_URL", "")
+    for cid, ccfg in CONFIG.get("http_collectors", {}).items():
+        if cid in _SKIP_COLLECTORS:
+            continue
+        uvar = ccfg.get("url_env_var", "")
+        kvar = ccfg.get("api_key_env_var", "")
+        label = cid.replace("_collector", "").replace("_", " ").title()
+        group = f"HTTP — {label}"
+        # URL: passes if either the per-collector var OR the global fallback is set
+        if uvar:
+            specific_url = os.getenv(uvar, "")
+            if specific_url:
+                url_status, url_detail = "ok", f"{uvar} set"
+            elif global_http_url:
+                url_status, url_detail = "ok", f"using HTTP_COLLECTOR_URL (global fallback)"
+            else:
+                url_status, url_detail = "warn", f"neither {uvar} nor HTTP_COLLECTOR_URL is set"
+            results.append({
+                "group": group,
+                "check": "collector URL defined",
+                "status": url_status,
+                "detail": url_detail,
+            })
+        # Key: no global fallback exists — each collector needs its own
+        if kvar:
+            key_val = os.getenv(kvar, "")
+            results.append({
+                "group": group,
+                "check": f"{kvar} defined",
+                "status": "ok" if key_val else "warn",
+                "detail": "set" if key_val else "not set — auth will fail",
+            })
+
+    # ── 2. Syslog TCP connectivity ────────────────────────────────────────────
+    syslog_host = os.getenv("SYSLOG_HOST", "")
+    syslog_port = CONFIG.get("syslog_port", 514)
+    if syslog_host:
+        try:
+            with _socket.create_connection((syslog_host, syslog_port), timeout=3):
+                pass
+            results.append({
+                "group": "Syslog",
+                "check": f"TCP {syslog_host}:{syslog_port} reachable",
+                "status": "ok", "detail": "connected",
+            })
+        except Exception as exc:
+            results.append({
+                "group": "Syslog",
+                "check": f"TCP {syslog_host}:{syslog_port} reachable",
+                "status": "error", "detail": str(exc),
+            })
+    else:
+        results.append({
+            "group": "Syslog", "check": "TCP connectivity",
+            "status": "skip", "detail": "SYSLOG_HOST not set",
+        })
+
+    # ── 3. HTTP collector reachability ────────────────────────────────────────
+    http_urls_checked: set = set()
+
+    def _check_http_url(url, label, group):
+        if not url or url in http_urls_checked:
+            return
+        http_urls_checked.add(url)
+        try:
+            r = _requests.head(url, timeout=3, verify=False,
+                               headers={"User-Agent": "LogSim-healthcheck/1.0"})
+            # Any HTTP response (even 401/403) means endpoint is reachable
+            results.append({
+                "group": group, "check": f"{label} reachable",
+                "status": "ok", "detail": f"HTTP {r.status_code}",
+            })
+        except Exception as exc:
+            results.append({
+                "group": group, "check": f"{label} reachable",
+                "status": "error", "detail": str(exc),
+            })
+
+    global_url = os.getenv("HTTP_COLLECTOR_URL", "")
+    if global_url:
+        _check_http_url(global_url, "HTTP_COLLECTOR_URL", "HTTP (global fallback)")
+
+    for cid, ccfg in CONFIG.get("http_collectors", {}).items():
+        if cid in _SKIP_COLLECTORS:
+            continue
+        uvar = ccfg.get("url_env_var", "")
+        url = os.getenv(uvar, "") if uvar else ""
+        label = cid.replace("_collector", "").replace("_", " ").title()
+        if url:
+            _check_http_url(url, label, f"HTTP — {label}")
+
+    # ── 4. AWS S3 permissions ─────────────────────────────────────────────────
+    aws_key    = os.getenv("AWS_ACCESS_KEY_ID", "")
+    aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    aws_bucket = os.getenv("s3_bucket_name", "")
+    aws_region = os.getenv("aws_region", "us-east-1")
+    if aws_key and aws_secret and aws_bucket:
+        try:
+            import boto3 as _boto3
+            session = _boto3.Session(
+                aws_access_key_id=aws_key,
+                aws_secret_access_key=aws_secret,
+                region_name=aws_region,
+            )
+            s3 = session.client("s3")
+            s3.head_bucket(Bucket=aws_bucket)
+            results.append({
+                "group": "AWS S3", "check": f"bucket '{aws_bucket}' accessible",
+                "status": "ok", "detail": "head_bucket succeeded",
+            })
+            test_key = f"logsim-healthcheck/{int(time.time())}.txt"
+            s3.put_object(Bucket=aws_bucket, Key=test_key, Body=b"logsim-healthcheck")
+            s3.delete_object(Bucket=aws_bucket, Key=test_key)
+            results.append({
+                "group": "AWS S3", "check": "s3:PutObject permission",
+                "status": "ok", "detail": "write + delete succeeded",
+            })
+        except ImportError:
+            results.append({
+                "group": "AWS S3", "check": "boto3 installed",
+                "status": "error", "detail": "not installed — run: pip install boto3",
+            })
+        except Exception as exc:
+            results.append({
+                "group": "AWS S3", "check": "S3 access",
+                "status": "error", "detail": str(exc),
+            })
+    else:
+        missing = [v for v in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "s3_bucket_name"] if not os.getenv(v, "")]
+        results.append({
+            "group": "AWS S3", "check": "credentials present",
+            "status": "skip", "detail": f"not set: {', '.join(missing)}",
+        })
+
+    # ── 5. GCP Pub/Sub permissions ────────────────────────────────────────────
+    gcp_project = os.getenv("GCP_PROJECT_ID", "")
+    gcp_topic   = os.getenv("GCP_PUBSUB_TOPIC", "")
+    inline_key  = os.getenv("GCP_SERVICE_ACCOUNT_KEY_JSON", "")
+    adc_path    = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if gcp_project and gcp_topic and (inline_key or adc_path):
+        try:
+            from google.cloud import pubsub_v1 as _pubsub
+            if inline_key:
+                import json as _json
+                from google.oauth2 import service_account as _sa
+                creds = _sa.Credentials.from_service_account_info(
+                    _json.loads(inline_key),
+                    scopes=["https://www.googleapis.com/auth/pubsub"],
+                )
+                publisher = _pubsub.PublisherClient(credentials=creds)
+            else:
+                publisher = _pubsub.PublisherClient()
+            topic_path = publisher.topic_path(gcp_project, gcp_topic)
+            publisher.get_topic(request={"topic": topic_path})
+            results.append({
+                "group": "GCP Pub/Sub", "check": f"topic '{gcp_topic}' accessible",
+                "status": "ok", "detail": "get_topic succeeded",
+            })
+        except ImportError:
+            results.append({
+                "group": "GCP Pub/Sub", "check": "google-cloud-pubsub installed",
+                "status": "error", "detail": "not installed — run: pip install google-cloud-pubsub",
+            })
+        except Exception as exc:
+            results.append({
+                "group": "GCP Pub/Sub", "check": "Pub/Sub access",
+                "status": "error", "detail": str(exc),
+            })
+    else:
+        missing = []
+        if not gcp_project: missing.append("GCP_PROJECT_ID")
+        if not gcp_topic:   missing.append("GCP_PUBSUB_TOPIC")
+        if not inline_key and not adc_path:
+            missing.append("GCP_SERVICE_ACCOUNT_KEY_JSON or GOOGLE_APPLICATION_CREDENTIALS")
+        results.append({
+            "group": "GCP Pub/Sub", "check": "credentials present",
+            "status": "skip", "detail": f"not set: {', '.join(missing)}" if missing else "skipped",
+        })
+
+    overall = ("error" if any(r["status"] == "error" for r in results)
+               else "warn" if any(r["status"] == "warn" for r in results)
+               else "ok")
+    return {"overall": overall, "checks": results}
+
+
+def _health_monitor_tick():
+    """Background thread: run health checks every 60 s, detect state transitions."""
+    global _health_cache, _health_ts, _health_prev, _health_alerts
+    while True:
+        time.sleep(60)
+        try:
+            result = _run_health_checks()
+            new_map = {f"{r['group']}|{r['check']}": r["status"] for r in result["checks"]}
+            with _health_lock:
+                alerts = []
+                for key, new_st in new_map.items():
+                    old_st = _health_prev.get(key, "skip")
+                    if new_st == "error" and old_st != "error":
+                        group, check = key.split("|", 1)
+                        detail = next((r["detail"] for r in result["checks"]
+                                       if r["group"] == group and r["check"] == check), "")
+                        alerts.append({"group": group, "check": check,
+                                       "from": old_st, "to": "error", "detail": detail})
+                    elif new_st == "warn" and old_st not in ("error", "warn"):
+                        group, check = key.split("|", 1)
+                        detail = next((r["detail"] for r in result["checks"]
+                                       if r["group"] == group and r["check"] == check), "")
+                        alerts.append({"group": group, "check": check,
+                                       "from": old_st, "to": "warn", "detail": detail})
+                _health_prev = new_map
+                _health_alerts.extend(alerts)
+                _health_cache = result
+                _health_ts = time.time()
+        except Exception:
+            pass
+
+
+# Start the background health monitor
+threading.Thread(target=_health_monitor_tick, daemon=True, name="health-monitor").start()
+
+
+@app.get("/api/health")
+def api_health():
+    force = request.args.get("refresh", "0") == "1"
+    with _health_lock:
+        cached = _health_cache if not force else None
+    if cached:
+        return jsonify(cached)
+    # Fresh run (forced or cache empty)
+    global _health_ts
+    result = _run_health_checks()
+    with _health_lock:
+        _health_cache.clear()
+        _health_cache.update(result)
+        _health_ts = time.time()
+    return jsonify(result)
+
+
+@app.get("/api/health/alerts")
+def api_health_alerts():
+    """Return pending health alerts and clear them."""
+    with _health_lock:
+        alerts = list(_health_alerts)
+        _health_alerts.clear()
+    return jsonify({"alerts": alerts})
+
+
+@app.get("/api/timeline")
+def api_timeline():
+    BUCKETS = 60
+    BUCKET_SEC = 2
+    window = BUCKETS * BUCKET_SEC   # 120 seconds
+    now = time.time()
+
+    result = {}
+    for name, state in MODULE_STATES.items():
+        benign       = [0] * BUCKETS
+        threats      = [0] * BUCKETS
+        threat_names = [[] for _ in range(BUCKETS)]
+        with state._lock:
+            for ts in state._benign_timestamps:
+                age = now - ts
+                if 0 <= age < window:
+                    idx = BUCKETS - 1 - int(age / BUCKET_SEC)
+                    benign[max(0, idx)] += 1
+            for ts in state._threat_timestamps:
+                age = now - ts
+                if 0 <= age < window:
+                    idx = BUCKETS - 1 - int(age / BUCKET_SEC)
+                    threats[max(0, idx)] += 1
+            for ts, ename in state._threat_event_details:
+                age = now - ts
+                if 0 <= age < window:
+                    idx = BUCKETS - 1 - int(age / BUCKET_SEC)
+                    bucket_names = threat_names[max(0, idx)]
+                    if ename not in bucket_names:
+                        bucket_names.append(ename)
+        result[name] = {"benign": benign, "threats": threats, "threat_names": threat_names}
+
+    labels = [f"-{(BUCKETS - i) * BUCKET_SEC}s" for i in range(BUCKETS)]
+    sparse = [labels[i] if i % 10 == 0 or i == BUCKETS - 1 else "" for i in range(BUCKETS)]
+    return jsonify({"labels": sparse, "modules": result})
+
+
+@app.get("/api/metrics")
+def api_metrics():
+    states = list(MODULE_STATES.values())
+    total_logs = sum(s.total_logs for s in states)
+    total_threats = sum(s.total_threats for s in states)
+    total_rate = round(sum(s.get_rate() for s in states), 2)
+    running = sum(1 for s in states if s.status == "running")
+    return jsonify({
+        "total_logs": total_logs,
+        "total_threats": total_threats,
+        "total_rate_per_sec": total_rate,
+        "modules_running": running,
+        "modules_total": len(states),
+        "session_start": _session_start,
+        "per_module": [s.to_dict() for s in states],
+    })
+
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+
+@app.get("/")
+def index():
+    resp = make_response(render_template("index.html"))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    host = os.getenv("DASHBOARD_HOST", "0.0.0.0")
+    port = int(os.getenv("DASHBOARD_PORT", "5000"))
+    print(f"\nLogSim Dashboard  →  http://{host}:{port}")
+    print(f"Loaded {len(MODULE_STATES)} modules: {', '.join(MODULE_STATES.keys())}\n")
+    app.run(host=host, port=port, debug=False, threaded=True)
