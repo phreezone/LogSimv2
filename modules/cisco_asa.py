@@ -132,7 +132,7 @@ def _generate_full_syslog_message(config, asa_message, event_time=None):
             break
 
     pri = 20 * 8 + sev
-    return f"<{pri}>{timestamp} {hostname}: {asa_message}"
+    return f"<{pri}> {timestamp} {hostname} : {asa_message}"
 
 
 def _get_user_ip_map(config):
@@ -241,7 +241,7 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
     built_log = (
         f"%ASA-6-{built_id}: Built {effective_direction} {protocol} connection {conn_id} "
         f"for {dest_interface}:{dest_ip}/{dest_port} ({dest_ip}/{dest_port}) "
-        f"to {src_interface}:{src_ip}/{src_port} ({nat_ip}/{nat_port}) ({user})"
+        f"to {src_interface}:{src_ip}/{src_port} ({nat_ip}/{nat_port})({user})"
     )
     session_logs.append(_generate_full_syslog_message(config, built_log))
 
@@ -292,7 +292,8 @@ def _generate_anyconnect_vpn_log(config, user=None, public_ip=None, session_cont
             user = random.choice(list(user_ip_map.keys()))
 
     if not public_ip:
-        source_ingress = random.choice(config.get('benign_ingress_sources', [{}]))
+        ingress_sources = config.get('benign_ingress_sources', [{}])
+        source_ingress = random.choice(ingress_sources) if ingress_sources else {}
         try:
             public_ip = rand_ip_from_network(ip_network(source_ingress.get("ip_range", "1.1.1.0/24"), strict=False))
         except (AddressValueError, ValueError):
@@ -488,13 +489,13 @@ def _simulate_inbound_block(config):
     message = (
         f"%ASA-4-106023: Deny {protocol} src outside:{scanner_ip}/{src_port} "
         f"dst inside:{target_ip}/{dest_port} "
-        f"by access-group \"{acl_name}\" [0x{hash1:08x}, 0x0]"
+        f"by access-group {acl_name} [0x{hash1:08x}, 0x0]"
     )
     return _generate_full_syslog_message(config, message)
 
 
 def _simulate_ntp_sync(config):
-    """NTP time synchronisation — %ASA-7-609001 + 609002 (Built/Teardown) for UDP/123.
+    """NTP time synchronisation — %ASA-6-302015 + 302016 (Built/Teardown) for UDP/123.
 
     Represents routine clock-sync traffic from internal hosts and network devices
     to public NTP pool servers.  Short duration (< 1 second), tiny byte counts.
@@ -606,17 +607,18 @@ def _simulate_dhcp_log(config):
     asa_config   = config.get(CONFIG_KEY, {})
     outside_ip   = asa_config.get('outside_ip', '203.0.113.1')
     event_type   = random.choices(["built", "teardown"], weights=[70, 30], k=1)[0]
+    src_port     = random.randint(49152, 65535)
     mapped_port  = random.randint(1024, 65535)
     hash1        = random.randint(0, 0xFFFFFFFF)
 
     if event_type == "built":
         message = (
-            f"%ASA-6-305011: Built dynamic TCP translation from inside:{client_ip}/68 "
-            f"to outside:{outside_ip}/{mapped_port} flags {{}}"
+            f"%ASA-6-305011: Built dynamic TCP translation from inside:{client_ip}/{src_port} "
+            f"to outside:{outside_ip}/{mapped_port}"
         )
     else:
         message = (
-            f"%ASA-6-305012: Teardown dynamic TCP translation from inside:{client_ip}/68 "
+            f"%ASA-6-305012: Teardown dynamic TCP translation from inside:{client_ip}/{src_port} "
             f"to outside:{outside_ip}/{mapped_port} duration 0:01:00 [0x{hash1:08x}]"
         )
     return _generate_full_syslog_message(config, message)
@@ -767,7 +769,7 @@ def _simulate_lateral_movement(config, src_ip, session_context=None):
             deny_msg = (
                 f"%ASA-4-106023: Deny {protocol.lower()} src inside:{src_ip}/{src_port} "
                 f"dst inside:{target_ip}/{port} "
-                f"by access-group \"{acl_name}\" [0x{hash1:08x}, 0x0]"
+                f"by access-group {acl_name} [0x{hash1:08x}, 0x0]"
             )
             movement_logs.append(_generate_full_syslog_message(config, deny_msg))
         else:
@@ -853,7 +855,7 @@ def _simulate_ips_alert(config, src_ip):
     deny_msg = (
         f"%ASA-4-106023: Deny {protocol} src outside:{src_ip}/{src_port} "
         f"dst inside:{target_ip}/{dest_port} "
-        f"by access-group \"{acl_name}\" [0x{hash1:08x}, 0x0]"
+        f"by access-group {acl_name} [0x{hash1:08x}, 0x0]"
     )
     alert_logs.append(_generate_full_syslog_message(config, deny_msg))
     return alert_logs
@@ -861,7 +863,7 @@ def _simulate_ips_alert(config, src_ip):
 
 def _simulate_url_filtering_block(config, src_ip):
     """
-    Generates %ASA-3-304001 URL filtering deny messages.
+    Generates %ASA-5-304001 URL filtering deny messages.
     Requires Cisco ASA with URL content filtering / Websense integration enabled.
 
     Syslog format:
@@ -1137,19 +1139,22 @@ def _simulate_vpn_impossible_travel(config, session_context=None):
     t_benign      = datetime.now(timezone.utc) - timedelta(minutes=gap_minutes)
     t_suspicious  = datetime.now(timezone.utc)
 
+    asa_conf     = _get_asa_config(config)
+    group_name   = asa_conf.get('vpn_group_name',   'TunnelGroup_AnyConnect')
+    session_type = asa_conf.get('vpn_session_type', 'AnyConnect')
+
+    def _vpn_start(public_ip, event_time):
+        msg = (
+            f"%ASA-4-113039: Group = {group_name}, Username = {user}, IP = {public_ip}, "
+            f"AnyConnect session profile is {group_name}. "
+            f"Session Type: {session_type}, Duration: 0:00:00, "
+            f"Bytes xmt: 0, Bytes rcv: 0, Reason: User Initiated"
+        )
+        return _generate_full_syslog_message(config, msg, event_time)
+
     return [
-        _generate_anyconnect_vpn_log(
-            config, user=user,
-            public_ip=benign_loc.get("ip", "68.185.12.14"),
-            session_context=session_context,
-            event_time=t_benign,
-        ),
-        _generate_anyconnect_vpn_log(
-            config, user=user,
-            public_ip=suspicious_loc.get("ip", "175.45.176.10"),
-            session_context=session_context,
-            event_time=t_suspicious,
-        ),
+        _vpn_start(benign_loc.get("ip", "68.185.12.14"),      t_benign),
+        _vpn_start(suspicious_loc.get("ip", "175.45.176.10"), t_suspicious),
     ]
 
 
@@ -1299,7 +1304,7 @@ def _simulate_smb_share_enumeration(config, src_ip, session_context=None):
             random.randint(40, 200), random.randint(40, 200),
             random.randint(0, 2),
             src_interface="inside", dest_interface="inside",
-            teardown_reason="TCP Reset"
+            teardown_reason="TCP Reset-I"
         ))
     return logs
 
@@ -1322,21 +1327,25 @@ def generate_log(config, scenario=None, threat_level="Realistic",
     Threat event fallback weights (used when event_mix is absent from config):
       ips_alert                  20  — IDS/IPS signature triggered (400xxx)
       port_scan                  15  — internal port scan (100–200 RST'd connections)
-      auth_brute_force           15  — burst of 109006 auth failures
+      auth_brute_force           13  — burst of 109006 auth failures
       lateral_movement           12  — multi-target SMB/RDP/SSH/WinRM attempts
       large_single_upload_session  8  — single large exfiltration session
       url_filter_block             8  — URL filter deny (304001)
-      cumulative_upload_session    4  — many small uploads to same external IP
       unusual_ssh_session          5  — outbound SSH to external IP
+      smb_share_enumeration        5  — 15–40 rapid SMB/445 probes to many hosts
+      cumulative_upload_session    4  — many small uploads to same external IP
       ssh_proxy_attack             4  — SSH to multiple internal servers
+      targeted_admin_bruteforce    4  — focused 109001+109006 bursts against single admin account
+      smb_new_host_lateral         4  — SMB connections to 5–10 new internal hosts
+      unusual_rdp_session          3  — RDP to internal server
       tor_connection               3  — connection to Tor exit node
       vpn_bruteforce               3  — VPN credential scan
-      vpn_impossible_travel        2  — same user from two distant IPs
-      unusual_rdp_session          3  — RDP to external host
-      dns_c2_beacon                1  — DNS C2 beacon
-      server_outbound_http         1  — server making HTTP to internet
+      vpn_tor_login                3  — successful VPN login from a Tor exit node IP
+      smb_rare_file_transfer       3  — single large SMB session (100 MB – 1 GB)
+      vpn_impossible_travel        2  — same user from two geographically distant IPs
+      dns_c2_beacon                1  — DNS C2 beacon to suspicious external resolver
+      server_outbound_http         1  — server making outbound HTTP to internet
       workstation_lateral_rdp      1  — workstation-to-workstation RDP
-      targeted_admin_bruteforce    4  — focused 109001+109006 bursts against single admin account
     """
     global last_threat_event_time
     session_context = (context or {}).get("session_context")
@@ -1420,104 +1429,105 @@ def generate_log(config, scenario=None, threat_level="Realistic",
                 _, internal_host_ip = random.choice(list(user_ip_map.items()))
 
     # --- Dispatch ---
+    _result = None
     if log_choice == "benign_session":
-        return _simulate_benign_office_traffic(config, session_context)
+        _result = _simulate_benign_office_traffic(config, session_context)
 
     elif log_choice == "inbound_block":
-        return _simulate_inbound_block(config)
+        _result = _simulate_inbound_block(config)
 
     elif log_choice == "anyconnect_vpn":
-        return _generate_anyconnect_vpn_log(config, session_context=session_context)
+        _result = _generate_anyconnect_vpn_log(config, session_context=session_context)
 
     elif log_choice == "aaa_auth":
-        return _generate_aaa_auth_log(config, session_context=session_context)
+        _result = _generate_aaa_auth_log(config, session_context=session_context)
 
     elif log_choice == "ntp_sync":
-        return _simulate_ntp_sync(config)
+        _result = _simulate_ntp_sync(config)
 
     elif log_choice == "internal_traffic":
-        return _simulate_internal_traffic(config, session_context)
+        _result = _simulate_internal_traffic(config, session_context)
 
     elif log_choice == "dhcp_log":
-        return _simulate_dhcp_log(config)
+        _result = _simulate_dhcp_log(config)
 
     elif log_choice == "large_single_upload_session":
         print("    - ASA Module simulating: Large Single Upload Session")
-        return _simulate_large_upload_session(config, internal_host_ip,
-                                               is_cumulative=False,
-                                               session_context=session_context)
+        _result = _simulate_large_upload_session(config, internal_host_ip,
+                                                  is_cumulative=False,
+                                                  session_context=session_context)
 
     elif log_choice == "cumulative_upload_session":
         print("    - ASA Module simulating: Cumulative Large Upload Session")
-        return _simulate_large_upload_session(config, internal_host_ip,
-                                               is_cumulative=True,
-                                               session_context=session_context)
+        _result = _simulate_large_upload_session(config, internal_host_ip,
+                                                  is_cumulative=True,
+                                                  session_context=session_context)
 
     elif log_choice == "unusual_rdp_session":
         print("    - ASA Module simulating: Unusual Internal RDP Session")
-        return _simulate_rdp_session(config, internal_host_ip, session_context)
+        _result = _simulate_rdp_session(config, internal_host_ip, session_context)
 
     elif log_choice == "unusual_ssh_session":
         print("    - ASA Module simulating: Rare External SSH Session")
-        return _simulate_ssh_session(config, internal_host_ip, session_context)
+        _result = _simulate_ssh_session(config, internal_host_ip, session_context)
 
     elif log_choice == "port_scan":
         print("    - ASA Module simulating: Internal Port Scan")
-        return _simulate_port_scan(config, scanner_ip=internal_host_ip,
-                                    session_context=session_context)
+        _result = _simulate_port_scan(config, scanner_ip=internal_host_ip,
+                                       session_context=session_context)
 
     elif log_choice == "ssh_proxy_attack":
         print("    - ASA Module simulating: SSH Proxy Attack (Lateral Movement)")
-        return _simulate_ssh_proxy_attack(config, attacker_ip=internal_host_ip,
-                                           session_context=session_context)
+        _result = _simulate_ssh_proxy_attack(config, attacker_ip=internal_host_ip,
+                                              session_context=session_context)
 
     elif log_choice == "tor_connection":
         print("    - ASA Module simulating: Connection to Tor Exit Node")
-        return _simulate_tor_connection_session(config, internal_host_ip, session_context)
+        _result = _simulate_tor_connection_session(config, internal_host_ip, session_context)
 
     elif log_choice == "vpn_bruteforce":
-        return _simulate_vpn_bruteforce_or_scan(config, session_context)
+        _result = _simulate_vpn_bruteforce_or_scan(config, session_context)
 
     elif log_choice == "vpn_impossible_travel":
-        return _simulate_vpn_impossible_travel(config, session_context)
+        _result = _simulate_vpn_impossible_travel(config, session_context)
 
     elif log_choice == "dns_c2_beacon":
         print("    - ASA Module simulating: DNS C2 Beacon")
-        return _simulate_dns_c2_beacon(config, internal_host_ip, session_context)
+        _result = _simulate_dns_c2_beacon(config, internal_host_ip, session_context)
 
     elif log_choice == "server_outbound_http":
         print("    - ASA Module simulating: Anomalous Server Outbound HTTP")
-        return _simulate_server_outbound_http(config, session_context)
+        _result = _simulate_server_outbound_http(config, session_context)
 
     elif log_choice == "workstation_lateral_rdp":
         print("    - ASA Module simulating: Workstation-to-Workstation RDP")
-        return _simulate_workstation_lateral_rdp(config, internal_host_ip, session_context)
+        _result = _simulate_workstation_lateral_rdp(config, internal_host_ip, session_context)
 
     elif log_choice == "auth_brute_force":
-        return _simulate_auth_brute_force(config, session_context)
+        _result = _simulate_auth_brute_force(config, session_context)
 
     elif log_choice == "targeted_admin_bruteforce":
-        return _simulate_targeted_admin_bruteforce(config, session_context)
+        _result = _simulate_targeted_admin_bruteforce(config, session_context)
 
     elif log_choice == "lateral_movement":
-        return _simulate_lateral_movement(config, internal_host_ip, session_context)
+        _result = _simulate_lateral_movement(config, internal_host_ip, session_context)
 
     elif log_choice == "ips_alert":
-        return _simulate_ips_alert(config, _random_external_ip())
+        _result = _simulate_ips_alert(config, _random_external_ip())
 
     elif log_choice == "url_filter_block":
-        return _simulate_url_filtering_block(config, internal_host_ip)
+        _result = _simulate_url_filtering_block(config, internal_host_ip)
 
     elif log_choice == "vpn_tor_login":
-        return _simulate_vpn_tor_login(config, session_context)
+        _result = _simulate_vpn_tor_login(config, session_context)
 
     elif log_choice == "smb_new_host_lateral":
-        return _simulate_smb_new_host_lateral(config, internal_host_ip, session_context)
+        _result = _simulate_smb_new_host_lateral(config, internal_host_ip, session_context)
 
     elif log_choice == "smb_rare_file_transfer":
-        return _simulate_smb_rare_file_transfer(config, internal_host_ip, session_context)
+        _result = _simulate_smb_rare_file_transfer(config, internal_host_ip, session_context)
 
     elif log_choice == "smb_share_enumeration":
-        return _simulate_smb_share_enumeration(config, internal_host_ip, session_context)
+        _result = _simulate_smb_share_enumeration(config, internal_host_ip, session_context)
 
-    return None
+    return (_result, log_choice) if _result is not None else None
