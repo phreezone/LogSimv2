@@ -67,9 +67,11 @@ Resources:
               - Effect: Allow
                 Action:
                   - "s3:PutObject"
+                  - "s3:DeleteObject"   # Required for preflight health-check key cleanup
                 Resource: !Sub "arn:aws:s3:::${BucketName}/*"
               - Effect: Allow
                 Action:
+                  - "s3:ListBucket"          # Required for preflight HeadBucket check
                   - "s3:PutBucketNotification" # Required to add the SQS notification event
                 Resource: !Sub "arn:aws:s3:::${BucketName}"
 
@@ -104,6 +106,10 @@ Resources:
                 Action:
                   - "s3:GetObject"
                 Resource: !Sub "arn:aws:s3:::${BucketName}/*"
+              - Effect: Allow
+                Action:
+                  - "s3:ListBucket"  # Required for XSIAM data source validation
+                Resource: !Sub "arn:aws:s3:::${BucketName}"
               - Effect: Allow
                 Action:
                   - "sqs:ReceiveMessage"

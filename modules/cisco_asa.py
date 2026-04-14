@@ -487,7 +487,7 @@ def _simulate_inbound_block(config):
 
     hash1 = random.randint(0, 0xFFFFFFFF)
     message = (
-        f"%ASA-4-106023: Deny {protocol} src outside:{scanner_ip}/{src_port} "
+        f"%ASA-4-106023: Deny {protocol.lower()} src outside:{scanner_ip}/{src_port} "
         f"dst inside:{target_ip}/{dest_port} "
         f"by access-group {acl_name} [0x{hash1:08x}, 0x0]"
     )
@@ -853,7 +853,7 @@ def _simulate_ips_alert(config, src_ip):
     src_port = random.randint(1024, 65535)
     hash1    = random.randint(0, 0xFFFFFFFF)
     deny_msg = (
-        f"%ASA-4-106023: Deny {protocol} src outside:{src_ip}/{src_port} "
+        f"%ASA-4-106023: Deny {protocol.lower()} src outside:{src_ip}/{src_port} "
         f"dst inside:{target_ip}/{dest_port} "
         f"by access-group {acl_name} [0x{hash1:08x}, 0x0]"
     )

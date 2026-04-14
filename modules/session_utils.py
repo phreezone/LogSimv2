@@ -217,6 +217,83 @@ def get_zscaler_device_info(user_info):
 
 
 # ---------------------------------------------------------------------------
+# Anonymizer IP helpers – shared across all modules
+# ---------------------------------------------------------------------------
+
+# Fallback VPN provider pool used when config.json has no "vpn_providers" key.
+# Keep this in sync with the config.json "vpn_providers" array.
+_FALLBACK_VPN_PROVIDERS = [
+    {"isp": "Mullvad VPN",             "asn": 39351,  "domain": "mullvad.net",               "country": "NL", "ip_prefix": "45.83",   "ip_range": [220, 223]},
+    {"isp": "Mullvad VPN",             "asn": 39351,  "domain": "mullvad.net",               "country": "SE", "ip_prefix": "194.165", "ip_range": [16, 17]},
+    {"isp": "NordVPN",                 "asn": 207049, "domain": "nordvpn.com",               "country": "NL", "ip_prefix": "195.206", "ip_range": [105, 106]},
+    {"isp": "NordVPN",                 "asn": 207049, "domain": "nordvpn.com",               "country": "DE", "ip_prefix": "37.120",  "ip_range": [210, 215]},
+    {"isp": "ProtonVPN AG",            "asn": 62597,  "domain": "protonvpn.com",             "country": "CH", "ip_prefix": "185.159", "ip_range": [157, 158]},
+    {"isp": "ExpressVPN",              "asn": 20278,  "domain": "expressvpn.com",            "country": "GB", "ip_prefix": "217.138", "ip_range": [128, 220]},
+    {"isp": "Surfshark B.V.",          "asn": 9009,   "domain": "surfshark.com",             "country": "NL", "ip_prefix": "156.146", "ip_range": [60, 80]},
+    {"isp": "IPVanish",                "asn": 32748,  "domain": "ipvanish.com",              "country": "US", "ip_prefix": "66.181",  "ip_range": [1, 100]},
+    {"isp": "Private Internet Access", "asn": 11260,  "domain": "privateinternetaccess.com", "country": "US", "ip_prefix": "104.244", "ip_range": [72, 79]},
+    {"isp": "CyberGhost S.A.",         "asn": 40065,  "domain": "cyberghost.com",            "country": "RO", "ip_prefix": "77.68",   "ip_range": [1, 100]},
+    {"isp": "Windscribe",              "asn": 14061,  "domain": "windscribe.com",            "country": "CA", "ip_prefix": "64.44",   "ip_range": [40, 50]},
+    {"isp": "Hide.me VPN",             "asn": 9009,   "domain": "hide.me",                   "country": "MY", "ip_prefix": "185.225", "ip_range": [56, 63]},
+]
+
+
+def get_random_vpn_ip_ctx(config):
+    """Pick a random commercial VPN provider from config and return an ip_ctx dict.
+
+    Reads 'vpn_providers' from the top-level config; falls back to the built-in
+    list if the key is absent.  Each call generates a fresh IP from the provider's
+    address range so consecutive calls land on different subnets.
+
+    Returned dict keys: ip, city, state, isp, asn, domain, country, is_proxy.
+    """
+    providers = config.get("vpn_providers") or _FALLBACK_VPN_PROVIDERS
+    p = random.choice(providers)
+    lo, hi = p["ip_range"][0], p["ip_range"][1]
+    ip = f"{p['ip_prefix']}.{random.randint(lo, hi)}.{random.randint(1, 254)}"
+    return {
+        "ip":       ip,
+        "city":     None,
+        "state":    None,
+        "isp":      p["isp"],
+        "asn":      p["asn"],
+        "domain":   p["domain"],
+        "country":  p["country"],
+        "is_proxy": True,
+    }
+
+
+def get_random_anon_ip_ctx(config):
+    """Return an anonymizer ip_ctx drawn from the live Tor list or a commercial VPN.
+
+    Mix: 70% commercial VPN (typically MEDIUM-priority XSIAM alert),
+         30% live Tor exit node (HIGH-priority XSIAM alert).
+
+    The wide provider pool ensures XSIAM UEBA sees a different subnet on
+    each event rather than normalising repeated connections from a /13 block.
+    """
+    tor_nodes = config.get("tor_exit_nodes", [])
+    if tor_nodes and random.random() < 0.30:
+        node = random.choice(tor_nodes)
+        if isinstance(node, dict):
+            ip      = node.get("ip", "185.220.101.1")
+            country = node.get("country", "Unknown")
+        else:
+            ip, country = str(node), "Unknown"
+        return {
+            "ip":       ip,
+            "city":     None,
+            "state":    None,
+            "isp":      "TOR Exit Node",
+            "asn":      0,
+            "domain":   None,
+            "country":  country,
+            "is_proxy": True,
+        }
+    return get_random_vpn_ip_ctx(config)
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

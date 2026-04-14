@@ -71,9 +71,9 @@ _SAML_URLS = [
 import hashlib
 
 try:
-    from modules.session_utils import get_random_user, get_user_by_name, get_all_emails
+    from modules.session_utils import get_random_user, get_user_by_name, get_all_emails, get_random_anon_ip_ctx
 except ImportError:
-    from session_utils import get_random_user, get_user_by_name, get_all_emails
+    from session_utils import get_random_user, get_user_by_name, get_all_emails, get_random_anon_ip_ctx
 
 # Stable alphanumeric Okta user ID: 00u + 17 base-62 chars, deterministic per username.
 # SHA-1 of the username is used as the seed so the same user always gets the same ID,
@@ -1644,15 +1644,18 @@ def _generate_ip_rotation_sso_spray(config, user_info, session_context=None):
     logs  = []
     actor = _build_actor(user_info["username"], user_info["full_name"])
     app   = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
-    # Build a pool of distinct IPs
-    ip_pool = [
-        {"ip": f"185.220.{random.randint(100,110)}.{random.randint(1,254)}", "city": None, "country": "NL",
-         "state": None, "asn": 208323, "isp": "TOR Exit", "domain": None, "is_proxy": True},
-        {"ip": f"45.33.{random.randint(1,254)}.{random.randint(1,254)}", "city": "Dallas", "country": "US",
-         "state": "TX", "asn": 63949, "isp": "Linode", "domain": "linode.com", "is_proxy": False},
-        {"ip": f"104.244.{random.randint(70,80)}.{random.randint(1,254)}", "city": None, "country": "SE",
-         "state": None, "asn": 395954, "isp": "Mullvad VPN", "domain": "mullvad.net", "is_proxy": True},
-    ]
+    # Build a pool of 4 distinct anonymizer IPs. Drawn from the full VPN/Tor pool each
+    # call so XSIAM UEBA sees a different subnet every time the scenario runs.
+    # Using get_random_anon_ip_ctx ensures 70% VPN (MEDIUM alert) / 30% Tor (HIGH alert) mix.
+    seen_ips = set()
+    ip_pool = []
+    for _ in range(4):
+        candidate = get_random_anon_ip_ctx(config)
+        # Retry once to avoid duplicate IPs in the same pool
+        if candidate["ip"] in seen_ips:
+            candidate = get_random_anon_ip_ctx(config)
+        seen_ips.add(candidate["ip"])
+        ip_pool.append(candidate)
     for ip_ctx in ip_pool:
         client = _build_client(ip_ctx, config, interactive_only=False)
         client["ipAddress"] = ip_ctx["ip"]
@@ -1674,8 +1677,10 @@ def _generate_ip_rotation_sso_spray(config, user_info, session_context=None):
 
 def _generate_sso_rejected_unusual_country(config, user_info, session_context=None):
     """User rejects MFA push during SSO from unusual country — A user rejected SSO from unusual country."""
+    anon = get_random_anon_ip_ctx(config)
     ip_ctx = _make_ip_ctx_from(random.choice(_HIGH_RISK_COUNTRIES),
-                               {"ip": f"185.220.{random.randint(100,110)}.{random.randint(1,254)}"})
+                               {"ip": anon["ip"], "isp": anon["isp"], "asn": anon["asn"],
+                                "domain": anon["domain"], "is_proxy": True})
     actor  = _build_actor(user_info["username"], user_info["full_name"])
     client = _build_client(ip_ctx, config, interactive_only=False)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
@@ -1726,8 +1731,10 @@ def _generate_sso_impossible_travel(config, user_info, session_context=None):
     ))
 
     # Second SSO — impossible foreign location minutes later
+    anon2 = get_random_anon_ip_ctx(config)
     ip_ctx2 = _make_ip_ctx_from(random.choice(_HIGH_RISK_COUNTRIES),
-                                {"ip": f"185.220.{random.randint(100,110)}.{random.randint(1,254)}"})
+                                {"ip": anon2["ip"], "isp": anon2["isp"], "asn": anon2["asn"],
+                                 "domain": anon2["domain"], "is_proxy": True})
     client2 = _build_client(ip_ctx2, config, interactive_only=False)
     logs.append(_assemble(
         "user.authentication.sso", actor, client2,
@@ -1804,8 +1811,10 @@ def _generate_sso_suspicious_country(config, user_info, session_context=None):
     country_code = random.choice(_SUSPICIOUS_COUNTRIES)
     country_data = next((c for c in _HIGH_RISK_COUNTRIES if c["country"] == country_code),
                         _HIGH_RISK_COUNTRIES[0])
+    anon = get_random_anon_ip_ctx(config)
     ip_ctx = _make_ip_ctx_from(country_data,
-                               {"ip": f"185.220.{random.randint(100,110)}.{random.randint(1,254)}"})
+                               {"ip": anon["ip"], "isp": anon["isp"], "asn": anon["asn"],
+                                "domain": anon["domain"], "is_proxy": True})
     actor  = _build_actor(user_info["username"], user_info["full_name"])
     client = _build_client(ip_ctx, config, interactive_only=False)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
@@ -4521,9 +4530,11 @@ def _generate_aitm_phishing(config, user_info, session_context=None):
     Hunt: session.start from anomalous IP + SSO burst to sensitive apps within 60s + session roaming."""
     print("    - Okta Module simulating: AiTM phishing attack (session token theft)...")
     logs = []
-    # Step 1: session.start via phishing proxy IP (high-risk country)
-    phishing_ip = f"185.220.{random.randint(100, 110)}.{random.randint(1, 254)}"
-    ip_ctx  = _make_ip_ctx_from(random.choice(_HIGH_RISK_COUNTRIES), {"ip": phishing_ip})
+    # Step 1: session.start via phishing proxy IP (high-risk country, anonymized via VPN/Tor)
+    anon = get_random_anon_ip_ctx(config)
+    ip_ctx = _make_ip_ctx_from(random.choice(_HIGH_RISK_COUNTRIES),
+                               {"ip": anon["ip"], "isp": anon["isp"], "asn": anon["asn"],
+                                "domain": anon["domain"], "is_proxy": True})
     actor   = _build_actor(user_info["username"], user_info["full_name"])
     client  = _build_client(ip_ctx, config, interactive_only=True)
     sec_ctx = _build_security_context(ip_ctx)
@@ -5796,7 +5807,7 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     if threat_level == "Insane":
         if random.random() < 0.5:
-            return _generate_threat_log(config, session_context)
+            return _generate_threat_log(config, session_context)  # (content, label) tuple
         result = _generate_background_log(config, session_context)
         return result if isinstance(result, list) else [result]
 
@@ -5805,8 +5816,7 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     if (current_time - last_threat_event_time) > interval:
         last_threat_event_time = current_time
-        result = _generate_threat_log(config, session_context)
-        return result if isinstance(result, list) else [result]
+        return _generate_threat_log(config, session_context)  # (content, label) tuple — return directly
 
     result = _generate_background_log(config)
     return result if isinstance(result, list) else [result]

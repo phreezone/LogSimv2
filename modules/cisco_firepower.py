@@ -228,7 +228,7 @@ def _format_firepower_cef(config, fields, cef_name):
     cef_header = f"CEF:0|Cisco|Firepower|6.4.0|{syslog_id}|{cef_name}|{cef_sev}|"
     extension  = " ".join(f"{k}={_cef_escape(v)}" for k, v in fields.items() if v is not None)
 
-    return f"<13>{timestamp} {fields['dvchost']} {cef_header}{extension}"
+    return f"<166>{timestamp} {fields['dvchost']} {cef_header}{extension}"
 
 
 def _base_fields(config, src_ip, user, shost=None):

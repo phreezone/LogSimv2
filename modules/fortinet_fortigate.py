@@ -1550,9 +1550,9 @@ def _simulate_lateral_movement(config, src_ip, user, shost):
 def _simulate_tor_connection(config, src_ip, user, shost):
     """Internal host connecting to Tor exit node — traffic:forward allow."""
     print(f"    - Fortinet Module simulating: Tor connection from {src_ip}")
-    forti_conf = _get_config(config)
-    tor_nodes  = forti_conf.get("tor_exit_nodes", ["198.51.100.77"])
-    tor_ip     = random.choice(tor_nodes)
+    tor_nodes  = config.get("tor_exit_nodes", [{"ip": "198.51.100.77"}])
+    _tor_entry = random.choice(tor_nodes)
+    tor_ip     = _tor_entry.get("ip", "198.51.100.77") if isinstance(_tor_entry, dict) else _tor_entry
     tor_port  = random.choices([443, 9001, 9030], weights=[60, 30, 10])[0]
     duration_s = random.randint(60, 3600)
 

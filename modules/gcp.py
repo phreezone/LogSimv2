@@ -586,6 +586,8 @@ def _build_log_entry(
         "requestMetadata": {
             "callerIp":                caller_ip,
             "callerSuppliedUserAgent": user_agent or _random_user_agent(),
+            "requestAttributes":       {},
+            "destinationAttributes":   {},
         },
         "serviceName":     service_name,
         "methodName":      method_name,
@@ -903,8 +905,8 @@ def _gen_compute_list_instances(config, context=None):
         service_name    = "compute.googleapis.com",
         method_name     = "v1.compute.instances.list",
         resource_name   = f"projects/{project_id}/zones/{zone}",
-        resource_type   = "gce_instance",
-        resource_labels = {"zone": zone, "instance_id": ""},
+        resource_type   = "gce_zone",
+        resource_labels = {"zone": zone},
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {"project": project_id, "zone": zone},
     )
@@ -1014,7 +1016,7 @@ def _gen_bigquery_run_query(config, context=None):
         resource_name   = f"projects/{project_id}/jobs/{job_id}",
         resource_type   = "bigquery_project",
         resource_labels = {"project_id": project_id, "location": region},
-        log_type        = _LOG_ACTIVITY,
+        log_type        = _LOG_DATA_ACCESS,
         request_body    = {
             "projectId": project_id,
             "job": {
@@ -1044,7 +1046,7 @@ def _gen_gke_list_clusters(config, context=None):
         service_name    = "container.googleapis.com",
         method_name     = "google.container.v1.ClusterManager.ListClusters",
         resource_name   = f"projects/{project_id}/locations/{region}",
-        resource_type   = "k8s_cluster",
+        resource_type   = "gke_cluster",
         resource_labels = {"location": region, "cluster_name": ""},
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {"parent": f"projects/{project_id}/locations/{region}"},
@@ -1077,12 +1079,9 @@ def _gen_cloudrun_list_services(config, context=None):
         service_name    = "run.googleapis.com",
         method_name     = "google.cloud.run.v2.Services.ListServices",
         resource_name   = f"projects/{project_id}/locations/{region}",
-        resource_type   = "cloud_run_revision",
+        resource_type   = "cloud_run_location",
         resource_labels = {
             "location": region,
-            "service_name": service,
-            "revision_name": f"{service}-00001-{uuid.uuid4().hex[:3]}",
-            "configuration_name": service,
         },
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {"parent": f"projects/{project_id}/locations/{region}"},
@@ -1125,7 +1124,7 @@ def _gen_secret_access(config, context=None):
         method_name     = "google.cloud.secretmanager.v1.SecretManagerService.AccessSecretVersion",
         resource_name   = f"{secret_id}/versions/{version}",
         resource_type   = "audited_resource",
-        resource_labels = {"service": "secretmanager.googleapis.com", "method": "google.cloud.secretmanager.v1.SecretManagerService.AccessSecretVersion"},
+        resource_labels = {"service": "secretmanager.googleapis.com"},
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {"name": f"{secret_id}/versions/{version}"},
     )
@@ -1215,7 +1214,7 @@ def _gen_vertex_list_models(config, context=None):
         method_name     = "google.cloud.aiplatform.v1.ModelService.ListModels",
         resource_name   = f"projects/{project_id}/locations/{region}",
         resource_type   = "audited_resource",
-        resource_labels = {"service": "aiplatform.googleapis.com", "method": "google.cloud.aiplatform.v1.ModelService.ListModels"},
+        resource_labels = {"service": "aiplatform.googleapis.com"},
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {"parent": f"projects/{project_id}/locations/{region}"},
     )
@@ -1268,7 +1267,7 @@ def _gen_cloudsql_list_instances(config, context=None):
         method_name     = "google.cloud.sql.v1.SqlInstancesService.List",
         resource_name   = f"projects/{project_id}/instances",
         resource_type   = "cloudsql_database",
-        resource_labels = {"database_id": f"{project_id}:*", "region": region},
+        resource_labels = {"database_id": f"{project_id}:", "region": region},
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {"project": project_id},
     )
@@ -1357,7 +1356,7 @@ def _gen_artifact_registry_list_repos(config, context=None):
         method_name     = "google.devtools.artifactregistry.v1.ArtifactRegistry.ListRepositories",
         resource_name   = f"projects/{project_id}/locations/{region}",
         resource_type   = "audited_resource",
-        resource_labels = {"service": "artifactregistry.googleapis.com", "method": "google.devtools.artifactregistry.v1.ArtifactRegistry.ListRepositories"},
+        resource_labels = {"service": "artifactregistry.googleapis.com"},
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {"parent": f"projects/{project_id}/locations/{region}"},
     )
@@ -1419,7 +1418,7 @@ def _gen_spanner_list_instances(config, context=None):
         method_name     = "google.spanner.admin.instance.v1.InstanceAdmin.ListInstances",
         resource_name   = f"projects/{project_id}/instances",
         resource_type   = "spanner_instance",
-        resource_labels = {"instance_id": instance, "project_id": project_id, "location": region},
+        resource_labels = {"instance_id": "", "project_id": project_id, "location": region},
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {"parent": f"projects/{project_id}"},
     )
@@ -1439,8 +1438,8 @@ def _gen_dataflow_list_jobs(config, context=None):
         service_name    = "dataflow.googleapis.com",
         method_name     = "google.dataflow.v1beta3.JobsV1Beta3.ListJobs",
         resource_name   = f"projects/{project_id}/locations/{region}/jobs",
-        resource_type   = "dataflow_step",
-        resource_labels = {"job_id": "", "step_id": "", "project_id": project_id, "region": region},
+        resource_type   = "project",
+        resource_labels = {"project_id": project_id},
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {"projectId": project_id, "location": region},
     )
@@ -1520,6 +1519,7 @@ def _gen_make_gcs_public(config, context=None):
     """
     p = _get_random_principal(config, context)
     project_id = _get_project_id(config)
+    region = _random_region(config)
     bucket = _get_random_gcs_bucket(config)
 
     entry = _build_log_entry(
@@ -1532,8 +1532,7 @@ def _gen_make_gcs_public(config, context=None):
         method_name     = "storage.setIamPolicy",
         resource_name   = f"projects/_/buckets/{bucket}",
         resource_type   = "gcs_bucket",
-        # Real gcs_bucket resource labels contain only bucket_name and project_id (no location)
-        resource_labels = {"bucket_name": bucket},
+        resource_labels = {"bucket_name": bucket, "location": region},
         log_type        = _LOG_ACTIVITY,
         authorization_info = [
             {
@@ -1587,7 +1586,7 @@ def _gen_create_sa_key(config, context=None):
         method_name     = "google.iam.admin.v1.CreateServiceAccountKey",
         resource_name   = f"projects/{project_id}/serviceAccounts/{sa_email}/keys/{key_id}",
         resource_type   = "service_account",
-        resource_labels = {"email_id": sa_email, "unique_id": str(random.randint(100000000000, 999999999999))},
+        resource_labels = {"email_id": sa_email, "unique_id": str(random.randint(100000000000000000000, 999999999999999999999))},
         log_type        = _LOG_ACTIVITY,
         request_body    = {
             "name":        f"projects/{project_id}/serviceAccounts/{sa_email}",
@@ -1745,7 +1744,7 @@ def _gen_tor_api_access(config, context=None):
         ("cloudresourcemanager.googleapis.com", "GetIamPolicy", f"projects/{project_id}", "project", {}),
         ("storage.googleapis.com", "storage.objects.list", f"projects/_/buckets/{_tor_bucket}", "gcs_bucket", {"bucket_name": _tor_bucket, "location": region}),
         ("iam.googleapis.com", "google.iam.admin.v1.ListServiceAccounts", f"projects/{project_id}", "project", {}),
-        ("compute.googleapis.com", "v1.compute.instances.list", f"projects/{project_id}/zones/{_tor_zone}", "gce_instance", {"zone": _tor_zone, "instance_id": ""}),
+        ("compute.googleapis.com", "v1.compute.instances.list", f"projects/{project_id}/zones/{_tor_zone}", "gce_zone", {"zone": _tor_zone}),
     ]
     svc, method, rname, rtype, rlabels = random.choice(api_variants)
 
@@ -1853,22 +1852,34 @@ def _gen_gke_exec_pod(config, context=None):
         "io.k8s.core.v1.pods.portforward",
     ])
 
+    # K8s API server audit events use serviceName "k8s.io", NOT "container.googleapis.com".
+    # "container.googleapis.com" is the GKE cluster management API (create/delete cluster).
+    # Pod exec/portforward go through the in-cluster Kubernetes API server → k8s.io service.
+    # resourceName follows K8s API path convention, not the GCP resource path format.
+    k8s_resource = f"core/v1/namespaces/{namespace}/pods/{pod_name}"
     entry = _build_log_entry(
         project_id      = project_id,
         principal_email = p['email'],
         caller_ip       = p['caller_ip'],
-        service_name    = "container.googleapis.com",
+        service_name    = "k8s.io",
         method_name     = method,
-        resource_name   = f"projects/{project_id}/locations/{region}/clusters/{cluster}/k8s/namespaces/{namespace}/pods/{pod_name}",
+        resource_name   = k8s_resource,
         resource_type   = "k8s_cluster",
         resource_labels = {"location": region, "cluster_name": cluster, "project_id": project_id},
         log_type        = _LOG_ACTIVITY,
         authorization_info = [
             {
-                "resource":   f"projects/{project_id}/locations/{region}/clusters/{cluster}",
-                "permission": "container.pods.exec" if "exec" in method else "container.pods.portForward",
+                "resource":   k8s_resource,
+                "permission": "io.k8s.core.v1.pods.exec" if "exec" in method else "io.k8s.core.v1.pods.portforward",
                 "granted":    True,
-                "resourceAttributes": {},
+                "resourceAttributes": {
+                    "namespace":   namespace,
+                    "verb":        "create",
+                    "resource":    "pods",
+                    "subresource": "exec" if "exec" in method else "portforward",
+                    "version":     "v1",
+                    "group":       "",
+                },
             }
         ],
         request_body = {
@@ -1922,6 +1933,10 @@ def _gen_snapshot_exfil(config, context=None):
         },
         offset_seconds  = -5,
     )
+    # createSnapshot is an LRO — the audit event marks the request (first=True, last=False),
+    # not the completion. The LRO completes asynchronously; no separate completion audit event
+    # is generated in Cloud Audit Logs for Compute Engine disk operations.
+    entry_create["operation"]["last"] = False
 
     entry_share = _build_log_entry(
         project_id      = project_id,
@@ -1986,9 +2001,9 @@ def _gen_secret_mass_access(config, context=None):
             method_name     = "google.cloud.secretmanager.v1.SecretManagerService.AccessSecretVersion",
             resource_name   = f"{secret}/versions/{version}",
             resource_type   = "audited_resource",
-            resource_labels = {"service": "secretmanager.googleapis.com", "method": "google.cloud.secretmanager.v1.SecretManagerService.AccessSecretVersion"},
+            resource_labels = {"service": "secretmanager.googleapis.com"},
             log_type        = _LOG_DATA_ACCESS,
-            offset_seconds  = i * random.uniform(0.2, 1.5), # type: ignore
+            offset_seconds  = -(count - 1 - i) * random.uniform(0.2, 1.5), # type: ignore
             request_body    = {"name": f"{secret}/versions/{version}"},
         )
         entries.append(entry)
@@ -2122,10 +2137,10 @@ def _gen_sa_impersonation(config, context=None):
         target_sa = f"privileged-sa@{project_id}.iam.gserviceaccount.com"
 
     # Shared unique_id for the target SA (consistent across both events)
-    target_unique_id = str(random.randint(100000000000, 999999999999))
-    op_id = str(uuid.uuid4())
+    target_unique_id = str(random.randint(100000000000000000000, 999999999999999999999))
 
     # Event 1: reconnaissance — read the target SA metadata before impersonating
+    # GetServiceAccount is a synchronous call — no operation field in real GCP audit logs
     entry_actas = _build_log_entry(
         project_id      = project_id,
         principal_email = p['email'],
@@ -2136,7 +2151,6 @@ def _gen_sa_impersonation(config, context=None):
         resource_type   = "service_account",
         resource_labels = {"email_id": target_sa, "unique_id": target_unique_id},
         log_type        = _LOG_DATA_ACCESS,
-        operation_id    = op_id,
         request_body    = {"name": f"projects/{project_id}/serviceAccounts/{target_sa}"},
         offset_seconds  = -2,
     )
@@ -2144,6 +2158,7 @@ def _gen_sa_impersonation(config, context=None):
     # Event 2: impersonation — generate a short-lived access token for the target SA
     # GenerateAccessToken uses permission iam.serviceAccounts.getAccessToken (DATA_READ)
     # real GCP routes this to cloudaudit.googleapis.com%2Fdata_access, not %2Factivity
+    # GenerateAccessToken is synchronous — no operation field in real GCP audit logs
     entry_token = _build_log_entry(
         project_id      = project_id,
         principal_email = p['email'],
@@ -2154,7 +2169,6 @@ def _gen_sa_impersonation(config, context=None):
         resource_type   = "service_account",
         resource_labels = {"email_id": target_sa, "unique_id": target_unique_id},
         log_type        = _LOG_DATA_ACCESS,
-        operation_id    = op_id,
         authorization_info = [
             {
                 "resource":   f"projects/-/serviceAccounts/{target_sa}",
@@ -2267,7 +2281,8 @@ def _gen_kms_key_destroy(config, context=None):
 def _gen_bigquery_data_exfil(config, context=None):
     """
     THREAT: Full-table SELECT followed by EXPORT to attacker-controlled GCS bucket.
-    Exfiltration — two events: query (DATA_ACCESS) + extract job (ACTIVITY).
+    Exfiltration — two events: query (DATA_ACCESS) + extract job (DATA_ACCESS).
+    Both InsertJob operations are DATA_READ in GCP's audit model and land in data_access log.
     """
     p = _get_random_principal(config, context)
     project_id = _get_project_id(config)
@@ -2278,8 +2293,6 @@ def _gen_bigquery_data_exfil(config, context=None):
     hex_id = uuid.uuid4().hex[:8]
     job_id_query   = f"bqjob_{uuid.uuid4().hex[:16]}"
     job_id_extract = f"bqjob_{uuid.uuid4().hex[:16]}"
-    # Shared operation_id links both jobs as one correlated exfil sequence in XSIAM
-    op_id = str(uuid.uuid4())
 
     e1 = _build_log_entry(
         project_id      = project_id,
@@ -2290,8 +2303,7 @@ def _gen_bigquery_data_exfil(config, context=None):
         resource_name   = f"projects/{project_id}/jobs/{job_id_query}",
         resource_type   = "bigquery_project",
         resource_labels = {"project_id": project_id, "location": region},
-        log_type        = _LOG_ACTIVITY,
-        operation_id    = op_id,
+        log_type        = _LOG_DATA_ACCESS,
         offset_seconds  = -10,
         request_body    = {
             "configuration": {
@@ -2312,8 +2324,7 @@ def _gen_bigquery_data_exfil(config, context=None):
         resource_name   = f"projects/{project_id}/jobs/{job_id_extract}",
         resource_type   = "bigquery_project",
         resource_labels = {"project_id": project_id, "location": region},
-        log_type        = _LOG_ACTIVITY,
-        operation_id    = op_id,
+        log_type        = _LOG_DATA_ACCESS,
         request_body    = {
             "configuration": {
                 "extract": {
@@ -2691,7 +2702,7 @@ def _gen_vertex_generate_content(config, context=None):
         method_name     = "google.cloud.aiplatform.v1.PredictionService.GenerateContent",
         resource_name   = model,
         resource_type   = "audited_resource",
-        resource_labels = {"service": "aiplatform.googleapis.com", "method": "google.cloud.aiplatform.v1.PredictionService.GenerateContent"},
+        resource_labels = {"service": "aiplatform.googleapis.com"},
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {
             "contents": [
@@ -2728,7 +2739,7 @@ def _gen_vertex_list_training_jobs(config, context=None):
         method_name     = "google.cloud.aiplatform.v1.JobService.ListCustomJobs",
         resource_name   = f"projects/{project_id}/locations/{region}",
         resource_type   = "audited_resource",
-        resource_labels = {"service": "aiplatform.googleapis.com", "method": "google.cloud.aiplatform.v1.JobService.ListCustomJobs"},
+        resource_labels = {"service": "aiplatform.googleapis.com"},
         log_type        = _LOG_DATA_ACCESS,
         request_body    = {"parent": f"projects/{project_id}/locations/{region}"},
     )
@@ -2788,7 +2799,7 @@ def _gen_vertex_denial_of_wallet(config, context=None):
     # Endpoint calls use specific resource type; publisher model calls use audited_resource
     if use_gemini:
         res_type   = "audited_resource"
-        res_labels = {"service": "aiplatform.googleapis.com", "method": method}
+        res_labels = {"service": "aiplatform.googleapis.com"}
     else:
         ep_parts   = endpoint.split('/')
         res_type   = "aiplatform.googleapis.com/Endpoint"
@@ -2796,8 +2807,8 @@ def _gen_vertex_denial_of_wallet(config, context=None):
 
     events = []
     for i in range(count):
-        # Spread burst across 0–60 s so time-window burst detection fires correctly
-        offset = i * random.uniform(0.5, 3.0)
+        # Spread burst across 0–150 s in the past so time-window burst detection fires correctly
+        offset = -(count - 1 - i) * random.uniform(0.5, 3.0)
         e = _build_log_entry(
             project_id      = project_id,
             principal_email = p['email'],
@@ -2957,7 +2968,7 @@ def _gen_vertex_rag_corpus_modify(config, context=None):
         method_name     = "google.cloud.aiplatform.v1.VertexRagDataService.ImportRagFiles",
         resource_name   = f"projects/{project_id}/locations/{region}/ragCorpora/{corpus_id}",
         resource_type   = "audited_resource",
-        resource_labels = {"service": "aiplatform.googleapis.com", "method": "google.cloud.aiplatform.v1.VertexRagDataService.ImportRagFiles"},
+        resource_labels = {"service": "aiplatform.googleapis.com"},
         log_type        = _LOG_ACTIVITY,
         request_body    = {
             "parent": f"projects/{project_id}/locations/{region}/ragCorpora/{corpus_id}",
@@ -3017,7 +3028,7 @@ def _gen_vertex_model_armor_delete(config, context=None):
         method_name     = "google.cloud.modelarmor.v1.ModelArmor.DeleteTemplate",
         resource_name   = template,
         resource_type   = "audited_resource",
-        resource_labels = {"service": "modelarmor.googleapis.com", "method": "google.cloud.modelarmor.v1.ModelArmor.DeleteTemplate"},
+        resource_labels = {"service": "modelarmor.googleapis.com"},
         log_type        = _LOG_ACTIVITY,
         request_body    = {"name": template},
     )
@@ -3109,7 +3120,7 @@ def _gen_create_service_account(config, context=None):
     project_id = _get_project_id(config)
     account_id = f"svc-{uuid.uuid4().hex[:10]}"
     sa_email = f"{account_id}@{project_id}.iam.gserviceaccount.com"
-    unique_id = str(random.randint(100000000000, 999999999999))
+    unique_id = str(random.randint(100000000000000000000, 999999999999999999999))
 
     entry = _build_log_entry(
         project_id      = project_id,
@@ -3158,8 +3169,8 @@ def _gen_pubsub_subscription_delete(config, context=None):
         service_name    = "pubsub.googleapis.com",
         method_name     = "google.pubsub.v1.Subscriber.DeleteSubscription",
         resource_name   = sub_resource,
-        resource_type   = "audited_resource",
-        resource_labels = {"service": "pubsub.googleapis.com", "method": "google.pubsub.v1.Subscriber.DeleteSubscription"},
+        resource_type   = "pubsub_subscription",
+        resource_labels = {"subscription_id": sub_resource.split("/")[-1]},
         log_type        = _LOG_ACTIVITY,
         request_body    = {"subscription": sub_resource},
     )
@@ -3221,7 +3232,7 @@ def _gen_sa_impersonation_failed(config, context=None):
         resource_name   = f"projects/-/serviceAccounts/{target_sa}",
         resource_type   = "service_account",
         resource_labels = {"email_id": target_sa,
-                           "unique_id": str(random.randint(100000000000, 999999999999))},
+                           "unique_id": str(random.randint(100000000000000000000, 999999999999999999999))},
         log_type        = _LOG_DATA_ACCESS,
         status_code     = _STATUS_CODE_PERMISSION_DENIED,
         status_message  = (
@@ -3490,11 +3501,12 @@ def _gen_cli_from_serverless(config, context=None):
         gcloud_cmd = "gcloud.iam.service-accounts.list"
     elif api_choice == "storage_list":
         bucket   = _get_random_gcs_bucket(config)
+        _region  = _random_region(config)
         service  = "storage.googleapis.com"
         method   = "storage.objects.list"
         res_name = f"projects/_/buckets/{bucket}"
         res_type = "gcs_bucket"
-        res_lbl  = {"bucket_name": bucket, "project_id": project_id}
+        res_lbl  = {"bucket_name": bucket, "location": _region, "project_id": project_id}
         log_t    = _LOG_DATA_ACCESS
         req_body = {"bucket": bucket}
         gcloud_cmd = "gcloud.storage.ls"
@@ -3516,7 +3528,7 @@ def _gen_cli_from_serverless(config, context=None):
         res_name = f"projects/{project_id}/serviceAccounts/{sa_target}"
         res_type = "service_account"
         res_lbl  = {"email_id": sa_target, "project_id": project_id,
-                    "unique_id": str(random.randint(100000000000, 999999999999))}
+                    "unique_id": str(random.randint(100000000000000000000, 999999999999999999999))}
         log_t    = _LOG_ACTIVITY
         req_body = {"name": f"projects/{project_id}/serviceAccounts/{sa_target}",
                     "keyAlgorithm": "KEY_ALG_RSA_2048", "privateKeyType": "TYPE_GOOGLE_CREDENTIALS_FILE"}
@@ -3524,12 +3536,13 @@ def _gen_cli_from_serverless(config, context=None):
     else:
         # ACTIVITY: serverless code deleting a GCS object — tampering/cover-tracks signal
         bucket   = _get_random_gcs_bucket(config)
+        _region  = _random_region(config)
         obj_name = f"logs/{uuid.uuid4().hex[:8]}.json"
         service  = "storage.googleapis.com"
         method   = "storage.objects.delete"
         res_name = f"projects/_/buckets/{bucket}/objects/{obj_name}"
         res_type = "gcs_bucket"
-        res_lbl  = {"bucket_name": bucket, "project_id": project_id}
+        res_lbl  = {"bucket_name": bucket, "location": _region, "project_id": project_id}
         log_t    = _LOG_ACTIVITY
         req_body = {"bucket": bucket, "object": obj_name}
         gcloud_cmd = "gcloud.storage.rm"
@@ -3688,6 +3701,7 @@ def _gen_iam_deny_policy_create(config, context=None):
     p = _get_random_principal(config, context)
     project_id = _get_project_id(config)
     # IAM deny policies attach to the resource hierarchy node; project number != project ID
+    # GCP project numbers are ~12 digits (e.g. 812875011777), not the 21-digit SA unique_id range
     project_number = str(random.randint(100000000000, 999999999999))
     policy_id = f"deny-{uuid.uuid4().hex[:8]}"
     # The resource name embeds the attachment point URL-encoded
@@ -3722,7 +3736,7 @@ def _gen_iam_deny_policy_create(config, context=None):
         method_name     = "google.iam.v2.Policies.CreatePolicy",
         resource_name   = resource_name,
         resource_type   = "audited_resource",
-        resource_labels = {"service": "iam.googleapis.com", "method": "google.iam.v2.Policies.CreatePolicy"},
+        resource_labels = {"service": "iam.googleapis.com"},
         log_type        = _LOG_ACTIVITY,
         authorization_info = [{
             "resource":   resource_name,
@@ -4039,7 +4053,7 @@ def _gen_disable_service_account(config, context=None):
     p          = _get_random_principal(config, context)
     project_id = _get_project_id(config)
     sa_email   = _get_random_sa_excluding(config, p['email'])
-    unique_id  = str(random.randint(100000000000, 999999999999))
+    unique_id  = str(random.randint(100000000000000000000, 999999999999999999999))
     resource_name = f"projects/{project_id}/serviceAccounts/{sa_email}"
 
     entry = _build_log_entry(
@@ -4116,7 +4130,7 @@ def _gen_delete_service_account(config, context=None):
     project_id = _get_project_id(config)
     # The SA being deleted — must differ from the actor
     sa_email    = _get_random_sa_excluding(config, p['email'])
-    unique_id   = str(random.randint(100000000000, 999999999999))
+    unique_id   = str(random.randint(100000000000000000000, 999999999999999999999))
     resource_name = f"projects/{project_id}/serviceAccounts/{sa_email}"
 
     entry = _build_log_entry(
@@ -4278,10 +4292,16 @@ def _gen_gke_privileged_pod_created(config, context=None):
         resource_labels = {"location": region, "cluster_name": cluster},
         log_type        = _LOG_ACTIVITY,
         authorization_info = [{
-            "resource":   f"projects/{project_id}/locations/{region}/clusters/{cluster}",
-            "permission": "container.pods.create",
+            "resource":   f"core/v1/namespaces/{namespace}/pods",
+            "permission": "io.k8s.core.v1.pods.create",
             "granted":    True,
-            "resourceAttributes": {},
+            "resourceAttributes": {
+                "namespace": namespace,
+                "verb":      "create",
+                "resource":  "pods",
+                "version":   "v1",
+                "group":     "",
+            },
         }],
         request_body = {
             "apiVersion": "v1",
@@ -4372,10 +4392,15 @@ def _gen_gke_cluster_admin_binding(config, context=None):
         resource_labels = {"location": region, "cluster_name": cluster},
         log_type        = _LOG_ACTIVITY,
         authorization_info = [{
-            "resource":   f"projects/{project_id}/locations/{region}/clusters/{cluster}",
-            "permission": "container.clusterRoleBindings.create",
+            "resource":   "rbac.authorization.k8s.io/v1/clusterrolebindings",
+            "permission": "io.k8s.rbac.v1.clusterrolebindings.create",
             "granted":    True,
-            "resourceAttributes": {},
+            "resourceAttributes": {
+                "verb":     "create",
+                "resource": "clusterrolebindings",
+                "version":  "v1",
+                "group":    "rbac.authorization.k8s.io",
+            },
         }],
         request_body = {
             "apiVersion": "rbac.authorization.k8s.io/v1",
@@ -4830,7 +4855,7 @@ def _gen_iam_recon_testpermissions(config, context=None):
             "service":    "storage.googleapis.com",
             "res_name":   f"projects/_/buckets/{bucket}",
             "res_type":   "gcs_bucket",
-            "res_labels": {"bucket_name": bucket, "project_id": project_id},
+            "res_labels": {"bucket_name": bucket, "location": _random_region(config), "project_id": project_id},
             "perms": [
                 "storage.buckets.setIamPolicy",
                 "storage.buckets.delete",
@@ -4895,7 +4920,7 @@ def _gen_iam_recon_testpermissions(config, context=None):
             principal_email = principal['email'],
             caller_ip       = principal['caller_ip'],
             service_name    = target["service"],
-            method_name     = "TestIamPermissions",
+            method_name     = "google.iam.v1.IAMPolicy.TestIamPermissions",
             resource_name   = target["res_name"],
             resource_type   = target["res_type"],
             resource_labels = target["res_labels"],
@@ -5078,6 +5103,7 @@ def _gen_gcs_lifecycle_tamper(config, context=None):
     p          = _get_random_principal(config, context)
     project_id = _get_project_id(config)
     bucket     = _get_random_gcs_bucket(config)
+    region     = _random_region(config)
     ttl_days   = random.choice([1, 1, 1, 2, 3])   # weighted toward 1 day
 
     entry = _build_log_entry(
@@ -5088,7 +5114,7 @@ def _gen_gcs_lifecycle_tamper(config, context=None):
         method_name     = "storage.buckets.update",
         resource_name   = f"projects/_/buckets/{bucket}",
         resource_type   = "gcs_bucket",
-        resource_labels = {"bucket_name": bucket, "project_id": project_id},
+        resource_labels = {"bucket_name": bucket, "location": region, "project_id": project_id},
         log_type        = _LOG_ACTIVITY,
         authorization_info = [{
             "resource":   f"projects/_/buckets/{bucket}",
