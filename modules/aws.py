@@ -8,6 +8,36 @@ import time # Added for sleep between actions
 from ipaddress import ip_network, ip_address # Added for IP generation
 import base64 # Added for UserData simulation
 
+try:
+    from modules.session_utils import get_random_anon_ip_ctx, get_random_vpn_ip_ctx
+except ImportError:
+    from session_utils import get_random_anon_ip_ctx, get_random_vpn_ip_ctx
+
+# Realistic AWS SDK/CLI user agents for CloudTrail events.
+# CloudTrail records the SDK/CLI used by the caller, NOT browser user agents.
+_AWS_USER_AGENTS = [
+    "aws-cli/2.15.30 Python/3.11.8 Linux/5.15.0-113-generic exe/x86_64 prompt/off",
+    "aws-cli/2.17.4 Python/3.12.3 Windows/10 exe/AMD64 prompt/off",
+    "aws-cli/2.13.21 Python/3.11.5 Darwin/22.6.0 source/x86_64 prompt/off",
+    "aws-cli/1.33.2 Python/3.11.8 Linux/5.15.0-113-generic botocore/1.35.2",
+    "Boto3/1.34.69 Python/3.11.8 Linux/5.15.0-113-generic Botocore/1.34.69",
+    "Boto3/1.35.0 Python/3.12.1 Windows/10 Botocore/1.35.0",
+    "Boto3/1.33.11 Python/3.10.12 Linux/5.15.0-91-generic Botocore/1.33.11",
+    "aws-sdk-go/1.55.5 (go1.22.0; linux; amd64)",
+    "aws-sdk-go-v2/1.30.5 os/linux lang/go/1.22.0 md/GOOS/linux md/GOARCH/amd64",
+    "aws-sdk-go/1.44.180 (go1.20.4; linux; amd64)",
+    "aws-sdk-java/2.25.16 ua/2.1 os/linux/5.15 lang/java/21 md/OpenJDK_JVM/21.0.1",
+    "aws-sdk-java/1.12.600 Linux/5.15.0 OpenJDK_64-Bit_Server_VM/21.0.1 Java/21.0.1",
+    "aws-sdk-js/2.1691.0 OS/linux OS/20.14.0 lang/js md/nodejs/20.14.0",
+    "aws-sdk-js-v3/3.540.0 os/Linux lang/js/20.14.0 md/nodejs/20.14.0",
+    "HashiCorp Terraform/1.9.5 (+https://www.terraform.io) terraform-provider-aws/5.65.0",
+    "HashiCorp Terraform/1.7.4 (+https://www.terraform.io) terraform-provider-aws/5.40.0",
+    "aws-sdk-ruby3/3.187.0 ruby/3.2.0 x86_64-linux",
+    "aws-sdk-php/3.300.0 OS/Linux/5.15.0 PHP/8.2.0",
+    "aws-cdk/2.150.0 Node.js/20.14.0 (linux; x64)",
+    "Ansible/2.16.3 (Python 3.11.8)",
+]
+
 # --- Module Metadata ---
 NAME = "aws"
 DESCRIPTION = "Simulates various AWS CloudTrail events to trigger XSIAM analytics."
@@ -87,8 +117,14 @@ def _get_random_user(config, allow_root=False):
     return final_identity
 
 
-def _get_random_ip(config, use_tor=False, force_external=False):
-    """Gets a random IP address, from internal, external, or Tor sources."""
+def _get_random_ip(config, use_tor=False, force_external=False, use_anon=False):
+    """Gets a random IP address, from internal, external, Tor, or anonymizer (VPN/Tor mix) sources.
+
+    use_tor=True  — always a Tor exit node (use for Tor-specific detections)
+    use_anon=True — 70% commercial VPN / 30% Tor mix (use for general anonymizer scenarios)
+    """
+    if use_anon:
+        return get_random_anon_ip_ctx(config)["ip"]
     if use_tor:
         tor_nodes = config.get('tor_exit_nodes', [])
         if tor_nodes:
@@ -232,14 +268,14 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
     if _access_key_id:
         user_identity_block["accessKeyId"] = _access_key_id               # -> used by "Remote usage of Lambda role" detector
 
-    # Add userName if explicitly provided or derivable
+    # Add userName if explicitly provided or derivable.
+    # Real CloudTrail only includes top-level userName for IAMUser and Root identity types.
+    # AssumedRole identities do NOT have a top-level userName — the role name lives exclusively
+    # in sessionContext.sessionIssuer.userName. Adding it here would be detectable as synthetic.
     if 'userName' in user_identity:
          user_identity_block["userName"] = user_identity['userName']
     elif user_identity['type'] == 'IAMUser' and 'name' in user_identity:
          user_identity_block["userName"] = user_identity['name']
-    elif user_identity['type'] in ['AssumedRole', 'Role'] and 'name' in user_identity:
-         role_name = user_identity['name'].split('/')[0] if '/' in user_identity['name'] else user_identity['name']
-         user_identity_block["userName"] = role_name # Add top-level userName for roles
 
 
     # Build sessionContext if needed and not already provided
@@ -306,13 +342,41 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
             }
 
 
-    ua_list = config.get('user_agents', ["Mozilla/5.0 (Unknown OS)"])
-    user_agent_choice = random.choice(ua_list) if ua_list else "DefaultUserAgent/1.0"
+    aws_conf_for_ua = config.get(CONFIG_KEY, {})
+    ua_list = aws_conf_for_ua.get('user_agents', _AWS_USER_AGENTS)
+    user_agent_choice = random.choice(ua_list) if ua_list else "aws-cli/2.15.30 Python/3.11.8 Linux/5.15.0-113-generic exe/x86_64 prompt/off"
 
-    # Determine managementEvent and eventCategory based on readOnly flag and service
+    # Determine managementEvent and eventCategory.
+    # CloudTrail data events (data-plane API calls) require managementEvent=false and eventCategory="Data".
+    # Management events (control-plane) are the default.
+    _DATA_EVENTS = {
+        "s3.amazonaws.com": {
+            "GetObject", "PutObject", "DeleteObject", "CopyObject", "HeadObject", "DeleteObjects",
+        },
+        "dynamodb.amazonaws.com": {
+            "GetItem", "PutItem", "UpdateItem", "DeleteItem",
+            "Query", "Scan", "BatchGetItem", "BatchWriteItem",
+            "ExecuteStatement", "BatchExecuteStatement",
+        },
+        "bedrock-runtime.amazonaws.com": {
+            "InvokeModel", "InvokeModelWithResponseStream", "Converse", "ConverseStream",
+        },
+        "bedrock-agent-runtime.amazonaws.com": {
+            "Retrieve", "RetrieveAndGenerate", "InvokeAgent",
+        },
+        "lambda.amazonaws.com": {
+            "Invoke", "InvokeWithResponseStream",
+        },
+        "logs.amazonaws.com": {
+            "GetLogEvents", "FilterLogEvents",
+        },
+        "rds.amazonaws.com": {
+            "DownloadDBLogFilePortion",
+        },
+    }
     management_event = True
     event_category = "Management"
-    if event_source.startswith("s3.") and event_name in ["GetObject", "PutObject", "CopyObject", "HeadObject"]:
+    if event_name in _DATA_EVENTS.get(event_source, set()):
         management_event = False
         event_category = "Data"
 
@@ -325,7 +389,7 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
         tls_host = event_source.replace("amazonaws.com", f"{region}.amazonaws.com")
 
     base_event = {
-        "eventVersion": "1.08",                                           # -> xdm.observer.content_version
+        "eventVersion": "1.11",                                           # -> xdm.observer.content_version
         "userIdentity": user_identity_block,
         "eventTime": now.strftime('%Y-%m-%dT%H:%M:%SZ'),                  # -> _time
         "eventSource": event_source,                                      # -> xdm.observer.name
@@ -409,7 +473,7 @@ def _generate_s3_get_object(config, context=None):
             },
         "responseElements": {
             "x-amz-request-id": str(uuid.uuid4()),
-             "x-amz-id-2": f"SimulatedId2{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=', k=64))}"
+             "x-amz-id-2": ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', k=76))
         },
         "resources": [
             {"type": "AWS::S3::Object", "ARN": object_arn, "accountId": account_id},
@@ -1437,7 +1501,7 @@ def _generate_s3_put_object(config, context=None):
         },
         "responseElements": {
             "x-amz-request-id": str(uuid.uuid4()),
-            "x-amz-id-2": f"SimulatedId2{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=', k=64))}",
+            "x-amz-id-2": ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', k=76)),
             "ETag": f"\"{''.join(random.choices('0123456789abcdef', k=32))}\""
         },
         "resources": [
@@ -2421,16 +2485,13 @@ def _generate_iam_recon_list(config, context=None):
     
     # 1. List Users
     events.append(_generate_iam_list_users(config, context)[0])
-    time.sleep(random.uniform(0.5, 2))
-    
+
     # 2. List Roles
     events.append(_generate_iam_list_roles(config, context)[0])
-    time.sleep(random.uniform(0.5, 2))
-    
+
     # 3. List Policies
     events.append(_generate_iam_list_policies(config, context)[0])
-    time.sleep(random.uniform(0.5, 2))
-    
+
     # 4. GetUser (on self)
     events.append(_generate_iam_get_user(config, context)[0])
     
@@ -2533,7 +2594,6 @@ def _generate_multiple_denied_actions(config, context=None):
         base_event["requestParameters"] = {k: v for k, v in base_event["requestParameters"].items() if v is not None}
 
         events.append(base_event)
-        time.sleep(random.uniform(0.1, 0.5)) # Slight delay between denied actions
     return events
 def _get_random_user_from_template(config, user_template):
     """Takes a user template from config and returns a fully-fleshed identity object."""
@@ -2833,7 +2893,7 @@ def _generate_kms_key_disabled(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.4: # 40% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.7: # 30% chance Random External (non-TOR, non-benign list)
             ip_address = _get_random_ip(config, force_external=True)
         else: # 30% chance Internal IP (Insider/Compromised Host)
@@ -2879,7 +2939,7 @@ def _generate_root_user_activity(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.1: # 10% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.4: # 30% chance Random External (non-TOR, non-benign list)
             ip_address = _get_random_ip(config, force_external=True)
         else: # 60% chance Internal IP (Insider/Compromised Host)
@@ -2911,7 +2971,7 @@ def _generate_trail_deleted(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.05: # 5% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.4: # 35% chance Random External
             ip_address = _get_random_ip(config, force_external=True)
         else: # 60% chance Internal IP (Insider/Compromised Host)
@@ -2946,7 +3006,7 @@ def _generate_multiple_deletes(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.01: # 1% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.4: # 39% chance Random External
             ip_address = _get_random_ip(config, force_external=True)
         else: # 60% chance Internal IP (Insider/Compromised Host)
@@ -2970,8 +3030,6 @@ def _generate_multiple_deletes(config, context=None):
         "resources": [{"type": "AWS::S3::Bucket", "ARN": bucket_arn, "accountId": account_id}]
     })
     events.append(s3_event)
-    
-    time.sleep(random.uniform(0.5, 2)) # Short delay
 
     # 2. Terminate EC2 Instance
     instance_id = random.choice(aws_conf.get("ec2_instances", ["i-00000000000000000"]))
@@ -3003,7 +3061,7 @@ def _generate_suspicious_iam_creation(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.1: # 10% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.7: # 60% chance Random External
             ip_address = _get_random_ip(config, force_external=True)
         else: # 30% chance Internal IP (Insider/Compromised Host)
@@ -3035,8 +3093,7 @@ def _generate_suspicious_iam_creation(config, context=None):
         "resources": [{"type": "AWS::IAM::User", "ARN": new_user_arn, "accountId": account_id}]
     })
     events.append(create_user_event)
-    time.sleep(random.uniform(0.5, 2))
-    
+
     # 2. Attach Admin Policy
     policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
     attach_policy_event = _get_base_event(config, user_identity, ip_address, region, "AttachUserPolicy", "iam.amazonaws.com", api_version="2010-05-08", read_only=False)
@@ -3047,8 +3104,7 @@ def _generate_suspicious_iam_creation(config, context=None):
         "resources": [{"type": "AWS::IAM::User", "ARN": new_user_arn, "accountId": account_id}]
     })
     events.append(attach_policy_event)
-    time.sleep(random.uniform(0.5, 2))
-    
+
     # 3. Create Access Key
     create_key_event = _get_base_event(config, user_identity, ip_address, region, "CreateAccessKey", "iam.amazonaws.com", api_version="2010-05-08", read_only=False)
     create_key_event["eventTime"] = (now + datetime.timedelta(seconds=10)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -3081,7 +3137,7 @@ def _generate_cloudtrail_stop_logging(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.05: # 5% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.7: # 65% chance Random External
             ip_address = _get_random_ip(config, force_external=True)
         else: # 30% chance Internal IP (Insider/Compromised Host)
@@ -3182,7 +3238,7 @@ def _generate_s3_suspicious_encryption(config, context=None):
             },
             "responseElements": {
                 "x-amz-request-id": str(uuid.uuid4()),
-                "x-amz-id-2": f"SimulatedId2{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=', k=64))}",
+                "x-amz-id-2": ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', k=76)),
                 "x-amz-server-side-encryption": "aws:kms",
                 "x-amz-server-side-encryption-aws-kms-key-id": kms_key_arn
             },
@@ -3193,9 +3249,306 @@ def _generate_s3_suspicious_encryption(config, context=None):
             ]
         })
         events.append(event)
-        time.sleep(random.uniform(0.2, 1))
-        
+
     return events
+
+
+def _generate_s3_ransomware_encrypt(config, context=None):
+    """(Threat) Simulates ransomware operator re-encrypting S3 objects with a foreign-account KMS key.
+    Triggers XSIAM: 'Suspicious objects encryption in an AWS bucket'
+    Detection signal: kms:GenerateDataKey from s3.amazonaws.com using a KMS key owned by a
+    non-organization account, repeated across multiple objects in the same bucket.
+
+    Full attack chain:
+      GetCallerIdentity → ListBuckets → ListObjectsV2 →
+      [CopyObject + GenerateDataKey] ×50-250 →
+      DeleteObjects (batch) → PutObject (ransom note, no KMS)
+
+    Each CopyObject (attacker IP) is immediately followed by a paired GenerateDataKey
+    (kms.amazonaws.com, sourceIPAddress=s3.amazonaws.com) — S3 calls KMS internally
+    to obtain the data key for each object it encrypts.
+    """
+    aws_conf = config.get(CONFIG_KEY, {})
+    account_id = aws_conf.get('aws_account_id', '123456789012')
+    region = aws_conf.get('aws_region', 'us-east-1')
+    s3_buckets = aws_conf.get("s3_buckets", ["default-sim-bucket-1"])
+
+    # Stolen long-term IAM credentials — AKIA key from exfiltrated .env/config files.
+    # Build a clean IAMUser identity from scratch so all fields are internally consistent:
+    # AIDA principalId prefix, user ARN, AKIA access key, no sessionContext.
+    # Coercing an AssumedRole identity to type=IAMUser leaves AROA/role fields intact,
+    # which breaks XIF field extraction and potentially the detection query.
+    _raw_user = _get_random_user(config)
+    _user_name = _raw_user.get('name', _raw_user.get('userName', 'svc-backup-user'))
+    account_id = _raw_user.get('accountId', account_id)
+    user_identity = {
+        "type": "IAMUser",
+        "name": _user_name,
+        "accountId": account_id,
+        "arn_suffix": f"user/{_user_name}",
+    }
+
+    # VPN-only source IP — single consistent IP per run, rotates across runs.
+    # Tor excluded: too slow/unreliable for bulk S3 throughput.
+    ip_address = get_random_vpn_ip_ctx(config)["ip"]
+
+    # Foreign-account KMS key — the primary cross-account detection signal
+    foreign_account = random.choice(aws_conf.get("foreign_account_ids", ["999988887777"]))
+    foreign_key_id = "mrk-" + "".join(random.choices("0123456789abcdef", k=32))
+    foreign_kms_arn = f"arn:aws:kms:{region}:{foreign_account}:key/{foreign_key_id}"
+
+    target_bucket = random.choice(s3_buckets)
+    bucket_arn = f"arn:aws:s3:::{target_bucket}"
+
+    # Generate object inventory once — shared across ListObjectsV2, CopyObject, DeleteObjects
+    _prefixes = ["documents/", "data/", "backups/", "reports/", "exports/", "archives/", "db/", "configs/"]
+    _exts = [".dat", ".bak", ".docx", ".xlsx", ".pdf", ".db", ".sql", ".csv", ".json", ".tar.gz"]
+    num_files = random.randint(50, 250)
+    objects = [
+        {
+            "key": f"{random.choice(_prefixes)}{random.randint(10000, 99999)}{random.choice(_exts)}",
+            "size": random.randint(1024, 50 * 1024 * 1024),
+            "eTag": '"' + ''.join(random.choices('0123456789abcdef', k=32)) + '"',
+        }
+        for _ in range(num_files)
+    ]
+
+    _cipher_suites = [
+        "ECDHE-RSA-AES128-GCM-SHA256",
+        "ECDHE-RSA-AES256-GCM-SHA384",
+        "TLS_AES_128_GCM_SHA256",
+    ]
+    cipher_suite = random.choice(_cipher_suites)
+
+    base_time = datetime.datetime.now(datetime.UTC)
+    t_offset = 0.0
+    events = []
+
+    def _ts(offset):
+        return (base_time + datetime.timedelta(seconds=offset)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def _ts_ms(offset):
+        return (base_time + datetime.timedelta(seconds=offset)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+    def _strip_vpc(e):
+        """External attacker traffic never arrives through a VPC endpoint."""
+        e.pop("vpcEndpointId", None)
+        e.pop("vpcEndpointAccountId", None)
+        return e
+
+    # ── Phase 1: GetCallerIdentity — verify stolen creds work ─────────────────
+    e = _strip_vpc(_get_base_event(config, user_identity, ip_address, region, "GetCallerIdentity", "sts.amazonaws.com", api_version="2011-06-15", read_only=True))
+    e["eventTime"] = _ts(t_offset)
+    e.update({
+        "requestParameters": None,
+        "responseElements": {
+            "account": account_id,
+            "userId": user_identity.get('name', 'unknown'),
+            "arn": user_identity.get('arn', f"arn:aws:iam::{account_id}:user/{user_identity.get('name', 'unknown')}")
+        },
+        "resources": []
+    })
+    events.append(e)
+    t_offset += 5
+
+    # ── Phase 2: ListBuckets — discover the target bucket ─────────────────────
+    e = _strip_vpc(_get_base_event(config, user_identity, ip_address, region, "ListBuckets", "s3.amazonaws.com", api_version="2006-03-01", read_only=True))
+    e["eventTime"] = _ts(t_offset)
+    e.update({
+        "requestParameters": None,
+        "responseElements": {"buckets": [{"name": b} for b in s3_buckets[:5]]},
+        "resources": []
+    })
+    events.append(e)
+    t_offset += 8
+
+    # ── Phase 3: ListObjectsV2 — enumerate bucket contents ────────────────────
+    page_size = 1000
+    pages = [objects[i:i + page_size] for i in range(0, len(objects), page_size)]
+    next_token = None
+    for page_idx, page_objects in enumerate(pages):
+        is_last = (page_idx == len(pages) - 1)
+        req_params = {"bucketName": target_bucket, "encoding-type": "url", "max-keys": page_size}
+        if next_token:
+            req_params["continuation-token"] = next_token
+        next_token = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789', k=32)) if not is_last else None
+
+        resp = {
+            "isTruncated": not is_last,
+            "keyCount": len(page_objects),
+            "maxKeys": page_size,
+            "name": target_bucket,
+            "prefix": ""
+        }
+        if next_token:
+            resp["nextContinuationToken"] = next_token
+
+        e = _strip_vpc(_get_base_event(config, user_identity, ip_address, region, "ListObjectsV2", "s3.amazonaws.com", api_version="2006-03-01", read_only=True))
+        e["eventTime"] = _ts(t_offset)
+        e.update({
+            "requestParameters": req_params,
+            "responseElements": resp,
+            "resources": [{"type": "AWS::S3::Bucket", "ARN": bucket_arn, "accountId": account_id}]
+        })
+        events.append(e)
+        t_offset += 3
+
+    # ── Phase 4: CopyObject + GenerateDataKey pairs ────────────────────────────
+    # Each CopyObject (attacker re-encrypts the object) is immediately followed by a
+    # kms:GenerateDataKey event — S3 calls KMS synchronously to get the data key.
+    # The KMS event carries:
+    #   - userIdentity.type=AWSService / invokedBy=s3.amazonaws.com (service-to-service)
+    #   - sourceIPAddress=s3.amazonaws.com (not the attacker IP)
+    #   - resources[].accountId=foreign_account  ← the non-org-account signal XSIAM detects
+    #   - encryptionContext links the KMS call back to the specific bucket and object key
+    for obj in objects:
+        object_arn = f"arn:aws:s3:::{target_bucket}/{obj['key']}"
+        new_etag = '"' + ''.join(random.choices('0123456789abcdef', k=32)) + '"'
+        copy_time = t_offset
+
+        # CopyObject — S3 data event from the attacker's VPN IP
+        # KMS key resource belongs in the KMS event only; S3 event has S3 resources only
+        e = _strip_vpc(_get_base_event(config, user_identity, ip_address, region, "CopyObject", "s3.amazonaws.com", api_version="2006-03-01", read_only=False))
+        e["eventTime"] = _ts(copy_time)
+        e.update({
+            "managementEvent": False,
+            "eventCategory": "Data",
+            "additionalEventData": {
+                "AuthenticationMethod": "AuthHeader",
+                "CipherSuite": cipher_suite,
+                "SignatureVersion": "SigV4",
+                "bytesTransferredIn": 0,
+                "bytesTransferredOut": 0
+            },
+            "requestParameters": {
+                "bucketName": target_bucket,
+                "key": obj['key'],
+                "copySource": f"{target_bucket}/{obj['key']}",
+                "x-amz-metadata-directive": "REPLACE",
+                "x-amz-server-side-encryption": "aws:kms",
+                "x-amz-server-side-encryption-aws-kms-key-id": foreign_kms_arn
+            },
+            "responseElements": {
+                "copyObjectResult": {
+                    "eTag": new_etag,
+                    "lastModified": _ts_ms(copy_time)
+                }
+            },
+            "resources": [
+                {"type": "AWS::S3::Object", "ARN": object_arn, "accountId": account_id},
+                {"type": "AWS::S3::Bucket", "ARN": bucket_arn, "accountId": account_id},
+                # KMS key included in S3 event resources — cross-account accountId is the detection signal
+                {"type": "AWS::KMS::Key", "ARN": foreign_kms_arn, "accountId": foreign_account}
+            ]
+        })
+        events.append(e)
+
+        # GenerateDataKey — KMS management event, S3 service calling KMS internally
+        # Built from the same base to inherit requestID, eventID, recipientAccountId, tlsDetails, etc.
+        # userIdentity and sourceIPAddress are then overridden to reflect the service call.
+        kms_e = _strip_vpc(_get_base_event(config, user_identity, "s3.amazonaws.com", region, "GenerateDataKey", "kms.amazonaws.com", read_only=False))
+        kms_e["eventTime"] = _ts(copy_time + 1)
+        kms_e["sourceIPAddress"] = "s3.amazonaws.com"
+        kms_e["recipientAccountId"] = account_id
+        # AWSService identity — no principalId, accessKeyId, accountId, or sessionContext
+        kms_e["userIdentity"] = {"type": "AWSService", "invokedBy": "s3.amazonaws.com"}
+        # S3→KMS service calls show the calling service as the agent, not a CLI string.
+        # Set explicitly so generate_log's defaults pass doesn't overwrite with a CLI agent.
+        kms_e["userAgent"] = "s3.amazonaws.com"
+        # sharedEventID is always present for cross-account KMS events — it marks that
+        # this event involves a resource (KMS key) owned by a different AWS account.
+        kms_e["sharedEventID"] = str(uuid.uuid4())
+        kms_e.update({
+            "requestParameters": {
+                "keyId": foreign_kms_arn,
+                "keySpec": "AES_256",
+                "encryptionContext": {
+                    "aws:s3:arn": object_arn,
+                    "aws:s3:bucketName": target_bucket,
+                    "aws:s3:x-amz-server-side-encryption-aws-kms-key-id": foreign_kms_arn
+                }
+            },
+            "responseElements": None,  # KMS never logs key material in CloudTrail
+            "resources": [
+                # Foreign accountId here is the non-organization-account signal XSIAM detects
+                {"type": "AWS::KMS::Key", "ARN": foreign_kms_arn, "accountId": foreign_account}
+            ]
+        })
+        events.append(kms_e)
+
+        t_offset += random.uniform(0.1, 0.5)  # Tight interval — rapid bulk operation
+
+    # ── Phase 5: DeleteObjects — remove originals in batches of 500 ──────────
+    batch_size = 500
+    for i in range(0, len(objects), batch_size):
+        batch = objects[i:i + batch_size]
+        e = _strip_vpc(_get_base_event(config, user_identity, ip_address, region, "DeleteObjects", "s3.amazonaws.com", api_version="2006-03-01", read_only=False))
+        e["eventTime"] = _ts(t_offset)
+        e.update({
+            "managementEvent": False,
+            "eventCategory": "Data",
+            "additionalEventData": {
+                "AuthenticationMethod": "AuthHeader",
+                "CipherSuite": cipher_suite,
+                "SignatureVersion": "SigV4",
+                "bytesTransferredIn": 0,
+                "bytesTransferredOut": 0
+            },
+            "requestParameters": {
+                "bucketName": target_bucket,
+                "delete": {
+                    "objects": [{"key": obj['key']} for obj in batch],
+                    "quiet": False
+                }
+            },
+            "responseElements": {
+                "DeleteResult": {
+                    "Deleted": [{"Key": obj['key']} for obj in batch]
+                }
+            },
+            "resources": [{"type": "AWS::S3::Bucket", "ARN": bucket_arn, "accountId": account_id}]
+        })
+        events.append(e)
+        t_offset += 5
+
+    # ── Phase 6: PutObject ransom note — plain text, intentionally no KMS ─────
+    # Victim must be able to read the note; encrypting it would defeat the purpose
+    ransom_key = random.choice([
+        "RANSOM_NOTE.txt", "README_DECRYPT.txt",
+        "HOW_TO_RECOVER_FILES.txt", "YOUR_FILES_ARE_ENCRYPTED.txt"
+    ])
+    ransom_arn = f"arn:aws:s3:::{target_bucket}/{ransom_key}"
+    e = _strip_vpc(_get_base_event(config, user_identity, ip_address, region, "PutObject", "s3.amazonaws.com", api_version="2006-03-01", read_only=False))
+    e["eventTime"] = _ts(t_offset)
+    e.update({
+        "managementEvent": False,
+        "eventCategory": "Data",
+        "additionalEventData": {
+            "AuthenticationMethod": "AuthHeader",
+            "CipherSuite": cipher_suite,
+            "SignatureVersion": "SigV4",
+            "bytesTransferredIn": random.randint(512, 2048),
+            "bytesTransferredOut": 0
+        },
+        "requestParameters": {
+            "bucketName": target_bucket,
+            "key": ransom_key,
+            "Host": f"{target_bucket}.s3.{region}.amazonaws.com"
+            # No x-amz-server-side-encryption — ransom note is deliberately unencrypted
+        },
+        "responseElements": {
+            "x-amz-request-id": str(uuid.uuid4()),
+            "x-amz-id-2": ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', k=76))
+        },
+        "resources": [
+            {"type": "AWS::S3::Object", "ARN": ransom_arn, "accountId": account_id},
+            {"type": "AWS::S3::Bucket", "ARN": bucket_arn, "accountId": account_id}
+        ]
+    })
+    events.append(e)
+
+    return events
+
 
 def _generate_k8s_sa_outside_cluster(config, context=None):
     """(Threat) Simulates a K8s service account token being used from an external IP."""
@@ -3216,18 +3569,36 @@ def _generate_k8s_sa_outside_cluster(config, context=None):
     # Use timezone-aware datetime
     now = datetime.datetime.now(datetime.UTC)
     
-    role_arn = f"arn:aws:iam::{account_id}:role/my-eks-sa-role"
+    # Generate realistic EKS IRSA (IAM Roles for Service Accounts) identifiers
+    _irsa_role_names = [
+        "prod-backend-api-irsa-role", "dev-worker-irsa-role", "staging-ingress-irsa-role",
+        "eks-cluster-autoscaler-role", "fluentbit-log-forwarder-role", "external-secrets-role",
+        "aws-load-balancer-controller-role", "cert-manager-irsa-role", "monitoring-prometheus-role",
+        "datadog-agent-irsa-role",
+    ]
+    _k8s_namespaces = ["default", "kube-system", "monitoring", "logging", "ingress-nginx", "prod", "staging"]
+    _k8s_sa_names = ["app-service-account", "backend-sa", "worker-sa", "api-sa", "default"]
+    eks_role_name = random.choice(_irsa_role_names)
+    k8s_namespace = random.choice(_k8s_namespaces)
+    k8s_sa_name = random.choice(_k8s_sa_names)
+    # Pod session name follows K8s naming: <deployment>-<replicaset-hash>-<pod-hash>
+    _pod_prefix = random.choice(["backend-api", "worker", "api-server", "log-agent", "autoscaler"])
+    _rs_hash = ''.join(random.choices('0123456789abcdef', k=8))
+    _pod_hash = ''.join(random.choices('bcdfghjklmnpqrstvwxz2456789', k=5))
+    pod_session_name = f"{_pod_prefix}-{_rs_hash}-{_pod_hash}"
+
+    role_arn = f"arn:aws:iam::{account_id}:role/{eks_role_name}"
     role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
-    
+
     event1 = {
-        "eventVersion": "1.08",
+        "eventVersion": "1.11",
         "userIdentity": None, # STS WebIdentity calls are initially anonymous
         "eventTime": now.strftime('%Y-%m-%dT%H:%M:%SZ'),
         "eventSource": "sts.amazonaws.com",
         "eventName": "AssumeRoleWithWebIdentity",
         "awsRegion": "us-east-1", # STS is global
         "sourceIPAddress": ip_address,
-        "userAgent": "aws-sdk-go/1.44.20 (go1.18.3; linux; amd64)",
+        "userAgent": "aws-sdk-go/1.44.180 (go1.20.4; linux; amd64)",
         "requestID": str(uuid.uuid4()),
         "eventID": str(uuid.uuid4()),
         "readOnly": True,
@@ -3246,7 +3617,7 @@ def _generate_k8s_sa_outside_cluster(config, context=None):
         "apiVersion": "2011-06-15",
         "requestParameters": {
             "roleArn": role_arn,
-            "roleSessionName": "eks-my-pod",
+            "roleSessionName": pod_session_name,
             "webIdentityToken": "eyJraWQiOi...[REDACTED]...GV9pbiI6MzYwMH0",
             "durationSeconds": 3600
         },
@@ -3254,45 +3625,43 @@ def _generate_k8s_sa_outside_cluster(config, context=None):
             "credentials": {
                 "accessKeyId": f"ASIA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=16))}",
                 "expiration": (now + datetime.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'),
-                "sessionToken": "<SENSITIVE_REDACTED>"
+                "sessionToken": "Value hidden due to security reasons."
             },
             "assumedRoleUser": {
-                "assumedRoleId": f"{role_id}:eks-my-pod",
-                "arn": f"arn:aws:sts::{account_id}:assumed-role/my-eks-sa-role/eks-my-pod"
+                "assumedRoleId": f"{role_id}:{pod_session_name}",
+                "arn": f"arn:aws:sts::{account_id}:assumed-role/{eks_role_name}/{pod_session_name}"
             },
             "audience": "sts.amazonaws.com"
         },
         "resources": [{"type": "AWS::IAM::Role", "ARN": role_arn, "accountId": account_id}]
     }
-    
+
     # 2. Create the identity that will be used for the *next* call
     assumed_role_identity = {
         "type": "AssumedRole",
         "principalId": event1["responseElements"]["assumedRoleUser"]["assumedRoleId"],
         "arn": event1["responseElements"]["assumedRoleUser"]["arn"],
         "accountId": account_id,
-        "userName": "my-eks-sa-role/eks-my-pod", # Add userName for base_event
+        "userName": f"{eks_role_name}/{pod_session_name}", # Add userName for base_event
         "sessionContext": {
             "sessionIssuer": {
                 "type": "Role",
                 "principalId": role_id,
                 "arn": role_arn,
                 "accountId": account_id,
-                "userName": "my-eks-sa-role"
+                "userName": eks_role_name
             },
             "attributes": {
                 "mfaAuthenticated": "false",
                 "creationDate": now.strftime('%Y-%m-%dT%H:%M:%SZ')
             },
             "webIdFederationData": { # This is key for K8s SA
-                "federatedProvider": f"arn:aws:iam::{account_id}:oidc-provider/oidc.eks.{region}.amazonaws.com/id/EXAMPLEOIDC",
-                "attributes": {"aud": "sts.amazonaws.com", "sub": "system:serviceaccount:default:my-sa"}
+                "federatedProvider": f"arn:aws:iam::{account_id}:oidc-provider/oidc.eks.{region}.amazonaws.com/id/{''.join(random.choices('0123456789ABCDEF', k=32))}",
+                "attributes": {"aud": "sts.amazonaws.com", "sub": f"system:serviceaccount:{k8s_namespace}:{k8s_sa_name}"}
             }
         }
     }
     
-    time.sleep(random.uniform(1, 3))
-
     # 3. Simulate the suspicious API call (e.g., ListSecrets) using the new identity
     event2 = _get_base_event(config, assumed_role_identity, ip_address, region, "ListSecrets", "secretsmanager.amazonaws.com", api_version="2017-10-17", read_only=True)
     event2.update({
@@ -3351,7 +3720,7 @@ def _generate_pentest_instance_launch(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.1: # 10% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.4: # 30% chance Random External
             ip_address = _get_random_ip(config, force_external=True)
         else: # 60% chance Internal IP (Insider/Compromised Host)
@@ -3400,7 +3769,7 @@ def _generate_ec2_instance_type_change(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.05: # 5% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.2: # 15% chance Random External
             ip_address = _get_random_ip(config, force_external=True)
         else: # 80% chance Internal IP (Insider/Compromised Host)
@@ -3533,7 +3902,7 @@ def _generate_s3_disable_bucket_logging(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.05: # 5% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.7: # 65% chance Random External
             ip_address = _get_random_ip(config, force_external=True)
         else: # 30% chance Internal IP (Insider/Compromised Host)
@@ -3632,7 +4001,7 @@ def _generate_cloudwatch_delete_log_stream(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.1: # 10% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.7: # 60% chance Random External
             ip_address = _get_random_ip(config, force_external=True)
         else: # 30% chance Internal IP (Insider/Compromised Host)
@@ -3670,7 +4039,7 @@ def _generate_iam_remove_billing_admin(config, context=None):
     if not ip_address:
         ip_choice = random.random()
         if ip_choice < 0.01: # 1% chance TOR
-            ip_address = _get_random_ip(config, use_tor=True)
+            ip_address = _get_random_ip(config, use_anon=True)
         elif ip_choice < 0.7: # 60% chance Random External
             ip_address = _get_random_ip(config, force_external=True)
         else: # 30% chance Internal IP (Insider/Compromised Host)
@@ -3810,8 +4179,6 @@ def _generate_ec2_create_and_share_snapshot(config, context=None):
         ]
     })
     events.append(create_event)
-    
-    time.sleep(random.uniform(1, 3)) # Short delay
 
     # 2. Modify Snapshot Attribute (Share it)
     share_event = _get_base_event(config, user_identity, ip_address, region, "ModifySnapshotAttribute", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
@@ -4014,6 +4381,126 @@ def _generate_ssm_send_command(config, context=None):
     return [event]
 
 
+def _generate_ssm_execution_chain(config, context=None):
+    """(Threat) Simulates a recon-to-code-execution attack chain via AWS SSM.
+    Triggers XSIAM: 'Command execution via AWS SSM' — with suspicious lead-up recon activity.
+    Chain: DescribeInstanceInformation -> GetParameter (withDecryption) -> SendCommand
+    """
+    user_identity = None
+    ip_address = None
+    if context:
+        user_identity = context.get('user_identity')
+        ip_address = context.get('ip_address')
+
+    if not user_identity: user_identity = _get_random_user(config)
+    if not ip_address: ip_address = _get_random_ip(config, use_anon=True)
+
+    aws_conf = config.get(CONFIG_KEY, {})
+    region = aws_conf.get('aws_region', 'us-east-1')
+    account_id = user_identity.get('accountId', aws_conf.get('aws_account_id', '123456789012'))
+
+    instance_id = random.choice(aws_conf.get("ec2_instances", ["i-00000000000000000"]))
+    instance_arn = f"arn:aws:ec2:{region}:{account_id}:instance/{instance_id}"
+
+    sensitive_param = random.choice(aws_conf.get("sensitive_credential_paths", ["/prod/db/password"]))
+
+    doc_name = random.choice(["AWS-RunShellScript", "AWS-RunPowerShellScript"])
+    command_id = str(uuid.uuid4())
+
+    base_time = datetime.datetime.now(datetime.UTC)
+    now_fmt = base_time.strftime("%b %d, %Y %I:%M:%S %p")
+    expires_fmt = (base_time + datetime.timedelta(hours=1)).strftime("%b %d, %Y %I:%M:%S %p")
+
+    events = []
+
+    # Event 1: DescribeInstanceInformation — attacker enumerates SSM-managed EC2 instances
+    e1 = _get_base_event(config, user_identity, ip_address, region, "DescribeInstanceInformation", "ssm.amazonaws.com", api_version="2014-11-06", read_only=True)
+    e1["eventTime"] = base_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+    e1.update({
+        "requestParameters": {
+            "filters": [{"key": "PingStatus", "valueSet": ["Online"]}]
+        },
+        "responseElements": {
+            "instanceInformationList": [{
+                "instanceId": instance_id,
+                "pingStatus": "Online",
+                "platformType": "Linux"
+            }]
+        },
+        "resources": []
+    })
+    events.append(e1)
+
+    # Event 2: GetParameter — attacker reads a sensitive Parameter Store value with decryption
+    e2 = _get_base_event(config, user_identity, ip_address, region, "GetParameter", "ssm.amazonaws.com", api_version="2014-11-06", read_only=True)
+    e2["eventTime"] = (base_time + datetime.timedelta(seconds=10)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    e2.update({
+        "requestParameters": {
+            "name": sensitive_param,
+            "withDecryption": True
+        },
+        "responseElements": None,  # CloudTrail omits parameter value from responseElements
+        "resources": []
+    })
+    events.append(e2)
+
+    # Event 3: SendCommand — code execution on the instance found in event 1
+    e3 = _get_base_event(config, user_identity, ip_address, region, "SendCommand", "ssm.amazonaws.com", api_version="2014-11-06", read_only=False)
+    e3["eventTime"] = (base_time + datetime.timedelta(seconds=20)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    e3.update({
+        "requestParameters": {
+            "documentName": doc_name,
+            "documentVersion": "$DEFAULT",
+            "instanceIds": [instance_id],
+            "parameters": "HIDDEN_DUE_TO_SECURITY_REASONS",
+            "timeoutSeconds": 3600,
+            "comment": "",
+            "outputS3BucketName": "",
+            "outputS3KeyPrefix": "",
+            "maxConcurrency": "50",
+            "maxErrors": "0"
+        },
+        "responseElements": {
+            "command": {
+                "commandId": command_id,
+                "documentName": doc_name,
+                "documentVersion": "$DEFAULT",
+                "comment": "",
+                "expiresAfter": expires_fmt,
+                "parameters": "HIDDEN_DUE_TO_SECURITY_REASONS",
+                "instanceIds": [instance_id],
+                "targets": [],
+                "requestedDateTime": now_fmt,
+                "status": "Pending",
+                "statusDetails": "Pending",
+                "outputS3BucketName": "",
+                "outputS3KeyPrefix": "",
+                "maxConcurrency": "50",
+                "maxErrors": "0",
+                "targetCount": 1,
+                "completedCount": 0,
+                "errorCount": 0,
+                "deliveryTimedOutCount": 0,
+                "timeoutSeconds": 3600,
+                "serviceRole": "",
+                "notificationConfig": {
+                    "notificationArn": "",
+                    "notificationEvents": [],
+                    "notificationType": ""
+                },
+                "cloudWatchOutputConfig": {
+                    "cloudWatchLogGroupName": "",
+                    "cloudWatchOutputEnabled": False
+                }
+            }
+        },
+        "resources": [{"type": "AWS::EC2::Instance", "ARN": instance_arn, "accountId": account_id}]
+    })
+    events.append(e3)
+
+    return events
+
+
 def _generate_rds_modify_db_snapshot_attribute(config, context=None):
     """(Threat) Simulates sharing an RDS snapshot with a foreign account.
     Triggers XSIAM: 'A cloud snapshot of AWS database or storage was modified or shared'
@@ -4060,30 +4547,38 @@ def _generate_rds_modify_db_snapshot_attribute(config, context=None):
 
 
 def _generate_lambda_role_remote_usage(config, context=None):
-    """(Threat) Simulates stolen Lambda execution-role credentials used from an external IP.
+    """(Threat) Simulates stolen Lambda execution-role credentials used from an external IP via CLI.
     Triggers XSIAM: 'Remote usage of AWS Lambda's role'
     Detection logic: AssumedRole with invokedBy=lambda.amazonaws.com + external sourceIPAddress.
+    4-event CLI chain: GetCallerIdentity -> ListBuckets -> ListSecrets -> GetSecretValue
     """
     aws_conf = config.get(CONFIG_KEY, {})
     account_id = aws_conf.get('aws_account_id', '123456789012')
     region = aws_conf.get('aws_region', 'us-east-1')
+    s3_buckets = aws_conf.get("s3_buckets", ["default-sim-bucket-1"])
 
     func_name = random.choice(aws_conf.get("lambda_functions", ["default-function"]))
-    role_name = "lambda-exec-role"
+    # Role name derived from the function — realistic naming convention
+    role_name = f"{func_name}-exec-role"
     role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
     role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
 
     # ASIA prefix = temporary STS credentials (from Lambda execution environment)
     temp_access_key = f"ASIA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=16))}"
 
-    # The stolen credentials are used from an external IP - not from Lambda infrastructure
-    ip_address = _get_random_ip(config, force_external=True)
+    # Attacker using stolen creds via CLI from VPN/Tor — not from Lambda infrastructure
+    ip_address = _get_random_ip(config, use_anon=True)
 
-    # Identity: AssumedRole with invokedBy=lambda.amazonaws.com is the key indicator
+    # Force a CLI user agent — key signal that credentials are being used outside Lambda
+    cli_agents = [ua for ua in _AWS_USER_AGENTS if ua.startswith("aws-cli/")]
+    cli_ua = random.choice(cli_agents) if cli_agents else _AWS_USER_AGENTS[0]
+
+    # Identity: AssumedRole with invokedBy=lambda.amazonaws.com is the key XSIAM detection signal
+    assumed_role_arn = f"arn:aws:sts::{account_id}:assumed-role/{role_name}/{func_name}"
     lambda_identity = {
         "type": "AssumedRole",
         "name": f"{role_name}/{func_name}",
-        "arn": f"arn:aws:sts::{account_id}:assumed-role/{role_name}/{func_name}",
+        "arn": assumed_role_arn,
         "principalId": f"{role_id}:{func_name}",
         "accountId": account_id,
         "accessKeyId": temp_access_key,
@@ -4103,18 +4598,69 @@ def _generate_lambda_role_remote_usage(config, context=None):
         }
     }
 
-    event = _get_base_event(config, lambda_identity, ip_address, region, "ListSecrets", "secretsmanager.amazonaws.com", api_version="2017-10-17", read_only=True)
-    event.update({
+    base_time = datetime.datetime.now(datetime.UTC)
+    secret_arn = f"arn:aws:secretsmanager:{region}:{account_id}:secret:prod/db/creds-AbCdEf"
+    events = []
+
+    # Event 1: GetCallerIdentity — attacker verifies stolen creds are valid (first CLI step)
+    e1 = _get_base_event(config, lambda_identity, ip_address, region, "GetCallerIdentity", "sts.amazonaws.com", api_version="2011-06-15", read_only=True)
+    e1["eventTime"] = base_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+    e1["userAgent"] = cli_ua
+    e1.update({
+        "requestParameters": None,
+        "responseElements": {
+            "account": account_id,
+            "userId": f"{role_id}:{func_name}",
+            "arn": assumed_role_arn
+        },
+        "resources": []
+    })
+    events.append(e1)
+
+    # Event 2: ListBuckets — recon, discovers accessible S3 buckets
+    e2 = _get_base_event(config, lambda_identity, ip_address, region, "ListBuckets", "s3.amazonaws.com", api_version="2006-03-01", read_only=True)
+    e2["eventTime"] = (base_time + datetime.timedelta(seconds=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    e2["userAgent"] = cli_ua
+    e2.update({
+        "requestParameters": None,
+        "responseElements": {
+            "buckets": [{"name": b} for b in s3_buckets[:5]]
+        },
+        "resources": []
+    })
+    events.append(e2)
+
+    # Event 3: ListSecrets — recon, discovers secrets stored in Secrets Manager
+    e3 = _get_base_event(config, lambda_identity, ip_address, region, "ListSecrets", "secretsmanager.amazonaws.com", api_version="2017-10-17", read_only=True)
+    e3["eventTime"] = (base_time + datetime.timedelta(seconds=10)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    e3["userAgent"] = cli_ua
+    e3.update({
         "requestParameters": {"maxResults": 100},
         "responseElements": {
-            "secretList": [
-                {"ARN": f"arn:aws:secretsmanager:{region}:{account_id}:secret:prod/db/creds-AbCdEf", "name": "prod/db/creds"}
-            ],
+            "secretList": [{"ARN": secret_arn, "name": "prod/db/creds"}],
             "nextToken": None
         },
         "resources": []
     })
-    return [event]
+    events.append(e3)
+
+    # Event 4: GetSecretValue — escalation, reads the discovered secret
+    # Real CloudTrail omits secretString from responseElements — only metadata returned
+    e4 = _get_base_event(config, lambda_identity, ip_address, region, "GetSecretValue", "secretsmanager.amazonaws.com", api_version="2017-10-17", read_only=True)
+    e4["eventTime"] = (base_time + datetime.timedelta(seconds=15)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    e4["userAgent"] = cli_ua
+    e4.update({
+        "requestParameters": {"secretId": "prod/db/creds"},
+        "responseElements": {
+            "ARN": secret_arn,
+            "name": "prod/db/creds",
+            "versionId": ''.join(random.choices('abcdef0123456789-', k=36))
+        },
+        "resources": [{"type": "AWS::SecretsManager::Secret", "ARN": secret_arn, "accountId": account_id}]
+    })
+    events.append(e4)
+
+    return events
 
 
 def _generate_bedrock_delete_model_invocation_logging(config, context=None):
@@ -4180,7 +4726,7 @@ def _generate_cross_account_assume_role(config, context=None):
     assumed_role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
     assumed_arn   = f"arn:aws:sts::{account_id}:assumed-role/{target_role}/{session_name}"
     credentials_expiry = (
-        datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+        datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     event = _get_base_event(
@@ -4200,7 +4746,7 @@ def _generate_cross_account_assume_role(config, context=None):
         "responseElements": {
             "credentials": {
                 "accessKeyId": f"ASIA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=16))}",
-                "sessionToken": f"{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', k=256))}",
+                "sessionToken": "Value hidden due to security reasons.",
                 "expiration": credentials_expiry,
             },
             "assumedRoleUser": {
@@ -5080,7 +5626,7 @@ def _generate_dynamodb_write(config, context=None):
     table_name = random.choice(tables)
     table_arn = f"arn:aws:dynamodb:{region}:{account_id}:table/{table_name}"
     item_id = str(uuid.uuid4())
-    ts = str(int(datetime.datetime.utcnow().timestamp()))
+    ts = str(int(datetime.datetime.now(datetime.UTC).timestamp()))
 
     action = random.choice(["PutItem", "UpdateItem", "DeleteItem"])
     if action == "PutItem":
@@ -5139,7 +5685,7 @@ def _generate_sts_assume_role_benign(config, context=None):
         f"automation-{random.randint(100,999)}",
     ])
     assumed_role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
-    expiry = (datetime.datetime.utcnow() + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    expiry = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     event = _get_base_event(config, user_identity, ip_address, region,
                             "AssumeRole", "sts.amazonaws.com", api_version="2011-06-15", read_only=False)
@@ -5386,10 +5932,20 @@ def _generate_ssm_get_parameter_benign(config, context=None):
 # ─── Additional threat generators ─────────────────────────────────────────────
 
 def _generate_iam_passrole_abuse(config, context=None):
-    """(Threat) Simulates IAM PassRole privilege escalation — attacker passes a high-privilege
-    role to a Lambda function or EC2 instance they control, gaining that role's permissions
-    without needing direct policy attachment.
-    Triggers XSIAM: Unusual IAM PassRole / privilege escalation via compute attachment.
+    """(Threat) Simulates IAM PassRole privilege escalation.
+
+    iam:PassRole is an IAM permission, not a CloudTrail event — it has no standalone
+    CloudTrail record. The real evidence of PassRole abuse appears in the downstream
+    action that consumes the role: an attacker calls CreateFunction on a Lambda they
+    control, supplying a high-privilege role ARN as the execution role. AWS internally
+    checks iam:PassRole at this point. The attacker then immediately Invokes the function
+    to execute actions under the privileged role.
+
+    Returns two events:
+      1. CreateFunction (lambda.amazonaws.com) — role ARN contains privileged role
+      2. Invoke (lambda.amazonaws.com) — attacker exercises the stolen permissions
+
+    Triggers XSIAM: Privilege escalation via Lambda PassRole / unexpected IAM role attachment.
     """
     user_identity = None
     ip_address = None
@@ -5412,14 +5968,59 @@ def _generate_iam_passrole_abuse(config, context=None):
     target_role = random.choice(privileged_roles)
     target_role_arn = f"arn:aws:iam::{account_id}:role/{target_role}"
 
-    event = _get_base_event(config, user_identity, ip_address, region,
-                            "PassRole", "iam.amazonaws.com", api_version="2010-05-08", read_only=False)
-    event.update({
-        "requestParameters": {"roleName": target_role, "roleArn": target_role_arn},
-        "responseElements": None,
-        "resources": [{"type": "AWS::IAM::Role", "ARN": target_role_arn, "accountId": account_id}],
+    # Attacker-chosen function name — looks innocuous
+    func_suffixes = ["helper", "worker", "sync", "monitor", "updater", "processor"]
+    func_name = f"svc-{''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=4))}-{random.choice(func_suffixes)}"
+    func_arn = f"arn:aws:lambda:{region}:{account_id}:function:{func_name}"
+    now = datetime.datetime.now(datetime.UTC)
+
+    # Event 1: CreateFunction — supplies privileged role via iam:PassRole
+    create_event = _get_base_event(config, user_identity, ip_address, region,
+                                   "CreateFunction20150331", "lambda.amazonaws.com",
+                                   api_version="2015-03-31", read_only=False)
+    create_event.update({
+        "requestParameters": {
+            "functionName": func_name,
+            "runtime": random.choice(["python3.12", "nodejs20.x"]),
+            "role": target_role_arn,   # ← iam:PassRole is checked here
+            "handler": "index.handler",
+            "code": {"zipFile": "HIDDEN_DUE_TO_SECURITY_REASONS"},
+            "timeout": 300,
+            "memorySize": 512,
+        },
+        "responseElements": {
+            "functionName": func_name,
+            "functionArn": func_arn,
+            "runtime": "python3.12",
+            "role": target_role_arn,
+            "lastModified": now.strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
+            "codeSize": random.randint(1024, 65536),
+            "state": "Active",
+        },
+        "resources": [
+            {"type": "AWS::Lambda::Function", "ARN": func_arn, "accountId": account_id},
+            {"type": "AWS::IAM::Role", "ARN": target_role_arn, "accountId": account_id},
+        ],
     })
-    return [event]
+
+    # Event 2: Invoke — attacker immediately uses the function to act under the privileged role
+    invoke_event = _get_base_event(config, user_identity, ip_address, region,
+                                   "Invoke", "lambda.amazonaws.com",
+                                   api_version="2015-03-31", read_only=False)
+    invoke_event["eventTime"] = (now + datetime.timedelta(seconds=random.randint(3, 15))).strftime('%Y-%m-%dT%H:%M:%SZ')
+    invoke_event.update({
+        "requestParameters": {
+            "functionName": func_name,
+            "invocationType": "RequestResponse",
+        },
+        "responseElements": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+        },
+        "resources": [{"type": "AWS::Lambda::Function", "ARN": func_arn, "accountId": account_id}],
+    })
+
+    return [create_event, invoke_event]
 
 
 def _generate_lambda_update_function_code(config, context=None):
@@ -5441,7 +6042,7 @@ def _generate_lambda_update_function_code(config, context=None):
     region = aws_conf.get('aws_region', 'us-east-1')
     account_id = user_identity.get('accountId', aws_conf.get('aws_account_id', '123456789012'))
 
-    functions = aws_conf.get('lambda_function_names', [
+    functions = aws_conf.get('lambda_functions', [
         'api-handler', 'auth-service', 'payment-processor', 'data-exporter', 'webhook-handler',
     ])
     function_name = random.choice(functions)
@@ -5467,7 +6068,7 @@ def _generate_lambda_update_function_code(config, context=None):
             "functionArn": function_arn,
             "runtime": random.choice(["python3.12", "nodejs20.x", "java21"]),
             "codeSize": random.randint(100000, 5000000),
-            "lastModified": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
+            "lastModified": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
             "codeSha256": ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', k=43)) + '=',
         },
         "resources": [{"type": "AWS::Lambda::Function", "ARN": function_arn, "accountId": account_id}],
@@ -5711,8 +6312,10 @@ SCENARIO_FUNCTIONS = {
     "CREATE_SUSPICIOUS_USER": _generate_suspicious_iam_creation,
     "SSM_START_SESSION": _generate_ssm_start_session,
     "SSM_SEND_COMMAND": _generate_ssm_send_command,
+    "SSM_EXECUTION_CHAIN": _generate_ssm_execution_chain,
     "RDS_SHARE_SNAPSHOT": _generate_rds_modify_db_snapshot_attribute,
     "LAMBDA_ROLE_REMOTE": _generate_lambda_role_remote_usage,
+    "S3_RANSOMWARE_ENCRYPT": _generate_s3_ransomware_encrypt,
     "BEDROCK_DELETE_LOGGING": _generate_bedrock_delete_model_invocation_logging,
     "CROSS_ACCOUNT_ASSUME_ROLE": _generate_cross_account_assume_role,
     "DISABLE_SECURITY_HUB": _generate_security_hub_disabled,
@@ -5864,8 +6467,10 @@ THREAT_SCENARIOS = {
     # XSIAM built-in detector scenarios
     _generate_ssm_start_session: 2,
     _generate_ssm_send_command: 2,
+    _generate_ssm_execution_chain: 2,
     _generate_rds_modify_db_snapshot_attribute: 2,
     _generate_lambda_role_remote_usage: 2,
+    _generate_s3_ransomware_encrypt: 2,
     _generate_bedrock_delete_model_invocation_logging: 2,
     # Defense evasion triad + cross-account lateral movement
     _generate_cross_account_assume_role: 2,
@@ -5894,8 +6499,6 @@ THREAT_SCENARIOS = {
 
 
 # --- Main Module Function ---
-
-last_threat_event_time = 0 # Keep this global variable
 
 def generate_log(config, context=None, threat_level="Benign", benign_only=False, scenario_event=None):
     """
@@ -6051,14 +6654,13 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
         ctx = ctx if isinstance(ctx, dict) else {}
 
         defaults = {
-            "eventVersion": "1.08",
-            # FIX: Change back to utcnow() to fix NameError
-            "eventTime": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z", 
+            "eventVersion": "1.11",
+            "eventTime": datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ'),
             "eventSource": evt.get("eventSource") or "aws.unknown",
             "eventName": evt.get("eventName") or evt.get("name") or "UnknownAction",
             "awsRegion": evt.get("awsRegion") or ctx.get("aws_region") or "us-east-1",
             "sourceIPAddress": evt.get("sourceIPAddress") or ctx.get("ip_address") or "0.0.0.0",
-            "userAgent": evt.get("userAgent") or "aws-sdk-python/unknown",
+            "userAgent": evt.get("userAgent") or "aws-cli/2.15.30 Python/3.11.8 Linux/5.15.0-113-generic exe/x86_64 prompt/off",
             "userIdentity": evt.get("userIdentity") or {"type": "Unknown"},
             "requestParameters": evt.get("requestParameters") if evt.get("requestParameters") is not None else None,
             "responseElements": evt.get("responseElements") if evt.get("responseElements") is not None else None,
@@ -6068,8 +6670,7 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
             if k not in evt or evt.get(k) is None:
                 evt[k] = v
         if not isinstance(evt.get("eventTime"), str):
-            # FIX: Change back to utcnow()
-            evt["eventTime"] = datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z" 
+            evt["eventTime"] = datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
         return evt
     # --- End _validate_event ---
 

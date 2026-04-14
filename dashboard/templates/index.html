@@ -878,7 +878,8 @@
       <div class="card-error ${m.error ? 'visible' : ''}">${escHtml(m.error || '')}</div>
 
       <div class="card-controls">
-        <select class="level-select" ${m.status === 'running' ? 'disabled' : ''}>
+        <select class="level-select"
+          onchange="${m.status === 'running' ? `setThreatLevel('${escHtml(m.name)}', this.value)` : ''}">
           ${threatLevels.map(l => `<option value="${l}"${l === m.threat_level ? ' selected' : ''}>${l}</option>`).join('')}
         </select>
         ${m.status === 'running'
@@ -976,6 +977,15 @@
       await api(`/api/modules/${encodeURIComponent(name)}/interval`, 'PATCH', { event_interval: iv });
     } catch (e) {
       showToast(`Error setting rate for ${name}: ${e.message}`, 4000);
+    }
+  }
+
+  async function setThreatLevel(name, level) {
+    try {
+      await api(`/api/modules/${encodeURIComponent(name)}/threat_level`, 'PATCH', { threat_level: level });
+      showToast(`${name} threat level → "${level}"`);
+    } catch (e) {
+      showToast(`Error setting threat level for ${name}: ${e.message}`, 4000);
     }
   }
 

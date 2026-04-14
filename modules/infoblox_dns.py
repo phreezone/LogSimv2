@@ -863,28 +863,30 @@ def _generate_threat_log(config, session_context=None):
     )[0]
 
     if threat_type == "c2_beacon":
-        return _generate_c2_beacon(config, client_ip, session_context)
+        content = _generate_c2_beacon(config, client_ip, session_context)
     elif threat_type == "dns_tunnel":
-        return _generate_dns_tunnel(config, client_ip, session_context)
+        content = _generate_dns_tunnel(config, client_ip, session_context)
     elif threat_type == "rpz_block":
-        return _generate_rpz_block(config, client_ip, session_context)
+        content = _generate_rpz_block(config, client_ip, session_context)
     elif threat_type == "threat_protect":
-        return _generate_threat_protect(config, client_ip, session_context)
+        content = _generate_threat_protect(config, client_ip, session_context)
     elif threat_type == "nxdomain_storm":
-        return _generate_nxdomain_storm(config, client_ip, session_context)
+        content = _generate_nxdomain_storm(config, client_ip, session_context)
     elif threat_type == "dns_flood":
-        return _generate_dns_flood(config, client_ip, session_context)
+        content = _generate_dns_flood(config, client_ip, session_context)
     elif threat_type == "dhcp_starvation":
-        return _generate_dhcp_starvation(config, session_context)
+        content = _generate_dhcp_starvation(config, session_context)
     elif threat_type == "zone_transfer":
-        return _generate_zone_transfer(config, client_ip, session_context)
+        content = _generate_zone_transfer(config, client_ip, session_context)
     elif threat_type == "fast_flux_dns":
-        return _generate_fast_flux_dns(config, client_ip, session_context)
+        content = _generate_fast_flux_dns(config, client_ip, session_context)
     elif threat_type == "dns_rebinding":
-        return _generate_dns_rebinding(config, client_ip, session_context)
+        content = _generate_dns_rebinding(config, client_ip, session_context)
     elif threat_type == "ptr_sweep":
-        return _generate_ptr_sweep(config, client_ip, session_context)
-    return None
+        content = _generate_ptr_sweep(config, client_ip, session_context)
+    else:
+        return None
+    return (content, threat_type.upper())
 
 
 # ---------------------------------------------------------------------------

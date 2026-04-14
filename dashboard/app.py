@@ -83,7 +83,45 @@ app.config["TEMPLATES_AUTO_RELOAD"] = True
 # ── Load config ───────────────────────────────────────────────────────────────
 _CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
 with open(_CONFIG_PATH) as _f:
-    CONFIG = json.load(_f)
+    _config_str = _f.read()
+
+# Apply the same placeholder substitution as log_simulator.py so that
+# GCP_PROJECT_ID / GCP_PROJECT_NUMBER / AWS_ACCOUNT_ID from .env propagate
+# into all config values (resource paths, SA emails, bucket names, etc.)
+_placeholders = {
+    'PLACEHOLDER_GCP_PROJECT_ID':     os.getenv('GCP_PROJECT_ID', ''),
+    'PLACEHOLDER_GCP_PROJECT_NUMBER': os.getenv('GCP_PROJECT_NUMBER', ''),
+    'PLACEHOLDER_AWS_ACCOUNT_ID':     os.getenv('AWS_ACCOUNT_ID', ''),
+}
+for _ph, _val in _placeholders.items():
+    if _val:
+        _config_str = _config_str.replace(_ph, _val)
+CONFIG = json.loads(_config_str)
+
+# ── Live Tor exit node fetch ──────────────────────────────────────────────────
+# Overwrites the static fallback list in config.json so that all Tor-themed
+# threat generators (AWS BEDROCK_TOR_USAGE, GCP TOR_API_ACCESS, VERTEX_TOR_PREDICT,
+# and any other module that reads config['tor_exit_nodes']) use IPs that are
+# confirmed to be on the live Tor exit node list at startup time.
+def _fetch_tor_exit_nodes() -> list[dict]:
+    """Fetch the current Tor exit node list from the Tor Project bulk-exit URL.
+    Returns a list of {ip, country} dicts on success, or empty list on failure."""
+    _TOR_BULK_URL = "https://check.torproject.org/torbulkexitlist"
+    try:
+        import urllib.request
+        with urllib.request.urlopen(_TOR_BULK_URL, timeout=10) as resp:
+            ips = resp.read().decode("utf-8").strip().splitlines()
+        nodes = [{"ip": ip.strip(), "country": "Unknown"} for ip in ips if ip.strip()]
+        print(f"[dashboard] Fetched {len(nodes)} live Tor exit nodes from torproject.org")
+        return nodes
+    except Exception as exc:
+        print(f"[dashboard] WARNING: Could not fetch live Tor exit nodes ({exc}). "
+              "Using static fallback list from config.json.")
+        return []
+
+_live_tor = _fetch_tor_exit_nodes()
+if _live_tor:
+    CONFIG["tor_exit_nodes"] = _live_tor
 
 THREAT_LEVELS = list(CONFIG.get("threat_generation_levels", {
     "Benign Traffic Only": 86400,
@@ -147,7 +185,7 @@ class ModuleState:
         # Control
         self.status = "stopped"       # stopped | running | error
         self.error_msg = ""
-        self._thread = None
+        self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
 
@@ -170,7 +208,7 @@ class ModuleState:
         fn = getattr(module, "get_threat_names", None)
         if callable(fn):
             try:
-                self.threat_names = set(fn())
+                self.threat_names = set(fn())  # type: ignore[arg-type]
             except Exception:
                 pass
 
@@ -241,8 +279,11 @@ def _module_worker(state: ModuleState, config: dict):
     Runs continuously, calling module.generate_log() and forwarding results
     to the appropriate transport via process_and_send().  Stopped by setting
     state._stop_event.
+
+    Both state.threat_level and state.event_interval are read each iteration
+    so that live updates via PATCH /threat_level or PATCH /interval take effect
+    without needing a stop/restart.
     """
-    benign_only = (state.threat_level == "Benign Traffic Only")
     context: dict = {"session_context": SESSION_CONTEXT}
     process_and_send = _get_process_and_send()
 
@@ -254,10 +295,14 @@ def _module_worker(state: ModuleState, config: dict):
         state.module.last_threat_event_time = time.time()
 
     while not state._stop_event.is_set():
+        # Read both live values each iteration so PATCH updates apply immediately.
+        current_level = state.threat_level
+        benign_only   = (current_level == "Benign Traffic Only")
+        cycle_start   = time.time()
         try:
             result = state.module.generate_log(
                 config=config,
-                threat_level=state.threat_level,
+                threat_level=current_level,
                 benign_only=benign_only,
                 context=context,
             )
@@ -285,7 +330,12 @@ def _module_worker(state: ModuleState, config: dict):
                 state.error_msg = ""
             continue
 
-        state._stop_event.wait(timeout=state.event_interval)
+        # Wait only the remaining portion of the interval so that generate_log +
+        # process_and_send time (e.g. S3 upload latency for AWS) doesn't inflate
+        # the effective cycle time beyond event_interval.
+        elapsed = time.time() - cycle_start
+        remaining = max(0.0, state.event_interval - elapsed)
+        state._stop_event.wait(timeout=remaining)
 
     state.status = "stopped"
 
@@ -418,13 +468,33 @@ def api_set_interval(name: str):
     return jsonify(state.to_dict())
 
 
+@app.route("/api/modules/<name>/threat_level", methods=["PATCH"])
+def api_set_threat_level(name: str):
+    """Update the threat level on a running or stopped module.
+    Takes effect on the next generate_log iteration — no restart needed."""
+    state = MODULE_STATES.get(name)
+    if not state:
+        return jsonify({"error": f"Module '{name}' not found"}), 404
+    body = request.get_json(silent=True) or {}
+    level = body.get("threat_level")
+    if not level or level not in THREAT_LEVELS:
+        return jsonify({"error": f"Unknown threat level '{level}'. Valid: {THREAT_LEVELS}"}), 400
+    # Reset last_threat_event_time when switching to a timed level so the module
+    # doesn't immediately fire a threat because the old timer had expired.
+    if level not in ("Insane", "Benign Traffic Only"):
+        if hasattr(state.module, "last_threat_event_time"):
+            state.module.last_threat_event_time = time.time()
+    state.threat_level = level
+    return jsonify(state.to_dict())
+
+
 @app.get("/api/modules/<name>/threats")
 def api_get_threats(name: str):
     state = MODULE_STATES.get(name)
     if not state:
         return jsonify({"error": f"Module '{name}' not found"}), 404
     fn = getattr(state.module, "get_threat_names", None)
-    threats = sorted(fn()) if callable(fn) else []
+    threats = sorted(fn()) if callable(fn) else []  # type: ignore[arg-type]
     return jsonify({"module": name, "threats": threats})
 
 
@@ -797,8 +867,9 @@ def _run_health_checks() -> dict:
     # ── 4. AWS S3 permissions ─────────────────────────────────────────────────
     aws_key    = os.getenv("AWS_ACCESS_KEY_ID", "")
     aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY", "")
-    aws_bucket = os.getenv("s3_bucket_name", "")
-    aws_region = os.getenv("aws_region", "us-east-1")
+    # Accept upper or lower case — .env may use lowercase names
+    aws_bucket = os.getenv("S3_BUCKET_NAME", "") or os.getenv("s3_bucket_name", "")
+    aws_region = os.getenv("AWS_REGION", "") or os.getenv("aws_region", "us-east-1")
     if aws_key and aws_secret and aws_bucket:
         try:
             import boto3 as _boto3
@@ -808,11 +879,27 @@ def _run_health_checks() -> dict:
                 region_name=aws_region,
             )
             s3 = session.client("s3")
-            s3.head_bucket(Bucket=aws_bucket)
-            results.append({
-                "group": "AWS S3", "check": f"bucket '{aws_bucket}' accessible",
-                "status": "ok", "detail": "head_bucket succeeded",
-            })
+            # HeadBucket requires s3:ListBucket which may not be granted.
+            # A 403 here does not mean PutObject will fail — check separately.
+            try:
+                s3.head_bucket(Bucket=aws_bucket)
+                results.append({
+                    "group": "AWS S3", "check": f"bucket '{aws_bucket}' accessible",
+                    "status": "ok", "detail": "head_bucket succeeded",
+                })
+            except Exception as hb_exc:
+                hb_msg = str(hb_exc)
+                if "403" in hb_msg or "Forbidden" in hb_msg:
+                    results.append({
+                        "group": "AWS S3", "check": f"bucket '{aws_bucket}' accessible",
+                        "status": "warn",
+                        "detail": "403 on head_bucket — s3:ListBucket not granted. PutObject check will still run.",
+                    })
+                else:
+                    results.append({
+                        "group": "AWS S3", "check": f"bucket '{aws_bucket}' accessible",
+                        "status": "error", "detail": hb_msg,
+                    })
             test_key = f"logsim-healthcheck/{int(time.time())}.txt"
             s3.put_object(Bucket=aws_bucket, Key=test_key, Body=b"logsim-healthcheck")
             s3.delete_object(Bucket=aws_bucket, Key=test_key)
@@ -831,7 +918,8 @@ def _run_health_checks() -> dict:
                 "status": "error", "detail": str(exc),
             })
     else:
-        missing = [v for v in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "s3_bucket_name"] if not os.getenv(v, "")]
+        missing = [v for v in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "S3_BUCKET_NAME"]
+                   if not (os.getenv(v, "") or os.getenv(v.lower(), ""))]
         results.append({
             "group": "AWS S3", "check": "credentials present",
             "status": "skip", "detail": f"not set: {', '.join(missing)}",
