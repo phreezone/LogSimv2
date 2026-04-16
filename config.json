@@ -3571,8 +3571,8 @@
     "hostname": "DC1-FTD-01",
     "device_id": "ftd-9a8b7c6d-5e4f-3a2b-1c0d",
     "access_control_policy": "Default_Access_Control_Policy",
-    "inbound_interface": "inside-zone",
-    "outbound_interface": "outside-zone",
+    "inbound_interface": "inside",
+    "outbound_interface": "outside",
     "scan_target_ports": [
       21,
       22,

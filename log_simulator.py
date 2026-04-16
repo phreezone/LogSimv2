@@ -101,17 +101,53 @@ def load_modules():
             except Exception as e:
                 print(f"Error loading module {module_name}: {e}")
     return modules
+# ── Persistent Syslog TCP Connection Pool ──────────────────────────────────
+# Reuses a single TCP socket per (host, port) instead of opening a new
+# connection for every log line.  Reconnects automatically on failure.
+_syslog_connections: dict[tuple[str, int], socket.socket] = {}
+_syslog_lock = threading.Lock()
+
+
+def _get_syslog_sock(host: str, port: int) -> socket.socket:
+    """Return a persistent TCP socket for (host, port), creating one if needed."""
+    key = (host, port)
+    sock = _syslog_connections.get(key)
+    if sock is not None:
+        return sock
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    sock.connect((host, port))
+    _syslog_connections[key] = sock
+    return sock
+
+
+def _close_syslog_sock(host: str, port: int) -> None:
+    """Close and discard the cached socket for (host, port)."""
+    key = (host, port)
+    sock = _syslog_connections.pop(key, None)
+    if sock:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def send_syslog_message(message, host, port, app_name="LogSim"):
-    """Sends a message to the configured Syslog server over TCP."""
+    """Sends a message to the configured Syslog server over a persistent TCP connection."""
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect((host, port))
-            full_message = f"{message}\n"
-            sock.sendall(full_message.encode('utf-8'))
+        with _syslog_lock:
+            sock = _get_syslog_sock(host, port)
+            sock.sendall(f"{message}\n".encode('utf-8'))
         _tprint(f"Sending Syslog for {app_name}: {host}:{port}")
-    except ConnectionRefusedError:
-        _tprint(f"ERROR: Connection refused for Syslog. Is the Broker VM at {host}:{port} listening?")
+    except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, OSError) as e:
+        # Connection lost or refused — close stale socket so next call reconnects
+        _close_syslog_sock(host, port)
+        if isinstance(e, ConnectionRefusedError):
+            _tprint(f"ERROR: Connection refused for Syslog. Is the Broker VM at {host}:{port} listening?")
+        else:
+            _tprint(f"Syslog connection to {host}:{port} lost ({e}), will reconnect on next send")
     except Exception as e:
+        _close_syslog_sock(host, port)
         _tprint(f"An error occurred while sending syslog message to {host}:{port}: {e}")
 
 def send_http_message(message, module, config):
@@ -264,49 +300,68 @@ def send_http_message(message, module, config):
         _tprint(f"[HTTP] Circuit OPEN for {module.NAME} after {HTTP_CB_THRESHOLD} failures. "
                 f"Suppressing errors for {HTTP_CB_COOLDOWN}s.")
 
+# ── Cached S3 client ────────────────────────────────────────────────────────
+# Creating a new boto3 Session + S3 client on every PUT adds ~50-100ms of
+# overhead.  Cache the client per (access_key, region) so subsequent uploads
+# reuse the existing HTTPS connection pool.
+_s3_client_cache: dict[tuple, "boto3.client"] = {}
+_s3_client_lock = threading.Lock()
+
+
+def _get_s3_client(region: str):
+    """Return a cached boto3 S3 client for the given region."""
+    key_id = os.getenv('AWS_ACCESS_KEY_ID', '')
+    cache_key = (key_id, region)
+    with _s3_client_lock:
+        client = _s3_client_cache.get(cache_key)
+        if client is not None:
+            return client
+        session = boto3.Session(
+            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+            region_name=region,
+        )
+        client = session.client('s3')
+        _s3_client_cache[cache_key] = client
+        return client
+
+
 def send_s3_message(content_bytes, module, config, event_name):
     event_str = f" ({event_name})" if event_name else ""
-    
+
     """Uploads a gzipped log file to S3."""
     conf_key = getattr(module, 'CONFIG_KEY', None)
     if not conf_key or conf_key not in config:
         return
-    
+
     try:
         # Use timezone-aware datetime object
         now = datetime.datetime.now(datetime.UTC)
-        
+
         # Get the 'aws_config' section from config.json for fallback values
         aws_conf = config.get(conf_key, {})
 
         # Retrieve variables: Prioritize .env (os.getenv) > config.json > Safe Default
         # AWS_ACCOUNT_ID
         account_id = os.getenv('AWS_ACCOUNT_ID', aws_conf.get('aws_account_id', '123456789012'))
-        
+
         # AWS_REGION
         region = os.getenv('AWS_REGION', aws_conf.get('aws_region', 'us-east-1'))
-        
+
         # S3_BUCKET_NAME (This is the most critical variable that was showing 'None')
         bucket_name = os.getenv('S3_BUCKET_NAME', aws_conf.get('s3_bucket_name'))
 
         if not bucket_name:
             print(f"ERROR: S3_BUCKET_NAME is not defined in the .env file and is missing from the '{conf_key}' block in config.json. Cannot upload log.")
             return
-        
+
         # Construct the CloudTrail-like file path
         file_name = f"{account_id}_CloudTrail_{region}_{now.strftime('%Y%m%dT%H%MZ')}_{str(uuid.uuid4())[:6].upper()}.json.gz"
         s3_key = f"AWSLogs/{account_id}/CloudTrail/{region}/{now.strftime('%Y/%m/%d')}/{file_name}"
-        
+
         _tprint(f"Sending S3 for {module.NAME}{event_str}: Uploading {file_name} to {bucket_name}/{s3_key}")
-        
-        # Use credentials from .env
-        session = boto3.Session(
-            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
-            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-            region_name=region
-        )
-        s3_client = session.client('s3')
-        
+
+        s3_client = _get_s3_client(region)
         s3_client.put_object(
             Bucket=bucket_name,
             Key=s3_key,
@@ -314,10 +369,18 @@ def send_s3_message(content_bytes, module, config, event_name):
             ContentEncoding='gzip',
             ContentType='application/json'
         )
-        
+
     except ImportError:
         _tprint("ERROR: 'boto3' library not found. Please install it with 'pip install boto3' to use S3 transport.")
     except Exception as e:
+        # Clear cached client on error so next call creates a fresh one
+        try:
+            aws_conf = config.get(getattr(module, 'CONFIG_KEY', ''), {})
+            r = os.getenv('AWS_REGION', aws_conf.get('aws_region', 'us-east-1'))
+            with _s3_client_lock:
+                _s3_client_cache.pop((os.getenv('AWS_ACCESS_KEY_ID', ''), r), None)
+        except Exception:
+            pass
         _tprint(f"ERROR: An S3 client error occurred: {e}")
 
 

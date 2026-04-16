@@ -26,9 +26,11 @@ from datetime import datetime, timedelta, timezone
 from ipaddress import ip_network, AddressValueError
 
 try:
-    from modules.session_utils import get_random_user, find_user_by_ip, get_user_by_name, rand_ip_from_network
+    from modules.session_utils import (get_random_user, find_user_by_ip, get_user_by_name,
+        rand_ip_from_network, stable_vpn_ip, stable_mail_servers, weighted_destination)
 except ImportError:
-    from session_utils import get_random_user, find_user_by_ip, get_user_by_name, rand_ip_from_network
+    from session_utils import (get_random_user, find_user_by_ip, get_user_by_name,
+        rand_ip_from_network, stable_vpn_ip, stable_mail_servers, weighted_destination)
 
 last_threat_event_time = 0
 
@@ -46,8 +48,9 @@ _DEFAULT_THREAT_NAMES = [
     "tor_connection", "vpn_bruteforce", "vpn_impossible_travel", "dns_c2_beacon",
     "server_outbound_http", "workstation_lateral_rdp", "targeted_admin_bruteforce",
     "vpn_tor_login", "smb_new_host_lateral", "smb_rare_file_transfer", "smb_share_enumeration",
+    "smtp_spray", "smtp_large_exfil",
 ]
-_DEFAULT_THREAT_WEIGHTS = [20, 15, 13, 12, 8, 4, 8, 5, 3, 4, 3, 3, 2, 1, 1, 1, 4, 3, 4, 3, 5]
+_DEFAULT_THREAT_WEIGHTS = [20, 15, 13, 12, 8, 4, 8, 5, 3, 4, 3, 3, 2, 1, 1, 1, 4, 3, 4, 3, 5, 3, 2]
 
 
 def get_threat_names():
@@ -157,6 +160,13 @@ def _get_user_from_ip(config, ip_address, session_context=None):
     }
     return user_map_rev.get(ip_address, "N/A")
 
+
+def _dns_precursor(config, src_ip, user):
+    """Generate a UDP/53 DNS Built+Teardown pair preceding an outbound connection."""
+    return _generate_connection_session(
+        config, "UDP", src_ip, "8.8.8.8", 53, user,
+        random.randint(60, 150), random.randint(100, 400), 0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +421,7 @@ def _simulate_benign_office_traffic(config, session_context=None):
     if not possible:
         return None
 
-    destination = random.choice(possible)
+    destination = weighted_destination(user, possible)
     try:
         dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range"), strict=False))
     except (ValueError, AddressValueError, TypeError):
@@ -431,6 +441,7 @@ def _simulate_benign_office_traffic(config, session_context=None):
         protocol    = "TCP"
         email_ports = [p for p in destination.get('ports', [993]) if p in [25, 587, 993]]
         dest_port   = random.choice(email_ports) if email_ports else 993
+        dest_ip     = stable_mail_servers(user)   # fixed 2-3 relays per user
         bytes_sent = random.randint(1000, 500000)
         bytes_recv = random.randint(500, 100000)
         duration   = random.randint(2, 30)
@@ -664,6 +675,14 @@ def _simulate_auth_brute_force(config, session_context=None):
             f"from {attacker_ip}/{src_port} to {outside_ip}/443 on interface outside"
         )
         auth_logs.append(_generate_full_syslog_message(config, fail_msg))
+    # Final success — attacker found valid credentials; triggers XSIAM brute-force detection
+    success_user = random.choice(target_users)
+    src_port = random.randint(1024, 65535)
+    success_msg = (
+        f"%ASA-6-109005: Authentication succeeded for user '{success_user}' "
+        f"from {attacker_ip}/{src_port} to {outside_ip}/443 on interface outside"
+    )
+    auth_logs.append(_generate_full_syslog_message(config, success_msg))
     return auth_logs
 
 
@@ -723,6 +742,20 @@ def _simulate_targeted_admin_bruteforce(config, session_context=None):
         )
         attack_logs.append(_generate_full_syslog_message(config, start_msg))
         attack_logs.append(_generate_full_syslog_message(config, fail_msg))
+    # Final success — attacker found valid credentials; triggers XSIAM brute-force detection
+    src_port = random.randint(1024, 65535)
+    start_msg = (
+        f"%ASA-6-109001: Auth start for user '{target_user}' "
+        f"from {attacker_ip}/{src_port} to {outside_ip}/{target_port} "
+        f"on interface {interface}"
+    )
+    success_msg = (
+        f"%ASA-6-109005: Authentication succeeded for user '{target_user}' "
+        f"from {attacker_ip}/{src_port} to {outside_ip}/{target_port} "
+        f"on interface {interface}"
+    )
+    attack_logs.append(_generate_full_syslog_message(config, start_msg))
+    attack_logs.append(_generate_full_syslog_message(config, success_msg))
     return attack_logs
 
 
@@ -1030,6 +1063,15 @@ def _simulate_port_scan(config, scanner_ip, session_context=None):
             src_interface="inside", dest_interface="inside",
             teardown_reason="TCP Reset-I"
         ))
+    # 1-2 successful connections on common open ports — attacker finds live services
+    open_ports = random.sample([22, 80, 443, 445, 3389, 8080, 8443], k=random.randint(1, 2))
+    for port in open_ports:
+        scan_logs.extend(_generate_connection_session(
+            config, "TCP", scanner_ip, victim_ip, port, user,
+            random.randint(500, 5000), random.randint(500, 5000), random.randint(5, 30),
+            src_interface="inside", dest_interface="inside",
+            teardown_reason="TCP FINs"
+        ))
     return scan_logs
 
 
@@ -1106,6 +1148,14 @@ def _simulate_vpn_bruteforce_or_scan(config, session_context=None):
                 f"from {attacker_ip}/{src_port} to {outside_ip}/443 on interface outside"
             )
             vpn_logs.append(_generate_full_syslog_message(config, fail_msg))
+    # Final success — attacker found valid credentials; triggers XSIAM brute-force detection
+    success_user = random.choice(users_to_try)
+    src_port = random.randint(1024, 65535)
+    success_msg = (
+        f"%ASA-6-109005: Authentication succeeded for user '{success_user}' "
+        f"from {attacker_ip}/{src_port} to {outside_ip}/443 on interface outside"
+    )
+    vpn_logs.append(_generate_full_syslog_message(config, success_msg))
     return vpn_logs
 
 
@@ -1159,12 +1209,7 @@ def _simulate_vpn_impossible_travel(config, session_context=None):
 
 
 def _simulate_vpn_tor_login(config, session_context=None):
-    """
-    Successful AnyConnect VPN session initiated from a known TOR exit node IP.
-
-    A valid corporate credential authenticated via TOR — indicating credential theft
-    or deliberate anonymisation. The session START (113039) SUCCEEDS. Source IP is
-    from tor_exit_nodes config; the username is a real corporate user.
+    """Full conversation: TLS handshake + VPN auth + post-auth internal activity from Tor.
 
     Triggers XSIAM: Suspicious VPN Login / TOR-based Access analytics detection.
     """
@@ -1186,14 +1231,51 @@ def _simulate_vpn_tor_login(config, session_context=None):
     asa_conf     = _get_asa_config(config)
     group_name   = asa_conf.get('vpn_group_name',   'TunnelGroup_AnyConnect')
     session_type = asa_conf.get('vpn_session_type', 'AnyConnect')
-    # Force session START (113039) — the successful auth from TOR is the detection signal
-    message = (
+
+    # Assign VPN pool inside IP for post-auth traffic
+    vpn_pool = asa_conf.get('vpn_pool', '10.250.0.0/16')
+    try:
+        vpn_inside_ip = rand_ip_from_network(ip_network(vpn_pool, strict=False))
+    except Exception:
+        vpn_inside_ip = f"10.250.{random.randint(1,254)}.{random.randint(1,254)}"
+
+    base_time = datetime.now(timezone.utc)
+    logs = []
+
+    # Log 1: TLS handshake (Built+Teardown TCP to gateway:443)
+    gateway_ip = asa_conf.get('outside_ip', '203.0.113.1')
+    logs.extend(_generate_connection_session(
+        config, "TCP", tor_ip, gateway_ip, 443, user,
+        random.randint(500, 2000), random.randint(2000, 8000), 1,
+        direction="inbound", src_interface="outside", dest_interface="inside"
+    ))
+
+    # Log 2: VPN session start (113039) — primary detection event
+    start_msg = (
         f"%ASA-4-113039: Group = {group_name}, Username = {user}, IP = {tor_ip}, "
         f"AnyConnect session profile is {group_name}. "
         f"Session Type: {session_type}, Duration: 0:00:00, "
         f"Bytes xmt: 0, Bytes rcv: 0, Reason: User Initiated"
     )
-    return [_generate_full_syslog_message(config, message)]
+    logs.append(_generate_full_syslog_message(config, start_msg,
+                event_time=base_time + timedelta(seconds=2)))
+
+    # Logs 3+: Post-auth internal activity from VPN pool IP
+    post_auth_ports = [
+        (445, "TCP", "SMB"), (3389, "TCP", "RDP"),
+        (22, "TCP", "SSH"), (389, "TCP", "LDAP"),
+    ]
+    internal_servers = config.get('internal_servers', ['10.0.10.50'])
+    n_post = random.randint(1, 3)
+    for i, (port, proto, _) in enumerate(random.sample(post_auth_ports, min(n_post, len(post_auth_ports)))):
+        dst_ip = random.choice(internal_servers)
+        logs.extend(_generate_connection_session(
+            config, proto, vpn_inside_ip, dst_ip, port, user,
+            random.randint(1000, 50000), random.randint(5000, 200000),
+            random.randint(5, 120),
+            src_interface="inside", dest_interface="inside"
+        ))
+    return logs
 
 
 def _simulate_smb_new_host_lateral(config, src_ip, session_context=None):
@@ -1309,6 +1391,75 @@ def _simulate_smb_share_enumeration(config, src_ip, session_context=None):
     return logs
 
 
+def _simulate_smtp_spray(config, src_ip, session_context=None):
+    """Compromised workstation acting as spam bot — direct SMTP to many external MX.
+
+    Generates 30-50 TCP Built+Teardown session pairs from one internal workstation
+    to DISTINCT external IPs on port 25 (SMTP) or 587 (submission).  Workstations
+    never connect directly to external MX servers in normal operations — a single
+    host opening direct SMTP connections to many destinations is a strong spam-bot
+    indicator.
+
+    Triggers XSIAM: anomalous SMTP from workstation / spam bot analytics.
+    Returns list of syslog strings (multi-event).
+    """
+    print(f"    - ASA Module simulating: SMTP Spray (spam bot) from {src_ip}")
+    user      = _get_user_from_ip(config, src_ip, session_context)
+    n_targets = random.randint(30, 50)
+    dest_ips  = set()
+    while len(dest_ips) < n_targets:
+        dest_ips.add(_random_external_ip())
+
+    logs = []
+    for dst_ip in list(dest_ips)[:n_targets]:
+        smtp_port   = random.choices([25, 587], weights=[70, 30], k=1)[0]
+        bytes_sent  = random.randint(2_000, 50_000)
+        bytes_recv  = random.randint(200, 2_000)
+        duration    = random.randint(1, 30)
+        logs.extend(_generate_connection_session(
+            config, "TCP", src_ip, dst_ip, smtp_port, user,
+            bytes_sent, bytes_recv, duration,
+            src_interface="inside", dest_interface="outside",
+            teardown_reason="TCP FINs"
+        ))
+    return logs
+
+
+def _simulate_smtp_large_exfil(config, src_ip, session_context=None):
+    """Data exfiltration via large email attachment over SMTP.
+
+    Single long-duration SMTP session with 100-500 MB outbound bytes.
+    Normal email attachments rarely exceed 25 MB.  The DNS precursor is
+    added by the dispatch block (same pattern as other exfil threats).
+
+    Triggers XSIAM: large outbound SMTP data transfer / email exfiltration analytics.
+    Returns list of syslog strings (multi-event).
+    """
+    print(f"    - ASA Module simulating: Large SMTP Exfiltration from {src_ip}")
+    user = _get_user_from_ip(config, src_ip, session_context)
+    mail_mx_ranges = [
+        "74.125.0.0/16", "40.76.0.0/14", "207.46.0.0/16",
+        "198.2.128.0/18", "159.148.0.0/16",
+    ]
+    try:
+        dest_ip = rand_ip_from_network(
+            ip_network(random.choice(mail_mx_ranges), strict=False))
+    except Exception:
+        dest_ip = _random_external_ip()
+
+    smtp_port  = random.choices([587, 25], weights=[80, 20], k=1)[0]
+    bytes_sent = random.randint(104_857_600, 524_288_000)   # 100 MB - 500 MB
+    bytes_recv = random.randint(500, 5_000)
+    duration   = random.randint(300, 1200)
+
+    return _generate_connection_session(
+        config, "TCP", src_ip, dest_ip, smtp_port, user,
+        bytes_sent, bytes_recv, duration,
+        src_interface="inside", dest_interface="outside",
+        teardown_reason="TCP FINs"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main log generation entry point
 # ---------------------------------------------------------------------------
@@ -1351,6 +1502,7 @@ def generate_log(config, scenario=None, threat_level="Realistic",
     session_context = (context or {}).get("session_context")
 
     # --- Scenario events from the coordinated simulator ---
+    forced_choice = None
     if scenario_event and context:
         if scenario_event == "LARGE_EGRESS":
             print("    - ASA Module simulating: Scenario LARGE_EGRESS")
@@ -1366,20 +1518,25 @@ def generate_log(config, scenario=None, threat_level="Realistic",
                 config, "TCP", src_ip, dest_ip, 443, user,
                 bytes_sent, random.randint(1000, 5000), random.randint(60, 300)
             )
-        return None
+        # Named threat from dashboard — set forced_choice and fall through to dispatch
+        forced_choice = scenario_event.lower()
 
     # --- Event mix from config or fallback defaults ---
     module_config = config.get(CONFIG_KEY, {})
     event_mix     = module_config.get('event_mix', {})
 
     benign_events   = event_mix.get('benign', [
-        {"event": "benign_session",    "weight": 50},
-        {"event": "inbound_block",     "weight": 22},
-        {"event": "anyconnect_vpn",    "weight": 9},
-        {"event": "aaa_auth",          "weight": 5},
-        {"event": "ntp_sync",          "weight": 6},
-        {"event": "internal_traffic",  "weight": 5},
+        {"event": "benign_session",    "weight": 38},
+        {"event": "inbound_block",     "weight": 18},
+        {"event": "anyconnect_vpn",    "weight": 7},
+        {"event": "aaa_auth",          "weight": 4},
+        {"event": "ntp_sync",          "weight": 5},
+        {"event": "internal_traffic",  "weight": 4},
         {"event": "dhcp_log",          "weight": 3},
+        {"event": "vpn_login_benign",  "weight": 4},
+        {"event": "vpn_failure_benign","weight": 2},
+        {"event": "rdp_internal_benign","weight": 3},
+        {"event": "ftp_internal_benign","weight": 2},
     ])
     benign_functions = [e['event'] for e in benign_events]
     benign_weights   = [e['weight'] for e in benign_events]
@@ -1392,7 +1549,10 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         threat_functions = list(_DEFAULT_THREAT_NAMES)
         threat_weights   = list(_DEFAULT_THREAT_WEIGHTS)
 
-    if benign_only or threat_level == "Benign Traffic Only":
+    if forced_choice is not None:
+        # Named threat from dashboard — bypass random selection entirely
+        log_choice = forced_choice
+    elif benign_only or threat_level == "Benign Traffic Only":
         log_choice = random.choices(benign_functions, weights=benign_weights, k=1)[0]
     elif threat_level == "Insane":
         log_choice = random.choices(threat_functions, weights=threat_weights, k=1)[0]
@@ -1413,6 +1573,7 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         "anyconnect_vpn", "vpn_bruteforce", "vpn_impossible_travel",
         "server_outbound_http", "inbound_block", "auth_brute_force", "aaa_auth",
         "vpn_tor_login",    # resolves its own user/IP from TOR nodes config
+        "vpn_login_benign", "vpn_failure_benign",  # resolve own user/IP
         "ntp_sync",         # picks IP from internal_networks directly
         "internal_traffic", # resolves user/IP from session_context itself
         "dhcp_log",         # picks IP from internal_networks directly
@@ -1451,17 +1612,79 @@ def generate_log(config, scenario=None, threat_level="Realistic",
     elif log_choice == "dhcp_log":
         _result = _simulate_dhcp_log(config)
 
+    elif log_choice == "vpn_login_benign":
+        # Benign VPN login from user's stable home IP
+        if session_context:
+            ui = get_random_user(session_context, preferred_device_type='workstation')
+            _vpn_user = ui['username'] if ui else None
+        else:
+            umap = _get_user_ip_map(config)
+            _vpn_user = random.choice(list(umap.keys())) if umap else None
+        if _vpn_user:
+            _result = _generate_anyconnect_vpn_log(config, user=_vpn_user,
+                        public_ip=stable_vpn_ip(_vpn_user), session_context=session_context)
+
+    elif log_choice == "vpn_failure_benign":
+        # Benign VPN auth failure — typo / expired cert
+        if session_context:
+            ui = get_random_user(session_context, preferred_device_type='workstation')
+            _vpn_user = ui['username'] if ui else None
+        else:
+            umap = _get_user_ip_map(config)
+            _vpn_user = random.choice(list(umap.keys())) if umap else None
+        if _vpn_user:
+            asa_conf = _get_asa_config(config)
+            outside_ip = asa_conf.get('outside_ip', '203.0.113.1')
+            home_ip = stable_vpn_ip(_vpn_user)
+            fail_reasons = ["Invalid Credentials", "Certificate Expired", "MFA Timeout", "Account Locked"]
+            fail_msg = (
+                f"%ASA-6-109006: Authentication failed for user '{_vpn_user}' "
+                f"from {home_ip}/{random.randint(49152, 65535)} to {outside_ip}/443 "
+                f"on interface outside"
+            )
+            _result = _generate_full_syslog_message(config, fail_msg)
+
+    elif log_choice == "rdp_internal_benign":
+        # Benign internal RDP — user to jump host / terminal server
+        if config.get('internal_servers'):
+            rdp_dest = random.choice(config['internal_servers'])
+            user = _get_user_from_ip(config, internal_host_ip, session_context)
+            _result = _generate_connection_session(
+                config, "TCP", internal_host_ip, rdp_dest, 3389, user,
+                random.randint(10_000, 200_000), random.randint(50_000, 2_000_000),
+                random.randint(300, 7200),
+                src_interface="inside", dest_interface="inside"
+            )
+
+    elif log_choice == "ftp_internal_benign":
+        # Internal FTP download from file server
+        if config.get('internal_servers'):
+            ftp_dest = random.choice(config['internal_servers'])
+            user = _get_user_from_ip(config, internal_host_ip, session_context)
+            _result = _generate_connection_session(
+                config, "TCP", internal_host_ip, ftp_dest, 21, user,
+                random.randint(200, 5_000), random.randint(50_000, 50_000_000),
+                random.randint(10, 300),
+                src_interface="inside", dest_interface="inside"
+            )
+
     elif log_choice == "large_single_upload_session":
         print("    - ASA Module simulating: Large Single Upload Session")
-        _result = _simulate_large_upload_session(config, internal_host_ip,
+        _user = _get_user_from_ip(config, internal_host_ip, session_context)
+        _dns = _dns_precursor(config, internal_host_ip, _user)
+        _upload = _simulate_large_upload_session(config, internal_host_ip,
                                                   is_cumulative=False,
                                                   session_context=session_context)
+        _result = _dns + (_upload if isinstance(_upload, list) else [_upload]) if _upload else _dns
 
     elif log_choice == "cumulative_upload_session":
         print("    - ASA Module simulating: Cumulative Large Upload Session")
-        _result = _simulate_large_upload_session(config, internal_host_ip,
+        _user = _get_user_from_ip(config, internal_host_ip, session_context)
+        _dns = _dns_precursor(config, internal_host_ip, _user)
+        _upload = _simulate_large_upload_session(config, internal_host_ip,
                                                   is_cumulative=True,
                                                   session_context=session_context)
+        _result = _dns + (_upload if isinstance(_upload, list) else [_upload]) if _upload else _dns
 
     elif log_choice == "unusual_rdp_session":
         print("    - ASA Module simulating: Unusual Internal RDP Session")
@@ -1469,7 +1692,10 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     elif log_choice == "unusual_ssh_session":
         print("    - ASA Module simulating: Rare External SSH Session")
-        _result = _simulate_ssh_session(config, internal_host_ip, session_context)
+        _user = _get_user_from_ip(config, internal_host_ip, session_context)
+        _dns = _dns_precursor(config, internal_host_ip, _user)
+        _ssh = _simulate_ssh_session(config, internal_host_ip, session_context)
+        _result = _dns + (_ssh if isinstance(_ssh, list) else [_ssh]) if _ssh else _dns
 
     elif log_choice == "port_scan":
         print("    - ASA Module simulating: Internal Port Scan")
@@ -1483,7 +1709,10 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     elif log_choice == "tor_connection":
         print("    - ASA Module simulating: Connection to Tor Exit Node")
-        _result = _simulate_tor_connection_session(config, internal_host_ip, session_context)
+        _user = _get_user_from_ip(config, internal_host_ip, session_context)
+        _dns = _dns_precursor(config, internal_host_ip, _user)
+        _tor = _simulate_tor_connection_session(config, internal_host_ip, session_context)
+        _result = _dns + (_tor if isinstance(_tor, list) else [_tor]) if _tor else _dns
 
     elif log_choice == "vpn_bruteforce":
         _result = _simulate_vpn_bruteforce_or_scan(config, session_context)
@@ -1497,7 +1726,11 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     elif log_choice == "server_outbound_http":
         print("    - ASA Module simulating: Anomalous Server Outbound HTTP")
-        _result = _simulate_server_outbound_http(config, session_context)
+        _srv_ip = random.choice(config.get('internal_servers', ['10.0.10.50']))
+        _srv_user = _get_user_from_ip(config, _srv_ip, session_context)
+        _dns = _dns_precursor(config, _srv_ip, _srv_user)
+        _http = _simulate_server_outbound_http(config, session_context)
+        _result = _dns + (_http if isinstance(_http, list) else [_http]) if _http else _dns
 
     elif log_choice == "workstation_lateral_rdp":
         print("    - ASA Module simulating: Workstation-to-Workstation RDP")
@@ -1529,5 +1762,14 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     elif log_choice == "smb_share_enumeration":
         _result = _simulate_smb_share_enumeration(config, internal_host_ip, session_context)
+
+    elif log_choice == "smtp_spray":
+        _result = _simulate_smtp_spray(config, internal_host_ip, session_context)
+
+    elif log_choice == "smtp_large_exfil":
+        _user = _get_user_from_ip(config, internal_host_ip, session_context)
+        _dns = _dns_precursor(config, internal_host_ip, _user)
+        _exfil = _simulate_smtp_large_exfil(config, internal_host_ip, session_context)
+        _result = _dns + (_exfil if isinstance(_exfil, list) else [_exfil]) if _exfil else _dns
 
     return (_result, log_choice) if _result is not None else None

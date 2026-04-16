@@ -810,6 +810,12 @@
         if (disp) disp.textContent = epsLabel(eps);
       }
 
+      // Always sync threat level dropdown to backend state
+      const sel = existing.querySelector('.level-select');
+      if (sel && sel.value !== m.threat_level) {
+        sel.value = m.threat_level;
+      }
+
       // Only touch controls when status actually changes
       if (_prevStatus[m.name] === m.status) return;
       if (_prevStatus[m.name] !== undefined && _prevStatus[m.name] !== 'error' && m.status === 'error') {
@@ -823,7 +829,6 @@
       badge.className   = `status-badge ${m.status}`;
       badge.textContent = m.status;
 
-      const sel = existing.querySelector('.level-select');
       if (sel) sel.disabled = (m.status === 'running');
 
       const btn = existing.querySelector('.card-controls button');
@@ -1031,8 +1036,16 @@
 
   document.getElementById('btn-start-all').addEventListener('click', async () => {
     const level = document.getElementById('global-level-select').value;
+    const globalSlider = document.getElementById('global-rate-slider');
+    const iv = 1 / sliderToEps(globalSlider.value);
     try {
-      await api('/api/modules/start_all', 'POST', { threat_level: level });
+      await api('/api/modules/start_all', 'POST', { threat_level: level, event_interval: iv });
+      // Sync per-card sliders to match the global rate
+      document.querySelectorAll('.modules-grid .rate-slider').forEach(s => {
+        s.value = globalSlider.value;
+        const disp = s.closest('.rate-control')?.querySelector('.rate-display');
+        if (disp) disp.textContent = epsLabel(sliderToEps(globalSlider.value));
+      });
       showToast(`All modules started at "${level}"`);
       await poll();
     } catch (e) { showToast('Error: ' + e.message, 4000); }

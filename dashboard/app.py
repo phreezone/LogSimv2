@@ -422,8 +422,15 @@ def api_stop_module(name: str):
 def api_start_all():
     body = request.get_json(silent=True) or {}
     level = body.get("threat_level", "Realistic")
+    raw_iv = body.get("event_interval")
+    iv = None
+    if raw_iv is not None:
+        try:
+            iv = float(raw_iv)
+        except (ValueError, TypeError):
+            iv = None
     for state in MODULE_STATES.values():
-        _start_module_state(state, level)
+        _start_module_state(state, level, iv)
     return jsonify([s.to_dict() for s in MODULE_STATES.values()])
 
 

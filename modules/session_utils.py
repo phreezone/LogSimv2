@@ -5,6 +5,7 @@
 # context={'session_context': session_context}.
 
 import random
+import hashlib
 from ipaddress import ip_address, ip_network
 
 
@@ -42,9 +43,15 @@ def build_session_context(config):
             ip = _pick_ip(device['subnet'])
             active_devices[device['type']] = {**device, 'ip': ip}
 
-        # Randomly activate secondary devices (40% each)
+        # Activate secondary devices with type-based affinity weights.
+        # Real users predominantly use their primary device; secondary
+        # devices are used much less frequently.
+        _SECONDARY_ACTIVATION = {
+            'laptop': 0.50, 'home': 0.20, 'mobile': 0.15,
+        }
         for device in secondary_devices:
-            if random.random() < 0.40:
+            chance = _SECONDARY_ACTIVATION.get(device.get('type'), 0.25)
+            if random.random() < chance:
                 ip = _pick_ip(device['subnet'])
                 # If a device of this type is already active (e.g. two laptops),
                 # suffix the type so both are preserved.
@@ -52,6 +59,16 @@ def build_session_context(config):
                 if dtype in active_devices:
                     dtype = f"{dtype}_{device['device_id']}"
                 active_devices[dtype] = {**device, 'ip': ip}
+
+        # Assign a sticky user-agent to each device for the run.
+        # Real users keep the same browser/OS fingerprint for days or weeks.
+        user_agents = config.get('user_agents', _DEFAULT_USER_AGENTS)
+        for dtype, dev in active_devices.items():
+            # Deterministic UA from hash of username+device_type so it's stable
+            # across restarts with the same config (but still looks random).
+            digest = hashlib.sha256(f"{username}:{dtype}".encode()).digest()
+            ua_idx = digest[0] % len(user_agents)
+            dev['user_agent'] = user_agents[ua_idx]
 
         # Derive the convenience primary_* shortcuts from the first primary device
         first_primary = primary_devices[0] if primary_devices else None
@@ -71,6 +88,7 @@ def build_session_context(config):
             'primary_hostname': primary_dev.get('hostname'),
             'primary_os_type':  primary_dev.get('os_type'),
             'primary_os_version': primary_dev.get('os_version'),
+            'primary_user_agent': primary_dev.get('user_agent'),
         }
 
     return session_context
@@ -291,6 +309,203 @@ def get_random_anon_ip_ctx(config):
             "is_proxy": True,
         }
     return get_random_vpn_ip_ctx(config)
+
+
+# ---------------------------------------------------------------------------
+# UEBA behavioral helpers – shared across all firewall modules
+# ---------------------------------------------------------------------------
+
+# Realistic external IP first octets used by stable_vpn_ip
+_EXT_FIRST_OCTETS = [11, 23, 31, 45, 46, 52, 63, 72, 91, 104,
+                     108, 128, 142, 155, 168, 176, 184, 198, 203, 212]
+
+_USER_HOME_IPS = {}
+
+def stable_vpn_ip(user):
+    """Return a deterministic 'home' external IP for a given user.
+
+    Each user gets a primary (80%) and secondary (20%) home IP derived from
+    a SHA-256 hash of their username. This lets UEBA platforms build a stable
+    baseline of where each user typically logs in from, so that logins from
+    novel locations (like Tor) stand out.
+    """
+    if user not in _USER_HOME_IPS:
+        digest = hashlib.sha256(user.encode()).digest()
+        o1 = _EXT_FIRST_OCTETS[digest[0] % len(_EXT_FIRST_OCTETS)]
+        primary = f"{o1}.{digest[1] % 254 + 1}.{digest[2] % 254 + 1}.{digest[3] % 254 + 1}"
+        o1b = _EXT_FIRST_OCTETS[digest[4] % len(_EXT_FIRST_OCTETS)]
+        secondary = f"{o1b}.{digest[5] % 254 + 1}.{digest[6] % 254 + 1}.{digest[7] % 254 + 1}"
+        _USER_HOME_IPS[user] = [primary, secondary]
+    ips = _USER_HOME_IPS[user]
+    return ips[0] if random.random() < 0.80 else ips[1]
+
+
+# Corporate mail relay IPs — small fixed pool that every module's benign email
+# generator draws from.  Real enterprises route all outbound email through 2-3
+# relays; a user connecting to dozens of distinct SMTP servers is exactly the
+# spam-bot signal XSIAM detects.  Threat smtp_spray generators deliberately
+# connect to 30-50 distinct IPs to create contrast against this tight baseline.
+CORPORATE_MAIL_SERVERS = [
+    "74.125.200.27",    # Google Workspace SMTP relay
+    "40.107.22.100",    # Microsoft 365 SMTP relay
+    "207.46.163.218",   # Microsoft Exchange Online Protection relay
+]
+
+
+_USER_MAIL_SERVERS = {}
+
+def stable_mail_servers(user):
+    """Return 2-3 deterministic corporate mail relay IPs for a given user.
+
+    Each user is assigned a primary mail server (70%) and 1-2 alternates (30%)
+    from CORPORATE_MAIL_SERVERS, derived from a SHA-256 hash of their username.
+    This keeps the per-user unique-server count to 2-3 over any time window,
+    preventing XSIAM from flagging normal email as spam-bot traffic.
+    """
+    if user not in _USER_MAIL_SERVERS:
+        digest = hashlib.sha256(user.encode()).digest()
+        n = len(CORPORATE_MAIL_SERVERS)
+        primary_idx = digest[8] % n
+        # 1-2 alternates (always includes primary, plus 1 or 2 others)
+        alt_count = 1 + (digest[9] % 2)   # 1 or 2 alternates
+        servers = [CORPORATE_MAIL_SERVERS[primary_idx]]
+        for i in range(1, alt_count + 1):
+            idx = (primary_idx + i) % n
+            servers.append(CORPORATE_MAIL_SERVERS[idx])
+        _USER_MAIL_SERVERS[user] = servers
+    servers = _USER_MAIL_SERVERS[user]
+    # Primary 70%, alternates share remaining 30%
+    if random.random() < 0.70 or len(servers) == 1:
+        return servers[0]
+    return random.choice(servers[1:])
+
+
+_USER_DEST_WEIGHTS = {}
+
+def weighted_destination(user, destinations):
+    """Pick a destination with per-user Zipf-like affinity.
+
+    70% of the time, destinations are chosen via a user-specific weighting
+    (so alice tends to visit the same top sites). 30% of the time, a uniform
+    random pick adds variety. This creates the browsing-pattern baselines
+    that UEBA platforms need for 'Rare X' / 'Uncommon X' detections.
+    """
+    if not destinations:
+        return {} if isinstance(destinations, dict) else destinations
+    n = len(destinations)
+    cache_key = (user, n)
+    if cache_key not in _USER_DEST_WEIGHTS:
+        digest = hashlib.sha256(user.encode()).digest()
+        offset = digest[0] % n
+        weights = []
+        for i in range(n):
+            pos = (i - offset) % n
+            weights.append(1.0 / (1 + pos))
+        _USER_DEST_WEIGHTS[cache_key] = weights
+    if random.random() < 0.70:
+        return random.choices(destinations, weights=_USER_DEST_WEIGHTS[cache_key], k=1)[0]
+    return random.choice(destinations)
+
+
+# Per-user byte volume bands: deterministic daily-transfer ranges so UEBA
+# can build a "user X typically transfers Y MB/day" baseline.
+_USER_BYTE_BANDS = {}
+
+def get_byte_volume_band(user):
+    """Return a (low, high) byte-count tuple for this user's typical daily web traffic.
+
+    The band is deterministic per-user: some users are heavy (200-500 MB),
+    some medium (50-200 MB), some light (10-50 MB). Within a single session
+    each event should draw from this band to build a consistent volume profile.
+    """
+    if user not in _USER_BYTE_BANDS:
+        digest = hashlib.sha256(user.encode()).digest()
+        # 3 tiers: light (40%), medium (40%), heavy (20%)
+        tier = digest[0] % 10
+        if tier < 4:        # light
+            lo, hi = 5_000, 50_000
+        elif tier < 8:      # medium
+            lo, hi = 20_000, 200_000
+        else:               # heavy
+            lo, hi = 100_000, 500_000
+        _USER_BYTE_BANDS[user] = (lo, hi)
+    return _USER_BYTE_BANDS[user]
+
+
+# DNS domain affinity: each user resolves the same ~50 domains repeatedly.
+_DEFAULT_BENIGN_DOMAINS = [
+    "google.com", "microsoft.com", "github.com", "office365.com",
+    "slack.com", "zoom.us", "salesforce.com", "aws.amazon.com",
+    "teams.microsoft.com", "linkedin.com", "stackoverflow.com",
+    "jira.atlassian.com", "confluence.atlassian.com", "drive.google.com",
+    "outlook.office.com", "portal.azure.com", "app.box.com",
+    "dropbox.com", "youtube.com", "wikipedia.org", "cloudflare.com",
+    "fastly.net", "akamai.com", "cdn.jsdelivr.net", "npmjs.com",
+    "pypi.org", "docker.io", "grafana.com", "datadog.com", "splunk.com",
+]
+
+_USER_DOMAIN_WEIGHTS = {}
+
+def weighted_dns_domain(user, domains=None):
+    """Pick a DNS domain with per-user affinity.
+
+    Each user has a stable top-5 most-queried domains (60% of queries),
+    a mid-tier of ~10 domains (25%), and the rest as tail (15%).
+    This creates the domain-frequency baselines UEBA needs for
+    'Rare Domain' / 'New Domain' detections.
+    """
+    if domains is None:
+        domains = _DEFAULT_BENIGN_DOMAINS
+    n = len(domains)
+    cache_key = (user, "dns", n)
+    if cache_key not in _USER_DOMAIN_WEIGHTS:
+        digest = hashlib.sha256(f"{user}:dns".encode()).digest()
+        offset = digest[0] % n
+        weights = []
+        for i in range(n):
+            pos = (i - offset) % n
+            weights.append(1.0 / (1 + pos) ** 1.5)  # steeper than destination affinity
+        _USER_DOMAIN_WEIGHTS[cache_key] = weights
+    if random.random() < 0.85:
+        return random.choices(domains, weights=_USER_DOMAIN_WEIGHTS[cache_key], k=1)[0]
+    return random.choice(domains)
+
+
+def get_user_agent(session_context, username, device_type=None):
+    """Return the sticky user-agent for a user's device.
+
+    Falls back to a deterministic pick from the default pool if no
+    session_context is available.
+    """
+    if session_context and username in session_context:
+        devices = session_context[username].get('active_devices', {})
+        if device_type and device_type in devices:
+            ua = devices[device_type].get('user_agent')
+            if ua:
+                return ua
+        # Try primary
+        ua = session_context[username].get('primary_user_agent')
+        if ua:
+            return ua
+    # Deterministic fallback
+    digest = hashlib.sha256(f"{username}:ua".encode()).digest()
+    return _DEFAULT_USER_AGENTS[digest[0] % len(_DEFAULT_USER_AGENTS)]
+
+
+def pick_ephemeral_port():
+    """Pick a random ephemeral source port (49152-65535)."""
+    return random.randint(49152, 65535)
+
+
+# Default user-agent pool (used when config has no 'user_agents' key)
+_DEFAULT_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
 
 
 # ---------------------------------------------------------------------------

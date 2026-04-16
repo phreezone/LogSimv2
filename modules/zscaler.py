@@ -8,9 +8,13 @@ from datetime import datetime, timezone
 from ipaddress import ip_network
 import hashlib
 try:
-    from modules.session_utils import get_random_user, get_user_by_name, get_zscaler_device_info, rand_ip_from_network
+    from modules.session_utils import (get_random_user, get_user_by_name,
+        get_zscaler_device_info, rand_ip_from_network,
+        stable_vpn_ip, stable_mail_servers, weighted_destination)
 except ImportError:
-    from session_utils import get_random_user, get_user_by_name, get_zscaler_device_info, rand_ip_from_network
+    from session_utils import (get_random_user, get_user_by_name,
+        get_zscaler_device_info, rand_ip_from_network,
+        stable_vpn_ip, stable_mail_servers, weighted_destination)
 
 def _cef_escape(value):
     """Escape CEF extension values per the CEF spec (backslash, equals, newlines)."""
@@ -106,6 +110,21 @@ def _get_user_and_device_info(config, user_override=None, session_context=None):
     return user, dept, ip, device_info
 
 
+def _dns_precursor_event(config, user, dept, device_info, src_ip):
+    """Generate a DNS resolution NSSFWlog event that precedes a connection.
+
+    Returns a single CEF string representing the UDP/53 query that must
+    logically precede any outbound TCP connection to an external host.
+    """
+    return _fw_event(config, user, dept, device_info,
+                     src_ip, random.choice(["8.8.8.8", "8.8.4.4", "1.1.1.1"]),
+                     53, "17",
+                     "Allow", "Allow_DNS_Outbound", "DNS",
+                     "N/A", "DNSQuery",
+                     "United States", "1",
+                     random.randint(64, 512), random.randint(32, 128))
+
+
 # ---------------------------------------------------------------------------
 # BENIGN WEB GENERATORS
 # ---------------------------------------------------------------------------
@@ -115,7 +134,7 @@ def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_in
     zscaler_conf = config.get('zscaler_config', {})
     _default_dest = [{"ip_range": "8.8.8.0/24", "name": "google.com",
                       "ports": [443], "service_types": ["HTTPS"], "country": "US"}]
-    destination = random.choice(zscaler_conf.get('benign_egress_destinations', _default_dest))
+    destination = weighted_destination(user, zscaler_conf.get('benign_egress_destinations', _default_dest))
     dest_ip_range = destination.get("ip_range", "8.8.8.0/24")
     if dest_ip_range.endswith("/32"):
         dest_ip = dest_ip_range[:-3]
@@ -127,7 +146,7 @@ def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_in
     domain = destination.get("name", "example.com").replace(" ", "").lower()
     app_details = random.choice(zscaler_conf.get('app_details', [{"name": "General Browsing", "class": "Web"}]))
     fields = {
-        "action": "Allow",
+        "action": "Allowed",
         "urlcat":     random.choice(zscaler_conf.get('benign_url_categories', ["Technology"])),
         "urlsupercat":random.choice(zscaler_conf.get('url_super_categories', ["Technology"])),
         "urlclass":   "Business and Productivity",
@@ -157,7 +176,7 @@ def _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, devi
     zscaler_conf = config.get('zscaler_config', {})
     _default_dest = [{"ip_range": "8.8.8.0/24", "name": "google.com",
                       "ports": [443], "service_types": ["HTTPS"], "country": "United States"}]
-    destination = random.choice(zscaler_conf.get('benign_egress_destinations', _default_dest))
+    destination = weighted_destination(user, zscaler_conf.get('benign_egress_destinations', _default_dest))
     dest_ip_range = destination.get("ip_range", "8.8.8.0/24")
     if dest_ip_range.endswith("/32"):
         dest_ip = dest_ip_range[:-3]
@@ -234,11 +253,11 @@ def _generate_benign_inbound_block(config, user, dept, internal_host_ip, device_
         "srcip": attacker_ip, "sport": random.randint(1024, 65535),
         "destip": target_ip, "destport": target_port,
         "proto": "6",
-        "action": "Block", "rulelabel": "Block_Inbound_Probe", "reason": "Policy Block",
+        "action": "Blocked", "rulelabel": "Block_Inbound_Probe", "reason": "Policy Block",
         "threatcat": "Network Scan", "threatname": "InboundProbe",
         "destCountry": "United States",
         "srcCountry": random.choice(_THREAT_COUNTRIES),
-        "bytesin": 0, "bytesout": random.randint(40, 100),
+        "bytesin": random.randint(40, 100), "bytesout": random.randint(40, 100),
         "nwsvc": nwsvc, "spriv": "N/A", "duration_ms": 0, "cefSeverity": "4",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
@@ -272,7 +291,7 @@ def _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_in
         dest_ip = "40.99.1.1"
     method = random.choice(["PUT", "POST"])
     fields = {
-        "action": "Allow",
+        "action": "Allowed",
         "urlcat":      url_cat,
         "urlsupercat": "Technology",
         "urlclass":    "Business and Productivity",
@@ -323,7 +342,7 @@ def _generate_benign_software_update(config, user, dept, internal_host_ip, devic
     except Exception:
         dest_ip = "13.107.4.1"
     fields = {
-        "action": "Allow",
+        "action": "Allowed",
         "urlcat":      url_cat,
         "urlsupercat": "Technology",
         "urlclass":    "Business and Productivity",
@@ -374,7 +393,7 @@ def _generate_benign_video_streaming(config, user, dept, internal_host_ip, devic
     except Exception:
         dest_ip = "216.58.1.1"
     fields = {
-        "action": "Allow",
+        "action": "Allowed",
         "urlcat":      url_cat,
         "urlsupercat": "Entertainment",
         "urlclass":    "Business and Productivity",
@@ -404,11 +423,126 @@ def _generate_benign_video_streaming(config, user, dept, internal_host_ip, devic
 
 
 # ---------------------------------------------------------------------------
+# BENIGN PROTOCOL BASELINE GENERATORS (UEBA)
+# ---------------------------------------------------------------------------
+
+def _generate_benign_smb_event(config, user, dept, internal_host_ip, device_info):
+    """Internal SMB file-share access — baseline for SMB lateral movement alerts (nssfwlog)."""
+    internal_servers = config.get('internal_servers', [])
+    dst_ip = random.choice(internal_servers) if internal_servers else _get_random_internal_ip(config)
+    return _fw_event(config, user, dept, device_info,
+                     internal_host_ip, dst_ip, 445, "6",
+                     "Allow", "Allow_Internal_SMB", "SMB",
+                     None, None,
+                     "Internal", "1",
+                     random.randint(2_000, 50_000), random.randint(500, 5_000))
+
+
+def _generate_benign_ssh_event(config, user, dept, internal_host_ip, device_info):
+    """Internal SSH admin session — baseline for rare_ssh alerts (nssfwlog)."""
+    internal_servers = config.get('internal_servers', [])
+    dst_ip = random.choice(internal_servers) if internal_servers else _get_random_internal_ip(config)
+    return _fw_event(config, user, dept, device_info,
+                     internal_host_ip, dst_ip, 22, "6",
+                     "Allow", "Allow_Internal_SSH", "SSH",
+                     None, None,
+                     "Internal", "1",
+                     random.randint(1_000, 20_000), random.randint(500, 10_000))
+
+
+def _generate_benign_rdp_event(config, user, dept, internal_host_ip, device_info):
+    """Internal RDP admin session — baseline for rare_external_rdp alerts (nssfwlog)."""
+    internal_servers = config.get('internal_servers', [])
+    dst_ip = random.choice(internal_servers) if internal_servers else _get_random_internal_ip(config)
+    return _fw_event(config, user, dept, device_info,
+                     internal_host_ip, dst_ip, 3389, "6",
+                     "Allow", "Allow_Internal_RDP", "RDP",
+                     None, None,
+                     "Internal", "1",
+                     random.randint(50_000, 500_000), random.randint(10_000, 100_000))
+
+
+def _generate_benign_vpn_event(config, user, dept, internal_host_ip, device_info):
+    """Successful RA-VPN login from user's stable home IP — VPN baseline (nssfwlog)."""
+    zscaler_conf = config.get('zscaler_config', {})
+    gateway_ip = zscaler_conf.get('vpn_gateway_ip',
+                     random.choice(config.get('internal_servers', ['10.0.10.1'])))
+    home_ip = stable_vpn_ip(user)
+    return _fw_event(config, user, dept, device_info,
+                     home_ip, gateway_ip, 443, "6",
+                     "Allow", "Allow_VPN_Access", "HTTPS",
+                     None, None,
+                     "United States", "2",
+                     random.randint(100_000, 5_000_000),
+                     random.randint(50_000, 2_000_000))
+
+
+def _generate_benign_vpn_failure_event(config, user, dept, internal_host_ip, device_info):
+    """Failed VPN auth attempt — baseline for vpn_brute_force detection (nssfwlog).
+
+    Real users fail auth for mundane reasons: typo, expired cert, MFA timeout,
+    or locked-out account. Generating occasional failures prevents UEBA from
+    treating any single auth failure as anomalous.
+    """
+    zscaler_conf = config.get('zscaler_config', {})
+    gateway_ip = zscaler_conf.get('vpn_gateway_ip',
+                     random.choice(config.get('internal_servers', ['10.0.10.1'])))
+    home_ip = stable_vpn_ip(user)
+    failure_reasons = ["Credential Mismatch", "Expired Certificate",
+                       "MFA Timeout", "Account Locked"]
+    return _fw_event(config, user, dept, device_info,
+                     home_ip, gateway_ip, 443, "6",
+                     "Blocked", "Block_VPN_AuthFail", "HTTPS",
+                     "Authentication", random.choice(failure_reasons),
+                     "United States", "3",
+                     random.randint(200, 1_000), random.randint(100, 500))
+
+
+def _generate_benign_email_event(config, user, dept, internal_host_ip, device_info):
+    """Outbound email via corporate SMTP relay — baseline for smtp_spray / smtp_large_exfil.
+
+    Uses stable_mail_servers() so each user connects to only 2-3 fixed relays,
+    matching real enterprise behavior and avoiding XSIAM spam-bot false positives.
+    """
+    dest_ip = stable_mail_servers(user)
+    smtp_port = random.choices([587, 25], weights=[80, 20], k=1)[0]
+    nwsvc = "SMTPS" if smtp_port == 587 else "SMTP"
+    return _fw_event(config, user, dept, device_info,
+                     internal_host_ip, dest_ip, smtp_port, "6",
+                     "Allow", "Allow_SMTP_Relay", nwsvc,
+                     None, None,
+                     "United States", "1",
+                     random.randint(500, 5_000),
+                     random.randint(1_000, 500_000))
+
+
+def _generate_benign_ftp_event(config, user, dept, internal_host_ip, device_info):
+    """Scheduled FTP download — baseline for ftp_large_exfil alerts (nssfwlog).
+
+    Benign FTP is predominantly download: bytesIn >> bytesOut (opposite of exfil).
+    """
+    internal_servers = config.get('internal_servers', [])
+    dst_ip = random.choice(internal_servers) if internal_servers else _get_random_internal_ip(config)
+    return _fw_event(config, user, dept, device_info,
+                     internal_host_ip, dst_ip, 21, "6",
+                     "Allow", "Allow_FTP_Internal", "FTP",
+                     None, None,
+                     "Internal", "1",
+                     random.randint(1_000_000, 50_000_000),
+                     random.randint(200, 5_000))
+
+
+# ---------------------------------------------------------------------------
 # THREAT WEB GENERATORS
 # ---------------------------------------------------------------------------
 
 def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_info):
-    """Blocked malicious web traffic — malware download or C2 callback (nssweblog)."""
+    """Blocked malicious web traffic — malware download or C2 callback.
+
+    Returns [DNS precursor, NSSFWlog TCP/80 blocked, NSSWeblog blocked].
+    Zscaler logs both a firewall connection event and a web proxy event for
+    the same HTTP session; UEBA platforms correlate across both log types.
+    """
     zscaler_conf = config.get('zscaler_config', {})
     web_threats = zscaler_conf.get('web_threats', {})
     if not web_threats:
@@ -417,8 +551,20 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
     malware_details = random.choice(zscaler_conf.get('malware_details', [{"class": "Trojan", "type": "Generic"}]))
     filename = details.get('filename', f"payload_{random.randint(100, 999)}.exe")
     filetype  = details.get('filetype', "Windows Executable")
+    dest_ip = _random_external_ip()
+    logs = []
+    # Log 1: DNS precursor
+    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip))
+    # Log 2: NSSFWlog — TCP/80 blocked connection
+    logs.append(_fw_event(config, user, dept, device_info,
+                          internal_host_ip, dest_ip, 80, "6",
+                          "Blocked", "Block_HighRisk_Geo", "HTTP",
+                          details.get('category', "Malware"), threat_name,
+                          "Unknown", "8",
+                          random.randint(200, 2_000), random.randint(300, 1_500)))
+    # Log 3: NSSWeblog — web proxy event with full URL/content inspection
     fields = {
-        "action": "Block",
+        "action": "Blocked",
         "urlcat": details.get('category', "Malware"), "urlsupercat": "Security",
         "urlclass": "Malicious Content",
         "riskscore": str(random.randint(75, 100)),
@@ -432,28 +578,42 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"http://{details.get('domain', 'malware.example.com')}/{filename}",
         "ehost": details.get('domain', 'malware.example.com'),
-        "cip": internal_host_ip, "sip": _random_external_ip(),
-        "proto": "HTTP", "bytesin": 0, "bytesout": 60,
+        "cip": internal_host_ip, "sip": dest_ip,
+        "proto": "HTTP",
+        "bytesin":  random.randint(200, 2_000),
+        "bytesout": random.randint(300, 1_500),
         "filename": filename, "filetype": filetype,
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "8",
     }
-    return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
+    logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
+    return logs
 
 
 def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, device_info):
-    """Large file upload to cloud storage — data exfiltration (nssweblog, ALLOWED).
+    """Large file upload to cloud storage — data exfiltration (ALLOWED).
 
-    The event is ALLOWED because Zscaler hasn't blocked it (DLP may not be
-    tuned for this destination or file type). The 5-100 MB upload is the signal.
+    Returns [DNS precursor, NSSFWlog TCP/443 allowed, NSSWeblog allowed].
     """
     zscaler_conf = config.get('zscaler_config', {})
     _default_exfil = [{"url": "https://drive.google.com/upload", "domain": "drive.google.com"}]
     exfil_dest = random.choice(zscaler_conf.get('exfil_destinations', _default_exfil))
     file_size_bytes = random.randint(5_242_880, 104_857_600)  # 5MB–100MB
+    dest_ip = f"104.18.30.{random.randint(1, 254)}"
+    logs = []
+    # Log 1: DNS precursor
+    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip))
+    # Log 2: NSSFWlog — TCP/443 allowed connection (large upload)
+    logs.append(_fw_event(config, user, dept, device_info,
+                          internal_host_ip, dest_ip, 443, "6",
+                          "Allow", "Allow_Web_Outbound", "HTTPS",
+                          "Data Exfiltration", "LargeUpload",
+                          "Unknown", "7",
+                          random.randint(100, 500), file_size_bytes))
+    # Log 3: NSSWeblog — web proxy event
     fields = {
-        "action": "Allow",
+        "action": "Allowed",
         "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
         "responsecode": "201", "reason": "Allowed", "reqmethod": "POST",
         "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
@@ -461,17 +621,21 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": exfil_dest.get('url'), "ehost": exfil_dest.get('domain'),
-        "cip": internal_host_ip, "sip": f"104.18.30.{random.randint(1, 254)}", "proto": "HTTPS",
+        "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
         "bytesin": random.randint(100, 500), "bytesout": file_size_bytes,
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "7",
     }
-    return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
+    logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
+    return logs
 
 
 def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info):
-    """DLP engine triggers block on sensitive data upload (nssweblog)."""
+    """DLP engine triggers block on sensitive data upload.
+
+    Returns [DNS precursor, NSSFWlog TCP/443 blocked, NSSWeblog DLP block] or None.
+    """
     zscaler_conf = config.get('zscaler_config', {})
     dlp_conf   = zscaler_conf.get('dlp_engines_and_rules', {})
     engines    = dlp_conf.get('engines', [])
@@ -485,8 +649,21 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
     rule       = random.choice(dlp_conf.get('rules', ["DLP-Default-Rule"]))
     _default_exfil = [{"url": "https://drive.google.com/upload", "domain": "drive.google.com"}]
     exfil_dest = random.choice(zscaler_conf.get('exfil_destinations', _default_exfil))
+    dest_ip = f"104.18.30.{random.randint(1, 254)}"
+    upload_bytes = random.randint(1000, 50000)
+    logs = []
+    # Log 1: DNS precursor
+    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip))
+    # Log 2: NSSFWlog — TCP/443 blocked
+    logs.append(_fw_event(config, user, dept, device_info,
+                          internal_host_ip, dest_ip, 443, "6",
+                          "Blocked", "Block_DLP_Upload", "HTTPS",
+                          "DLP", "DLP_Block",
+                          "Unknown", "6",
+                          random.randint(100, 500), upload_bytes))
+    # Log 3: NSSWeblog — DLP block with engine details
     fields = {
-        "action": "Block",
+        "action": "Blocked",
         "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
         "responsecode": "403", "reason": "DLP Block", "reqmethod": "POST",
         "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
@@ -494,26 +671,43 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": exfil_dest.get('url'), "ehost": exfil_dest.get('domain'),
-        "cip": internal_host_ip, "sip": f"104.18.30.{random.randint(1, 254)}", "proto": "HTTPS",
-        "bytesin": random.randint(100, 500), "bytesout": random.randint(1000, 50000),
+        "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
+        "bytesin": random.randint(100, 500), "bytesout": upload_bytes,
         "dlpengine": engine, "dlpdictionary": dictionary, "dlprule": rule,
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "6", "event_type": "dlp",
     }
-    return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
+    logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
+    return logs
 
 
 def _generate_cloud_app_control_event(config, user, dept, internal_host_ip, device_info):
-    """Cloud Application Control enforcement — block or caution (nssweblog)."""
+    """Cloud Application Control enforcement — block or caution.
+
+    Returns [DNS precursor, NSSFWlog TCP/443, NSSWeblog app control] or None.
+    """
     zscaler_conf = config.get('zscaler_config', {})
     policy = zscaler_conf.get('cloud_app_control_policy', [])
     if not policy:
         return None
     app     = random.choice(policy)
-    blocked = app.get('action') == "Block"
+    blocked = app.get('action', "Block") in ("Block", "Blocked")
+    action_str = "Blocked" if blocked else "Allow"
+    dest_ip = f"104.20.10.{random.randint(1, 254)}"
+    logs = []
+    # Log 1: DNS precursor
+    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip))
+    # Log 2: NSSFWlog — TCP/443 connection
+    logs.append(_fw_event(config, user, dept, device_info,
+                          internal_host_ip, dest_ip, 443, "6",
+                          action_str, "Block_CloudApp" if blocked else "Allow_Web_Outbound", "HTTPS",
+                          "Cloud Application", app.get('name', 'Unknown App'),
+                          "Unknown", "5" if blocked else "2",
+                          random.randint(100, 500), random.randint(200, 2_000)))
+    # Log 3: NSSWeblog — app control event
     fields = {
-        "action": app.get('action', "Block"),
+        "action": "Blocked" if blocked else "Allowed",
         "urlcat": "Information Technology", "urlsupercat": "Information Technology",
         "responsecode": "403" if blocked else "200",
         "reason": f"Cloud App Control: {app.get('name', 'Unknown App')}",
@@ -522,16 +716,20 @@ def _generate_cloud_app_control_event(config, user, dept, internal_host_ip, devi
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"https://{app.get('name', 'app').lower()}.com",
         "ehost": f"{app.get('name', 'app').lower()}.com",
-        "cip": internal_host_ip, "sip": f"104.20.10.{random.randint(1, 254)}", "proto": "HTTPS",
+        "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "5" if blocked else "2",
     }
-    return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
+    logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
+    return logs
 
 
 def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
-    """File blocked after sandbox detonation — definitive malware verdict (nssweblog)."""
+    """File blocked after sandbox detonation — definitive malware verdict.
+
+    Returns [DNS precursor, NSSFWlog TCP/80 blocked, NSSWeblog sandbox block] or None.
+    """
     zscaler_conf = config.get('zscaler_config', {})
     threats = zscaler_conf.get('sandbox_threats', [])
     if not threats:
@@ -539,8 +737,20 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
     threat    = random.choice(threats)
     filename  = f"document_{random.randint(1000, 9999)}.{threat.get('type', 'exe').lower()}"
     file_hash = hashlib.md5(f"{filename}{time.time()}".encode()).hexdigest()
+    dest_ip = _random_external_ip()
+    logs = []
+    # Log 1: DNS precursor
+    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip))
+    # Log 2: NSSFWlog — TCP/80 blocked
+    logs.append(_fw_event(config, user, dept, device_info,
+                          internal_host_ip, dest_ip, 80, "6",
+                          "Blocked", "Block_Sandbox_Verdict", "HTTP",
+                          threat.get('category', "Malware"), threat.get('name', "Unknown"),
+                          "Unknown", "10",
+                          random.randint(200, 2_000), random.randint(300, 1_500)))
+    # Log 3: NSSWeblog — sandbox verdict
     fields = {
-        "action": "Block",
+        "action": "Blocked",
         "urlcat": "Malicious Content", "urlsupercat": "Security",
         "urlclass": "Malicious Content",
         "riskscore": "100",
@@ -553,13 +763,16 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"http://download.unsafe-storage.com/{filename}",
         "ehost": "download.unsafe-storage.com",
-        "cip": internal_host_ip, "sip": _random_external_ip(),
-        "proto": "HTTP", "bytesin": 0, "bytesout": 60,
+        "cip": internal_host_ip, "sip": dest_ip,
+        "proto": "HTTP",
+        "bytesin":  random.randint(200, 2_000),
+        "bytesout": random.randint(300, 1_500),
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "10", "event_type": "sandbox",
     }
-    return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
+    logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
+    return logs
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +799,7 @@ def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
         "srcip": src_ip, "sport": random.randint(49152, 65535),
         "destip": dst_ip, "destport": dst_port, "proto": proto,
         "action": action, "rulelabel": rule,
-        "reason": "Policy Block" if action == "Block" else "Allowed",
+        "reason": "Policy Block" if action in ("Block", "Blocked") else "Allowed",
         "threatcat": threat_cat, "threatname": threat_name,
         "destCountry": dest_country,
         "srcCountry": src_country,
@@ -606,7 +819,10 @@ def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
 # ---------------------------------------------------------------------------
 
 def _generate_threat_firewall_traffic(config, user, dept, internal_host_ip, device_info):
-    """Outbound connection to a suspicious or TOR destination, blocked (nssfwlog)."""
+    """Outbound connection to a suspicious or TOR destination, blocked.
+
+    Returns [DNS precursor, NSSFWlog blocked connection].
+    """
     print("    - Zscaler Module simulating: Threat Firewall (outbound to suspicious IP)")
     threat_dest = _get_threat_destination(config)
     dest_ip     = threat_dest.get("ip") or _random_external_ip()
@@ -619,18 +835,21 @@ def _generate_threat_firewall_traffic(config, user, dept, internal_host_ip, devi
         dest_port, nwsvc = 22, "SSH"
     else:
         dest_port, nwsvc = 443, "HTTPS"
-    return _fw_event(config, user, dept, device_info,
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
+    logs.append(_fw_event(config, user, dept, device_info,
                      internal_host_ip, dest_ip, dest_port, "6",
-                     "Block", "Block_HighRisk_Geo", nwsvc,
+                     "Blocked", "Block_HighRisk_Geo", nwsvc,
                      threat_dest.get('category', 'Suspicious'), threat_name,
-                     threat_dest.get('country', 'Unknown'), "7")
+                     threat_dest.get('country', 'Unknown'), "7",
+                     random.randint(40, 200), random.randint(100, 500)))
+    return logs
 
 
 def _generate_tor_connection(config, user, dept, internal_host_ip, device_info):
-    """Outbound connection to a known TOR exit node (nssfwlog, Block).
+    """Outbound connection to a known TOR exit node.
 
-    Port distribution: 443 (60%), 9001 (30%), 9030 (10%) — matches Checkpoint
-    and FortiGate TOR simulation patterns.
+    Returns [DNS precursor, NSSFWlog Tor block].
+    Port distribution: 443 (60%), 9001 (30%), 9030 (10%).
     """
     print("    - Zscaler Module simulating: TOR Exit Node connection")
     tor_nodes = config.get('tor_exit_nodes', [])
@@ -638,67 +857,91 @@ def _generate_tor_connection(config, user, dept, internal_host_ip, device_info):
     dest_ip   = tor_dest.get("ip") or _random_external_ip()
     dest_port = random.choices([443, 9001, 9030], weights=[60, 30, 10])[0]
     nwsvc_map = {443: "HTTPS", 9001: "TOR", 9030: "TOR"}
-    return _fw_event(config, user, dept, device_info,
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
+    logs.append(_fw_event(config, user, dept, device_info,
                      internal_host_ip, dest_ip, dest_port, "6",
-                     "Block", "Block_TOR_Traffic", nwsvc_map.get(dest_port, "HTTPS"),
+                     "Blocked", "Block_TOR_Traffic", nwsvc_map.get(dest_port, "HTTPS"),
                      "TOR", "TOR Exit Node",
-                     tor_dest.get('country', 'Unknown'), "8")
+                     tor_dest.get('country', 'Unknown'), "8",
+                     random.randint(40, 200), random.randint(100, 500)))
+    return logs
 
 
 def _generate_server_outbound_http(config, user, dept, internal_host_ip, device_info):
-    """Internal server initiating outbound HTTP (port 80) — anomalous (nssfwlog, Allow).
+    """Internal server initiating outbound HTTP — anomalous.
 
-    Servers should not initiate HTTP sessions. Allowed because no block rule matches,
-    making it a detection gap. Signal: server as source + port 80 + Allow.
-    Matches the server_outbound_http pattern in ASA, Checkpoint, and FortiGate modules.
+    Returns [DNS precursor, NSSFWlog HTTP allowed].
+    Servers should not initiate HTTP sessions. Allowed because no block rule matches.
     """
     print("    - Zscaler Module simulating: Server Outbound HTTP (anomalous)")
     internal_servers = config.get('internal_servers', [])
     server_ip = random.choice(internal_servers) if internal_servers else _get_random_internal_ip(config)
-    return _fw_event(config, user, dept, device_info,
+    logs = [_dns_precursor_event(config, user, dept, device_info, server_ip)]
+    logs.append(_fw_event(config, user, dept, device_info,
                      server_ip, _random_external_ip(), 80, "6",
                      "Allow", "Allow_Web_Outbound", "HTTP",
                      "Suspicious Outbound", "ServerOutboundHTTP",
                      "Unknown", "5",
-                     random.randint(100, 2000), random.randint(200, 5000))
+                     random.randint(100, 2000), random.randint(200, 5000)))
+    return logs
 
 
 def _generate_rdp_lateral(config, user, dept, internal_host_ip, device_info):
     """Workstation-to-workstation RDP (port 3389) — lateral movement signal (nssfwlog).
 
-    Normal users don't RDP between workstations. Blocked by cloud firewall policy.
+    Generates 3-8 blocked RDP attempts then one successful connection — the attacker
+    eventually finds a host where the policy doesn't apply. The blocked-then-success
+    pattern triggers XSIAM lateral movement detection.
     Matches the rdp_lateral / workstation_rdp pattern in ASA, Checkpoint, and Firepower.
+    Returns a list of CEF log strings.
     """
-    print("    - Zscaler Module simulating: RDP Lateral Movement (workstation → workstation)")
+    print("    - Zscaler Module simulating: RDP Lateral Movement (workstation -> workstation)")
     dest_ip = _get_random_internal_ip(config)
     for _ in range(5):
         if dest_ip != internal_host_ip:
             break
         dest_ip = _get_random_internal_ip(config)
-    return _fw_event(config, user, dept, device_info,
-                     internal_host_ip, dest_ip, 3389, "6",
-                     "Block", "Block_RDP_Lateral", "RDP",
-                     "Lateral Movement", "RDPLateralMovement",
-                     "Internal", "6")
+
+    logs = []
+
+    # 3-8 blocked RDP attempts
+    for _ in range(random.randint(3, 8)):
+        logs.append(_fw_event(config, user, dept, device_info,
+                              internal_host_ip, dest_ip, 3389, "6",
+                              "Blocked", "Block_RDP_Lateral", "RDP",
+                              "Lateral Movement", "RDPLateralMovement",
+                              "Internal", "6",
+                              0, random.randint(200, 2_000)))
+
+    # Final successful RDP connection — attacker finds allowed path
+    logs.append(_fw_event(config, user, dept, device_info,
+                          internal_host_ip, dest_ip, 3389, "6",
+                          "Allowed", "Allow_Internal_Admin", "RDP",
+                          "Lateral Movement", "RDPLateralMovement",
+                          "Internal", "5",
+                          random.randint(5_000, 50_000), random.randint(5_000, 50_000)))
+
+    return logs
 
 
 def _generate_ssh_over_https(config, user, dept, internal_host_ip, device_info):
-    """Suspicious outbound SSH or tunneled connection over non-standard port (nssfwlog).
+    """Suspicious outbound SSH or tunneled connection.
 
-    SSH on TCP/443 (70%) suggests reverse tunnel or traffic blending.
-    Direct outbound TCP/22 from a workstation (30%) is also anomalous.
-    Matches the ssh_over_https / unusual_ssh patterns in ASA and Firepower modules.
+    Returns [DNS precursor, NSSFWlog SSH-over-443 or SSH/22 blocked].
     """
     print("    - Zscaler Module simulating: SSH over HTTPS / suspicious SSH tunnel")
     if random.random() < 0.70:
         dest_port, nwsvc, threat_name = 443, "HTTPS", "SSHoverHTTPS"
     else:
         dest_port, nwsvc, threat_name = 22,  "SSH",   "SuspiciousSSH"
-    return _fw_event(config, user, dept, device_info,
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
+    logs.append(_fw_event(config, user, dept, device_info,
                      internal_host_ip, _random_external_ip(), dest_port, "6",
-                     "Block", "Block_SuspiciousSSH", nwsvc,
+                     "Blocked", "Block_SuspiciousSSH", nwsvc,
                      "Tunneling", threat_name,
-                     "Unknown", "7")
+                     "Unknown", "7",
+                     random.randint(40, 200), random.randint(100, 500)))
+    return logs
 
 
 # ---------------------------------------------------------------------------
@@ -713,7 +956,7 @@ def _generate_port_scan(config, user, dept, internal_host_ip, device_info):
     Matches the port_scan pattern in Checkpoint, Firepower, ASA, and FortiGate modules.
     Returns a list of CEF log strings.
     """
-    print("    - Zscaler Module simulating: Port Scan (external → internal server)")
+    print("    - Zscaler Module simulating: Port Scan (external -> internal server)")
     attacker_ip     = _random_external_ip()
     internal_targets = config.get('internal_servers', []) or [_get_random_internal_ip(config)]
     target_ip       = random.choice(internal_targets)
@@ -724,9 +967,21 @@ def _generate_port_scan(config, user, dept, internal_host_ip, device_info):
     for port in ports_to_scan:
         logs.append(_fw_event(config, user, dept, device_info,
                               attacker_ip, target_ip, port, "6",
-                              "Block", "Block_PortScan", "PortScan",
+                              "Blocked", "Block_PortScan", "PortScan",
                               "Network Scan", "PortScan",
-                              "Unknown", "6", 0, random.randint(40, 80)))
+                              "Unknown", "6",
+                              random.randint(40, 60), random.randint(40, 80)))
+
+    # 1-2 open ports discovered — attacker finds live services
+    open_ports = random.sample([22, 80, 443, 445, 3389, 8080, 8443], k=random.randint(1, 2))
+    svc_map = {22: "SSH", 80: "HTTP", 443: "HTTPS", 445: "SMB", 3389: "RDP", 8080: "HTTP", 8443: "HTTPS"}
+    for port in open_ports:
+        logs.append(_fw_event(config, user, dept, device_info,
+                              attacker_ip, target_ip, port, "6",
+                              "Allowed", "Allow_Inbound_Services", svc_map.get(port, "Unknown"),
+                              "None", "None",
+                              "Unknown", "3",
+                              random.randint(500, 5000), random.randint(500, 5000)))
     return logs
 
 
@@ -738,7 +993,7 @@ def _generate_brute_force(config, user, dept, internal_host_ip, device_info):
     Matches the brute_force / auth_brute_force pattern across all other modules.
     Returns a list of CEF log strings.
     """
-    print("    - Zscaler Module simulating: Brute Force (external → internal service)")
+    print("    - Zscaler Module simulating: Brute Force (external -> internal service)")
     attacker_ip     = _random_external_ip()
     internal_targets = config.get('internal_servers', []) or [_get_random_internal_ip(config)]
     target_ip       = random.choice(internal_targets)
@@ -754,9 +1009,10 @@ def _generate_brute_force(config, user, dept, internal_host_ip, device_info):
     for _ in range(n_attempts):
         logs.append(_fw_event(config, user, dept, device_info,
                               attacker_ip, target_ip, dest_port, "6",
-                              "Block", "Block_BruteForce", nwsvc,
+                              "Blocked", "Block_BruteForce", nwsvc,
                               "Brute Force Attack", threat_name,
-                              "Unknown", "7", 0, random.randint(40, 100)))
+                              "Unknown", "7",
+                              random.randint(100, 500), random.randint(40, 200)))
     return logs
 
 
@@ -877,11 +1133,356 @@ def _generate_smb_share_enumeration(config, user, dept, internal_host_ip, device
                               "Allow", "Allow_Internal_SMB", "SMB",
                               "Network Scan", "SMBShareEnumeration",
                               "Internal", "7",
-                              random.randint(40, 200), random.randint(40, 200)))
+                              random.randint(100, 500), random.randint(500, 5_000)))
     return logs
 
 
-# Module-level dispatch map for named-threat mode (keys match THREAT_NAMES).
+# ---------------------------------------------------------------------------
+# VPN / REMOTE ACCESS GENERATORS — Zscaler ZPA / RA-VPN via cloud firewall
+# ---------------------------------------------------------------------------
+
+def _generate_vpn_brute_force(config, user, dept, internal_host_ip, device_info):
+    """External IP repeatedly failing VPN/ZPA authentication — brute force (nssfwlog).
+
+    Generates 20-50 blocked TCP/443 connection events from a single external
+    attacker to the Zscaler cloud connector / RA-VPN gateway. Volume of failed
+    attempts from one source is the XSIAM detection signal.
+
+    Returns list of CEF log strings (multi-event).
+    """
+    print("    - Zscaler Module simulating: VPN Brute Force (external credential-stuffing)")
+    attacker_ip = _random_external_ip()
+    zscaler_conf = config.get('zscaler_config', {})
+    gateway_ip = zscaler_conf.get('vpn_gateway_ip',
+                     random.choice(config.get('internal_servers', ['10.0.10.1'])))
+    n_attempts = random.randint(20, 50)
+    logs = []
+    for _ in range(n_attempts):
+        logs.append(_fw_event(config, user, dept, device_info,
+                              attacker_ip, gateway_ip, 443, "6",
+                              "Blocked", "Block_VPN_BruteForce", "HTTPS",
+                              "Brute Force Attack", "VPN_BruteForce",
+                              "Unknown", "7",
+                              random.randint(100, 400), random.randint(200, 800)))
+    return logs
+
+
+def _generate_vpn_impossible_travel(config, user, dept, internal_host_ip, device_info):
+    """Same user authenticates from geographically distant IPs within minutes (nssfwlog).
+
+    Two ALLOWED VPN/ZPA sessions from the same user — the first from a benign
+    location, the second from a suspicious foreign location 5-10 minutes later.
+    Physical travel is impossible in that window. XSIAM detects the anomaly.
+
+    Returns list of CEF log strings (multi-event).
+    """
+    print(f"    - Zscaler Module simulating: VPN Impossible Travel for {user}")
+    zscaler_conf = config.get('zscaler_config', {})
+    gateway_ip = zscaler_conf.get('vpn_gateway_ip',
+                     random.choice(config.get('internal_servers', ['10.0.10.1'])))
+    benign_loc     = config.get('impossible_travel_scenario', {}).get('benign_location', {})
+    suspicious_loc = config.get('impossible_travel_scenario', {}).get('suspicious_location', {})
+    benign_ip      = benign_loc.get('ip', '68.185.12.14')
+    suspicious_ip  = suspicious_loc.get('ip', '175.45.176.10')
+
+    logs = []
+    for vpn_src_ip, country in [(benign_ip, "United States"), (suspicious_ip, random.choice(_THREAT_COUNTRIES))]:
+        logs.append(_fw_event(config, user, dept, device_info,
+                              vpn_src_ip, gateway_ip, 443, "6",
+                              "Allow", "Allow_VPN_Access", "HTTPS",
+                              "N/A", "VPN_Session",
+                              country, "3",
+                              random.randint(100_000, 2_000_000),
+                              random.randint(50_000, 500_000)))
+    return logs
+
+
+def _generate_vpn_tor_login(config, user, dept, internal_host_ip, device_info):
+    """Successful VPN/ZPA session from a known TOR exit node IP.
+
+    Returns [TLS handshake, VPN auth success, 1-3 post-auth internal connections].
+    Full conversation: Tor IP negotiates TLS, authenticates to VPN, then the
+    VPN-assigned IP accesses internal resources (SMB, RDP, HTTPS, SSH).
+    """
+    print(f"    - Zscaler Module simulating: VPN Login from TOR Exit Node for {user}")
+    zscaler_conf = config.get('zscaler_config', {})
+    gateway_ip = zscaler_conf.get('vpn_gateway_ip',
+                     random.choice(config.get('internal_servers', ['10.0.10.1'])))
+    tor_nodes = config.get('tor_exit_nodes', [])
+    tor_ip = (random.choice(tor_nodes).get('ip', _random_external_ip())
+              if tor_nodes else _random_external_ip())
+    # VPN-assigned inside IP (typical ZPA/AnyConnect pool: 10.250.x.x)
+    vpn_pool_net = zscaler_conf.get('vpn_pool', '10.250.0.0/16')
+    try:
+        vpn_inside_ip = rand_ip_from_network(ip_network(vpn_pool_net, strict=False))
+    except Exception:
+        vpn_inside_ip = f"10.250.{random.randint(1,254)}.{random.randint(1,254)}"
+    logs = []
+    # Log 1: Inbound TLS handshake (Tor IP -> gateway:443)
+    logs.append(_fw_event(config, user, dept, device_info,
+                     tor_ip, gateway_ip, 443, "6",
+                     "Allow", "Allow_VPN_TLS", "HTTPS",
+                     "TOR", "VPN_TLS_Handshake",
+                     "Unknown", "5",
+                     random.randint(500, 2_000), random.randint(500, 2_000)))
+    # Log 2: VPN auth success (the primary detection event)
+    logs.append(_fw_event(config, user, dept, device_info,
+                     tor_ip, gateway_ip, 443, "6",
+                     "Allow", "Allow_VPN_Access", "HTTPS",
+                     "TOR", "VPN_TOR_Login",
+                     "Unknown", "7",
+                     random.randint(100_000, 5_000_000),
+                     random.randint(50_000, 2_000_000)))
+    # Logs 3-5: Post-auth internal activity from VPN-assigned IP
+    internal_servers = config.get('internal_servers', ['10.0.10.50'])
+    post_auth_actions = [
+        {"nwsvc": "SMB",   "port": 445,  "rule": "Allow_Internal_SMB"},
+        {"nwsvc": "RDP",   "port": 3389, "rule": "Allow_Internal_RDP"},
+        {"nwsvc": "HTTPS", "port": 443,  "rule": "Allow_Web_Outbound"},
+        {"nwsvc": "SSH",   "port": 22,   "rule": "Allow_Internal_SSH"},
+    ]
+    n_post_auth = random.randint(1, 3)
+    for action in random.sample(post_auth_actions, min(n_post_auth, len(post_auth_actions))):
+        dst_ip = random.choice(internal_servers)
+        logs.append(_fw_event(config, user, dept, device_info,
+                         vpn_inside_ip, dst_ip, action["port"], "6",
+                         "Allow", action["rule"], action["nwsvc"],
+                         None, None,
+                         "Internal", "3",
+                         random.randint(1_000, 100_000),
+                         random.randint(500, 50_000)))
+    return logs
+
+
+# ---------------------------------------------------------------------------
+# RARE OUTBOUND SERVICE GENERATORS
+# ---------------------------------------------------------------------------
+
+def _generate_rare_external_rdp(config, user, dept, internal_host_ip, device_info):
+    """Outbound RDP from internal workstation to a rare external IP.
+
+    Returns [DNS precursor, NSSFWlog RDP allowed].
+    """
+    print(f"    - Zscaler Module simulating: Rare External RDP from {internal_host_ip}")
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
+    logs.append(_fw_event(config, user, dept, device_info,
+                     internal_host_ip, _random_external_ip(), 3389, "6",
+                     "Allow", "Allow_Web_Outbound", "RDP",
+                     "Suspicious Outbound", "RareExternalRDP",
+                     "Unknown", "5",
+                     random.randint(50_000, 2_000_000),
+                     random.randint(10_000, 200_000)))
+    return logs
+
+
+def _generate_rare_ssh(config, user, dept, internal_host_ip, device_info):
+    """Outbound SSH to a rare (first-seen) external IP.
+
+    Returns [DNS precursor, NSSFWlog SSH allowed].
+    """
+    print(f"    - Zscaler Module simulating: Rare External SSH from {internal_host_ip}")
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
+    logs.append(_fw_event(config, user, dept, device_info,
+                     internal_host_ip, _random_external_ip(), 22, "6",
+                     "Allow", "Allow_Web_Outbound", "SSH",
+                     "Suspicious Outbound", "RareExternalSSH",
+                     "Unknown", "5",
+                     random.randint(1_000, 50_000),
+                     random.randint(1_000, 50_000)))
+    return logs
+
+
+# ---------------------------------------------------------------------------
+# SMTP / FTP EXFILTRATION GENERATORS
+# ---------------------------------------------------------------------------
+
+def _generate_smtp_spray(config, user, dept, internal_host_ip, device_info):
+    """Compromised workstation acting as spam bot — direct SMTP to many external MX (nssfwlog).
+
+    30-50 short ALLOWED TCP connections on port 25/587 to DISTINCT external IPs.
+    Workstations should never connect directly to external MX servers.
+    XSIAM detects the volume of outbound SMTP from a single non-mail source.
+
+    Returns list of CEF log strings (multi-event).
+    """
+    print(f"    - Zscaler Module simulating: SMTP Spray (spam bot) from {internal_host_ip}")
+    n_targets = random.randint(30, 50)
+    dest_ips = set()
+    while len(dest_ips) < n_targets:
+        dest_ips.add(_random_external_ip())
+
+    logs = []
+    for dst_ip in list(dest_ips)[:n_targets]:
+        smtp_port = random.choices([25, 587], weights=[70, 30], k=1)[0]
+        nwsvc = "SMTP" if smtp_port == 25 else "SMTPS"
+        logs.append(_fw_event(config, user, dept, device_info,
+                              internal_host_ip, dst_ip, smtp_port, "6",
+                              "Allow", "Allow_Web_Outbound", nwsvc,
+                              "Spam Bot", "SMTP_Spray",
+                              "Unknown", "5",
+                              random.randint(200, 2_000),
+                              random.randint(2_000, 50_000)))
+    return logs
+
+
+def _generate_smtp_large_exfil(config, user, dept, internal_host_ip, device_info):
+    """Data exfiltration via large email attachment over SMTP.
+
+    Returns [DNS/MX precursor, NSSFWlog SMTP session].
+    """
+    print(f"    - Zscaler Module simulating: Large SMTP Exfiltration from {internal_host_ip}")
+    mail_mx_ranges = [
+        "74.125.0.0/16", "40.76.0.0/14", "207.46.0.0/16",
+        "198.2.128.0/18", "159.148.0.0/16",
+    ]
+    try:
+        dest_ip = rand_ip_from_network(
+            ip_network(random.choice(mail_mx_ranges), strict=False))
+    except Exception:
+        dest_ip = _random_external_ip()
+    smtp_port = random.choices([587, 25], weights=[80, 20], k=1)[0]
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
+    logs.append(_fw_event(config, user, dept, device_info,
+                     internal_host_ip, dest_ip, smtp_port, "6",
+                     "Allow", "Allow_SMTP_Relay", "SMTP",
+                     "Data Exfiltration", "SMTP_LargeExfil",
+                     "Unknown", "6",
+                     random.randint(500, 5_000),
+                     random.randint(104_857_600, 524_288_000)))
+    return logs
+
+
+def _generate_ftp_large_exfil(config, user, dept, internal_host_ip, device_info):
+    """Data exfiltration via outbound FTP.
+
+    Returns [DNS precursor, NSSFWlog FTP session].
+    """
+    print(f"    - Zscaler Module simulating: Large FTP Exfiltration from {internal_host_ip}")
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
+    logs.append(_fw_event(config, user, dept, device_info,
+                     internal_host_ip, _random_external_ip(), 21, "6",
+                     "Allow", "Allow_Web_Outbound", "FTP",
+                     "Data Exfiltration", "FTP_LargeExfil",
+                     "Unknown", "6",
+                     random.randint(500, 10_000),
+                     random.randint(104_857_600, 524_288_000)))
+    return logs
+
+
+# ---------------------------------------------------------------------------
+# DDNS C2 GENERATOR
+# ---------------------------------------------------------------------------
+
+def _generate_ddns_connection(config, user, dept, internal_host_ip, device_info):
+    """Internal workstation connecting to a known dynamic DNS domain (nssfwlog).
+
+    Generates two logs: DNS query resolving the DDNS hostname, then an HTTPS
+    session to the resolved IP. DDNS services are commonly used for cheap C2
+    infrastructure. Both events are ALLOWED — detection is UEBA-driven.
+
+    Returns list of CEF log strings (multi-event).
+    """
+    print(f"    - Zscaler Module simulating: Dynamic DNS Connection from {internal_host_ip}")
+    ddns_providers = [
+        "duckdns.org", "no-ip.com", "dynu.com", "afraid.org",
+        "hopto.org", "zapto.org", "sytes.net", "ddns.net",
+        "servebeer.com", "myftp.biz", "myvnc.com", "redirectme.net",
+    ]
+    subdomain = random.choice([
+        "update-service", "cdn-relay", "mail-check", "vpn-gateway",
+        "api-health", "sync-node", "cloud-backup", "office-proxy",
+    ])
+    ddns_hostname = f"{subdomain}.{random.choice(ddns_providers)}"
+    resolved_ip = _random_external_ip()
+
+    logs = []
+    # Log 1: DNS query resolving the DDNS hostname
+    logs.append(_fw_event(config, user, dept, device_info,
+                          internal_host_ip, "8.8.8.8", 53, "17",
+                          "Allow", "Allow_DNS_Outbound", "DNS",
+                          "N/A", "DDNS_Query",
+                          "United States", "3",
+                          random.randint(80, 300), random.randint(60, 120)))
+    # Log 2: HTTPS session to the resolved DDNS IP
+    logs.append(_fw_event(config, user, dept, device_info,
+                          internal_host_ip, resolved_ip, 443, "6",
+                          "Allow", "Allow_Web_Outbound", "HTTPS",
+                          "Dynamic DNS", "DDNS_Connection",
+                          "Unknown", "5",
+                          random.randint(5_000, 500_000),
+                          random.randint(1_000, 100_000)))
+    return logs
+
+
+# Single source of truth for threat event names, weights, and analytics metadata.
+# analytic: True  -> event is expected to trigger an XSIAM Third-Party analytics alert
+# analytic: False -> event is realistic but won't fire a dedicated XSIAM alert
+# xsiam_alert:    -> name of the matching XSIAM analytics alert (or None)
+_NON_ANALYTIC_PREFIX = "[Non-Analytic] "
+_DEFAULT_THREAT_EVENTS = [
+    {"event": "web_threat",           "weight": 12, "analytic": False,
+     "xsiam_alert": None},
+    {"event": "data_exfil",           "weight": 8,  "analytic": True,
+     "xsiam_alert": "Large Upload (HTTPS)"},
+    {"event": "dlp_threat",           "weight": 6,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "cloud_app_threat",     "weight": 5,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "sandbox_threat",       "weight": 4,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "fw_threat",            "weight": 8,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "port_scan",            "weight": 10, "analytic": True,
+     "xsiam_alert": "Port Scan"},
+    {"event": "brute_force",          "weight": 8,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "tor_connection",       "weight": 6,  "analytic": True,
+     "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "dns_c2_beacon",        "weight": 5,  "analytic": True,
+     "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
+    {"event": "server_outbound_http", "weight": 4,  "analytic": True,
+     "xsiam_alert": "New Administrative Behavior"},
+    {"event": "rdp_lateral",          "weight": 3,  "analytic": True,
+     "xsiam_alert": "Failed Connections"},
+    {"event": "ssh_over_https",       "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "smb_new_host_lateral", "weight": 4,  "analytic": True,
+     "xsiam_alert": "Rare SMB session to a remote host"},
+    {"event": "smb_rare_file_transfer","weight": 3, "analytic": True,
+     "xsiam_alert": "Rare SMB session to a remote host"},
+    {"event": "smb_share_enumeration","weight": 5,  "analytic": True,
+     "xsiam_alert": "Rare SMB session to a remote host"},
+    {"event": "vpn_brute_force",      "weight": 6,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "vpn_impossible_travel","weight": 3,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "vpn_tor_login",        "weight": 3,  "analytic": True,
+     "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "rare_external_rdp",    "weight": 3,  "analytic": True,
+     "xsiam_alert": "Rare RDP session to a remote host"},
+    {"event": "rare_ssh",             "weight": 3,  "analytic": True,
+     "xsiam_alert": "Uncommon SSH session was established"},
+    {"event": "smtp_spray",           "weight": 3,  "analytic": True,
+     "xsiam_alert": "Spam Bot Traffic"},
+    {"event": "smtp_large_exfil",     "weight": 2,  "analytic": True,
+     "xsiam_alert": "Large Upload (SMTP)"},
+    {"event": "ftp_large_exfil",      "weight": 2,  "analytic": True,
+     "xsiam_alert": "New FTP Server"},
+    {"event": "ddns_connection",      "weight": 3,  "analytic": True,
+     "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
+]
+
+# --- Display-name mapping (same pattern as checkpoint_firewall.py) ---
+_EVENT_DISPLAY_NAMES = {}   # event_key -> display_name
+_DISPLAY_TO_EVENT    = {}   # display_name -> event_key  (reverse lookup)
+for _e in _DEFAULT_THREAT_EVENTS:
+    _key  = _e["event"]
+    _name = _key if _e.get("analytic", True) else _NON_ANALYTIC_PREFIX + _key
+    _EVENT_DISPLAY_NAMES[_key]  = _name
+    _DISPLAY_TO_EVENT[_name]    = _key
+    _DISPLAY_TO_EVENT[_key]     = _key      # also accept raw key for back-compat
+
+# Module-level dispatch map for named-threat mode.
 # Functions accept (config, user, dept, internal_host_ip, device_info).
 _NAMED_THREATS = {
     "web_threat":           _generate_threat_web_traffic,
@@ -900,13 +1501,43 @@ _NAMED_THREATS = {
     "smb_new_host_lateral": _generate_smb_new_host_lateral,
     "smb_rare_file_transfer": _generate_smb_rare_file_transfer,
     "smb_share_enumeration":  _generate_smb_share_enumeration,
+    "vpn_brute_force":        _generate_vpn_brute_force,
+    "vpn_impossible_travel":  _generate_vpn_impossible_travel,
+    "vpn_tor_login":          _generate_vpn_tor_login,
+    "rare_external_rdp":      _generate_rare_external_rdp,
+    "rare_ssh":               _generate_rare_ssh,
+    "smtp_spray":             _generate_smtp_spray,
+    "smtp_large_exfil":       _generate_smtp_large_exfil,
+    "ftp_large_exfil":        _generate_ftp_large_exfil,
+    "ddns_connection":        _generate_ddns_connection,
 }
 
 
 def get_threat_names():
-    """Return available threat names dynamically from _NAMED_THREATS.
-    Adding a new entry to _NAMED_THREATS automatically surfaces it here."""
-    return list(_NAMED_THREATS.keys())
+    """Return available threat names dynamically from _DEFAULT_THREAT_EVENTS.
+
+    Non-analytic events (those that won't trigger an XSIAM Third-Party Firewall
+    analytics detection) are prefixed with '[Non-Analytic] ' so operators can
+    focus on events that will produce alerts.
+    """
+    return [_EVENT_DISPLAY_NAMES[e["event"]] for e in _DEFAULT_THREAT_EVENTS]
+
+
+def get_threat_info():
+    """Return full metadata for each threat event (name, analytic flag, XSIAM alert).
+
+    Returns a list of dicts with keys: event, display_name, analytic, xsiam_alert, weight.
+    """
+    result = []
+    for e in _DEFAULT_THREAT_EVENTS:
+        result.append({
+            "event":        e["event"],
+            "display_name": _EVENT_DISPLAY_NAMES[e["event"]],
+            "analytic":     e.get("analytic", True),
+            "xsiam_alert":  e.get("xsiam_alert"),
+            "weight":       e["weight"],
+        })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -914,8 +1545,19 @@ def get_threat_names():
 # ---------------------------------------------------------------------------
 
 def _format_nss_log_as_cef(fields, user, dept, log_product):
-    """Builds the final CEF log string for Zscaler NSS feeds."""
+    """Builds the final CEF log string for Zscaler NSS feeds.
+
+    CEF header: CEF:0|Zscaler|{NSSWeblog|NSSFWlog}|6.1|{action}|{action}|{severity}|
+    Syslog PRI <14> = facility user (1<<3=8) + info (6) = 14.
+
+    Per Zscaler/Azure Sentinel: signatureId (position 4) and name (position 5)
+    are both the action string (Allowed/Blocked for web, Allow/Blocked for FW).
+    deviceProduct uses mixed case: NSSWeblog, NSSFWlog.
+    """
     rt = int(time.time() * 1000)
+    # Zscaler NSS deviceProduct uses mixed case per XSIAM dataset naming
+    _PRODUCT_MAP = {"nssweblog": "NSSWeblog", "nssfwlog": "NSSFWlog"}
+    cef_product = _PRODUCT_MAP.get(log_product, log_product)
 
     common_map = {
         "rt": rt,
@@ -986,7 +1628,7 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
             "cn1": fields.get("duration_ms"),  "cn1Label": "duration",
             "cat": fields.get("threatcat"),
             # Raw dataset hunting fields:
-            "cs1": fields.get("nwsvc"),        "cs1Label": "nwsvc",
+            "cs1": dept,                       "cs1Label": "department",
             "cs4": fields.get("destCountry"),  "cs4Label": "destCountry",
             # Standard XIF-mapped fields:
             "act": fields.get("action"),
@@ -1005,7 +1647,9 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
     merged = dict(common_map)
     merged.update(cef_map)
     cef_severity = fields.get('cefSeverity', '3')
-    cef_header   = f"CEF:0|Zscaler|{log_product}|6.1|0|{cef_name}|{cef_severity}|"
+    # Zscaler uses the action string as both signatureId (pos 4) and name (pos 5)
+    action_str   = fields.get('action', 'Allow')
+    cef_header   = f"CEF:0|Zscaler|{cef_product}|6.1|{action_str}|{action_str}|{cef_severity}|"
     extension_parts  = [f"{key}={_cef_escape(value)}" for key, value in merged.items() if value is not None]
     extension_string = " ".join(extension_parts)
     return f"<14>{datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')} zscaler-nss {cef_header}{extension_string}"
@@ -1023,7 +1667,7 @@ def _generate_scenario_log(config, scenario):
         ip = scenario.get('source_ip', _get_random_internal_ip(config))
     zscaler_conf = config.get('zscaler_config', {})
     fields = {
-        "action": "Block", "urlcat": "Malware", "urlsupercat": "Security",
+        "action": "Blocked", "urlcat": "Malware", "urlsupercat": "Security",
         "responsecode": "403", "reason": "Threat Block",
         "malwarecat": scenario.get('threat_category', 'Adware'),
         "threatname":  scenario.get('threat_name',     'JS/Adware.Gen'),
@@ -1033,7 +1677,9 @@ def _generate_scenario_log(config, scenario):
         "eurl":  f"http://{scenario.get('dest_domain', 'malware.example.com')}/",
         "ehost": scenario.get('dest_domain', 'malware.example.com'),
         "cip": ip, "sip": scenario.get('dest_ip', _random_external_ip()),
-        "proto": "HTTP", "bytesin": 0, "bytesout": 60,
+        "proto": "HTTP",
+        "bytesin":  random.randint(200, 2_000),
+        "bytesout": random.randint(300, 1_500),
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "8",
@@ -1048,10 +1694,12 @@ def _generate_scenario_log(config, scenario):
 def generate_log(config, scenario=None, threat_level="Realistic", benign_only=False, context=None, scenario_event=None):
     """Generates a Zscaler NSS CEF log with variable threat rates.
 
-    Benign pool (4 types):
-        web(x3), firewall(x2), dns_query, inbound_block
+    Benign pool (14 types, ~20 slots):
+        web(x3), firewall(x2), video_streaming(x2), saas_upload,
+        software_update, dns_query, inbound_block, smb, ssh, rdp,
+        vpn_success, vpn_failure, email, ftp
 
-    Threat pool (16 types, weighted):
+    Threat pool (25 types, weighted) — all conversation-complete:
         Web layer:  web_threat(12), data_exfil(8), dlp_threat(6),
                     cloud_app_threat(5), sandbox_threat(4)
         Firewall:   fw_threat(8), port_scan(10), brute_force(8),
@@ -1059,6 +1707,10 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
                     server_outbound_http(4), rdp_lateral(3), ssh_over_https(3)
         SMB:        smb_new_host_lateral(4), smb_rare_file_transfer(3),
                     smb_share_enumeration(5)
+        VPN:        vpn_brute_force(6), vpn_impossible_travel(3), vpn_tor_login(3)
+        Rare:       rare_external_rdp(3), rare_ssh(3)
+        Exfil:      smtp_spray(3), smtp_large_exfil(2), ftp_large_exfil(2)
+        C2:         ddns_connection(3)
 
     scenario_event values:
         THREAT_BLOCK — victim browser hits malicious domain (phishing kill chain step 3)
@@ -1105,9 +1757,9 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     if not internal_host_ip:
         internal_host_ip = _get_random_internal_ip(config)
 
-    # Benign pool — weighted so web traffic dominates, matching real Zscaler proportions.
-    # web_traffic×3 + firewall_traffic×2 + video_streaming×2 + saas_upload×1 + software_update×1
-    # + dns_query×1 + inbound_block×1 = 11 slots → ~27/18/18/9/9/9/9 %
+    # Benign pool — 14 types, ~20 slots.
+    # Rebalanced to include UEBA protocol baselines for SMB, SSH, RDP, VPN,
+    # email, and FTP so UEBA platforms can build 'normal' behavioral profiles.
     benign_pool = (
         [lambda: _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_info)] * 3 +
         [lambda: _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, device_info)] * 2 +
@@ -1115,7 +1767,14 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         [lambda: _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_info)] +
         [lambda: _generate_benign_software_update(config, user, dept, internal_host_ip, device_info)] +
         [lambda: _generate_benign_dns_query(config, user, dept, internal_host_ip, device_info)] +
-        [lambda: _generate_benign_inbound_block(config, user, dept, internal_host_ip, device_info)]
+        [lambda: _generate_benign_inbound_block(config, user, dept, internal_host_ip, device_info)] +
+        [lambda: _generate_benign_smb_event(config, user, dept, internal_host_ip, device_info)] +
+        [lambda: _generate_benign_ssh_event(config, user, dept, internal_host_ip, device_info)] +
+        [lambda: _generate_benign_rdp_event(config, user, dept, internal_host_ip, device_info)] +
+        [lambda: _generate_benign_vpn_event(config, user, dept, internal_host_ip, device_info)] +
+        [lambda: _generate_benign_vpn_failure_event(config, user, dept, internal_host_ip, device_info)] +
+        [lambda: _generate_benign_email_event(config, user, dept, internal_host_ip, device_info)] +
+        [lambda: _generate_benign_ftp_event(config, user, dept, internal_host_ip, device_info)]
     )
 
     if benign_only:
@@ -1140,6 +1799,15 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         ("smb_new_host_lateral",   4, lambda: _generate_smb_new_host_lateral(config, user, dept, internal_host_ip, device_info)),
         ("smb_rare_file_transfer", 3, lambda: _generate_smb_rare_file_transfer(config, user, dept, internal_host_ip, device_info)),
         ("smb_share_enumeration",  5, lambda: _generate_smb_share_enumeration(config, user, dept, internal_host_ip, device_info)),
+        ("vpn_brute_force",        6, lambda: _generate_vpn_brute_force(config, user, dept, internal_host_ip, device_info)),
+        ("vpn_impossible_travel",  3, lambda: _generate_vpn_impossible_travel(config, user, dept, internal_host_ip, device_info)),
+        ("vpn_tor_login",          3, lambda: _generate_vpn_tor_login(config, user, dept, internal_host_ip, device_info)),
+        ("rare_external_rdp",      3, lambda: _generate_rare_external_rdp(config, user, dept, internal_host_ip, device_info)),
+        ("rare_ssh",               3, lambda: _generate_rare_ssh(config, user, dept, internal_host_ip, device_info)),
+        ("smtp_spray",             3, lambda: _generate_smtp_spray(config, user, dept, internal_host_ip, device_info)),
+        ("smtp_large_exfil",       2, lambda: _generate_smtp_large_exfil(config, user, dept, internal_host_ip, device_info)),
+        ("ftp_large_exfil",        2, lambda: _generate_ftp_large_exfil(config, user, dept, internal_host_ip, device_info)),
+        ("ddns_connection",        3, lambda: _generate_ddns_connection(config, user, dept, internal_host_ip, device_info)),
     ]
     labels    = [t[0] for t in _threat_map]
     weights   = [t[1] for t in _threat_map]

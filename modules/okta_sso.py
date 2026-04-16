@@ -6,7 +6,7 @@
 import random
 import time
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from ipaddress import ip_network
 import uuid
 import re
@@ -19,11 +19,12 @@ XSIAM_PRODUCT = "Sso"
 CONFIG_KEY = "okta_config"
 
 last_threat_event_time = 0
+_okta_org_url = "https://examplecorp.okta.com"  # overridden from config in generate_log()
 
 # authenticationProvider string values per Okta API spec
 # PASSWORD logins → None; MFA factor events → "FACTOR_PROVIDER"
 _AUTH_PROVIDER_FOR_CRED = {
-    "PASSWORD":             None,
+    "PASSWORD":             "OKTA_AUTHENTICATION_PROVIDER",
     "OIE_OKTA_VERIFY_PUSH": "FACTOR_PROVIDER",
     "PUSH":                 "FACTOR_PROVIDER",
     "SIGNED_NONCE":         "FACTOR_PROVIDER",
@@ -39,7 +40,7 @@ _MFA_FACTOR_MAP = {
     "SIGNED_NONCE":         ("OKTA_CREDENTIAL_PROVIDER",   "SIGNED_NONCE",         "urn:oasis:names:tc:SAML:2.0:ac:classes:TimeSyncToken"),
     "SMS":                  ("OKTA_CREDENTIAL_PROVIDER",   "SMS",                  "urn:oasis:names:tc:SAML:2.0:ac:classes:MobileTwoFactorContract"),
     "EMAIL":                ("OKTA_CREDENTIAL_PROVIDER",   "EMAIL",                "urn:oasis:names:tc:SAML:2.0:ac:classes:MobileTwoFactorContract"),
-    "TOTP":                 ("GOOGLE_CREDENTIAL_PROVIDER", "TOKEN:SOFTWARE:TOTP",  "urn:oasis:names:tc:SAML:2.0:ac:classes:TimeSyncToken"),
+    "TOTP":                 ("GOOGLE",                     "TOKEN:SOFTWARE:TOTP",  "urn:oasis:names:tc:SAML:2.0:ac:classes:TimeSyncToken"),
 }
 
 # Realistic Okta request URIs — mix of IDX/OAuth endpoints (with ?) and SAML paths
@@ -108,6 +109,71 @@ _COUNTRY_NAMES = {
 def _country_name(code):
     """Convert ISO-2 country code to full name. Falls back to code if unknown."""
     return _COUNTRY_NAMES.get(str(code).upper(), code)
+
+# Approximate lat/lon for cities appearing in ip_context data so geolocation
+# coordinates match the city field instead of being random global values.
+_CITY_COORDS = {
+    "New York":     (40.7128, -74.0060),
+    "Los Angeles":  (34.0522, -118.2437),
+    "Chicago":      (41.8781, -87.6298),
+    "Houston":      (29.7604, -95.3698),
+    "Dallas":       (32.7767, -96.7970),
+    "San Francisco":(37.7749, -122.4194),
+    "Seattle":      (47.6062, -122.3321),
+    "Denver":       (39.7392, -104.9903),
+    "Atlanta":      (33.7490, -84.3880),
+    "Miami":        (25.7617, -80.1918),
+    "Boston":       (42.3601, -71.0589),
+    "Washington":   (38.9072, -77.0369),
+    "Phoenix":      (33.4484, -112.0740),
+    "Philadelphia": (39.9526, -75.1652),
+    "Portland":     (45.5152, -122.6784),
+    "London":       (51.5074, -0.1278),
+    "Paris":        (48.8566,  2.3522),
+    "Berlin":       (52.5200, 13.4050),
+    "Moscow":       (55.7558, 37.6173),
+    "Beijing":      (39.9042, 116.4074),
+    "Tokyo":        (35.6762, 139.6503),
+    "Sydney":       (-33.8688, 151.2093),
+    "Toronto":      (43.6532, -79.3832),
+    "Mumbai":       (19.0760, 72.8777),
+    "São Paulo":    (-23.5505, -46.6333),
+    "Lagos":        (6.5244, 3.3792),
+    "Cairo":        (30.0444, 31.2357),
+    "Tehran":       (35.6892, 51.3890),
+    "Pyongyang":    (39.0392, 125.7625),
+    "Seoul":        (37.5665, 126.9780),
+    "Singapore":    (1.3521, 103.8198),
+    "Amsterdam":    (52.3676,  4.9041),
+    "Stockholm":    (59.3293, 18.0686),
+    "Bucharest":    (44.4268, 26.1025),
+    "Prague":       (50.0755, 14.4378),
+    "Zurich":       (47.3769,  8.5417),
+    "Mexico City":  (19.4326, -99.1332),
+    "Buenos Aires": (-34.6037, -58.3816),
+    "Hong Kong":    (22.3193, 114.1694),
+    "Hanoi":        (21.0285, 105.8542),
+    "Karachi":      (24.8607, 67.0011),
+    "Riyadh":       (24.7136, 46.6753),
+    "Bangkok":      (13.7563, 100.5018),
+    "Jakarta":      (-6.2088, 106.8456),
+    "Manila":       (14.5995, 120.9842),
+    "Johannesburg": (-26.2041, 28.0473),
+    "Kyiv":         (50.4504, 30.5245),
+}
+
+
+def _city_geolocation(city_name):
+    """Return approximate (lat, lon) for a known city, with small jitter.
+    Falls back to random global coordinates for unknown cities."""
+    base = _CITY_COORDS.get(city_name)
+    if base:
+        # Add ±0.05° jitter (~5 km) so coordinates look realistic but not identical
+        return (
+            round(base[0] + random.uniform(-0.05, 0.05), 4),
+            round(base[1] + random.uniform(-0.05, 0.05), 4),
+        )
+    return (round(random.uniform(-90, 90), 4), round(random.uniform(-180, 180), 4))
 
 # --- UTILITY ---
 
@@ -264,10 +330,7 @@ def _build_client(ip_context, config, interactive_only=False):
             "country":     _country_name(ip_context.get("country", "")),  # full name per Okta API
             "state":       ip_context.get("state"),
             "postalCode":  None,
-            "geolocation": {
-                "lat": round(random.uniform(-90, 90),   4),
-                "lon": round(random.uniform(-180, 180), 4),
-            },
+            "geolocation": dict(zip(("lat", "lon"), _city_geolocation(ip_context.get("city")))),
         },
         "zone": "null",  # Okta returns the string "null" when no named zone matches
     }
@@ -290,6 +353,21 @@ def _build_authentication_context(credential_type="PASSWORD"):
     }
 
 
+def _build_authentication_context_null():
+    """Minimal authenticationContext for non-auth events (lifecycle, admin, policy, etc.).
+    Real Okta logs for these events have null/empty auth fields."""
+    return {
+        "authenticationProvider": None,
+        "credentialProvider":     None,
+        "credentialType":         None,
+        "externalSessionId":      f"ext-session-{uuid.uuid4()}",
+        "authnContextClassRef":   None,
+        "issuer":                 None,
+        "interface":              None,
+        "authenticationStep":     0,
+    }
+
+
 def _build_security_context(ip_context):
     return {
         "asNumber": ip_context.get("asn"),
@@ -300,22 +378,46 @@ def _build_security_context(ip_context):
     }
 
 
+# Common CDN/proxy IPs that appear as second ipChain entries
+_PROXY_HOPS = [
+    {"ip": "104.18.32.7",   "city": "San Francisco", "country": "United States", "source": "Cloudflare CDN"},
+    {"ip": "13.107.42.14",  "city": "Redmond",       "country": "United States", "source": "Microsoft Azure Front Door"},
+    {"ip": "151.101.1.69",  "city": "San Francisco", "country": "United States", "source": "Fastly CDN"},
+    {"ip": "143.204.98.12", "city": "Ashburn",       "country": "United States", "source": "AWS CloudFront"},
+    {"ip": "199.36.153.4",  "city": "Mountain View", "country": "United States", "source": "Google Front End"},
+]
+
+
 def _build_request(client_block):
     geo = client_block.get("geographicalContext", {})
-    return {
-        "ipChain": [{
-            "ip":  client_block.get("ipAddress"),
+    chain = [{
+        "ip":  client_block.get("ipAddress"),
+        "geographicalContext": {
+            "city":       geo.get("city"),
+            "country":    _country_name(geo.get("country", "")),  # full name
+            "state":      geo.get("state"),
+            "postalCode": geo.get("postalCode"),
+            "geolocation": geo.get("geolocation", {}),
+        },
+        "version": "V4",
+        "source":  None,
+    }]
+    # ~20% of requests traverse a CDN/proxy — add a second ipChain entry
+    if random.random() < 0.20:
+        hop = random.choice(_PROXY_HOPS)
+        chain.append({
+            "ip":  hop["ip"],
             "geographicalContext": {
-                "city":       geo.get("city"),
-                "country":    _country_name(geo.get("country", "")),  # full name
-                "state":      geo.get("state"),
-                "postalCode": geo.get("postalCode"),
-                "geolocation": geo.get("geolocation", {}),
+                "city":    hop["city"],
+                "country": hop["country"],
+                "state":   None,
+                "postalCode": None,
+                "geolocation": dict(zip(("lat", "lon"), _city_geolocation(hop["city"]))),
             },
             "version": "V4",
-            "source":  None,
-        }]
-    }
+            "source":  hop["source"],
+        })
+    return {"ipChain": chain}
 
 
 # --- THREAT / BEHAVIOR FORMATTERS ---
@@ -339,7 +441,7 @@ _AUTH_DEBUG_DEFAULTS = {
 
 
 def _build_debug_context(credential_type="PASSWORD", extra=None, include_auth_signals=False,
-                         okta_domain="https://examplecorp.okta.com"):
+                         okta_domain=None):
     """
     Build debugContext block.
 
@@ -368,7 +470,7 @@ def _build_debug_context(credential_type="PASSWORD", extra=None, include_auth_si
         data["factor"] = factor_value
     if include_auth_signals:
         data.update(_AUTH_DEBUG_DEFAULTS)
-        data["origin"] = okta_domain  # present on interactive login events
+        data["origin"] = okta_domain or _okta_org_url  # present on interactive login events
     if extra:
         data.update(extra)
     return {"debugData": data}
@@ -391,11 +493,70 @@ def _build_transaction_api():
     }
 
 
+def _build_transaction_oauth2(client_id=None):
+    """Transaction block for OAuth2 flows — includes clientId."""
+    return {
+        "type":   "WEB",
+        "id":     uuid.uuid4().hex,
+        "detail": {"clientId": client_id or f"0oa{uuid.uuid4().hex[:17]}"},
+    }
+
+
+# Event prefixes that should get OAuth2 transaction detail
+_OAUTH2_EVENT_PREFIXES = ("app.oauth2.",)
+# Event prefixes that should get API token transaction detail
+_API_TOKEN_EVENT_PREFIXES = ("system.api_token.",)
+
+
 def _build_target_user(actor):
     return [{"id": actor["id"], "type": "User",
              "alternateId": actor["alternateId"],
              "displayName": actor["displayName"],
              "detailEntry": None}]
+
+
+def _build_device(client):
+    """Build an Okta device object from the client block (UA + geo).
+    Real OIE logs populate this on auth events when device context is available."""
+    ua = client.get("userAgent", {})
+    os_str = ua.get("os", "Unknown")
+    raw_ua = ua.get("rawUserAgent", "")
+    device_type = client.get("device", "Computer")
+
+    # Map OS string to Okta platform enum
+    if "Windows" in os_str:
+        platform = "WINDOWS"
+    elif "Mac" in os_str:
+        platform = "MACOS"
+    elif "iOS" in os_str:
+        platform = "IOS"
+    elif "Android" in os_str:
+        platform = "ANDROID"
+    elif "Linux" in os_str:
+        platform = "LINUX"
+    else:
+        platform = "UNKNOWN"
+
+    # Deterministic device ID from UA hash
+    dev_hash = hashlib.sha256(raw_ua.encode()).hexdigest()[:20]
+    return {
+        "id":              f"guo{dev_hash}",
+        "name":            f"{os_str} Device",
+        "os_platform":     platform,
+        "os_version":      os_str,
+        "managed":         random.random() < 0.7,  # 70% of devices managed in typical corp
+        "registered":      True,
+        "status":          "ACTIVE",
+        "screenLockType":  "BIOMETRIC" if device_type == "Mobile" else "PASSCODE",
+    }
+
+
+# Auth event types where Okta populates the device object
+_DEVICE_EVENTS = frozenset({
+    "user.session.start", "user.authentication.auth_via_mfa",
+    "user.authentication.verify", "user.authentication.sso",
+    "user.authentication.auth_via_radius", "user.authentication.auth_via_IDP",
+})
 
 
 # --- CORE ASSEMBLER ---
@@ -411,6 +572,7 @@ _LEGACY_EVENT_TYPES = {
     "user.account.privilege.grant":                           "core.user.admin_privilege.granted",
     "user.account.lock":                                      "core.user_auth.account_locked",
     "user.account.update_password":                           "core.user.config.password_update.success",
+    "user.account.change_password":                           "core.user.config.password_update.success",
     "group.user_membership.add":                              "core.user_group_member.user_add",
     "group.user_membership.remove":                           "core.user_group_member.user_remove",
     "system.api_token.create":                                "api.token.create",
@@ -423,13 +585,38 @@ _LEGACY_EVENT_TYPES = {
 }
 
 
+def _okta_timestamp(dt=None):
+    """Format a datetime as Okta-style ISO-8601 with real millisecond precision."""
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
+def _event_times(count, base=None, gap_range=(1, 15)):
+    """Return a list of `count` datetime objects with realistic inter-event gaps.
+    Each subsequent event is 1-15 seconds after the previous (default).
+    Use for multi-event generators to avoid identical timestamps."""
+    if base is None:
+        base = datetime.now(timezone.utc)
+    times = [base]
+    for _ in range(count - 1):
+        gap = timedelta(seconds=random.uniform(*gap_range),
+                        milliseconds=random.randint(0, 999))
+        base = base + gap
+        times.append(base)
+    return times
+
+
 def _assemble(event_type, actor, client, outcome,
               severity="INFO", display_message="",
               authentication_context=None, security_context=None,
               debug_context=None, target=None, legacy_event_type=None,
-              transaction=None):
+              transaction=None, published_override=None, session_id=None):
     if authentication_context is None:
-        authentication_context = _build_authentication_context()
+        authentication_context = _build_authentication_context_null()
+    # Override externalSessionId for session continuity across multi-event sequences
+    if session_id is not None:
+        authentication_context = dict(authentication_context, externalSessionId=session_id)
     if security_context is None:
         security_context = {"asNumber": None, "asOrg": None,
                             "domain": "examplecorp.com", "isProxy": False, "isp": None}
@@ -442,14 +629,14 @@ def _assemble(event_type, actor, client, outcome,
             legacy_event_type = (
                 "core.user_auth.login_success"
                 if outcome.get("result") == "SUCCESS"
-                else "core.user.factor.attempt_fail"
+                else "core.user_auth.login_failed"
             )
         else:
             legacy_event_type = _LEGACY_EVENT_TYPES.get(event_type)
 
-    # For SSO events, append an AppUser target entry (matches real Okta logs).
-    if event_type == "user.authentication.sso" and target:
-        if not any(t.get("type") == "AppUser" for t in target):
+    # For SSO events, append an AppUser target entry and authnRequestId (matches real Okta logs).
+    if event_type == "user.authentication.sso":
+        if target and not any(t.get("type") == "AppUser" for t in target):
             target = list(target) + [{
                 "id":          f"0ua{uuid.uuid4().hex[:17]}",
                 "type":        "AppUser",
@@ -457,10 +644,13 @@ def _assemble(event_type, actor, client, outcome,
                 "alternateId": actor.get("alternateId", "unknown"),
                 "detailEntry": None,
             }]
+        # authnRequestId ties SSO events to the originating auth chain
+        if debug_context and "debugData" in debug_context:
+            debug_context["debugData"]["authnRequestId"] = uuid.uuid4().hex
 
     event = {
         "uuid":             str(uuid.uuid4()),
-        "published":        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "published":        _okta_timestamp(published_override),
         "eventType":        event_type,
         "legacyEventType":  legacy_event_type,
         "version":          "0",
@@ -470,9 +660,13 @@ def _assemble(event_type, actor, client, outcome,
         "client":           client,
         "outcome":          outcome,
         "target":           target or [],
-        "device":           None,
+        "device":           _build_device(client) if event_type in _DEVICE_EVENTS else None,
         "request":          _build_request(client),
-        "transaction":      transaction if transaction is not None else _build_transaction(),
+        "transaction":      transaction if transaction is not None else (
+            _build_transaction_oauth2() if any(event_type.startswith(p) for p in _OAUTH2_EVENT_PREFIXES) else
+            _build_transaction_api() if any(event_type.startswith(p) for p in _API_TOKEN_EVENT_PREFIXES) else
+            _build_transaction()
+        ),
         "authenticationContext": authentication_context,
         "securityContext":  security_context,
         "debugContext":     debug_context,
@@ -533,11 +727,42 @@ def _generate_successful_login(config, user_info, session_context=None, ip_ctx=N
     )
 
 
+def _get_sensitive_apps(config):
+    """Return the sensitive apps list for threat generators.
+    Falls back to a curated subset of high-value targets if not configured."""
+    sensitive = config.get("okta_config", {}).get("sensitive_apps")
+    if sensitive:
+        return sensitive
+    # Fallback: pick from full list or use defaults
+    all_apps = config.get("okta_config", {}).get("okta_sso_apps", [])
+    _DEFAULT_SENSITIVE = ["AWS Console", "GitHub", "Okta Admin Console", "Snowflake", "Salesforce"]
+    # Use intersection of configured apps and defaults; fall back to defaults if no overlap
+    overlap = [a for a in all_apps if a in _DEFAULT_SENSITIVE]
+    return overlap if overlap else (all_apps[:5] if all_apps else _DEFAULT_SENSITIVE)
+
+
+def _user_preferred_app(username, all_apps):
+    """Pick an app with per-user affinity.  80% of the time the user accesses one of
+    their 3-5 'preferred' apps (determined by username hash); 20% any random app.
+    This produces realistic UEBA baselines where each user has habitual apps."""
+    if len(all_apps) <= 3:
+        return random.choice(all_apps)
+    # Deterministic preferred subset: hash username → stable seed → pick 3-5 apps
+    h = int(hashlib.sha256(username.encode()).hexdigest(), 16)
+    rng = random.Random(h)
+    k = min(rng.randint(3, 5), len(all_apps))
+    preferred = rng.sample(all_apps, k)
+    if random.random() < 0.80:
+        return random.choice(preferred)
+    return random.choice(all_apps)
+
+
 def _generate_sso_access(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
     client = _build_client(ip_ctx, config, interactive_only=True)
-    app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Microsoft Office 365"]))
+    all_apps = config.get("okta_config", {}).get("okta_sso_apps", ["Microsoft Office 365"])
+    app    = _user_preferred_app(user_info["username"], all_apps)
     target = [{"id": _app_instance_id(app), "type": "AppInstance",
                "displayName": app, "alternateId": app, "detailEntry": {"signOnModeType": _app_sign_on_mode(app)}}]
     return _assemble(
@@ -566,6 +791,24 @@ def _generate_mfa_verify(config, user_info, session_context=None):
     )
 
 
+def _generate_mfa_verify_failure(config, user_info, session_context=None):
+    """Benign MFA failure — wrong TOTP code or timed-out push.
+    Normal noise that UEBA baselines need to distinguish from real attacks."""
+    ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
+    actor  = _build_actor(user_info["username"], user_info["full_name"])
+    client = _build_client(ip_ctx, config, interactive_only=True)
+    cred   = random.choice(["OIE_OKTA_VERIFY_PUSH", "TOTP", "SMS"])
+    reason = random.choice(["INVALID_CREDENTIALS", "FACTOR_VERIFY_TIMEOUT"])
+    return _assemble(
+        "user.authentication.auth_via_mfa", actor, client,
+        outcome={"result": "FAILURE", "reason": reason},
+        severity="WARN", display_message=f"Authentication of user via MFA failed: {reason}",
+        authentication_context=_build_authentication_context(cred),
+        security_context=_build_security_context(ip_ctx),
+        debug_context=_build_debug_context(cred, include_auth_signals=True),
+    )
+
+
 def _generate_password_reset(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
@@ -574,6 +817,23 @@ def _generate_password_reset(config, user_info, session_context=None):
         "user.account.update_password", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="Update password for user",
+        target=_build_target_user(actor),
+    )
+
+
+def _generate_change_password(config, user_info, session_context=None):
+    """user.account.change_password — user self-service password change.
+    Normal lifecycle event that should appear in benign baseline."""
+    ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
+    actor  = _build_actor(user_info["username"], user_info["full_name"])
+    client = _build_client(ip_ctx, config, interactive_only=True)
+    return _assemble(
+        "user.account.change_password", actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="INFO", display_message="User changed password",
+        authentication_context=_build_authentication_context("PASSWORD"),
+        security_context=_build_security_context(ip_ctx),
+        debug_context=_build_debug_context("PASSWORD"),
         target=_build_target_user(actor),
     )
 
@@ -646,7 +906,7 @@ def _generate_failed_login(config, user_info, ip_ctx=None, session_context=None)
         ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
     client = _build_client(ip_ctx, config, interactive_only=False)
-    reason = random.choice(["INVALID_CREDENTIALS", "LOCKED_OUT", "ACCOUNT_SUSPENDED"])
+    reason = random.choice(["INVALID_CREDENTIALS", "LOCKED_OUT", "PASSWORD_EXPIRED", "AUTHENTICATION_FAILED"])
     return _assemble(
         "user.session.start", actor, client,
         outcome={"result": "FAILURE", "reason": reason},
@@ -657,7 +917,11 @@ def _generate_failed_login(config, user_info, ip_ctx=None, session_context=None)
 
 
 def _generate_brute_force_sequence(config, user_info, session_context=None):
-    """Failed logins -> account lock -> admin unlock."""
+    """Failed logins -> account lock -> admin unlock -> successful login.
+
+    XSIAM only triggers brute-force detection when failures are followed
+    by a successful login, so we always append one after the unlock.
+    """
     print("    - Okta Module generating brute force + lockout + unlock sequence...")
     logs = []
     ip_ctx = _get_random_ip_and_context(config, "tor_exit_nodes")
@@ -665,6 +929,8 @@ def _generate_brute_force_sequence(config, user_info, session_context=None):
         logs.append(_generate_failed_login(config, user_info, ip_ctx=ip_ctx))
     logs.append(_generate_account_lock(config, user_info))
     logs.append(_generate_account_unlock_by_admin(config, user_info))
+    # Attacker succeeds after unlock — triggers XSIAM brute-force detection
+    logs.append(_generate_successful_login(config, user_info, ip_ctx=ip_ctx))
     return logs
 
 
@@ -682,10 +948,13 @@ def _generate_benign_retry(config, user_info, session_context=None):
     actor  = _build_actor(user_info["username"], user_info["full_name"])
     client = _build_client(ip_ctx, config, interactive_only=True)
     sec_ctx = _build_security_context(ip_ctx)
+    sid    = f"ext-session-{uuid.uuid4()}"
+    num_fails = random.randint(1, 2)
+    ts = _event_times(num_fails + 1, gap_range=(2, 8))
     logs = []
 
     # 1-2 failed attempts — INVALID_CREDENTIALS only (not LOCKED_OUT, that needs repeated failures)
-    for _ in range(random.randint(1, 2)):
+    for i in range(num_fails):
         logs.append(_assemble(
             "user.session.start", actor, client,
             outcome={"result": "FAILURE", "reason": "INVALID_CREDENTIALS"},
@@ -693,6 +962,7 @@ def _generate_benign_retry(config, user_info, session_context=None):
             security_context=sec_ctx,
             debug_context=_build_debug_context("PASSWORD",
                 extra={"loginResult": "INVALID_CREDENTIALS"}, include_auth_signals=True),
+            session_id=sid, published_override=ts[i],
         ))
 
     # Successful login — same IP, same user
@@ -704,30 +974,61 @@ def _generate_benign_retry(config, user_info, session_context=None):
         security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", include_auth_signals=True),
         target=_session_start_targets("PASSWORD"),
+        session_id=sid, published_override=ts[num_fails],
     ))
     return logs
 
 
 def _generate_tor_login(config, user_info, session_context=None):
+    """TOR login with post-auth SSO activity — full conversation.
+    Event 1: user.session.start from Tor exit node
+    Events 2-4: user.authentication.sso to 2-3 sensitive apps (attacker pivoting)
+    """
     print("    - Okta Module generating TOR login event...")
+    logs   = []
     ip_ctx = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
     client = _build_client(ip_ctx, config, interactive_only=False)
-    return [_assemble(
+    sec_ctx = _build_security_context(ip_ctx)
+    sid    = f"ext-session-{uuid.uuid4()}"
+    all_apps = _get_sensitive_apps(config)
+    sso_apps = random.sample(all_apps, k=min(random.randint(2, 3), len(all_apps)))
+    ts = _event_times(1 + len(sso_apps))
+
+    # Step 1: session start from Tor
+    logs.append(_assemble(
         "user.session.start", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="WARN", display_message="User login to Okta",
         authentication_context=_build_authentication_context("PASSWORD"),
-        security_context=_build_security_context(ip_ctx),
+        security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "risk": "{level=HIGH}",
             "behaviors": "{New Geo-Location=POSITIVE, New Device=NEGATIVE, New IP=POSITIVE, New State=NEGATIVE, New Country=NEGATIVE, Velocity Behavior=NEGATIVE, New City=NEGATIVE}",
             "threatSuspected": "true",
             "proxyType": "TOR",
             "threatDetections": json.dumps({"TOR Exit Node": "HIGH"}),
-        }),
+        }, include_auth_signals=True),
         target=_session_start_targets("PASSWORD"),
-    )]
+        session_id=sid, published_override=ts[0],
+    ))
+
+    # Steps 2-4: post-auth SSO to sensitive apps (same Tor IP)
+    for i, app in enumerate(sso_apps):
+        target = [{"id": _app_instance_id(app), "type": "AppInstance",
+                   "displayName": app, "alternateId": app,
+                   "detailEntry": {"signOnModeType": _app_sign_on_mode(app)}}]
+        logs.append(_assemble(
+            "user.authentication.sso", actor, client,
+            outcome={"result": "SUCCESS", "reason": None},
+            severity="WARN", display_message="User single sign on to app",
+            authentication_context=_build_authentication_context("PASSWORD"),
+            security_context=sec_ctx,
+            debug_context=_build_debug_context("PASSWORD"),
+            target=target,
+            session_id=sid, published_override=ts[1 + i],
+        ))
+    return logs
 
 
 def _generate_policy_deny(config, user_info, session_context=None):
@@ -738,8 +1039,8 @@ def _generate_policy_deny(config, user_info, session_context=None):
     reason  = random.choice(config.get("okta_threat_events", {}).get("policy_deny_reasons", ["RISK_LEVEL_HIGH"]))
     return [_assemble(
         "policy.evaluate_sign_on", actor, client,
-        outcome={"result": "FAILURE", "reason": reason},
-        severity="WARN", display_message=f"Sign-on policy evaluation failed: {reason}",
+        outcome={"result": "DENY", "reason": reason},
+        severity="WARN", display_message=f"Sign-on policy evaluation denied: {reason}",
         security_context=_build_security_context(ip_ctx),
         debug_context=_build_debug_context("PASSWORD", extra={"risk": "{level=MEDIUM}"}),
     )]
@@ -753,21 +1054,25 @@ def _generate_mfa_bombing_sequence(config, user_info, session_context=None):
     client  = _build_client(ip_ctx, config, interactive_only=False)
     sec_ctx = _build_security_context(ip_ctx)
     auth_ctx = _build_authentication_context("OIE_OKTA_VERIFY_PUSH")
+    sid     = f"ext-session-{uuid.uuid4()}"
+    num_bombs = random.randint(10, 20)
+    ts = _event_times(1 + num_bombs * 2, gap_range=(0.5, 3))
+    print(f"      -> Sending {num_bombs} MFA push notifications...")
 
     logs.append(_assemble(
         "user.authentication.verify", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="Verify user identity",
         authentication_context=auth_ctx, security_context=sec_ctx,
+        session_id=sid, published_override=ts[0],
     ))
-    num_bombs = random.randint(10, 20)
-    print(f"      -> Sending {num_bombs} MFA push notifications...")
-    for _ in range(num_bombs):
+    for i in range(num_bombs):
         logs.append(_assemble(
             "system.push.send_factor_verify_push", actor, client,
             outcome={"result": "SUCCESS", "reason": None},
             severity="INFO", display_message="MFA push challenge sent",
             authentication_context=auth_ctx, security_context=sec_ctx,
+            session_id=sid, published_override=ts[1 + i * 2],
         ))
         logs.append(_assemble(
             "user.mfa.okta_verify.deny_push", actor, client,
@@ -777,6 +1082,7 @@ def _generate_mfa_bombing_sequence(config, user_info, session_context=None):
             debug_context=_build_debug_context("OIE_OKTA_VERIFY_PUSH", extra={
                 "risk": "{level=HIGH}"
             }),
+            session_id=sid, published_override=ts[2 + i * 2],
         ))
     return logs
 
@@ -1334,7 +1640,12 @@ def _generate_okta_threat_detected(config, user_info, session_context=None):
 
 def _generate_session_impersonation(config, user_info, session_context=None):
     """
-    user.session.impersonation.* sequence — admin impersonates a user.
+    Full impersonation conversation:
+      1. grant — admin grants impersonation privilege
+      2. initiate — admin starts impersonating the user
+      3. SSO activity as impersonated user (1-2 apps)
+      4. extend (optional) — session extended
+      5. revoke — impersonation ended
     Feeds 'Okta User Session Impersonation' detection.
     """
     print("    - Okta Module generating session impersonation sequence...")
@@ -1345,21 +1656,66 @@ def _generate_session_impersonation(config, user_info, session_context=None):
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     sec_ctx     = _build_security_context(ip_ctx)
     target      = _build_target_user(target_user)
+    sid         = f"ext-session-{uuid.uuid4()}"
 
-    for event_type, message in [
-        ("user.session.impersonation.grant",    "Grant user session impersonation"),
-        ("user.session.impersonation.initiate", "Initiate user session impersonation"),
-        ("user.session.impersonation.extend",   "Extend user session impersonation"),
-        ("user.session.impersonation.revoke",   "Revoke user session impersonation"),
-    ]:
+    # Step 1: grant
+    logs.append(_assemble(
+        "user.session.impersonation.grant", admin_actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="WARN", display_message="Grant user session impersonation",
+        security_context=sec_ctx,
+        debug_context=_build_debug_context("PASSWORD"),
+        target=target,
+        session_id=sid,
+    ))
+    # Step 2: initiate
+    logs.append(_assemble(
+        "user.session.impersonation.initiate", admin_actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="WARN", display_message="Initiate user session impersonation",
+        security_context=sec_ctx,
+        debug_context=_build_debug_context("PASSWORD"),
+        target=target,
+        session_id=sid,
+    ))
+    # Step 3: SSO activity as the impersonated user
+    all_apps = _get_sensitive_apps(config)
+    sso_apps = random.sample(all_apps, k=min(random.randint(1, 2), len(all_apps)))
+    for app in sso_apps:
+        app_target = [{"id": _app_instance_id(app), "type": "AppInstance",
+                       "displayName": app, "alternateId": app,
+                       "detailEntry": {"signOnModeType": _app_sign_on_mode(app)}}]
         logs.append(_assemble(
-            event_type, admin_actor, client,
+            "user.authentication.sso", target_user, client,
             outcome={"result": "SUCCESS", "reason": None},
-            severity="WARN", display_message=message,
+            severity="WARN", display_message="User single sign on to app",
+            authentication_context=_build_authentication_context("PASSWORD"),
+            security_context=sec_ctx,
+            debug_context=_build_debug_context("PASSWORD"),
+            target=app_target,
+            session_id=sid,
+        ))
+    # Step 4 (optional): extend
+    if random.random() < 0.4:
+        logs.append(_assemble(
+            "user.session.impersonation.extend", admin_actor, client,
+            outcome={"result": "SUCCESS", "reason": None},
+            severity="WARN", display_message="Extend user session impersonation",
             security_context=sec_ctx,
             debug_context=_build_debug_context("PASSWORD"),
             target=target,
+            session_id=sid,
         ))
+    # Step 5: revoke
+    logs.append(_assemble(
+        "user.session.impersonation.revoke", admin_actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="WARN", display_message="Revoke user session impersonation",
+        security_context=sec_ctx,
+        debug_context=_build_debug_context("PASSWORD"),
+        target=target,
+        session_id=sid,
+    ))
     return logs
 
 
@@ -1372,6 +1728,14 @@ def _generate_impossible_travel_sequence(config, user_info, session_context=None
     """
     print("    - Okta Module generating impossible travel sequence...")
     logs = []
+    sid1 = f"ext-session-{uuid.uuid4()}"
+    sid2 = f"ext-session-{uuid.uuid4()}"
+    all_apps = _get_sensitive_apps(config)
+    sso_apps = random.sample(all_apps, k=min(random.randint(2, 3), len(all_apps)))
+    # Location 1 login, then 5-30 min gap, then location 2 login + SSO
+    t0 = datetime.now(timezone.utc)
+    t1 = t0 + timedelta(minutes=random.randint(5, 30))
+    ts_loc2 = _event_times(1 + len(sso_apps), base=t1)
 
     # Location 1: benign home country
     ip_ctx1 = _get_random_ip_and_context(config, "benign_ingress_sources")
@@ -1385,6 +1749,7 @@ def _generate_impossible_travel_sequence(config, user_info, session_context=None
         security_context=_build_security_context(ip_ctx1),
         debug_context=_build_debug_context("PASSWORD", include_auth_signals=True),
         target=_session_start_targets("PASSWORD"),
+        session_id=sid1, published_override=t0,
     ))
 
     # Location 2: attacker from TOR / foreign IP — minutes later, same user
@@ -1404,7 +1769,24 @@ def _generate_impossible_travel_sequence(config, user_info, session_context=None
         security_context=sec_ctx2,
         debug_context=dbg_ctx2,
         target=_session_start_targets("PASSWORD"),
+        session_id=sid2, published_override=ts_loc2[0],
     ))
+
+    # Steps 3-5: post-auth SSO from the suspicious location (attacker accessing resources)
+    for i, app in enumerate(sso_apps):
+        target = [{"id": _app_instance_id(app), "type": "AppInstance",
+                   "displayName": app, "alternateId": app,
+                   "detailEntry": {"signOnModeType": _app_sign_on_mode(app)}}]
+        logs.append(_assemble(
+            "user.authentication.sso", actor, client2,
+            outcome={"result": "SUCCESS", "reason": None},
+            severity="WARN", display_message="User single sign on to app",
+            authentication_context=_build_authentication_context("PASSWORD"),
+            security_context=sec_ctx2,
+            debug_context=_build_debug_context("PASSWORD"),
+            target=target,
+            session_id=sid2, published_override=ts_loc2[1 + i],
+        ))
     return logs
 
 
@@ -1442,6 +1824,20 @@ def _generate_password_spray(config, session_context=None):
             security_context=sec_ctx,
             debug_context=dbg_ctx,
         ))
+    # Final success — attacker found valid credentials; triggers XSIAM password-spray detection
+    success_user, success_details = random.choice(targets)
+    actor  = _build_actor(success_user, success_details.get("owner", success_user))
+    client = _build_client(ip_ctx, config, interactive_only=False)
+    client["ipAddress"] = ip_ctx.get("ip")
+    logs.append(_assemble(
+        "user.session.start", actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="INFO", display_message="User login to Okta",
+        security_context=sec_ctx,
+        debug_context=_build_debug_context("PASSWORD", extra={
+            "risk": "{level=HIGH}", "threatSuspected": "true",
+        }),
+    ))
     return logs
 
 
@@ -1558,7 +1954,11 @@ def _make_ip_ctx_from(base, overrides):
 # --- SSO FAILURE PATTERNS ---
 
 def _generate_sso_brute_force(config, user_info, session_context=None):
-    """Many failed user.authentication.sso, same user — SSO Brute Force."""
+    """Many failed user.authentication.sso, same user, then success — SSO Brute Force.
+
+    XSIAM only triggers brute-force detection when failures are followed
+    by a successful login, so we always append a success event.
+    """
     print("    - Okta Module generating SSO brute force sequence...")
     logs   = []
     ip_ctx = _get_random_ip_and_context(config, "tor_exit_nodes")
@@ -1577,11 +1977,24 @@ def _generate_sso_brute_force(config, user_info, session_context=None):
             security_context=sec_ctx, debug_context=dbg_ctx,
             target=_make_sso_target(app),
         ))
+    # Final success — attacker found valid credentials; triggers XSIAM detection
+    client = _build_client(ip_ctx, config, interactive_only=False)
+    logs.append(_assemble(
+        "user.authentication.sso", actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="INFO", display_message=f"SSO authentication to {app}",
+        security_context=sec_ctx, debug_context=dbg_ctx,
+        target=_make_sso_target(app),
+    ))
     return logs
 
 
 def _generate_intense_sso_failures(config, session_context=None):
-    """High volume failed SSO across multiple users — Intense SSO failures."""
+    """High volume failed SSO across multiple users, then one success.
+
+    XSIAM only triggers brute-force detection when failures are followed
+    by a successful login, so we always append a success event.
+    """
     print("    - Okta Module generating intense SSO failures sequence...")
     logs   = []
     ip_ctx = _get_random_ip_and_context(config, "tor_exit_nodes")
@@ -1605,6 +2018,19 @@ def _generate_intense_sso_failures(config, session_context=None):
                 debug_context=_build_debug_context("PASSWORD"),
                 target=_make_sso_target(app),
             ))
+    # Final success — attacker found valid credentials; triggers XSIAM brute-force detection
+    success_user, success_details = random.choice(targets)
+    actor  = _build_actor(success_user, success_details.get("owner", success_user))
+    app    = random.choice(apps)
+    client = _build_client(ip_ctx, config, interactive_only=False)
+    logs.append(_assemble(
+        "user.authentication.sso", actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="INFO", display_message=f"SSO authentication to {app}",
+        security_context=sec_ctx,
+        debug_context=_build_debug_context("PASSWORD"),
+        target=_make_sso_target(app),
+    ))
     return logs
 
 
@@ -1635,6 +2061,18 @@ def _generate_sso_password_spray(config, session_context=None):
             security_context=sec_ctx, debug_context=dbg_ctx,
             target=_make_sso_target(app),
         ))
+    # Final success — attacker found valid credentials; triggers XSIAM spray detection
+    success_user, success_details = random.choice(targets)
+    actor  = _build_actor(success_user, success_details.get("owner", success_user))
+    client = _build_client(ip_ctx, config, interactive_only=False)
+    client["ipAddress"] = ip_ctx.get("ip")
+    logs.append(_assemble(
+        "user.authentication.sso", actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="INFO", display_message=f"SSO authentication to {app}",
+        security_context=sec_ctx, debug_context=dbg_ctx,
+        target=_make_sso_target(app),
+    ))
     return logs
 
 
@@ -1670,6 +2108,21 @@ def _generate_ip_rotation_sso_spray(config, user_info, session_context=None):
             }),
             target=_make_sso_target(app),
         ))
+    # Final success from the last rotated IP; triggers XSIAM spray detection
+    last_ip_ctx = ip_pool[-1]
+    client = _build_client(last_ip_ctx, config, interactive_only=False)
+    client["ipAddress"] = last_ip_ctx["ip"]
+    logs.append(_assemble(
+        "user.authentication.sso", actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="INFO", display_message=f"SSO authentication to {app}",
+        security_context=_build_security_context(last_ip_ctx),
+        debug_context=_build_debug_context("PASSWORD", extra={
+            "threatSuspected": "true",
+            "risk": "{level=HIGH}",
+        }),
+        target=_make_sso_target(app),
+    ))
     return logs
 
 
@@ -2183,7 +2636,7 @@ def _generate_sso_unusual_time(config, user_info, session_context=None):
     odd_hour   = random.randint(2, 4)
     odd_minute = random.randint(0, 59)
     ts = datetime.utcnow().replace(hour=odd_hour, minute=odd_minute, second=0, microsecond=0)
-    published  = ts.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    published  = _okta_timestamp(ts)
 
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
@@ -3897,7 +4350,7 @@ def _generate_risk_policy_bypass(config, user_info, session_context=None):
         target=_build_target_user(actor)))
     c2 = _build_client(ip_ctx, config, interactive_only=False)
     logs.append(_assemble("policy.auth_reevaluate.fail", actor, c2,
-        outcome={"result": "FAILURE", "reason": "POLICY_VIOLATION"}, severity="WARN",
+        outcome={"result": "DENY", "reason": "POLICY_VIOLATION"}, severity="WARN",
         display_message="Auth policy re-evaluation violation — user should be blocked",
         security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
@@ -4679,9 +5132,9 @@ def _generate_background_log(config, session_context=None):
         # Core auth — weighted 3x to keep realistic baseline
         _generate_successful_login, _generate_successful_login, _generate_successful_login,
         _generate_sso_access, _generate_sso_access, _generate_sso_access,
-        _generate_mfa_verify, _generate_mfa_verify,
+        _generate_mfa_verify, _generate_mfa_verify, _generate_mfa_verify_failure,
         # Account management (legacy _generate_* helpers)
-        _generate_password_reset, _generate_account_unlock_self,
+        _generate_password_reset, _generate_change_password, _generate_account_unlock_self,
         _generate_account_unlock_by_admin, _generate_account_unlock_token,
         _generate_user_suspended, _generate_user_deactivated,
         _generate_password_reset_by_admin, _generate_mfa_factor_enrolled,
@@ -4798,8 +5251,8 @@ def _generate_background_log(config, session_context=None):
     ]
 
     # Pick from combined pool (weight single 10:1 over multi to avoid huge bursts)
-    pool = single * 1 + [None] * (len(single) // 10)
-    pick = random.choice(single + multi)
+    weighted = single * 10 + multi
+    pick = random.choice(weighted)
     result = pick(config, user_info, session_context)
     if isinstance(result, list):
         return result
@@ -5029,20 +5482,19 @@ def _generate_radius_brute_force(config, user_info, session_context=None):
             target=[{"id": _app_instance_id(app), "type": "AppInstance",
                      "displayName": app, "alternateId": app, "detailEntry": {"signOnModeType": _app_sign_on_mode(app)}}],
         ))
-    # Optional final success (attacker found correct credentials)
-    if random.random() < 0.3:
-        logs.append(_assemble(
-            "user.authentication.auth_via_radius", actor, client,
-            outcome={"result": "SUCCESS", "reason": None},
-            severity="WARN", display_message=f"Authentication of user via RADIUS: {app}",
-            authentication_context=_build_authentication_context("PASSWORD"),
-            security_context=sec_ctx,
-            debug_context=_build_debug_context("PASSWORD", extra={
-                "risk": "{level=HIGH}", "threatSuspected": "true",
-            }),
-            target=[{"id": _app_instance_id(app), "type": "AppInstance",
-                     "displayName": app, "alternateId": app, "detailEntry": {"signOnModeType": _app_sign_on_mode(app)}}],
-        ))
+    # Final success — attacker found correct credentials; triggers XSIAM brute-force detection
+    logs.append(_assemble(
+        "user.authentication.auth_via_radius", actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="WARN", display_message=f"Authentication of user via RADIUS: {app}",
+        authentication_context=_build_authentication_context("PASSWORD"),
+        security_context=sec_ctx,
+        debug_context=_build_debug_context("PASSWORD", extra={
+            "risk": "{level=HIGH}", "threatSuspected": "true",
+        }),
+        target=[{"id": _app_instance_id(app), "type": "AppInstance",
+                 "displayName": app, "alternateId": app, "detailEntry": {"signOnModeType": _app_sign_on_mode(app)}}],
+    ))
     return logs
 
 
@@ -5668,19 +6120,12 @@ def _make_threat_dict(config, user_info, session_context):
         "mfa_downgrade_access":        lambda: _generate_mfa_downgrade_access(config, user_info, session_context),
         "authenticator_downgrade":     lambda: _generate_authenticator_downgrade(config, user_info, session_context),
         "api_token_abuse":             lambda: _generate_api_token_abuse(config, user_info, session_context),
-        "zone_bypass_access":          lambda: _generate_zone_bypass_access(config, user_info, session_context),
-        "admin_app_pivot":             lambda: _generate_admin_app_after_compromise(config, user_info, session_context),
+        "tor_zone_bypass_access":      lambda: _generate_zone_bypass_access(config, user_info, session_context),
+        "tor_admin_app_pivot":         lambda: _generate_admin_app_after_compromise(config, user_info, session_context),
         "rogue_oauth_client_spray":    lambda: _generate_rogue_oauth_client_spray(config, user_info, session_context),
         # --- NEW: UEBA baseline and lifecycle attack scenarios ---
-        "benign_retry":                lambda: _generate_benign_retry(config, user_info, session_context),
         "ephemeral_account":           lambda: _generate_ephemeral_account(config, user_info, session_context),
         "lateral_sso_attempts":        lambda: _generate_lateral_sso_attempts(config, user_info, session_context),
-        # --- Okta Audit analytics detections ---
-        "mfa_factor_update":      lambda: [_gen_user_mfa_factor_update(config, user_info, session_context)],
-        "policy_rule_update":     lambda: [_gen_policy_rule_update(config, user_info, session_context)],
-        "device_assigned":        lambda: [_generate_device_assigned(config, user_info, session_context)],
-        "new_device_enrolled":    lambda: _generate_new_device_enrolled(config, user_info, session_context),
-        "zone_update":            lambda: [_gen_zone_update(config, user_info, session_context)],
         # --- NEW: cross-platform IDP attack patterns ---
         "mfa_enroll_attack":      lambda: _generate_mfa_factor_enroll_attack(config, user_info, session_context),
         "log_stream_evasion":     lambda: _generate_log_stream_evasion(config, user_info, session_context),
@@ -5712,13 +6157,13 @@ def get_threat_names():
     return list(_make_threat_dict({}, {"username": "", "full_name": ""}, None).keys())
 
 
-def _generate_threat_log(config, session_context=None, override=None):
+def _generate_threat_log(config, session_context=None, forced_event=None):
     """Return a list of threat-level JSON event strings.
-    If override is a known threat key, that specific threat is generated instead of a random one.
+    If forced_event is a known threat key, that specific threat is generated instead of a random one.
     """
     user_info = _get_random_user_info(config, session_context)
     threats   = _make_threat_dict(config, user_info, session_context)
-    label = override if (override and override in threats) else random.choice(list(threats.keys()))
+    label = forced_event if (forced_event and forced_event in threats) else random.choice(list(threats.keys()))
     return (threats[label](), label)
 
 
@@ -5771,7 +6216,10 @@ def _generate_scenario_log(config, scenario):
 
 def generate_log(config, scenario=None, threat_level="Realistic",
                  scenario_event=None, context=None, benign_only=False):
-    global last_threat_event_time
+    global last_threat_event_time, _okta_org_url
+
+    # Set org URL from config (used by _build_debug_context for origin field)
+    _okta_org_url = config.get("okta_config", {}).get("okta_domain", "https://examplecorp.okta.com")
 
     # Extract session_context from the context dict passed by log_simulator.py
     session_context = (context or {}).get("session_context")
@@ -5799,7 +6247,7 @@ def generate_log(config, scenario=None, threat_level="Realistic",
             return [_generate_account_unlock_by_admin(config, user_info, session_context)]
         else:
             # Treat any other scenario_event as a named internal threat
-            return _generate_threat_log(config, session_context, override=scenario_event)
+            return _generate_threat_log(config, session_context, forced_event=scenario_event)
 
     if benign_only:
         result = _generate_background_log(config, session_context)

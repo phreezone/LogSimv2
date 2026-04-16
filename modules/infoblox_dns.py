@@ -20,27 +20,10 @@ XSIAM_VENDOR = "infoblox"
 XSIAM_PRODUCT = "infoblox"
 CONFIG_KEY = "infoblox_config"
 
-# Single source of truth for threat scenario_event names supported by generate_log.
-# Adding a new scenario_event handler in generate_log requires adding it here too.
-_THREAT_SCENARIO_EVENTS = [
-    "C2_BEACON",
-    "DNS_TUNNEL",
-    "RPZ_BLOCK",
-    "THREAT_PROTECT",
-    "NXDOMAIN_STORM",
-    "DNS_FLOOD",
-    "DHCP_STARVATION",
-    "ZONE_TRANSFER",
-    "FAST_FLUX_DNS",
-    "DNS_REBINDING",
-    "PTR_SWEEP",
-]
-
-
 def get_threat_names():
-    """Return available threat scenario_event names dynamically from _THREAT_SCENARIO_EVENTS.
-    Adding a new entry to _THREAT_SCENARIO_EVENTS automatically surfaces it here."""
-    return list(_THREAT_SCENARIO_EVENTS)
+    """Return available threat names from _SCENARIO_FUNCTIONS.
+    _SCENARIO_FUNCTIONS is defined after the generator functions lower in this file."""
+    return list(_SCENARIO_FUNCTIONS.keys())
 
 
 last_threat_event_time = 0
@@ -693,7 +676,7 @@ def _generate_dns_flood(config, client_ip=None, session_context=None):
     return logs
 
 
-def _generate_dhcp_starvation(config, session_context=None):
+def _generate_dhcp_starvation(config, client_ip=None, session_context=None):
     """
     Generates a DHCP starvation attack: 20–50 DHCPDISCOVER from spoofed random MACs.
 
@@ -784,7 +767,7 @@ def _generate_dns_rebinding(config, client_ip=None, session_context=None):
     internal_ip  = rand_ip_from_network(ip_network(int_net))
     resp_rr      = [f"{domain} 1 IN A {internal_ip}"]   # TTL=1 = rebinding signal
 
-    print(f"    - Infoblox Module simulating: DNS Rebinding — {domain} → {internal_ip} from {client_ip}")
+    print(f"    - Infoblox Module simulating: DNS Rebinding -- {domain} -> {internal_ip} from {client_ip}")
     query_log = _build_dns_query_log(config, client_ip, domain, "A")
     resp_log  = _build_dns_response_log(config, client_ip, domain, "A", "NOERROR", resp_rr)
     return [query_log, resp_log]
@@ -830,13 +813,44 @@ def _generate_ptr_sweep(config, client_ip=None, session_context=None):
 
 
 # ---------------------------------------------------------------------------
+# Scenario functions dict — single source of truth for named-event dispatch.
+# Keys are the exact strings returned by get_threat_names() and shown in the
+# dashboard "Fire Threat" dropdown.  All values share the signature
+# (config, client_ip=None, session_context=None).
+# ---------------------------------------------------------------------------
+
+_SCENARIO_FUNCTIONS = {
+    "C2_BEACON":       _generate_c2_beacon,
+    "DNS_TUNNEL":      _generate_dns_tunnel,
+    "RPZ_BLOCK":       _generate_rpz_block,
+    "THREAT_PROTECT":  _generate_threat_protect,
+    "NXDOMAIN_STORM":  _generate_nxdomain_storm,
+    "DNS_FLOOD":       _generate_dns_flood,
+    "DHCP_STARVATION": _generate_dhcp_starvation,
+    "ZONE_TRANSFER":   _generate_zone_transfer,
+    "FAST_FLUX_DNS":   _generate_fast_flux_dns,
+    "DNS_REBINDING":   _generate_dns_rebinding,
+    "PTR_SWEEP":       _generate_ptr_sweep,
+}
+
+
+# ---------------------------------------------------------------------------
 # Threat log dispatcher
 # ---------------------------------------------------------------------------
 
-def _generate_threat_log(config, session_context=None):
-    """Weighted threat dispatcher — pool pattern matching Firepower/ASA/Checkpoint."""
+def _generate_threat_log(config, session_context=None, forced_event=None):
+    """Weighted threat dispatcher — pool pattern matching Firepower/ASA/Checkpoint.
+    If forced_event is given, that specific named event is generated instead of a random pick.
+    """
     internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
     client_ip    = rand_ip_from_network(ip_network(internal_net))
+
+    if forced_event:
+        event = forced_event.upper()
+        if event in _SCENARIO_FUNCTIONS:
+            content = _SCENARIO_FUNCTIONS[event](config, client_ip, session_context)
+            return (content, event)
+        return None
 
     infoblox_conf  = config.get(CONFIG_KEY, {})
     threat_events  = infoblox_conf.get('event_mix', {}).get('threat', [])
@@ -875,7 +889,7 @@ def _generate_threat_log(config, session_context=None):
     elif threat_type == "dns_flood":
         content = _generate_dns_flood(config, client_ip, session_context)
     elif threat_type == "dhcp_starvation":
-        content = _generate_dhcp_starvation(config, session_context)
+        content = _generate_dhcp_starvation(config, client_ip, session_context)
     elif threat_type == "zone_transfer":
         content = _generate_zone_transfer(config, client_ip, session_context)
     elif threat_type == "fast_flux_dns":
@@ -993,51 +1007,22 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         client_mac      = ctx.get('client_mac', f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}")
         client_hostname = ctx.get('hostname', 'CORP-WORKSTATION')
 
+        if not src_ip:
+            internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
+            src_ip       = rand_ip_from_network(ip_network(internal_net))
+
+        # Benign helper events (used by orchestrated scenarios, not in the threat dropdown)
         if scenario_event == "DNS_LOOKUP":
-            if not src_ip:
-                internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
-                src_ip       = rand_ip_from_network(ip_network(internal_net))
             return generate_dns_pair(config, src_ip, domain)
 
-        elif scenario_event == "DHCP_ACK":
-            if not src_ip:
-                internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
-                src_ip       = rand_ip_from_network(ip_network(internal_net))
+        if scenario_event == "DHCP_ACK":
             return generate_dhcp_ack(config, src_ip, client_mac, client_hostname)
 
-        elif scenario_event == "C2_BEACON":
-            return (_generate_c2_beacon(config, src_ip, session_context), "C2_BEACON")
-
-        elif scenario_event == "DNS_TUNNEL":
-            return (_generate_dns_tunnel(config, src_ip, session_context), "DNS_TUNNEL")
-
-        elif scenario_event == "RPZ_BLOCK":
-            return (_generate_rpz_block(config, src_ip, session_context), "RPZ_BLOCK")
-
-        elif scenario_event == "THREAT_PROTECT":
-            result = _generate_threat_protect(config, src_ip, session_context)
-            return (result, "THREAT_PROTECT")
-
-        elif scenario_event == "NXDOMAIN_STORM":
-            return (_generate_nxdomain_storm(config, src_ip, session_context), "NXDOMAIN_STORM")
-
-        elif scenario_event == "DNS_FLOOD":
-            return (_generate_dns_flood(config, src_ip, session_context), "DNS_FLOOD")
-
-        elif scenario_event == "DHCP_STARVATION":
-            return (_generate_dhcp_starvation(config, session_context), "DHCP_STARVATION")
-
-        elif scenario_event == "ZONE_TRANSFER":
-            return (_generate_zone_transfer(config, src_ip, session_context), "ZONE_TRANSFER")
-
-        elif scenario_event == "FAST_FLUX_DNS":
-            return (_generate_fast_flux_dns(config, src_ip, session_context), "FAST_FLUX_DNS")
-
-        elif scenario_event == "DNS_REBINDING":
-            return (_generate_dns_rebinding(config, src_ip, session_context), "DNS_REBINDING")
-
-        elif scenario_event == "PTR_SWEEP":
-            return (_generate_ptr_sweep(config, src_ip, session_context), "PTR_SWEEP")
+        # Named threat dispatch via _SCENARIO_FUNCTIONS dict
+        event = scenario_event.upper()
+        if event in _SCENARIO_FUNCTIONS:
+            content = _SCENARIO_FUNCTIONS[event](config, src_ip, session_context)
+            return (content, event)
 
         return None
 

