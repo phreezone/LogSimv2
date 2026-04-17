@@ -474,6 +474,59 @@ def _maybe_report_throughput():
           f"= {rate_sec:.0f}/sec ({rate_min:.0f}/min)")
 
 
+# ── Filebeat JSONL Transport ───────────────────────────────────────────────
+# Writes events as JSONL files organized by computer_name (hostname) so
+# Filebeat can pick them up and forward to XSIAM's Broker VM.  Each
+# simulated host gets its own log file under FILEBEAT_OUTPUT_DIR.
+#
+# Directory layout:
+#   <output_dir>/
+#     WKS001.lab.local/security.json
+#     WKS002.lab.local/security.json
+#     DC01.lab.local/security.json
+#     ...
+#
+# Filebeat watches *.json under each subdirectory.  The Broker receives
+# them with full _collector_* metadata attached by Filebeat.
+
+_filebeat_output_dir = None
+_filebeat_lock = threading.Lock()
+
+def _get_filebeat_output_dir(config):
+    """Resolve the filebeat output directory from env or config."""
+    global _filebeat_output_dir
+    if _filebeat_output_dir is not None:
+        return _filebeat_output_dir
+    d = os.getenv("FILEBEAT_OUTPUT_DIR")
+    if not d:
+        conf_key = "windows_events_config"
+        d = config.get(conf_key, {}).get("filebeat_output_dir", "")
+    if not d:
+        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filebeat_output")
+    _filebeat_output_dir = d
+    return d
+
+
+def send_filebeat_message(message, module, config):
+    """Append a JSON event to a per-hostname JSONL file for Filebeat pickup."""
+    try:
+        ev = json.loads(message) if isinstance(message, str) else message
+    except (json.JSONDecodeError, TypeError):
+        _tprint(f"Warning: {module.NAME} filebeat transport received non-JSON content. Skipping.")
+        return
+
+    hostname = ev.get("computer_name") or ev.get("host_name") or "unknown_host"
+    safe_hostname = hostname.replace(":", "_").replace("/", "_").replace("\\", "_")
+    output_dir = _get_filebeat_output_dir(config)
+    host_dir = os.path.join(output_dir, safe_hostname)
+
+    with _filebeat_lock:
+        os.makedirs(host_dir, exist_ok=True)
+        filepath = os.path.join(host_dir, "security.json")
+        with open(filepath, "a", encoding="utf-8") as f:
+            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
+
 def process_and_send(log_content, module, config, event_name=None):
     """Determines how to send the log and sends it. Counts logs for throughput reporting."""
     transport = "syslog"
@@ -504,6 +557,17 @@ def process_and_send(log_content, module, config, event_name=None):
         else:
             event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} wants HTTP transport but did not return a string or list of strings. Skipping.")
+    elif transport == "filebeat":
+        if isinstance(log_content, list):
+            for msg in log_content:
+                send_filebeat_message(msg, module, config)
+                _increment_throughput()
+        elif isinstance(log_content, str):
+            send_filebeat_message(log_content, module, config)
+            _increment_throughput()
+        else:
+            event_str = f" ({event_name})" if event_name else ""
+            _tprint(f"Warning: Module {module.NAME}{event_str} wants filebeat transport but did not return a string or list of strings. Skipping.")
     elif transport == "pubsub":
         if isinstance(log_content, list):
             for msg in log_content:
