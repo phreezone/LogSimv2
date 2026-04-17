@@ -471,6 +471,27 @@ def weighted_dns_domain(user, domains=None):
     return random.choice(domains)
 
 
+def get_users_by_department(session_context):
+    """Return users grouped by department for the Bad User picker.
+
+    Returns {department: [{username, display_name, department, has_aws, has_gcp}, ...]}
+    sorted by department name, users sorted by display_name within each group.
+    """
+    groups = {}
+    for username, profile in (session_context or {}).items():
+        dept = profile.get('department', 'Unknown')
+        entry = {
+            'username':     username,
+            'display_name': profile.get('display_name', username),
+            'department':   dept,
+            'has_aws':      bool(profile.get('aws_iam_user')),
+        }
+        groups.setdefault(dept, []).append(entry)
+    # Sort departments alphabetically, users by display_name within each
+    return {dept: sorted(users, key=lambda u: u['display_name'])
+            for dept, users in sorted(groups.items())}
+
+
 def get_user_agent(session_context, username, device_type=None):
     """Return the sticky user-agent for a user's device.
 
