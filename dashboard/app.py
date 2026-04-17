@@ -159,6 +159,7 @@ MODULES = _load_modules()
 # ── Build session context (stable user→IP map, same as parallel mode) ────────
 try:
     from modules.session_utils import build_session_context as _build_session_context
+    from modules.session_utils import get_users_by_department as _get_users_by_department
     SESSION_CONTEXT = _build_session_context(CONFIG)
 except Exception as _e:
     print(f"[dashboard] Could not build session context: {_e}")
@@ -270,6 +271,215 @@ class ModuleState:
 MODULE_STATES: dict[str, ModuleState] = {
     name: ModuleState(mod) for name, mod in MODULES.items()
 }
+
+
+# ── Bad User mode ─────────────────────────────────────────────────────────────
+# Independent worker threads that focus ALL log generation on a single selected
+# user, causing them to accumulate risk score in XSIAM UEBA.  Normal module
+# workers keep running to provide baseline traffic from other users.
+
+_baduser_lock = threading.Lock()
+_baduser_state = {
+    "active": False,
+    "username": None,
+    "display_name": None,
+    "department": None,
+    "started_at": None,
+    "duration_seconds": 0,
+    "threat_level": "Extreme",
+    "event_interval": 0.5,
+    "stop_event": threading.Event(),
+    "threads": [],
+    "metrics": {},       # {module_name: {"logs": int, "threats": int}}
+}
+
+
+def _build_baduser_context(username):
+    """Deep-copy a single user's profile into a new session_context dict.
+
+    Since every module (except AWS) calls get_random_user(session_context) and
+    there's only one user in the dict, all events will attribute to that user.
+    """
+    if username not in SESSION_CONTEXT:
+        return None
+    return {"session_context": {username: copy.deepcopy(SESSION_CONTEXT[username])}}
+
+
+def _build_baduser_aws_config(username, config):
+    """Return a config with aws_config.users_and_roles filtered to the target user's IAM identity.
+
+    Returns None if the user has no aws_iam_user mapping (skip AWS in that case).
+    """
+    profile = SESSION_CONTEXT.get(username, {})
+    iam_name = profile.get('aws_iam_user')
+    if not iam_name:
+        return None
+    cfg = copy.deepcopy(config)
+    aws_conf = cfg.get('aws_config', {})
+    pool = aws_conf.get('users_and_roles', [])
+    # Keep only entries matching the user's IAM identity
+    filtered = [u for u in pool if u.get('name') == iam_name]
+    if not filtered:
+        # Create an IAMUser entry for the target
+        filtered = [{"type": "IAMUser", "name": iam_name, "arn_suffix": f"user/{iam_name}"}]
+    aws_conf['users_and_roles'] = filtered
+    cfg['aws_config'] = aws_conf
+    return cfg
+
+
+def _baduser_worker(module, config, context, stop_event, metrics_key,
+                    threat_level, event_interval_func):
+    """Worker loop for a single module in bad-user mode.
+
+    Same pattern as _module_worker() but uses a filtered single-user context
+    and records metrics into the bad-user state instead of MODULE_STATES.
+    """
+    process_and_send = _get_process_and_send()
+
+    while not stop_event.is_set():
+        current_level = threat_level
+        benign_only = (current_level == "Benign Traffic Only")
+        cycle_start = time.time()
+        try:
+            result = module.generate_log(
+                config=config,
+                threat_level=current_level,
+                benign_only=benign_only,
+                context=context,
+            )
+            if result is not None:
+                if isinstance(result, tuple) and len(result) == 2:
+                    log_content, event_name = result
+                else:
+                    log_content, event_name = result, None
+
+                logs = log_content if isinstance(log_content, list) else [log_content]
+                valid = [m for m in logs if m]
+                for msg in valid:
+                    process_and_send(msg, module, config, event_name)
+
+                if valid:
+                    with _baduser_lock:
+                        m = _baduser_state["metrics"].get(metrics_key, {"logs": 0, "threats": 0})
+                        m["logs"] += len(valid)
+                        # Check if this was a threat event
+                        state = MODULE_STATES.get(module.NAME)
+                        if state and event_name and event_name in state.threat_names:
+                            m["threats"] += 1
+                        _baduser_state["metrics"][metrics_key] = m
+
+        except Exception as exc:
+            print(f"[bad-user][{module.NAME}] worker error: {exc}")
+            stop_event.wait(timeout=5)
+            continue
+
+        elapsed = time.time() - cycle_start
+        remaining = max(0.0, event_interval_func() - elapsed)
+        stop_event.wait(timeout=remaining)
+
+
+def _baduser_watchdog(duration_seconds, stop_event):
+    """Auto-stop bad-user mode after the configured duration."""
+    elapsed = 0
+    while elapsed < duration_seconds and not stop_event.is_set():
+        stop_event.wait(timeout=1)
+        elapsed += 1
+    if not stop_event.is_set():
+        print("[bad-user] Duration expired — stopping.")
+        _stop_baduser()
+
+
+def _start_baduser(username, duration_minutes, threat_level, event_interval):
+    """Spin up bad-user worker threads for all loaded modules."""
+    with _baduser_lock:
+        if _baduser_state["active"]:
+            return False, "Bad user mode is already active"
+
+    context = _build_baduser_context(username)
+    if context is None:
+        return False, f"User '{username}' not found in session context"
+
+    profile = SESSION_CONTEXT[username]
+    duration_seconds = int(duration_minutes * 60)
+    stop_event = threading.Event()
+
+    with _baduser_lock:
+        _baduser_state["active"] = True
+        _baduser_state["username"] = username
+        _baduser_state["display_name"] = profile.get("display_name", username)
+        _baduser_state["department"] = profile.get("department", "Unknown")
+        _baduser_state["started_at"] = time.time()
+        _baduser_state["duration_seconds"] = duration_seconds
+        _baduser_state["threat_level"] = threat_level
+        _baduser_state["event_interval"] = event_interval
+        _baduser_state["stop_event"] = stop_event
+        _baduser_state["threads"] = []
+        _baduser_state["metrics"] = {}
+
+    # Closure so workers always read current interval
+    def _get_interval():
+        with _baduser_lock:
+            return _baduser_state["event_interval"]
+
+    base_config = copy.deepcopy(CONFIG)
+
+    for name, mod in MODULES.items():
+        # AWS special handling — skip if no IAM mapping
+        if name == "aws":
+            aws_cfg = _build_baduser_aws_config(username, base_config)
+            if aws_cfg is None:
+                print(f"[bad-user] Skipping {name} — no aws_iam_user mapping for {username}")
+                continue
+            worker_config = aws_cfg
+            worker_context = context  # AWS ignores session_context but we pass it anyway
+        else:
+            worker_config = copy.deepcopy(base_config)
+            worker_context = context
+
+        t = threading.Thread(
+            target=_baduser_worker,
+            args=(mod, worker_config, worker_context, stop_event, name,
+                  threat_level, _get_interval),
+            daemon=True,
+            name=f"baduser-{name}",
+        )
+        with _baduser_lock:
+            _baduser_state["threads"].append(t)
+        t.start()
+
+    # Watchdog thread for auto-stop
+    wd = threading.Thread(
+        target=_baduser_watchdog,
+        args=(duration_seconds, stop_event),
+        daemon=True,
+        name="baduser-watchdog",
+    )
+    with _baduser_lock:
+        _baduser_state["threads"].append(wd)
+    wd.start()
+
+    n_threads = len(_baduser_state["threads"]) - 1  # exclude watchdog
+    print(f"[bad-user] Started — {username} ({profile.get('display_name')}) | "
+          f"{n_threads} modules | {duration_minutes}min | {threat_level} | "
+          f"{1/event_interval:.1f}/sec")
+    return True, None
+
+
+def _stop_baduser():
+    """Stop all bad-user worker threads."""
+    with _baduser_lock:
+        if not _baduser_state["active"]:
+            return
+        _baduser_state["stop_event"].set()
+        threads = list(_baduser_state["threads"])
+
+    for t in threads:
+        t.join(timeout=5)
+
+    with _baduser_lock:
+        _baduser_state["active"] = False
+        _baduser_state["threads"] = []
+    print("[bad-user] Stopped.")
 
 
 # ── Module worker thread ──────────────────────────────────────────────────────
@@ -1098,6 +1308,73 @@ def api_metrics():
         "session_start": _session_start,
         "per_module": [s.to_dict() for s in states],
     })
+
+
+# ── Bad User API ─────────────────────────────────────────────────────────────
+
+@app.get("/api/baduser/users")
+def api_baduser_users():
+    """User list grouped by department for the Bad User picker."""
+    groups = _get_users_by_department(SESSION_CONTEXT)
+    return jsonify(groups)
+
+
+@app.post("/api/baduser/start")
+def api_baduser_start():
+    body = request.get_json(silent=True) or {}
+    username = body.get("username")
+    if not username:
+        return jsonify({"error": "username required"}), 400
+    duration = float(body.get("duration_minutes", 15))
+    if duration < 1 or duration > 480:
+        return jsonify({"error": "duration_minutes must be 1-480"}), 400
+    threat_level = body.get("threat_level", "Extreme")
+    if threat_level not in THREAT_LEVELS:
+        return jsonify({"error": f"Unknown threat level '{threat_level}'"}), 400
+    event_interval = float(body.get("event_interval", 0.5))
+    if event_interval < 0.01:
+        return jsonify({"error": "event_interval must be >= 0.01"}), 400
+
+    ok, err = _start_baduser(username, duration, threat_level, event_interval)
+    if not ok:
+        return jsonify({"error": err}), 409
+    return jsonify({"started": True, "username": username})
+
+
+@app.post("/api/baduser/stop")
+def api_baduser_stop():
+    _stop_baduser()
+    return jsonify({"stopped": True})
+
+
+@app.get("/api/baduser/status")
+def api_baduser_status():
+    with _baduser_lock:
+        active = _baduser_state["active"]
+        if not active:
+            return jsonify({"active": False})
+        started_at = _baduser_state["started_at"]
+        duration = _baduser_state["duration_seconds"]
+        elapsed = time.time() - started_at if started_at else 0
+        remaining = max(0, duration - elapsed)
+        metrics = copy.deepcopy(_baduser_state["metrics"])
+        total_logs = sum(m["logs"] for m in metrics.values())
+        total_threats = sum(m["threats"] for m in metrics.values())
+        return jsonify({
+            "active": True,
+            "username": _baduser_state["username"],
+            "display_name": _baduser_state["display_name"],
+            "department": _baduser_state["department"],
+            "threat_level": _baduser_state["threat_level"],
+            "event_interval": _baduser_state["event_interval"],
+            "started_at": started_at,
+            "duration_seconds": duration,
+            "elapsed_seconds": round(elapsed),
+            "remaining_seconds": round(remaining),
+            "total_logs": total_logs,
+            "total_threats": total_threats,
+            "per_module": metrics,
+        })
 
 
 # ── Frontend ──────────────────────────────────────────────────────────────────

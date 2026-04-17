@@ -289,6 +289,88 @@
     .health-icon { font-size: 14px; text-align: center; }
     .health-detail { font-size: 11px; color: var(--text-muted); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
 
+    /* ── Bad User mode ──────────────────────────────────────────────────────── */
+    .baduser-banner {
+      display: none;
+      background: rgba(248,81,73,.12);
+      border-bottom: 1px solid rgba(248,81,73,.3);
+      color: var(--red);
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+      padding: 6px 16px;
+      position: sticky;
+      top: 58px;
+      z-index: 99;
+    }
+    .baduser-banner.visible { display: block; }
+
+    .baduser-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    @media (max-width: 900px) { .baduser-layout { grid-template-columns: 1fr; } }
+    .baduser-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-r); padding: 20px 22px; }
+
+    .baduser-active-card {
+      background: var(--surface);
+      border: 2px solid var(--red);
+      border-radius: var(--card-r);
+      padding: 24px 28px;
+      box-shadow: 0 0 0 1px rgba(248,81,73,.15), var(--shadow);
+    }
+    .baduser-user-display {
+      font-size: 20px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .baduser-user-display .pulse-dot {
+      width: 12px; height: 12px; border-radius: 50%;
+      background: var(--red);
+      box-shadow: 0 0 8px var(--red);
+      animation: pulse 1.5s infinite;
+    }
+    .baduser-timer {
+      font-size: 28px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+    .baduser-progress {
+      width: 100%;
+      height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 18px;
+    }
+    .baduser-progress-fill {
+      height: 100%;
+      background: var(--red);
+      border-radius: 3px;
+      transition: width 1s linear;
+    }
+    .baduser-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .baduser-module-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 18px; }
+    .baduser-module-table th { text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); padding: 6px 10px; border-bottom: 1px solid var(--border); }
+    .baduser-module-table td { padding: 6px 10px; border-bottom: 1px solid rgba(48,54,61,.5); font-variant-numeric: tabular-nums; }
+
+    .baduser-note {
+      font-size: 12px;
+      color: var(--text-muted);
+      background: var(--surface2);
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin-top: 14px;
+      line-height: 1.5;
+    }
+
     /* ── Toast ───────────────────────────────────────────────────────────────── */
     #toast {
       position: fixed; bottom: 24px; right: 24px;
@@ -328,6 +410,7 @@
     <button class="tab-btn" data-tab="threats" onclick="switchTab('threats')">Threats &amp; Scenarios</button>
     <button class="tab-btn" data-tab="schedule" onclick="switchTab('schedule')">Schedule</button>
     <button class="tab-btn" data-tab="health" onclick="switchTab('health')">Health</button>
+    <button class="tab-btn" data-tab="baduser" onclick="switchTab('baduser')">Bad User</button>
   </nav>
 
   <div class="header-actions">
@@ -359,6 +442,8 @@
     </button>
   </div>
 </header>
+
+<div id="baduser-banner" class="baduser-banner"></div>
 
 <main>
 
@@ -563,6 +648,107 @@
 
 </div><!-- /tab-health -->
 
+<!-- ── Bad User tab ──────────────────────────────────────────────────────── -->
+<div id="tab-baduser" class="tab-content">
+
+  <!-- Inactive state — configuration form -->
+  <div id="baduser-config" style="max-width:560px;">
+    <div class="section-title" style="margin-bottom:18px;">Bad User Mode</div>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.6;">
+      Focus all log generation on a single user for a limited time. This causes the selected user to accumulate
+      concentrated suspicious activity across all modules, making them jump to the top of XSIAM UEBA risk scoring.
+      Normal modules should keep running to provide baseline traffic from other users.
+    </p>
+
+    <div class="baduser-panel">
+      <div class="sched-field">
+        <label>Department</label>
+        <select id="baduser-dept" class="sched-input" onchange="onBadUserDeptChange()">
+          <option value="">-- select department --</option>
+        </select>
+      </div>
+
+      <div class="sched-field">
+        <label>User</label>
+        <select id="baduser-user" class="sched-input" disabled>
+          <option value="">-- select department first --</option>
+        </select>
+      </div>
+
+      <div class="sched-field">
+        <label>Duration (minutes)</label>
+        <input type="number" id="baduser-duration" class="sched-input" min="1" max="480" step="1" value="15" />
+      </div>
+
+      <div class="sched-field">
+        <label>Threat Level</label>
+        <select id="baduser-level" class="sched-input"></select>
+      </div>
+
+      <div class="sched-field">
+        <label>Event Rate <span id="baduser-rate-disp" style="color:var(--accent);font-weight:600;">2.0 / sec</span></label>
+        <input type="range" id="baduser-rate-slider" class="rate-slider" min="0" max="100" step="1" value="65"
+               oninput="document.getElementById('baduser-rate-disp').textContent=epsLabel(sliderToEps(this.value))" />
+        <div class="rate-ticks"><span>Slow</span><span>Normal</span><span>Fast</span></div>
+      </div>
+
+      <button class="btn btn-danger" style="width:100%;margin-top:8px;" onclick="startBadUser()">
+        Start Bad User Mode
+      </button>
+      <div class="result-msg" id="baduser-start-result"></div>
+
+      <div class="baduser-note">
+        Keep normal modules running for background baseline traffic. UEBA scores users by comparing their activity
+        against the baseline — one concentrated bad actor among normal users is the realistic demo scenario.
+      </div>
+    </div>
+  </div>
+
+  <!-- Active state — live status -->
+  <div id="baduser-active" style="display:none;">
+    <div class="section-title" style="margin-bottom:18px;">Bad User Mode — Active</div>
+
+    <div class="baduser-active-card">
+      <div class="baduser-user-display">
+        <span class="pulse-dot"></span>
+        <span id="baduser-active-name">—</span>
+        <span style="font-size:13px;font-weight:400;color:var(--text-muted);" id="baduser-active-dept"></span>
+      </div>
+
+      <div class="baduser-timer" id="baduser-timer">--:--</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Time Remaining</div>
+      <div class="baduser-progress">
+        <div class="baduser-progress-fill" id="baduser-progress-fill" style="width:0%"></div>
+      </div>
+
+      <div class="baduser-stats">
+        <div class="mini-metric">
+          <div class="m-val" id="baduser-stat-logs">0</div>
+          <div class="m-label">Total Logs</div>
+        </div>
+        <div class="mini-metric">
+          <div class="m-val threat" id="baduser-stat-threats">0</div>
+          <div class="m-label">Threats</div>
+        </div>
+        <div class="mini-metric">
+          <div class="m-val accent" id="baduser-stat-level">—</div>
+          <div class="m-label">Threat Level</div>
+        </div>
+      </div>
+
+      <table class="baduser-module-table" id="baduser-module-table">
+        <thead><tr><th>Module</th><th>Logs</th><th>Threats</th></tr></thead>
+        <tbody id="baduser-module-tbody"></tbody>
+      </table>
+
+      <button class="btn btn-danger" style="width:100%;" onclick="stopBadUser()">
+        Stop Bad User Mode
+      </button>
+    </div>
+  </div>
+
+</div><!-- /tab-baduser -->
+
 </main>
 
 <div id="toast"></div>
@@ -745,6 +931,7 @@
       const [metrics] = await Promise.all([
         api('/api/metrics'),
         updateChart(),
+        pollBadUserStatus(),
       ]);
       modules = metrics.per_module;
       renderAll(metrics);
@@ -1352,6 +1539,135 @@
     }
   }
 
+  // ── Bad User mode ─────────────────────────────────────────────────────────
+  let _badUserGroups = {};   // {dept: [{username, display_name, ...}]}
+
+  async function loadBadUserUsers() {
+    try {
+      _badUserGroups = await api('/api/baduser/users');
+      const deptSel = document.getElementById('baduser-dept');
+      deptSel.innerHTML = '<option value="">-- select department --</option>' +
+        Object.keys(_badUserGroups).map(d =>
+          `<option value="${escHtml(d)}">${escHtml(d)} (${_badUserGroups[d].length})</option>`
+        ).join('');
+    } catch (e) {
+      console.error('Failed to load bad user list:', e);
+    }
+  }
+
+  function onBadUserDeptChange() {
+    const dept = document.getElementById('baduser-dept').value;
+    const userSel = document.getElementById('baduser-user');
+    if (!dept || !_badUserGroups[dept]) {
+      userSel.innerHTML = '<option value="">-- select department first --</option>';
+      userSel.disabled = true;
+      return;
+    }
+    const users = _badUserGroups[dept];
+    userSel.innerHTML = '<option value="">-- select user --</option>' +
+      users.map(u => `<option value="${escHtml(u.username)}">${escHtml(u.display_name)} (${escHtml(u.username)})</option>`).join('');
+    userSel.disabled = false;
+  }
+
+  async function startBadUser() {
+    const username = document.getElementById('baduser-user').value;
+    const resultEl = document.getElementById('baduser-start-result');
+    if (!username) {
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = 'Select a department and user first.';
+      return;
+    }
+    const duration = parseFloat(document.getElementById('baduser-duration').value) || 15;
+    const level = document.getElementById('baduser-level').value;
+    const interval = 1 / sliderToEps(document.getElementById('baduser-rate-slider').value);
+
+    resultEl.style.color = 'var(--text-muted)';
+    resultEl.textContent = 'Starting...';
+
+    try {
+      await api('/api/baduser/start', 'POST', {
+        username,
+        duration_minutes: duration,
+        threat_level: level,
+        event_interval: interval,
+      });
+      resultEl.textContent = '';
+      showToast(`Bad User started: ${username}`);
+    } catch (e) {
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = `Error: ${e.message}`;
+    }
+  }
+
+  async function stopBadUser() {
+    try {
+      await api('/api/baduser/stop', 'POST');
+      showToast('Bad User mode stopped');
+    } catch (e) {
+      showToast(`Error stopping bad user: ${e.message}`, 4000);
+    }
+  }
+
+  function fmtTimer(secs) {
+    if (secs <= 0) return '0:00';
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  async function pollBadUserStatus() {
+    try {
+      const data = await api('/api/baduser/status');
+      const banner = document.getElementById('baduser-banner');
+      const configDiv = document.getElementById('baduser-config');
+      const activeDiv = document.getElementById('baduser-active');
+
+      if (!data.active) {
+        banner.classList.remove('visible');
+        if (configDiv) configDiv.style.display = '';
+        if (activeDiv) activeDiv.style.display = 'none';
+        return;
+      }
+
+      // Banner (visible on all tabs)
+      banner.textContent = `BAD USER ACTIVE: ${data.display_name} (${data.username}) — ${data.department} — ${fmtTimer(data.remaining_seconds)} remaining`;
+      banner.classList.add('visible');
+
+      // Toggle config/active views
+      if (configDiv) configDiv.style.display = 'none';
+      if (activeDiv) activeDiv.style.display = '';
+
+      // Update active display
+      document.getElementById('baduser-active-name').textContent =
+        `${data.display_name} (${data.username})`;
+      document.getElementById('baduser-active-dept').textContent =
+        `— ${data.department}`;
+      document.getElementById('baduser-timer').textContent =
+        fmtTimer(data.remaining_seconds);
+      document.getElementById('baduser-stat-logs').textContent = fmt(data.total_logs);
+      document.getElementById('baduser-stat-threats').textContent = fmt(data.total_threats);
+      document.getElementById('baduser-stat-level').textContent = data.threat_level;
+
+      // Progress bar
+      const pct = data.duration_seconds > 0
+        ? Math.min(100, (data.elapsed_seconds / data.duration_seconds) * 100)
+        : 0;
+      document.getElementById('baduser-progress-fill').style.width = `${pct.toFixed(1)}%`;
+
+      // Per-module table
+      const tbody = document.getElementById('baduser-module-tbody');
+      const entries = Object.entries(data.per_module || {}).sort((a, b) => b[1].logs - a[1].logs);
+      if (entries.length) {
+        tbody.innerHTML = entries.map(([name, m]) =>
+          `<tr><td>${escHtml(name)}</td><td>${fmt(m.logs)}</td><td style="color:var(--red)">${fmt(m.threats)}</td></tr>`
+        ).join('');
+      } else {
+        tbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-muted);text-align:center;">Waiting for data...</td></tr>';
+      }
+
+    } catch (e) { /* silent */ }
+  }
+
   // ── Bootstrap ─────────────────────────────────────────────────────────────
   async function init() {
     requestNotificationPermission();
@@ -1370,6 +1686,14 @@
       }
       loadScenarios();
       updateSchedFields();
+      // Bad User tab setup
+      loadBadUserUsers();
+      const badLevelSel = document.getElementById('baduser-level');
+      if (badLevelSel) {
+        badLevelSel.innerHTML = threatLevels.map(l =>
+          `<option value="${l}"${l === 'Extreme' ? ' selected' : ''}>${l}</option>`
+        ).join('');
+      }
       _pollInterval = setInterval(poll, 2000);
     } catch (e) {
       showToast('Failed to connect to API: ' + e.message, 5000);
