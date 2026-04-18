@@ -254,7 +254,10 @@ def _msg_4634(d):
         f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
         f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n"
         f"\tLogon ID:\t\t{d.get('TargetLogonId','')}\r\n\r\n"
-        f"Logon Type:\t\t\t{d.get('LogonType','')}"
+        f"Logon Type:\t\t\t{d.get('LogonType','')}\r\n\r\n"
+        "This event is generated when a logon session is destroyed. It may be positively "
+        "correlated with a logon event using the Logon ID value. Logon IDs are only unique "
+        "between reboots on the same computer."
     )
 
 
@@ -1842,12 +1845,22 @@ def _generate_scenario_event(scenario_event, config, context):
         return json.dumps(_build_4740(user, config, source_workstation=user["hostname"])), "lockout"
     if ev == "KERBEROS_TGT":
         return json.dumps(_build_4768(user, config)), "kerberos_tgt"
-    if ev == "BRUTE_FORCE":
-        result = _threat_brute_force(config, session_context)
-        return (result, "brute_force") if result else None
-    if ev == "KERBEROASTING":
-        result = _threat_kerberoasting(config, session_context)
-        return (result, "kerberoasting") if result else None
+    # Dispatch to named threat generators
+    _threat_dispatch = {
+        "BRUTE_FORCE":                 _threat_brute_force,
+        "PASSWORD_SPRAY":              _threat_password_spray,
+        "KERBEROASTING":               _threat_kerberoasting,
+        "AS_REP_ROASTING":             _threat_as_rep_roasting,
+        "PASS_THE_HASH":               _threat_pass_the_hash,
+        "RDP_BRUTEFORCE":              _threat_rdp_bruteforce,
+        "ACCOUNT_LOCKOUT":             _threat_account_lockout,
+        "ACCOUNT_LOCKOUT_THEN_SUCCESS":_threat_account_lockout_then_success,
+        "EXPLICIT_CREDENTIAL_ABUSE":   _threat_explicit_credential_abuse,
+        "ANOMALOUS_WORKSTATION_LOGON": _threat_anomalous_workstation_logon,
+    }
+    if ev in _threat_dispatch:
+        result = _threat_dispatch[ev](config, session_context)
+        return (result, ev.lower()) if result else None
     return None
 
 
