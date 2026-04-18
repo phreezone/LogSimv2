@@ -36,20 +36,17 @@ filebeat.inputs:
           overwrite_keys: true
           add_error_key: true
 
+    processors:
+      - add_fields:
+          fields:
+            vendor: "microsoft"
+            product: "windows"
+      - dissect:
+          tokenizer: '%{}\filebeat_output\%{host.name}\security.json'
+          field: "log.file.path"
+          target_prefix: ""
+          ignore_failure: true
+
     file_identity.native: ~
     prospector.scanner:
       check_interval: 5s
-
-# ── Processors ─────────────────────────────────────────────────────────────
-# Identify vendor/product so XSIAM routes to microsoft_windows_raw.
-# IMPORTANT: do NOT use the "target" attribute — XSIAM requires default fields.
-processors:
-  - add_fields:
-      fields:
-        vendor: microsoft
-        product: windows
-  - dissect:
-      tokenizer: '%{}\filebeat_output\%{host.name}\security.json'
-      field: "log.file.path"
-      target_prefix: ""
-      ignore_failure: true
