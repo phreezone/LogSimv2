@@ -198,13 +198,18 @@ _SID_ANON         = "S-1-0-0"
 # Domain RID counter base – synthetic but realistic-looking domain SID prefix
 _SYNTH_DOMAIN_SID = "S-1-5-21-3457937927-2839227994-823803824"
 
-# Process names and paths that commonly appear in logon event ProcessName
-_LOGON_PROCESSES = [
-    ("0x1d4", "C:\\Windows\\System32\\winlogon.exe"),
-    ("0x248", "C:\\Windows\\System32\\svchost.exe"),
-    ("0x34c", "C:\\Windows\\System32\\lsass.exe"),
-    ("0x5f4", "C:\\Windows\\System32\\services.exe"),
-]
+# Process names/paths keyed by logon type category.
+# Windows uses specific processes for each logon scenario.
+_LOGON_PROCESSES_BY_TYPE = {
+    "interactive": [("0x1d4", "C:\\Windows\\System32\\winlogon.exe")],
+    "service":     [("0x248", "C:\\Windows\\System32\\svchost.exe"),
+                    ("0x5f4", "C:\\Windows\\System32\\services.exe")],
+    "network":     [("0x34c", "C:\\Windows\\System32\\lsass.exe")],
+    "unlock":      [("0x1d4", "C:\\Windows\\System32\\winlogon.exe")],
+    "remote":      [("0x1d4", "C:\\Windows\\System32\\winlogon.exe")],
+    "cached":      [("0x1d4", "C:\\Windows\\System32\\winlogon.exe")],
+}
+_LOGON_PROCESSES_DEFAULT = [("0x34c", "C:\\Windows\\System32\\lsass.exe")]
 
 # LogonProcessName values Windows emits for various scenarios
 _LOGON_PROCESS_NAMES = {
@@ -473,13 +478,13 @@ def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
         lm_pkg = "-"
         key_len = "0"
 
-    lp_name = random.choice(_LOGON_PROCESS_NAMES.get(
-        {2: "interactive", 3: "network", 4: "service", 5: "service",
-         7: "unlock", 10: "remote", 11: "cached",
-         12: "remote", 13: "cached"}.get(logon_type, "interactive"),
-        ["User32"]))
+    _lt_cat = {2: "interactive", 3: "network", 4: "service", 5: "service",
+               7: "unlock", 10: "remote", 11: "cached",
+               12: "remote", 13: "cached"}.get(logon_type, "interactive")
 
-    proc_id, proc_name = random.choice(_LOGON_PROCESSES)
+    lp_name = random.choice(_LOGON_PROCESS_NAMES.get(_lt_cat, ["User32"]))
+    proc_id, proc_name = random.choice(
+        _LOGON_PROCESSES_BY_TYPE.get(_lt_cat, _LOGON_PROCESSES_DEFAULT))
 
     target_logon_id = target_logon_id or _new_logon_id()
     logon_guid = logon_guid or _new_logon_guid()
@@ -576,10 +581,10 @@ def _build_4625(user_info, config, *, logon_type=3, auth_pkg=None,
         match = next((t for t in _FAILURE_REASONS if t[0].lower() == status.lower()), None)
         failure_reason = failure_reason or (match[2] if match else "%%2304")
 
-    proc_id, proc_name = random.choice(_LOGON_PROCESSES)
-
     lp_category = {2: "interactive", 3: "network", 4: "service", 5: "service",
                    7: "unlock", 10: "remote", 11: "cached"}.get(logon_type, "network")
+    proc_id, proc_name = random.choice(
+        _LOGON_PROCESSES_BY_TYPE.get(lp_category, _LOGON_PROCESSES_DEFAULT))
     lp_name = random.choice(_LOGON_PROCESS_NAMES.get(lp_category, ["NtLmSsp "]))
 
     event_data = {
