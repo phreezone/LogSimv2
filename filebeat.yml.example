@@ -36,19 +36,18 @@ filebeat.inputs:
           overwrite_keys: true
           add_error_key: true
 
-    processors:
-      - add_fields:
-          fields:
-            vendor: microsoft
-            product: windows
-
     file_identity.native: ~
     prospector.scanner:
       check_interval: 5s
 
-# Extract the simulated hostname from the directory path so each file
-# appears to come from a different Windows system.
+# ── Processors ─────────────────────────────────────────────────────────────
+# Identify vendor/product so XSIAM routes to microsoft_windows_raw.
+# IMPORTANT: do NOT use the "target" attribute — XSIAM requires default fields.
 processors:
+  - add_fields:
+      fields:
+        vendor: microsoft
+        product: windows
   - dissect:
       tokenizer: '%{}\filebeat_output\%{host.name}\security.json'
       field: "log.file.path"
