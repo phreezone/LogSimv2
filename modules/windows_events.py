@@ -226,7 +226,23 @@ def _msg_4625(d):
         f"\tAuthentication Package:\t{d.get('AuthenticationPackageName','')}\r\n"
         f"\tTransited Services:\t{d.get('TransmittedServices','')}\r\n"
         f"\tPackage Name (NTLM only):\t{d.get('LmPackageName','')}\r\n"
-        f"\tKey Length:\t\t{d.get('KeyLength','')}"
+        f"\tKey Length:\t\t{d.get('KeyLength','')}\r\n\r\n"
+        "The subject fields indicate the account on the local system which requested "
+        "the logon. This is most commonly a service such as the Server service, or a "
+        "local process such as Winlogon.exe or Services.exe.\r\n\r\n"
+        "The Logon Type field indicates the kind of logon that was requested. The most "
+        "common types are 2 (interactive) and 3 (network).\r\n\r\n"
+        "The Process Information fields indicate which account and process on the system "
+        "requested the logon.\r\n\r\n"
+        "The Network Information fields indicate where a remote logon request originated. "
+        "Workstation name is not always available and may be left blank in some cases.\r\n\r\n"
+        "The authentication information fields provide detailed information about this "
+        "specific logon request.\r\n"
+        "\t- Transited services indicate which intermediate services have participated in "
+        "this logon request.\r\n"
+        "\t- Package name indicates which sub-protocol was used among the NTLM protocols.\r\n"
+        "\t- Key length indicates the length of the generated session key. This will be 0 "
+        "if no session key was requested."
     )
 
 
@@ -299,15 +315,21 @@ def _msg_4740(d):
 
 
 def _msg_4768(d):
+    domain_dns = d.get('TargetDomainName', '')
+    domain_nb = domain_dns.split('.')[0].upper() if '.' in domain_dns else domain_dns
+    acct = d.get('TargetUserName', '').split('@')[0]
+    user_id = f"{domain_nb}\\{acct}" if domain_nb else d.get('TargetSid', '')
+    svc_name = d.get('ServiceName', '')
+    svc_id = f"{domain_nb}\\{svc_name}" if domain_nb else d.get('ServiceSid', '')
     return (
         "A Kerberos authentication ticket (TGT) was requested.\r\n\r\n"
         "Account Information:\r\n"
         f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
-        f"\tSupplied Realm Name:\t{d.get('TargetDomainName','')}\r\n"
-        f"\tUser ID:\t\t\t{d.get('TargetSid','')}\r\n\r\n"
+        f"\tSupplied Realm Name:\t{domain_dns}\r\n"
+        f"\tUser ID:\t\t\t{user_id}\r\n\r\n"
         "Service Information:\r\n"
-        f"\tService Name:\t\t{d.get('ServiceName','')}\r\n"
-        f"\tService ID:\t\t{d.get('ServiceSid','')}\r\n\r\n"
+        f"\tService Name:\t\t{svc_name}\r\n"
+        f"\tService ID:\t\t{svc_id}\r\n\r\n"
         "Network Information:\r\n"
         f"\tClient Address:\t\t{d.get('IpAddress','')}\r\n"
         f"\tClient Port:\t\t{d.get('IpPort','')}\r\n\r\n"
@@ -319,7 +341,11 @@ def _msg_4768(d):
         "Certificate Information:\r\n"
         f"\tCertificate Issuer Name:\t\t{d.get('CertIssuerName','')}\r\n"
         f"\tCertificate Serial Number:\t{d.get('CertSerialNumber','')}\r\n"
-        f"\tCertificate Thumbprint:\t\t{d.get('CertThumbprint','')}"
+        f"\tCertificate Thumbprint:\t\t{d.get('CertThumbprint','')}\r\n\r\n"
+        "Certificate information is only provided if a certificate was used for "
+        "pre-authentication.\r\n\r\n"
+        "Pre-authentication types, ticket options, encryption types and result codes "
+        "are defined in RFC 4120."
     )
 
 
@@ -340,7 +366,15 @@ def _msg_4769(d):
         f"\tTicket Options:\t\t{d.get('TicketOptions','')}\r\n"
         f"\tTicket Encryption Type:\t{d.get('TicketEncryptionType','')}\r\n"
         f"\tFailure Code:\t\t{d.get('Status','')}\r\n"
-        f"\tTransited Services:\t{d.get('TransmittedServices','')}"
+        f"\tTransited Services:\t{d.get('TransmittedServices','')}\r\n\r\n"
+        "This event is generated every time access is requested to a resource such as a "
+        "computer or a Windows service.  The service name indicates the resource to which "
+        "access was requested.\r\n\r\n"
+        "This event can be correlated with Windows logon events by comparing the Logon GUID "
+        "fields in each event.  The logon event occurs on the machine that was accessed, "
+        "which is often a different machine than the domain controller which issued the "
+        "service ticket.\r\n\r\n"
+        "Ticket options, encryption types, and failure codes are defined in RFC 4120."
     )
 
 
@@ -844,8 +878,8 @@ def _build_4625(user_info, config, *, logon_type=3, auth_pkg=None,
         "KeyLength":                 "0",
         "ProcessId":                 proc_id,
         "ProcessName":               proc_name,
-        "IpAddress":                 ip,
-        "IpPort":                    port,
+        "IpAddress":                 ip if logon_type in (3, 10) else ("127.0.0.1" if logon_type in (2, 7) else "-"),
+        "IpPort":                    str(random.randint(49152, 65535)) if logon_type in (3, 10) else "0",
     }
 
     with _STATE_LOCK:
