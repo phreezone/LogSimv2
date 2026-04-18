@@ -41,8 +41,12 @@ filebeat.inputs:
           overwrite_keys: true
           add_error_key: true
 
-    # Tag so the Broker can route to the correct dataset
-    tags: ["microsoft", "windows", "security"]
+    # Route events to the microsoft_windows_raw dataset in XSIAM
+    processors:
+      - add_fields:
+          fields:
+            vendor: microsoft
+            product: windows
 
     # Filebeat reads from the end by default; start from the beginning
     # so existing events are picked up on first run.
