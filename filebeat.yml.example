@@ -1,25 +1,24 @@
 # ============================================================================
-# Filebeat configuration for LogSim Windows Event Log module
+# XDR Collector (XDRC) profile for LogSim Windows Event Log module
 # ============================================================================
 #
-# This config tells Filebeat to watch the JSONL files that LogSim writes
-# when the windows_events module is set to "filebeat" transport, and forward
-# them to an XSIAM Broker VM.
+# The XDR Collector is Palo Alto's custom Filebeat fork that ships with
+# managed connectivity to XSIAM — no output/SSL/logging config needed.
+# Push this YAML as a collector profile from the XSIAM console.
+#
+# Docs: https://docs-cortex.paloaltonetworks.com/r/Cortex-XDR/Cortex-XDR-3.x-Documentation/XDR-Collector-XDRC
 #
 # Each simulated host gets its own subdirectory under filebeat_output/:
 #   filebeat_output/WKS001.examplecorp.local/security.json
 #   filebeat_output/WKS002.examplecorp.local/security.json
 #   filebeat_output/DC01.examplecorp.local/security.json
 #
-# Filebeat reads each line as a JSON object and ships it with the
-# subdirectory name as the host identifier.
-#
 # Usage:
 #   1. Set "transport": "filebeat" in config.json under windows_events_config
 #   2. Start LogSim — it writes JSONL files into filebeat_output/
-#   3. Start Filebeat with this config:
-#        filebeat -e -c filebeat.yml
-#   4. Events flow to XSIAM Broker VM → microsoft_windows_raw dataset
+#   3. Create an XDRC profile in XSIAM with this YAML
+#   4. Install XDRC on the LogSim host and assign this profile
+#   5. Events flow to XSIAM → microsoft_windows_raw dataset
 # ============================================================================
 
 filebeat.inputs:
@@ -28,71 +27,30 @@ filebeat.inputs:
     id: logsim-windows-events
     enabled: true
 
-    # Watch all security.json files under the LogSim output directory.
-    # Each subdirectory represents a different simulated Windows host.
     paths:
-      - ./filebeat_output/*/security.json
+      - c:\LogSim\filebeat_output\*\security.json
 
-    # Parse each line as a JSON object.  The fields are merged into the
-    # top level of the Filebeat event so the Broker sees them directly.
     parsers:
       - ndjson:
           target: ""
           overwrite_keys: true
           add_error_key: true
 
-    # Route events to the microsoft_windows_raw dataset in XSIAM
     processors:
       - add_fields:
           fields:
             vendor: microsoft
             product: windows
 
-    # Filebeat reads from the end by default; start from the beginning
-    # so existing events are picked up on first run.
     file_identity.native: ~
     prospector.scanner:
       check_interval: 5s
 
-# ── Processors ─────────────────────────────────────────────────────────────
 # Extract the simulated hostname from the directory path so each file
 # appears to come from a different Windows system.
-
 processors:
   - dissect:
-      tokenizer: "%{}/filebeat_output/%{host.name}/security.json"
+      tokenizer: '%{}\filebeat_output\%{host.name}\security.json'
       field: "log.file.path"
       target_prefix: ""
       ignore_failure: true
-
-# ── Output to XSIAM Broker VM ─────────────────────────────────────────────
-# Replace with your Broker VM's address and credentials.
-
-output.logstash:
-  hosts: ["<your-broker-vm>:5044"]
-  ssl.enabled: true
-  ssl.certificate_authorities: ["/path/to/broker-ca.pem"]
-  # If your Broker uses client certificates:
-  # ssl.certificate: "/path/to/client.pem"
-  # ssl.key: "/path/to/client-key.pem"
-
-# Alternative: output directly to XSIAM HTTP collector (no Broker needed)
-# Uncomment below and comment out the logstash output above.
-#
-# output.elasticsearch:
-#   hosts: ["https://api-<tenant>.xdr.us.paloaltonetworks.com"]
-#   path: "/logs/v1/event"
-#   headers:
-#     Authorization: "<your-http-collector-api-key>"
-#     x-palo-alto-networks-vendor: "Microsoft"
-#     x-palo-alto-networks-product: "Windows"
-#   protocol: "https"
-
-# ── Logging ────────────────────────────────────────────────────────────────
-
-logging.level: info
-logging.to_files: true
-logging.files:
-  path: /var/log/filebeat
-  name: filebeat
-  keepfiles: 3
