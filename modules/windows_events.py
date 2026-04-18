@@ -504,7 +504,7 @@ def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
         "SubjectUserSid":            subj_sid,
         "SubjectUserName":           subj_name,
         "SubjectDomainName":         subj_domain,
-        "SubjectLogonId":            "0x3e7",   # SYSTEM
+        "SubjectLogonId":            "0x3E7",   # SYSTEM
         "TargetUserSid":             _stable_user_sid(user_info["username"]),
         "TargetUserName":            user_info["username"],
         "TargetDomainName":          domain,
@@ -519,7 +519,7 @@ def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
         "KeyLength":                 key_len,
         "ProcessId":                 proc_id,
         "ProcessName":               proc_name,
-        "IpAddress":                 ip if logon_type in (3, 10) else ("127.0.0.1" if logon_type == 2 else "-"),
+        "IpAddress":                 ip if logon_type in (3, 10) else ("127.0.0.1" if logon_type in (2, 7) else "-"),
         "IpPort":                    port if logon_type in (3, 10) else "0",
         "ImpersonationLevel":        random.choice(["%%1833", "%%1834", "%%1834", "%%1834"]),
         "RestrictedAdminMode":       ("Yes" if random.random() < 0.1 else "-") if logon_type == 10 else "-",
@@ -591,7 +591,7 @@ def _build_4625(user_info, config, *, logon_type=3, auth_pkg=None,
         "SubjectUserSid":            _SID_SYSTEM,
         "SubjectUserName":           computer.split(".")[0].upper() + "$",
         "SubjectDomainName":         domain,
-        "SubjectLogonId":            "0x3e7",
+        "SubjectLogonId":            "0x3E7",
         "TargetUserSid":             _SID_ANON,
         "TargetUserName":            user_info["username"],
         "TargetDomainName":          domain,
@@ -705,7 +705,7 @@ def _build_4740(user_info, config, *, source_workstation=None, ts=None) -> dict:
         "SubjectUserSid":     _SID_SYSTEM,
         "SubjectUserName":    _get_dc_short(config) + "$",
         "SubjectDomainName":  domain,
-        "SubjectLogonId":     "0x3e7",
+        "SubjectLogonId":     "0x3E7",
     }
     return _build_event(4740, dc_host, event_data, success=True, ts=ts,
                         message_tail=f"User={user_info['username']} From={caller}")
@@ -722,21 +722,38 @@ def _build_4768(user_info, config, *, ip_override=None, encryption=None,
     success = (status == "0x0")
     dns_domain_upper = _get_dns_domain(config).upper()
     svc_name = "krbtgt" if success else f"krbtgt/{dns_domain_upper}"
+    enc_desc = {"0x12": "AES256-CTS-HMAC-SHA1-96", "0x11": "AES128-CTS-HMAC-SHA1-96",
+                "0x17": "RC4-HMAC", "0x3": "DES-CBC-MD5"}.get(enc, enc)
+    dc_supported = "0x1F (DES, RC4, AES128-SHA96, AES256-SHA96)"
+    client_enc_types = ("\n\t\tAES256-CTS-HMAC-SHA1-96\n\t\tAES128-CTS-HMAC-SHA1-96"
+                        "\n\t\tRC4-HMAC-NT\n\t\tRC4-HMAC-NT-EXP\n\t\tRC4-HMAC-OLD-EXP")
     event_data = {
-        "TargetUserName":         user_info["username"],
-        "TargetDomainName":       dns_domain_upper,
-        "TargetSid":              _stable_user_sid(user_info["username"]) if success else _SID_ANON,
-        "ServiceName":            svc_name,
-        "ServiceSid":             f"{_SYNTH_DOMAIN_SID}-502" if success else _SID_ANON,
-        "TicketOptions":          "0x40810010",
-        "Status":                 status,
-        "TicketEncryptionType":   enc,
-        "PreAuthType":            "2",
-        "IpAddress":              f"::ffff:{ip}" if ip and "." in str(ip) else ip,
-        "IpPort":                 str(random.randint(49152, 65535)),
-        "CertIssuerName":         cert_issuer,
-        "CertSerialNumber":       cert_serial,
-        "CertThumbprint":         cert_thumbprint,
+        "TargetUserName":                   f"{user_info['username']}@{dns_domain_upper}",
+        "TargetDomainName":                 dns_domain_upper,
+        "TargetSid":                        _stable_user_sid(user_info["username"]) if success else _SID_ANON,
+        "ServiceName":                      svc_name,
+        "ServiceSid":                       f"{_SYNTH_DOMAIN_SID}-502" if success else _SID_ANON,
+        "TicketOptions":                    "0x40810000",
+        "Status":                           status,
+        "TicketEncryptionType":             enc,
+        "PreAuthType":                      "2",
+        "IpAddress":                        f"::ffff:{ip}" if ip and "." in str(ip) else ip,
+        "IpPort":                           "0",
+        "CertIssuerName":                   cert_issuer,
+        "CertSerialNumber":                 cert_serial,
+        "CertThumbprint":                   cert_thumbprint,
+        "LogonGuid":                        _new_logon_guid(),
+        "TransmittedServices":              "-",
+        "DCSupportedEncryptionTypes":       dc_supported,
+        "AccountSupportedEncryptionTypes":  "N/A",
+        "ServiceSupportedEncryptionTypes":  dc_supported,
+        "ServiceAvailableKeys":             "AES-SHA1, RC4",
+        "DCAvailableKeys":                  "AES-SHA1, RC4",
+        "ClientAdvertizedEncryptionTypes":  client_enc_types,
+        "SessionKeyEncryptionType":         enc,
+        "RequestTicketHash":                "N/A",
+        "ResponseTicketHash":               "N/A",
+        "AccountAvailableKeys":             "N/A",
     }
     return _build_event(4768, dc_host, event_data, success=success, ts=ts,
                         message_tail=f"User={user_info['username']} Enc={enc} Status={status}")
@@ -760,11 +777,13 @@ def _build_4769(user_info, config, *, service_spn=None, encryption=None,
         "TicketOptions":         "0x40810000",
         "TicketEncryptionType":  enc if success else "0xFFFFFFFF",
         "IpAddress":             f"::ffff:{ip}" if ip and "." in str(ip) else ip,
-        "IpPort":                str(random.randint(49152, 65535)),
+        "IpPort":                "0",
         "Status":                status,
         "LogonGuid":             _new_logon_guid(),
         "TransmittedServices":   "-",
     }
+    # 4769 on newer DCs may also include encryption detail fields
+    # but they are less consistently present than in 4768
     return _build_event(4769, dc_host, event_data, success=success, ts=ts,
                         message_tail=f"User={user_info['username']} Service={spn} Enc={enc}")
 
@@ -902,6 +921,53 @@ def _benign_service_logon(config, session_context):
                                   auth_pkg=_NEG_PACKAGE))
 
 
+def _benign_dc_self_logon(config, session_context):
+    """DC self-authentication — the background noise DCs constantly generate.
+
+    Produces a mix of:
+      - Type 5 service logon (svchost.exe starting a service as SYSTEM/machine acct)
+      - Type 7 unlock (admin unlocking DC console)
+      - Self-TGT request (DC's machine account requesting its own krbtgt)
+    """
+    dc_host = _get_dc_hostname(config)
+    dc_short = _get_dc_short(config)
+    domain = _get_domain(config)
+    dc_machine_acct = dc_short + "$"
+    dc_user = {
+        "username": dc_machine_acct,
+        "hostname": dc_host,
+        "ip": "127.0.0.1",
+    }
+    events = []
+    t = time.time()
+
+    scenario = random.choices(
+        ["service", "unlock", "tgt"],
+        weights=[50, 20, 30], k=1)[0]
+
+    if scenario == "service":
+        svc = random.choice(_SERVICE_ACCOUNT_SAMS + [dc_machine_acct, "SYSTEM"])
+        svc_user = {**dc_user, "username": svc}
+        events.append(json.dumps(
+            _build_4624(svc_user, config, logon_type=5,
+                        auth_pkg=_NEG_PACKAGE,
+                        workstation_override=dc_host,
+                        ip_override="-", ts=t)))
+    elif scenario == "unlock":
+        admin_user = {**dc_user, "username": "Administrator"}
+        events.append(json.dumps(
+            _build_4624(admin_user, config, logon_type=7,
+                        auth_pkg=_NEG_PACKAGE,
+                        workstation_override=dc_host,
+                        ip_override="127.0.0.1", ts=t)))
+    else:
+        events.append(json.dumps(
+            _build_4768(dc_user, config,
+                        ip_override="::1", ts=t)))
+
+    return events
+
+
 def _benign_scheduled_task_logon(config, session_context):
     """Scheduled task fires (LogonType 4 – Batch)."""
     u = _pick_windows_user(session_context)
@@ -978,6 +1044,7 @@ _BENIGN_WEIGHTS = {
     "ntlm_validation":        4,
     "explicit_cred_runas":    1,
     "password_typo":          2,
+    "dc_self_logon":          8,
 }
 
 _BENIGN_GENERATORS = {
@@ -992,6 +1059,7 @@ _BENIGN_GENERATORS = {
     "ntlm_validation":      _benign_ntlm_validation,
     "explicit_cred_runas":  _benign_explicit_cred_runas,
     "password_typo":        _benign_password_typo,
+    "dc_self_logon":        _benign_dc_self_logon,
 }
 
 
