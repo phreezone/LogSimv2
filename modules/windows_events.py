@@ -127,21 +127,266 @@ _EVENT_META = {
     4776: {"task": 14336, "category": "Credential Validation", "version": 0, "outcome": "success"},
 }
 
-# Per-event human-readable message templates (abbreviated; Windows renders
-# the full multi-line description from the provider manifest — we emit the
-# first line + a compact key=value tail so XSIAM correlation on Message still
-# works).  Full EventData is always present as individual fields.
-_EVENT_MSG_TITLE = {
-    4624: "An account was successfully logged on.",
-    4625: "An account failed to log on.",
-    4634: "An account was logged off.",
-    4647: "User initiated logoff:",
-    4648: "A logon was attempted using explicit credentials.",
-    4740: "A user account was locked out.",
-    4768: "A Kerberos authentication ticket (TGT) was requested.",
-    4769: "A Kerberos service ticket was requested.",
-    4771: "Kerberos pre-authentication failed.",
-    4776: "The computer attempted to validate the credentials for an account.",
+def _format_message(event_id: int, ed: dict) -> str:
+    """Build the full Windows-style message text for a given event ID."""
+    d = ed
+    _b = _MSG_BUILDERS.get(event_id)
+    if _b:
+        return _b(d)
+    return f"Event ID {event_id}"
+
+
+def _msg_4624(d):
+    return (
+        "An account was successfully logged on.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Logon Information:\r\n"
+        f"\tLogon Type:\t\t{d.get('LogonType','')}\r\n"
+        f"\tRestricted Admin Mode:\t{d.get('RestrictedAdminMode','-')}\r\n"
+        f"\tVirtual Account:\t\t{d.get('VirtualAccount','')}\r\n"
+        f"\tElevated Token:\t\t{d.get('ElevatedToken','')}\r\n\r\n"
+        f"Impersonation Level:\t\t{d.get('ImpersonationLevel','')}\r\n\r\n"
+        "New Logon:\r\n"
+        f"\tSecurity ID:\t\t{d.get('TargetUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('TargetLogonId','')}\r\n"
+        f"\tLinked Logon ID:\t\t{d.get('TargetLinkedLogonId','0x0')}\r\n"
+        f"\tNetwork Account Name:\t{d.get('TargetOutboundUserName','-')}\r\n"
+        f"\tNetwork Account Domain:\t{d.get('TargetOutboundDomainName','-')}\r\n"
+        f"\tLogon GUID:\t\t{d.get('LogonGuid','')}\r\n\r\n"
+        "Process Information:\r\n"
+        f"\tProcess ID:\t\t{d.get('ProcessId','')}\r\n"
+        f"\tProcess Name:\t\t{d.get('ProcessName','')}\r\n\r\n"
+        "Network Information:\r\n"
+        f"\tWorkstation Name:\t{d.get('WorkstationName','')}\r\n"
+        f"\tSource Network Address:\t{d.get('IpAddress','')}\r\n"
+        f"\tSource Port:\t\t{d.get('IpPort','')}\r\n\r\n"
+        "Detailed Authentication Information:\r\n"
+        f"\tLogon Process:\t\t{d.get('LogonProcessName','')}\r\n"
+        f"\tAuthentication Package:\t{d.get('AuthenticationPackageName','')}\r\n"
+        f"\tTransited Services:\t{d.get('TransmittedServices','')}\r\n"
+        f"\tPackage Name (NTLM only):\t{d.get('LmPackageName','')}\r\n"
+        f"\tKey Length:\t\t{d.get('KeyLength','')}\r\n\r\n"
+        "This event is generated when a logon session is created. It is generated on "
+        "the computer that was accessed.\r\n\r\n"
+        "The subject fields indicate the account on the local system which requested "
+        "the logon. This is most commonly a service such as the Server service, or a "
+        "local process such as Winlogon.exe or Services.exe.\r\n\r\n"
+        "The logon type field indicates the kind of logon that occurred. The most common "
+        "types are 2 (interactive) and 3 (network).\r\n\r\n"
+        "The New Logon fields indicate the account for whom the new logon was created, "
+        "i.e. the account that was logged on.\r\n\r\n"
+        "The network fields indicate where a remote logon request originated. Workstation "
+        "name is not always available and may be left blank in some cases.\r\n\r\n"
+        "The impersonation level field indicates the extent to which a process in the "
+        "logon session can impersonate.\r\n\r\n"
+        "The authentication information fields provide detailed information about this "
+        "specific logon request.\r\n"
+        "\t- Logon GUID is a unique identifier that can be used to correlate this event "
+        "with a KDC event.\r\n"
+        "\t- Transited services indicate which intermediate services have participated in "
+        "this logon request.\r\n"
+        "\t- Package name indicates which sub-protocol was used among the NTLM protocols.\r\n"
+        "\t- Key length indicates the length of the generated session key. This will be 0 "
+        "if no session key was requested."
+    )
+
+
+def _msg_4625(d):
+    return (
+        "An account failed to log on.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Logon Type:\t\t\t{}\r\n\r\n".format(d.get('LogonType','')) +
+        "Account For Which Logon Failed:\r\n"
+        f"\tSecurity ID:\t\t{d.get('TargetUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n\r\n"
+        "Failure Information:\r\n"
+        f"\tFailure Reason:\t\t{d.get('FailureReason','')}\r\n"
+        f"\tStatus:\t\t\t{d.get('Status','')}\r\n"
+        f"\tSub Status:\t\t{d.get('SubStatus','')}\r\n\r\n"
+        "Process Information:\r\n"
+        f"\tCaller Process ID:\t{d.get('ProcessId','')}\r\n"
+        f"\tCaller Process Name:\t{d.get('ProcessName','')}\r\n\r\n"
+        "Network Information:\r\n"
+        f"\tWorkstation Name:\t{d.get('WorkstationName','')}\r\n"
+        f"\tSource Network Address:\t{d.get('IpAddress','')}\r\n"
+        f"\tSource Port:\t\t{d.get('IpPort','')}\r\n\r\n"
+        "Detailed Authentication Information:\r\n"
+        f"\tLogon Process:\t\t{d.get('LogonProcessName','')}\r\n"
+        f"\tAuthentication Package:\t{d.get('AuthenticationPackageName','')}\r\n"
+        f"\tTransited Services:\t{d.get('TransmittedServices','')}\r\n"
+        f"\tPackage Name (NTLM only):\t{d.get('LmPackageName','')}\r\n"
+        f"\tKey Length:\t\t{d.get('KeyLength','')}"
+    )
+
+
+def _msg_4634(d):
+    return (
+        "An account was logged off.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('TargetUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('TargetLogonId','')}\r\n\r\n"
+        f"Logon Type:\t\t\t{d.get('LogonType','')}"
+    )
+
+
+def _msg_4647(d):
+    return (
+        "User initiated logoff:\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('TargetUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('TargetLogonId','')}"
+    )
+
+
+def _msg_4648(d):
+    return (
+        "A logon was attempted using explicit credentials.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n"
+        f"\tLogon GUID:\t\t{d.get('LogonGuid','')}\r\n\r\n"
+        "Account Whose Credentials Were Used:\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n"
+        f"\tLogon GUID:\t\t{d.get('TargetLogonGuid','')}\r\n\r\n"
+        "Target Server:\r\n"
+        f"\tTarget Server Name:\t{d.get('TargetServerName','')}\r\n"
+        f"\tAdditional Information:\t{d.get('TargetInfo','')}\r\n\r\n"
+        "Process Information:\r\n"
+        f"\tProcess ID:\t\t{d.get('ProcessId','')}\r\n"
+        f"\tProcess Name:\t\t{d.get('ProcessName','')}\r\n\r\n"
+        "Network Information:\r\n"
+        f"\tNetwork Address:\t{d.get('IpAddress','')}\r\n"
+        f"\tPort:\t\t\t{d.get('IpPort','')}\r\n\r\n"
+        "This event is generated when a process attempts to log on an account by "
+        "explicitly specifying that account's credentials.  This most commonly occurs "
+        "in batch-type configurations such as scheduled tasks, or when using the "
+        "RUNAS command."
+    )
+
+
+def _msg_4740(d):
+    return (
+        "A user account was locked out.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Account That Was Locked Out:\r\n"
+        f"\tSecurity ID:\t\t{d.get('TargetSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n\r\n"
+        "Additional Information:\r\n"
+        f"\tCaller Computer Name:\t{d.get('TargetDomainName','')}"
+    )
+
+
+def _msg_4768(d):
+    return (
+        "A Kerberos authentication ticket (TGT) was requested.\r\n\r\n"
+        "Account Information:\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
+        f"\tSupplied Realm Name:\t{d.get('TargetDomainName','')}\r\n"
+        f"\tUser ID:\t\t\t{d.get('TargetSid','')}\r\n\r\n"
+        "Service Information:\r\n"
+        f"\tService Name:\t\t{d.get('ServiceName','')}\r\n"
+        f"\tService ID:\t\t{d.get('ServiceSid','')}\r\n\r\n"
+        "Network Information:\r\n"
+        f"\tClient Address:\t\t{d.get('IpAddress','')}\r\n"
+        f"\tClient Port:\t\t{d.get('IpPort','')}\r\n\r\n"
+        "Additional Information:\r\n"
+        f"\tTicket Options:\t\t{d.get('TicketOptions','')}\r\n"
+        f"\tResult Code:\t\t{d.get('Status','')}\r\n"
+        f"\tTicket Encryption Type:\t{d.get('TicketEncryptionType','')}\r\n"
+        f"\tPre-Authentication Type:\t{d.get('PreAuthType','')}\r\n\r\n"
+        "Certificate Information:\r\n"
+        f"\tCertificate Issuer Name:\t\t{d.get('CertIssuerName','')}\r\n"
+        f"\tCertificate Serial Number:\t{d.get('CertSerialNumber','')}\r\n"
+        f"\tCertificate Thumbprint:\t\t{d.get('CertThumbprint','')}"
+    )
+
+
+def _msg_4769(d):
+    return (
+        "A Kerberos service ticket was requested.\r\n\r\n"
+        "Account Information:\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n"
+        f"\tLogon GUID:\t\t{d.get('LogonGuid','')}\r\n\r\n"
+        "Service Information:\r\n"
+        f"\tService Name:\t\t{d.get('ServiceName','')}\r\n"
+        f"\tService ID:\t\t{d.get('ServiceSid','')}\r\n\r\n"
+        "Network Information:\r\n"
+        f"\tClient Address:\t\t{d.get('IpAddress','')}\r\n"
+        f"\tClient Port:\t\t{d.get('IpPort','')}\r\n\r\n"
+        "Additional Information:\r\n"
+        f"\tTicket Options:\t\t{d.get('TicketOptions','')}\r\n"
+        f"\tTicket Encryption Type:\t{d.get('TicketEncryptionType','')}\r\n"
+        f"\tFailure Code:\t\t{d.get('Status','')}\r\n"
+        f"\tTransited Services:\t{d.get('TransmittedServices','')}"
+    )
+
+
+def _msg_4771(d):
+    return (
+        "Kerberos pre-authentication failed.\r\n\r\n"
+        "Account Information:\r\n"
+        f"\tSecurity ID:\t\t{d.get('TargetSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n\r\n"
+        "Service Information:\r\n"
+        f"\tService Name:\t\t{d.get('ServiceName','')}\r\n\r\n"
+        "Network Information:\r\n"
+        f"\tClient Address:\t\t{d.get('IpAddress','')}\r\n"
+        f"\tClient Port:\t\t{d.get('IpPort','')}\r\n\r\n"
+        "Additional Information:\r\n"
+        f"\tTicket Options:\t\t{d.get('TicketOptions','')}\r\n"
+        f"\tFailure Code:\t\t{d.get('Status','')}\r\n"
+        f"\tPre-Authentication Type:\t{d.get('PreAuthType','')}\r\n\r\n"
+        "Certificate Information:\r\n"
+        f"\tCertificate Issuer Name:\t\t{d.get('CertIssuerName','')}\r\n"
+        f"\tCertificate Serial Number:\t{d.get('CertSerialNumber','')}\r\n"
+        f"\tCertificate Thumbprint:\t\t{d.get('CertThumbprint','')}"
+    )
+
+
+def _msg_4776(d):
+    return (
+        "The computer attempted to validate the credentials for an account.\r\n\r\n"
+        f"Authentication Package:\t{d.get('PackageName','MICROSOFT_AUTHENTICATION_PACKAGE_V1_0')}\r\n"
+        f"Logon Account:\t\t{d.get('TargetUserName','')}\r\n"
+        f"Source Workstation:\t{d.get('Workstation','')}\r\n"
+        f"Error Code:\t\t{d.get('Status','')}"
+    )
+
+
+_MSG_BUILDERS = {
+    4624: _msg_4624,
+    4625: _msg_4625,
+    4634: _msg_4634,
+    4647: _msg_4647,
+    4648: _msg_4648,
+    4740: _msg_4740,
+    4768: _msg_4768,
+    4769: _msg_4769,
+    4771: _msg_4771,
+    4776: _msg_4776,
 }
 
 # 4625 Status/SubStatus → FailureReason mapping.  Status is the primary
@@ -376,7 +621,7 @@ def _get_threat_interval(threat_level, config):
 # ---------------------------------------------------------------------------
 
 def _build_event(event_id: int, computer: str, event_data: dict,
-                 success: bool = True, message_tail: str = "",
+                 success: bool = True,
                  ts: float = None) -> dict:
     """Construct a record matching the microsoft_windows_raw dataset schema.
 
@@ -395,14 +640,7 @@ def _build_event(event_id: int, computer: str, event_data: dict,
 
     ts_str = _iso_ts(ts)
 
-    msg_lines = [_EVENT_MSG_TITLE[event_id]]
-    if message_tail:
-        msg_lines.append(message_tail)
-    for k, v in event_data.items():
-        if v is None or v == "":
-            continue
-        msg_lines.append(f"\t{k}:\t\t{v}")
-    message = "\r\n".join(msg_lines)
+    message = _format_message(event_id, event_data)
 
     ed_clean = {k: v for k, v in event_data.items() if v is not None}
 
@@ -526,7 +764,7 @@ def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
         "TargetOutboundUserName":    "-",
         "TargetOutboundDomainName":  "-",
         "VirtualAccount":            "%%1843",   # "No"
-        "TargetLinkedLogonId":       "0x0",
+        "TargetLinkedLogonId":       _new_logon_id() if elevated else "0x0",
         "ElevatedToken":             "%%1842" if elevated else "%%1843",  # Yes / No
     }
 
@@ -549,7 +787,6 @@ def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
 
     return _build_event(
         4624, computer, event_data, success=True, ts=ts,
-        message_tail=f"Logon Type:{logon_type}  {auth_pkg}  {event_data['TargetUserName']}",
     )
 
 
@@ -616,7 +853,6 @@ def _build_4625(user_info, config, *, logon_type=3, auth_pkg=None,
 
     return _build_event(
         4625, computer, event_data, success=False, ts=ts,
-        message_tail=f"{failure_reason} User={user_info['username']} LogonType={logon_type}",
     )
 
 
@@ -648,7 +884,7 @@ def _build_4634(session_row, config, ts=None) -> dict:
         "LogonType":        session_row["logon_type"],
     }
     return _build_event(4634, computer, event_data, success=True, ts=ts,
-                        message_tail=f"User={session_row['target_user_name']} LogonId={session_row['logon_id']}")
+)
 
 
 def _build_4647(session_row, config, ts=None) -> dict:
@@ -661,7 +897,7 @@ def _build_4647(session_row, config, ts=None) -> dict:
         "TargetLogonId":    session_row["logon_id"],
     }
     return _build_event(4647, computer, event_data, success=True, ts=ts,
-                        message_tail=f"User={session_row['target_user_name']} LogonId={session_row['logon_id']}")
+)
 
 
 def _build_4648(user_info, config, *, target_user, target_server,
@@ -690,7 +926,7 @@ def _build_4648(user_info, config, *, target_user, target_server,
         "IpPort":               "0" if is_local else str(random.randint(49152, 65535)),
     }
     return _build_event(4648, computer, event_data, success=True, ts=ts,
-                        message_tail=f"Subject={user_info['username']} Target={target_user}@{target_server}")
+)
 
 
 def _build_4740(user_info, config, *, source_workstation=None, ts=None) -> dict:
@@ -708,7 +944,7 @@ def _build_4740(user_info, config, *, source_workstation=None, ts=None) -> dict:
         "SubjectLogonId":     "0x3E7",
     }
     return _build_event(4740, dc_host, event_data, success=True, ts=ts,
-                        message_tail=f"User={user_info['username']} From={caller}")
+)
 
 
 def _build_4768(user_info, config, *, ip_override=None, encryption=None,
@@ -756,7 +992,7 @@ def _build_4768(user_info, config, *, ip_override=None, encryption=None,
         "AccountAvailableKeys":             "N/A",
     }
     return _build_event(4768, dc_host, event_data, success=success, ts=ts,
-                        message_tail=f"User={user_info['username']} Enc={enc} Status={status}")
+)
 
 
 def _build_4769(user_info, config, *, service_spn=None, encryption=None,
@@ -785,7 +1021,7 @@ def _build_4769(user_info, config, *, service_spn=None, encryption=None,
     # 4769 on newer DCs may also include encryption detail fields
     # but they are less consistently present than in 4768
     return _build_event(4769, dc_host, event_data, success=success, ts=ts,
-                        message_tail=f"User={user_info['username']} Service={spn} Enc={enc}")
+)
 
 
 def _build_4771(user_info, config, *, status="0x18", ip_override=None, ts=None) -> dict:
@@ -808,7 +1044,7 @@ def _build_4771(user_info, config, *, status="0x18", ip_override=None, ts=None) 
     with _STATE_LOCK:
         _FAIL_COUNTS[user_info["username"]] = _FAIL_COUNTS.get(user_info["username"], 0) + 1
     return _build_event(4771, dc_host, event_data, success=False, ts=ts,
-                        message_tail=f"User={user_info['username']} Status={status}")
+)
 
 
 def _build_4776(user_info, config, *, status="0x0", workstation=None, ts=None) -> dict:
@@ -823,7 +1059,7 @@ def _build_4776(user_info, config, *, status="0x0", workstation=None, ts=None) -
         "Status":          status,
     }
     return _build_event(4776, dc_host, event_data, success=success, ts=ts,
-                        message_tail=f"User={user_info['username']} Workstation={ws} Status={status}")
+)
 
 
 # ---------------------------------------------------------------------------
