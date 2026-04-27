@@ -29,6 +29,24 @@ A modular, high-fidelity log simulation tool for **Palo Alto Networks Cortex XSI
 
 See [How to Run](docs/how-to-run.md) for full details.
 
+### Run with Docker
+
+The repo ships a `Dockerfile` and `docker-compose.yml` that launch the Flask dashboard by default — visible in your browser on the host.
+
+```sh
+cp .env.example .env       # fill in your endpoints / credentials
+docker compose up -d       # build and start the dashboard
+open http://localhost:5000 # macOS; otherwise just open the URL
+```
+
+> **macOS port 5000 conflict:** AirPlay Receiver binds port 5000 by default. Either disable it (System Settings → General → AirDrop & Handoff → AirPlay Receiver) or override the host-side port: `LOGSIM_HOST_PORT=5050 docker compose up -d` and browse to `http://localhost:5050`.
+
+Edit `config.json` on the host and restart the container to pick up changes (it's bind-mounted read-only). To run the original interactive CLI instead of the WebUI, use the `cli` profile:
+
+```sh
+docker compose run --rm logsim-cli
+```
+
 ## Flask Dashboard
 
 The web dashboard provides full control over log generation without touching the CLI:

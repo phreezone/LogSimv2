@@ -1,8 +1,26 @@
 services:
   logsim:
     build: .
+    image: logsim:latest
+    container_name: logsim
     env_file: .env                          # credentials/endpoints — never committed
-    # Optional: override the default config.json baked into the image
-    # volumes:
-    #   - ./config.json:/app/config.json:ro
-    restart: "no"                           # run once and exit; change to "unless-stopped" for continuous mode
+    ports:
+      - "${LOGSIM_HOST_PORT:-5000}:5000"    # browse at http://localhost:${LOGSIM_HOST_PORT:-5000}
+                                            #   macOS tip: AirPlay Receiver claims :5000 — set
+                                            #   LOGSIM_HOST_PORT=5050 (or disable AirPlay Receiver)
+    volumes:
+      - ./config.json:/app/config.json:ro   # edit config without rebuilding the image
+    restart: unless-stopped
+
+  # Optional: run the original interactive CLI instead of the WebUI.
+  #   docker compose run --rm logsim-cli
+  logsim-cli:
+    profiles: ["cli"]
+    build: .
+    image: logsim:latest
+    env_file: .env
+    volumes:
+      - ./config.json:/app/config.json:ro
+    entrypoint: ["python", "-u", "log_simulator.py"]
+    stdin_open: true
+    tty: true
