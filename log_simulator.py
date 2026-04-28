@@ -277,7 +277,7 @@ def send_http_message(message, module, config):
             cb["fails"] += 1
         else:
             cb["fails"] = 0
-            _tprint(f"Sending HTTP for {module.NAME}: {collector_id} → {response.status_code}")
+            _tprint(f"Sending HTTP for {module.NAME}: {collector_id} -> {response.status_code}")
 
     except requests.exceptions.Timeout:
         cb["fails"] += 1
@@ -474,57 +474,110 @@ def _maybe_report_throughput():
           f"= {rate_sec:.0f}/sec ({rate_min:.0f}/min)")
 
 
-# ── Filebeat JSONL Transport ───────────────────────────────────────────────
-# Writes events as JSONL files organized by computer_name (hostname) so
-# Filebeat can pick them up and forward to XSIAM's Broker VM.  Each
-# simulated host gets its own log file under FILEBEAT_OUTPUT_DIR.
-#
-# Directory layout:
-#   <output_dir>/
-#     WKS001.lab.local/security.json
-#     WKS002.lab.local/security.json
-#     DC01.lab.local/security.json
-#     ...
-#
-# Filebeat watches *.json under each subdirectory.  The Broker receives
-# them with full _collector_* metadata attached by Filebeat.
+# ── WEC Transport (Direct WS-Management to Broker VM) ────────────────────
+_wec_client = None
+_wec_client_lock = threading.Lock()
+_wec_batch = []
+_wec_batch_lock = threading.Lock()
+_wec_batch_timer = None
+_wec_cb_state = {"fails": 0, "open_since": None}
 
-_filebeat_output_dir = None
-_filebeat_lock = threading.Lock()
+def _get_wec_client(config):
+    """Lazy-init the WecClient singleton. Returns None on failure."""
+    global _wec_client
+    if _wec_client is not None:
+        return _wec_client
+    with _wec_client_lock:
+        if _wec_client is not None:
+            return _wec_client
+        try:
+            from modules.wec_transport import WecClient, WecTransportError
+            wec_cfg = config.get("windows_events_config", {})
+            broker_url = os.getenv("WEC_BROKER_URL") or wec_cfg.get("wec_broker_url", "")
+            pfx_path = os.getenv("WEC_PFX_PATH") or wec_cfg.get("wec_pfx_path", "")
+            pfx_password = os.getenv("WEC_PFX_PASSWORD") or wec_cfg.get("wec_pfx_password", "")
+            machine_id = wec_cfg.get("wec_machine_id", "logsim.examplecorp.local")
+            if not broker_url or not pfx_path:
+                _tprint("Error: WEC transport requires WEC_BROKER_URL and WEC_PFX_PATH. "
+                        "Set them in .env or config.json.")
+                return None
+            client = WecClient(broker_url, pfx_path, pfx_password, machine_id)
+            client.enumerate()
+            hb_interval = wec_cfg.get("wec_heartbeat_interval_s", 900)
+            client.start_heartbeat_thread(interval_s=hb_interval)
+            _wec_client = client
+            _tprint(f"WEC transport connected: subscription={client.subscription_id}")
+            return client
+        except Exception as exc:
+            _tprint(f"Error: WEC transport init failed: {exc}")
+            return None
 
-def _get_filebeat_output_dir(config):
-    """Resolve the filebeat output directory from env or config."""
-    global _filebeat_output_dir
-    if _filebeat_output_dir is not None:
-        return _filebeat_output_dir
-    d = os.getenv("FILEBEAT_OUTPUT_DIR")
-    if not d:
-        conf_key = "windows_events_config"
-        d = config.get(conf_key, {}).get("filebeat_output_dir", "")
-    if not d:
-        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filebeat_output")
-    _filebeat_output_dir = d
-    return d
+
+def _flush_wec_batch(config):
+    """Send accumulated WEC events in a single SOAP POST."""
+    global _wec_batch_timer
+    with _wec_batch_lock:
+        batch = _wec_batch[:]
+        _wec_batch.clear()
+        _wec_batch_timer = None
+    if not batch:
+        return
+    client = _get_wec_client(config)
+    if not client:
+        return
+    try:
+        client.deliver_events(batch)
+        with _wec_batch_lock:
+            _wec_cb_state["fails"] = 0
+            _wec_cb_state["open_since"] = None
+    except Exception as exc:
+        with _wec_batch_lock:
+            _wec_cb_state["fails"] += 1
+            if _wec_cb_state["fails"] >= HTTP_CB_THRESHOLD:
+                if _wec_cb_state["open_since"] is None:
+                    _wec_cb_state["open_since"] = time.time()
+                    _tprint(f"WEC circuit breaker OPEN after {HTTP_CB_THRESHOLD} failures: {exc}")
 
 
-def send_filebeat_message(message, module, config):
-    """Append a JSON event to a per-hostname JSONL file for Filebeat pickup."""
+def send_wec_message(message, module, config):
+    """Queue a Windows event for WEC transport (batched delivery)."""
+    global _wec_batch_timer
+    # Circuit breaker check
+    with _wec_batch_lock:
+        if _wec_cb_state["open_since"]:
+            if time.time() - _wec_cb_state["open_since"] < HTTP_CB_COOLDOWN:
+                return
+            _wec_cb_state["open_since"] = None
+            _wec_cb_state["fails"] = 0
+
     try:
         ev = json.loads(message) if isinstance(message, str) else message
     except (json.JSONDecodeError, TypeError):
-        _tprint(f"Warning: {module.NAME} filebeat transport received non-JSON content. Skipping.")
+        _tprint(f"Warning: {module.NAME} WEC transport received non-JSON content. Skipping.")
         return
 
-    hostname = ev.get("computer_name") or ev.get("host_name") or "unknown_host"
-    safe_hostname = hostname.replace(":", "_").replace("/", "_").replace("\\", "_")
-    output_dir = _get_filebeat_output_dir(config)
-    host_dir = os.path.join(output_dir, safe_hostname)
+    from modules.windows_events import _render_event_xml
+    try:
+        xml_str = _render_event_xml(ev)
+    except Exception as exc:
+        _tprint(f"Warning: WEC XML render failed: {exc}")
+        return
 
-    with _filebeat_lock:
-        os.makedirs(host_dir, exist_ok=True)
-        filepath = os.path.join(host_dir, "security.json")
-        with open(filepath, "a", encoding="utf-8") as f:
-            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    wec_cfg = config.get("windows_events_config", {})
+    batch_size = wec_cfg.get("wec_batch_size", 20)
+    batch_interval_ms = wec_cfg.get("wec_batch_interval_ms", 1000)
+
+    with _wec_batch_lock:
+        _wec_batch.append(xml_str)
+        if len(_wec_batch) >= batch_size:
+            threading.Thread(target=_flush_wec_batch, args=(config,),
+                             daemon=True).start()
+        elif _wec_batch_timer is None:
+            _wec_batch_timer = threading.Timer(
+                batch_interval_ms / 1000.0,
+                _flush_wec_batch, args=(config,))
+            _wec_batch_timer.daemon = True
+            _wec_batch_timer.start()
 
 
 def process_and_send(log_content, module, config, event_name=None):
@@ -557,17 +610,17 @@ def process_and_send(log_content, module, config, event_name=None):
         else:
             event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} wants HTTP transport but did not return a string or list of strings. Skipping.")
-    elif transport == "filebeat":
+    elif transport == "wec":
         if isinstance(log_content, list):
             for msg in log_content:
-                send_filebeat_message(msg, module, config)
+                send_wec_message(msg, module, config)
                 _increment_throughput()
         elif isinstance(log_content, str):
-            send_filebeat_message(log_content, module, config)
+            send_wec_message(log_content, module, config)
             _increment_throughput()
         else:
             event_str = f" ({event_name})" if event_name else ""
-            _tprint(f"Warning: Module {module.NAME}{event_str} wants filebeat transport but did not return a string or list of strings. Skipping.")
+            _tprint(f"Warning: Module {module.NAME}{event_str} wants WEC transport but did not return a string or list of strings. Skipping.")
     elif transport == "pubsub":
         if isinstance(log_content, list):
             for msg in log_content:
@@ -2613,7 +2666,7 @@ def _start_dashboard():
 
         time.sleep(2)  # Give Flask time to bind
         if proc.poll() is None:
-            print(f"--- Dashboard started → http://localhost:{port} ---\n")
+            print(f"--- Dashboard started -> http://localhost:{port} ---\n")
         else:
             print(f"WARNING: Dashboard process exited early (code {proc.returncode})")
     except Exception as e:

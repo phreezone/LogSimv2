@@ -11,6 +11,7 @@ Or with Flask CLI:
 import sys
 import os
 import threading
+import queue as _queue
 import time
 import json
 import copy
@@ -291,6 +292,7 @@ _baduser_state = {
     "stop_event": threading.Event(),
     "threads": [],
     "metrics": {},       # {module_name: {"logs": int, "threats": int}}
+    "selected_modules": [],  # module names chosen by user (empty = all)
 }
 
 
@@ -334,7 +336,7 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
     Same pattern as _module_worker() but uses a filtered single-user context
     and records metrics into the bad-user state instead of MODULE_STATES.
     """
-    process_and_send = _get_process_and_send()
+    _ensure_send_workers()
 
     while not stop_event.is_set():
         current_level = threat_level
@@ -355,10 +357,9 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
 
                 logs = log_content if isinstance(log_content, list) else [log_content]
                 valid = [m for m in logs if m]
-                for msg in valid:
-                    process_and_send(msg, module, config, event_name)
 
                 if valid:
+                    # Record metrics immediately, send async
                     with _baduser_lock:
                         m = _baduser_state["metrics"].get(metrics_key, {"logs": 0, "threats": 0})
                         m["logs"] += len(valid)
@@ -367,6 +368,11 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
                         if state and event_name and event_name in state.threat_names:
                             m["threats"] += 1
                         _baduser_state["metrics"][metrics_key] = m
+                    for msg in valid:
+                        try:
+                            _SEND_QUEUE.put_nowait((msg, module, config, event_name))
+                        except _queue.Full:
+                            pass
 
         except Exception as exc:
             print(f"[bad-user][{module.NAME}] worker error: {exc}")
@@ -389,8 +395,9 @@ def _baduser_watchdog(duration_seconds, stop_event):
         _stop_baduser()
 
 
-def _start_baduser(username, duration_minutes, threat_level, event_interval):
-    """Spin up bad-user worker threads for all loaded modules."""
+def _start_baduser(username, duration_minutes, threat_level, event_interval,
+                   selected_modules=None):
+    """Spin up bad-user worker threads for selected (or all) modules."""
     with _baduser_lock:
         if _baduser_state["active"]:
             return False, "Bad user mode is already active"
@@ -415,6 +422,7 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval):
         _baduser_state["stop_event"] = stop_event
         _baduser_state["threads"] = []
         _baduser_state["metrics"] = {}
+        _baduser_state["selected_modules"] = selected_modules or []
 
     # Closure so workers always read current interval
     def _get_interval():
@@ -423,7 +431,10 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval):
 
     base_config = copy.deepcopy(CONFIG)
 
+    _sel = set(selected_modules) if selected_modules else None
     for name, mod in MODULES.items():
+        if _sel and name not in _sel:
+            continue
         # AWS special handling — skip if no IAM mapping
         if name == "aws":
             aws_cfg = _build_baduser_aws_config(username, base_config)
@@ -435,6 +446,9 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval):
         else:
             worker_config = copy.deepcopy(base_config)
             worker_context = context
+
+        with _baduser_lock:
+            _baduser_state["metrics"][name] = {"logs": 0, "threats": 0}
 
         t = threading.Thread(
             target=_baduser_worker,
@@ -482,6 +496,44 @@ def _stop_baduser():
     print("[bad-user] Stopped.")
 
 
+# ── Async send queue — decouples metrics from network I/O ─────────────────────
+# Modules that produce large batches (e.g. Windows Events parallel mode draining
+# 50 events at once) would block the worker loop for 10–30s if each message is
+# sent synchronously via HTTP.  The send queue lets the worker record metrics
+# instantly while a pool of sender threads handles the slow network I/O.
+
+_SEND_QUEUE: _queue.Queue = _queue.Queue(maxsize=5000)
+_SEND_WORKERS_STARTED = False
+_SEND_WORKERS_LOCK = threading.Lock()
+
+
+def _send_worker():
+    """Background thread that pulls (msg, module, config, event_name) from the
+    send queue and forwards via process_and_send."""
+    process_and_send = _get_process_and_send()
+    while True:
+        try:
+            msg, module, config, event_name = _SEND_QUEUE.get()
+            try:
+                process_and_send(msg, module, config, event_name)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+
+def _ensure_send_workers(count=3):
+    """Start sender pool once (idempotent)."""
+    global _SEND_WORKERS_STARTED
+    with _SEND_WORKERS_LOCK:
+        if _SEND_WORKERS_STARTED:
+            return
+        _SEND_WORKERS_STARTED = True
+    for i in range(count):
+        t = threading.Thread(target=_send_worker, daemon=True, name=f"send-worker-{i}")
+        t.start()
+
+
 # ── Module worker thread ──────────────────────────────────────────────────────
 
 def _module_worker(state: ModuleState, config: dict):
@@ -495,7 +547,7 @@ def _module_worker(state: ModuleState, config: dict):
     without needing a stop/restart.
     """
     context: dict = {"session_context": SESSION_CONTEXT}
-    process_and_send = _get_process_and_send()
+    _ensure_send_workers()
 
     # Every module initialises last_threat_event_time = 0 at import, which
     # makes the very first generate_log call always fire a threat (since
@@ -524,10 +576,14 @@ def _module_worker(state: ModuleState, config: dict):
 
                 logs = log_content if isinstance(log_content, list) else [log_content]
                 valid = [m for m in logs if m]
-                for msg in valid:
-                    process_and_send(msg, state.module, config, event_name)
+                # Record metrics immediately — sending happens async via send queue.
                 if valid:
                     state.record_log(event_name, log_count=len(valid))
+                    for msg in valid:
+                        try:
+                            _SEND_QUEUE.put_nowait((msg, state.module, config, event_name))
+                        except _queue.Full:
+                            pass  # drop if send queue is backed up
 
         except Exception as exc:
             state.status = "error"
@@ -979,6 +1035,9 @@ def _run_health_checks() -> dict:
         "aws_region":             "AWS",
         "GCP_PROJECT_ID":         "GCP",
         "GCP_PUBSUB_TOPIC":       "GCP",
+        "WEC_BROKER_URL":         "WEC",
+        "WEC_PFX_PATH":           "WEC",
+        "WEC_PFX_PASSWORD":       "WEC",
     }
     for var, group in ENV_VARS.items():
         val = os.getenv(var, "")
@@ -1334,8 +1393,12 @@ def api_baduser_start():
     event_interval = float(body.get("event_interval", 0.5))
     if event_interval < 0.01:
         return jsonify({"error": "event_interval must be >= 0.01"}), 400
+    selected_modules = body.get("selected_modules")  # list of module names or None
+    if selected_modules is not None and not isinstance(selected_modules, list):
+        return jsonify({"error": "selected_modules must be a list"}), 400
 
-    ok, err = _start_baduser(username, duration, threat_level, event_interval)
+    ok, err = _start_baduser(username, duration, threat_level, event_interval,
+                             selected_modules=selected_modules)
     if not ok:
         return jsonify({"error": err}), 409
     return jsonify({"started": True, "username": username})
@@ -1374,6 +1437,7 @@ def api_baduser_status():
             "total_logs": total_logs,
             "total_threats": total_threats,
             "per_module": metrics,
+            "selected_modules": list(_baduser_state["selected_modules"]),
         })
 
 
@@ -1391,6 +1455,6 @@ def index():
 if __name__ == "__main__":
     host = os.getenv("DASHBOARD_HOST", "0.0.0.0")
     port = int(os.getenv("DASHBOARD_PORT", "5000"))
-    print(f"\nLogSim Dashboard  →  http://{host}:{port}")
+    print(f"\nLogSim Dashboard -> http://{host}:{port}")
     print(f"Loaded {len(MODULE_STATES)} modules: {', '.join(MODULE_STATES.keys())}\n")
     app.run(host=host, port=port, debug=False, threaded=True)
