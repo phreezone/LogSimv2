@@ -343,6 +343,13 @@ def _format_checkpoint_cef(config, extensions_dict, device_product=None, event_t
         ext["cs2"] = ext.pop("cs1")
         ext["cs2Label"] = ext.pop("cs1Label")
 
+    # AD domain-qualify bare usernames so XSIAM Identity can stitch
+    # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com)
+    for _ufield in ("suser", "duser"):
+        _uval = ext.get(_ufield)
+        if _uval and "\\" not in _uval and "@" not in _uval:
+            ext[_ufield] = f"EXAMPLECORP\\{_uval}"
+
     extension_string = " ".join(
         f"{key}={_cef_escape(value)}" for key, value in ext.items() if value is not None
     )

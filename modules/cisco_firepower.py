@@ -345,6 +345,13 @@ def _format_firepower_cef(config, fields, cef_name):
     sig_id  = fields.pop('_sig_id', 'RNA:1003:1')
     cef_sev = str(fields.get('cefSeverity', '3'))
 
+    # AD domain-qualify bare usernames so XSIAM Identity can stitch
+    # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com)
+    for _ufield in ("suser", "duser"):
+        _uval = fields.get(_ufield)
+        if _uval and "\\" not in _uval and "@" not in _uval:
+            fields[_ufield] = f"EXAMPLECORP\\{_uval}"
+
     timestamp  = datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')
     cef_header = f"CEF:0|Cisco|Firepower|6.0|{sig_id}|{cef_name}|{cef_sev}|"
     extension  = " ".join(f"{k}={_cef_escape(v)}" for k, v in fields.items() if v is not None)
