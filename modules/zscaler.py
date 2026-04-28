@@ -1561,7 +1561,7 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
 
     common_map = {
         "rt": rt,
-        "suser": user if '@' in user else f"{user}@example.com",
+        "suser": user if '@' in user else f"{user}@examplecorp.com",
         "externalId": str(random.randint(1000000, 9999999999)),
         "deviceHostName":              fields.get("devicehostname"),
         "deviceOwner":                 fields.get("deviceowner"),
