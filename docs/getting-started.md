@@ -21,6 +21,7 @@ Follow these steps to get the simulator up and running.
    LogSim/
    ├── log_simulator.py
    ├── config.json
+   ├── requirements.txt
    ├── .env                  ← create this (see below)
    ├── modules/
    │   ├── aws.py
@@ -32,58 +33,49 @@ Follow these steps to get the simulator up and running.
    └── CloudFormation/
        └── S3LogSim.yaml
    ```
-3. Install Python dependencies (see below).
+3. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ---
 
 ### Python Dependencies
 
-#### Core — required for all deployments
+All dependencies are pinned in `requirements.txt` at the project root. Install everything with:
 
 ```bash
-pip install requests python-dotenv
+pip install -r requirements.txt
 ```
+
+On Debian/Ubuntu, if pip warns about externally-managed environments, add the `--break-system-packages` flag or use a virtual environment:
+
+```bash
+# Option A: virtual environment (recommended)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Option B: system-wide install
+pip install -r requirements.txt --break-system-packages
+```
+
+The key packages and what they support:
 
 | Package | Used by |
 |---|---|
+| `flask` | Dashboard web UI and REST API |
 | `requests` | HTTP Collector transport (Okta, Proofpoint, GCP, Google Workspace) |
 | `python-dotenv` | Loads `.env` secrets into the runtime environment |
-
-#### AWS module — required only when using the `aws` module
-
-```bash
-pip install boto3
-```
-
-| Package | Used by |
-|---|---|
-| `boto3` | Writes gzip-compressed CloudTrail JSON to the configured S3 bucket |
+| `boto3` | AWS module — writes gzip-compressed CloudTrail JSON to S3 |
+| `google-cloud-pubsub` | GCP module — publishes LogEntry objects to Google Cloud Pub/Sub |
+| `lxml` | XML log formatting |
+| `requests-pkcs12` | WEC module — client certificate authentication |
+| `cryptography` | WEC module — PFX/PKCS#12 certificate handling |
 
 > **IAM requirement:** The AWS IAM user (created by the CloudFormation stack) needs `s3:PutObject` on the log bucket. The CloudFormation template creates this automatically — see [CloudFormation setup in Configuration](configuration.md#aws-s3-setup-cloudformation--recommended).
 
-#### GCP module — required only when using the `gcp` module
-
-```bash
-pip install google-cloud-pubsub
-```
-
-| Package | Used by |
-|---|---|
-| `google-cloud-pubsub` | Publishes single-event JSON LogEntry objects to Google Cloud Pub/Sub |
-
-> **Auth requirement:** A GCP service account key with `roles/pubsub.publisher` on the topic. The Terraform template creates this automatically — see [Terraform setup in Configuration](configuration.md#gcp-pubsub-setup-terraform--recommended).
-
-#### All dependencies at once
-
-```bash
-pip install requests python-dotenv boto3 google-cloud-pubsub
-```
-
-On Debian/Ubuntu you can use system packages for the core libraries:
-```bash
-apt install python3-requests python3-dotenv
-pip install boto3 google-cloud-pubsub
-```
+> **Auth requirement:** The GCP module requires a service account key with `roles/pubsub.publisher` on the topic. The Terraform template creates this automatically — see [Terraform setup in Configuration](configuration.md#gcp-pubsub-setup-terraform--recommended).
 
 ---
 
@@ -214,14 +206,14 @@ In XSIAM, navigate to **Settings → Data Sources → Add Data Source → Syslog
 
 ### Quick Verification
 
-After creating your `.env` and installing dependencies, verify the setup:
+After creating your `.env` and running `pip install -r requirements.txt`, verify the setup:
 
 ```bash
 # Confirm Python version
 python3 --version
 
 # Confirm all packages are importable
-python3 -c "import requests, dotenv, boto3, google.cloud.pubsub_v1; print('All OK')"
+python3 -c "import flask, requests, dotenv, boto3, google.cloud.pubsub_v1; print('All OK')"
 
 # Run the simulator
 python3 log_simulator.py
