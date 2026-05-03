@@ -19260,12 +19260,20 @@
     "hthompson": "10.0.10.20"
   },
   "windows_events_config": {
-    "transport": "http",
+    "transport": "wec",
     "collector_id": "windows_events_collector",
     "domain_name": "EXAMPLECORP",
     "dns_domain": "examplecorp.local",
     "domain_controller_hostname": "DC01.examplecorp.local",
     "use_fqdn_hostnames": false,
+    "parallel_hosts": true,
+    "dc_interval_multiplier": 0.5,
+    "wks_interval_multiplier": 1.0,
+    "threat_interval_multiplier": 2.0,
+    "wec_machine_id": "logsim.examplecorp.local",
+    "wec_batch_size": 20,
+    "wec_batch_interval_ms": 1000,
+    "wec_heartbeat_interval_s": 900,
     "event_mix": {
       "benign": {
         "interactive_logon": 18,

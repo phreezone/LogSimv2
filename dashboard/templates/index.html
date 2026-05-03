@@ -361,6 +361,20 @@
     .baduser-module-table th { text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); padding: 6px 10px; border-bottom: 1px solid var(--border); }
     .baduser-module-table td { padding: 6px 10px; border-bottom: 1px solid rgba(48,54,61,.5); font-variant-numeric: tabular-nums; }
 
+    .baduser-module-checks {
+      display: flex; flex-wrap: wrap; gap: 6px 14px;
+      max-height: 150px; overflow-y: auto;
+      padding: 8px; background: var(--surface); border-radius: 6px;
+    }
+    .baduser-mod-label {
+      font-size: 12px; display: flex; align-items: center; gap: 4px;
+      cursor: pointer; white-space: nowrap;
+    }
+    .baduser-mod-label .mod-warn {
+      font-size: 10px; color: var(--yellow, #d29922); margin-left: 2px;
+    }
+    .baduser-mod-label.incompatible { opacity: 0.5; }
+
     .baduser-note {
       font-size: 12px;
       color: var(--text-muted);
@@ -670,7 +684,7 @@
 
       <div class="sched-field">
         <label>User</label>
-        <select id="baduser-user" class="sched-input" disabled>
+        <select id="baduser-user" class="sched-input" disabled onchange="onBadUserUserChange()">
           <option value="">-- select department first --</option>
         </select>
       </div>
@@ -690,6 +704,17 @@
         <input type="range" id="baduser-rate-slider" class="rate-slider" min="0" max="100" step="1" value="65"
                oninput="document.getElementById('baduser-rate-disp').textContent=epsLabel(sliderToEps(this.value))" />
         <div class="rate-ticks"><span>Slow</span><span>Normal</span><span>Fast</span></div>
+      </div>
+
+      <div class="sched-field">
+        <label>Modules</label>
+        <div id="baduser-modules" class="baduser-module-checks">
+          <span style="color:var(--text-muted);font-size:12px;">Loading...</span>
+        </div>
+        <div style="margin-top:4px;">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="toggleBadUserModules(true)">All</button>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="toggleBadUserModules(false)">None</button>
+        </div>
       </div>
 
       <button class="btn btn-danger" style="width:100%;margin-top:8px;" onclick="startBadUser()">
@@ -997,9 +1022,9 @@
         if (disp) disp.textContent = epsLabel(eps);
       }
 
-      // Always sync threat level dropdown to backend state
+      // Sync threat level dropdown to backend state, but not while user is picking
       const sel = existing.querySelector('.level-select');
-      if (sel && sel.value !== m.threat_level) {
+      if (sel && document.activeElement !== sel && sel.value !== m.threat_level) {
         sel.value = m.threat_level;
       }
 
@@ -1016,7 +1041,7 @@
       badge.className   = `status-badge ${m.status}`;
       badge.textContent = m.status;
 
-      if (sel) sel.disabled = (m.status === 'running');
+      if (sel) sel.disabled = false;
 
       const btn = existing.querySelector('.card-controls button');
       if (btn) {
@@ -1071,7 +1096,7 @@
 
       <div class="card-controls">
         <select class="level-select"
-          onchange="${m.status === 'running' ? `setThreatLevel('${escHtml(m.name)}', this.value)` : ''}">
+          onchange="setThreatLevel('${escHtml(m.name)}', this.value)">
           ${threatLevels.map(l => `<option value="${l}"${l === m.threat_level ? ' selected' : ''}>${l}</option>`).join('')}
         </select>
         ${m.status === 'running'
@@ -1567,6 +1592,57 @@
     userSel.innerHTML = '<option value="">-- select user --</option>' +
       users.map(u => `<option value="${escHtml(u.username)}">${escHtml(u.display_name)} (${escHtml(u.username)})</option>`).join('');
     userSel.disabled = false;
+    _clearBadUserModWarn();
+  }
+
+  function onBadUserUserChange() {
+    const username = document.getElementById('baduser-user').value;
+    if (!username) { _clearBadUserModWarn(); return; }
+    // Find the user profile in _badUserGroups
+    let user = null;
+    for (const users of Object.values(_badUserGroups)) {
+      user = users.find(u => u.username === username);
+      if (user) break;
+    }
+    if (!user) { _clearBadUserModWarn(); return; }
+
+    const isWindows = (user.primary_os || '').toLowerCase() === 'windows';
+    const hasAws = user.has_aws;
+
+    document.querySelectorAll('#baduser-modules label').forEach(label => {
+      const cb = label.querySelector('input');
+      const name = cb.value;
+      let warn = '';
+      let compat = true;
+      if (name === 'Windows Event Log' && !isWindows) {
+        warn = `(${user.primary_os || 'non-Windows'})`;
+        compat = false;
+      } else if (name === 'aws' && !hasAws) {
+        warn = '(no IAM user)';
+        compat = false;
+      }
+      label.classList.toggle('incompatible', !compat);
+      let warnEl = label.querySelector('.mod-warn');
+      if (warn) {
+        if (!warnEl) { warnEl = document.createElement('span'); warnEl.className = 'mod-warn'; label.appendChild(warnEl); }
+        warnEl.textContent = warn;
+      } else if (warnEl) {
+        warnEl.remove();
+      }
+    });
+  }
+
+  function _clearBadUserModWarn() {
+    document.querySelectorAll('#baduser-modules label').forEach(label => {
+      label.classList.remove('incompatible');
+      const w = label.querySelector('.mod-warn');
+      if (w) w.remove();
+    });
+  }
+
+  function toggleBadUserModules(selectAll) {
+    document.querySelectorAll('#baduser-modules input[type=checkbox]')
+      .forEach(cb => cb.checked = selectAll);
   }
 
   async function startBadUser() {
@@ -1575,6 +1651,13 @@
     if (!username) {
       resultEl.style.color = 'var(--red)';
       resultEl.textContent = 'Select a department and user first.';
+      return;
+    }
+    const selectedModules = [...document.querySelectorAll('#baduser-modules input:checked')]
+      .map(cb => cb.value);
+    if (!selectedModules.length) {
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = 'Select at least one module.';
       return;
     }
     const duration = parseFloat(document.getElementById('baduser-duration').value) || 15;
@@ -1590,9 +1673,10 @@
         duration_minutes: duration,
         threat_level: level,
         event_interval: interval,
+        selected_modules: selectedModules,
       });
       resultEl.textContent = '';
-      showToast(`Bad User started: ${username}`);
+      showToast(`Bad User started: ${username} (${selectedModules.length} modules)`);
     } catch (e) {
       resultEl.style.color = 'var(--red)';
       resultEl.textContent = `Error: ${e.message}`;
@@ -1688,6 +1772,12 @@
       updateSchedFields();
       // Bad User tab setup
       loadBadUserUsers();
+      const badModDiv = document.getElementById('baduser-modules');
+      if (badModDiv && modules.length) {
+        badModDiv.innerHTML = modules.map(m =>
+          `<label class="baduser-mod-label"><input type="checkbox" value="${escHtml(m.name)}" checked /> ${escHtml(m.name)}</label>`
+        ).join('');
+      }
       const badLevelSel = document.getElementById('baduser-level');
       if (badLevelSel) {
         badLevelSel.innerHTML = threatLevels.map(l =>
