@@ -34,6 +34,18 @@ except ImportError:
 
 last_threat_event_time = 0
 
+
+def _ad_user(user):
+    """Format bare username as EXAMPLECORP\\username for syslog output.
+
+    AD/LDAP-integrated firewalls show domain\\user in identity fields.
+    This lets XSIAM Identity stitch firewall users (EXAMPLECORP\\user)
+    with cloud/SaaS users (user@examplecorp.com) into one identity.
+    """
+    if user and "\\" not in user and "@" not in user:
+        return f"EXAMPLECORP\\{user}"
+    return user
+
 NAME        = "Cisco ASA Firewall"
 DESCRIPTION = "Simulates Cisco ASA syslog messages for the XSIAM cisco_asa_raw dataset."
 XSIAM_PARSER = "Cisco ASA"
@@ -251,7 +263,7 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
     built_log = (
         f"%ASA-6-{built_id}: Built {effective_direction} {protocol} connection {conn_id} "
         f"for {dest_interface}:{dest_ip}/{dest_port} ({dest_ip}/{dest_port}) "
-        f"to {src_interface}:{src_ip}/{src_port} ({nat_ip}/{nat_port})({user})"
+        f"to {src_interface}:{src_ip}/{src_port} ({nat_ip}/{nat_port})({_ad_user(user)})"
     )
     session_logs.append(_generate_full_syslog_message(config, built_log))
 
@@ -263,7 +275,7 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
         f"%ASA-6-{teardown_id}: Teardown {protocol} connection {conn_id} "
         f"for {dest_interface}:{dest_ip}/{dest_port} "
         f"to {src_interface}:{src_ip}/{src_port} "
-        f"duration {duration_str} bytes {total_bytes}{reason_str} user {user}"
+        f"duration {duration_str} bytes {total_bytes}{reason_str} user {_ad_user(user)}"
     )
     session_logs.append(_generate_full_syslog_message(config, teardown_log))
     return session_logs
@@ -312,7 +324,7 @@ def _generate_anyconnect_vpn_log(config, user=None, public_ip=None, session_cont
     if random.choice([True, False]):
         # Session Start
         message = (
-            f"%ASA-4-113039: Group = {group_name}, Username = {user}, IP = {public_ip}, "
+            f"%ASA-4-113039: Group = {group_name}, Username = {_ad_user(user)}, IP = {public_ip}, "
             f"AnyConnect session profile is {group_name}. "
             f"Session Type: {session_type}, Duration: 0:00:00, "
             f"Bytes xmt: 0, Bytes rcv: 0, Reason: User Initiated"
@@ -321,7 +333,7 @@ def _generate_anyconnect_vpn_log(config, user=None, public_ip=None, session_cont
         # Session End
         duration = random.randint(60, 3600)
         message = (
-            f"%ASA-4-113019: Group = {group_name}, Username = {user}, IP = {public_ip}, "
+            f"%ASA-4-113019: Group = {group_name}, Username = {_ad_user(user)}, IP = {public_ip}, "
             f"Session disconnected. Session Type: {session_type}, "
             f"Duration: {_format_duration(duration)}, "
             f"Bytes xmt: {random.randint(5000, 1000000)}, "
@@ -367,17 +379,17 @@ def _generate_aaa_auth_log(config, user=None, session_context=None):
     success = random.random() > 0.15
 
     req_msg = (
-        f"%ASA-6-109001: Auth start for user '{user}' "
+        f"%ASA-6-109001: Auth start for user '{_ad_user(user)}' "
         f"from {src_ip}/0 to {outside_ip}/443 on interface outside"
     )
     if success:
         result_msg = (
-            f"%ASA-6-109005: Authentication succeeded for user '{user}' "
+            f"%ASA-6-109005: Authentication succeeded for user '{_ad_user(user)}' "
             f"from {src_ip}/0 to {outside_ip}/443 on interface outside"
         )
     else:
         result_msg = (
-            f"%ASA-6-109006: Authentication failed for user '{user}' "
+            f"%ASA-6-109006: Authentication failed for user '{_ad_user(user)}' "
             f"from {src_ip}/0 to {outside_ip}/443 on interface outside"
         )
     return [
@@ -671,7 +683,7 @@ def _simulate_auth_brute_force(config, session_context=None):
         user     = random.choice(target_users)
         src_port = random.randint(1024, 65535)
         fail_msg = (
-            f"%ASA-6-109006: Authentication failed for user '{user}' "
+            f"%ASA-6-109006: Authentication failed for user '{_ad_user(user)}' "
             f"from {attacker_ip}/{src_port} to {outside_ip}/443 on interface outside"
         )
         auth_logs.append(_generate_full_syslog_message(config, fail_msg))
@@ -679,7 +691,7 @@ def _simulate_auth_brute_force(config, session_context=None):
     success_user = random.choice(target_users)
     src_port = random.randint(1024, 65535)
     success_msg = (
-        f"%ASA-6-109005: Authentication succeeded for user '{success_user}' "
+        f"%ASA-6-109005: Authentication succeeded for user '{_ad_user(success_user)}' "
         f"from {attacker_ip}/{src_port} to {outside_ip}/443 on interface outside"
     )
     auth_logs.append(_generate_full_syslog_message(config, success_msg))
@@ -730,13 +742,13 @@ def _simulate_targeted_admin_bruteforce(config, session_context=None):
         src_port = random.randint(1024, 65535)
         # 109001: Auth attempt started
         start_msg = (
-            f"%ASA-6-109001: Auth start for user '{target_user}' "
+            f"%ASA-6-109001: Auth start for user '{_ad_user(target_user)}' "
             f"from {attacker_ip}/{src_port} to {outside_ip}/{target_port} "
             f"on interface {interface}"
         )
         # 109006: Auth failed (each attempt)
         fail_msg = (
-            f"%ASA-6-109006: Authentication failed for user '{target_user}' "
+            f"%ASA-6-109006: Authentication failed for user '{_ad_user(target_user)}' "
             f"from {attacker_ip}/{src_port} to {outside_ip}/{target_port} "
             f"on interface {interface}"
         )
@@ -745,12 +757,12 @@ def _simulate_targeted_admin_bruteforce(config, session_context=None):
     # Final success — attacker found valid credentials; triggers XSIAM brute-force detection
     src_port = random.randint(1024, 65535)
     start_msg = (
-        f"%ASA-6-109001: Auth start for user '{target_user}' "
+        f"%ASA-6-109001: Auth start for user '{_ad_user(target_user)}' "
         f"from {attacker_ip}/{src_port} to {outside_ip}/{target_port} "
         f"on interface {interface}"
     )
     success_msg = (
-        f"%ASA-6-109005: Authentication succeeded for user '{target_user}' "
+        f"%ASA-6-109005: Authentication succeeded for user '{_ad_user(target_user)}' "
         f"from {attacker_ip}/{src_port} to {outside_ip}/{target_port} "
         f"on interface {interface}"
     )
@@ -1144,7 +1156,7 @@ def _simulate_vpn_bruteforce_or_scan(config, session_context=None):
         for _ in range(random.randint(2, 5)):
             src_port = random.randint(1024, 65535)
             fail_msg = (
-                f"%ASA-6-109006: Authentication failed for user '{user}' "
+                f"%ASA-6-109006: Authentication failed for user '{_ad_user(user)}' "
                 f"from {attacker_ip}/{src_port} to {outside_ip}/443 on interface outside"
             )
             vpn_logs.append(_generate_full_syslog_message(config, fail_msg))
@@ -1152,7 +1164,7 @@ def _simulate_vpn_bruteforce_or_scan(config, session_context=None):
     success_user = random.choice(users_to_try)
     src_port = random.randint(1024, 65535)
     success_msg = (
-        f"%ASA-6-109005: Authentication succeeded for user '{success_user}' "
+        f"%ASA-6-109005: Authentication succeeded for user '{_ad_user(success_user)}' "
         f"from {attacker_ip}/{src_port} to {outside_ip}/443 on interface outside"
     )
     vpn_logs.append(_generate_full_syslog_message(config, success_msg))
@@ -1195,7 +1207,7 @@ def _simulate_vpn_impossible_travel(config, session_context=None):
 
     def _vpn_start(public_ip, event_time):
         msg = (
-            f"%ASA-4-113039: Group = {group_name}, Username = {user}, IP = {public_ip}, "
+            f"%ASA-4-113039: Group = {group_name}, Username = {_ad_user(user)}, IP = {public_ip}, "
             f"AnyConnect session profile is {group_name}. "
             f"Session Type: {session_type}, Duration: 0:00:00, "
             f"Bytes xmt: 0, Bytes rcv: 0, Reason: User Initiated"
@@ -1252,7 +1264,7 @@ def _simulate_vpn_tor_login(config, session_context=None):
 
     # Log 2: VPN session start (113039) — primary detection event
     start_msg = (
-        f"%ASA-4-113039: Group = {group_name}, Username = {user}, IP = {tor_ip}, "
+        f"%ASA-4-113039: Group = {group_name}, Username = {_ad_user(user)}, IP = {tor_ip}, "
         f"AnyConnect session profile is {group_name}. "
         f"Session Type: {session_type}, Duration: 0:00:00, "
         f"Bytes xmt: 0, Bytes rcv: 0, Reason: User Initiated"
@@ -1638,7 +1650,7 @@ def generate_log(config, scenario=None, threat_level="Realistic",
             home_ip = stable_vpn_ip(_vpn_user)
             fail_reasons = ["Invalid Credentials", "Certificate Expired", "MFA Timeout", "Account Locked"]
             fail_msg = (
-                f"%ASA-6-109006: Authentication failed for user '{_vpn_user}' "
+                f"%ASA-6-109006: Authentication failed for user '{_ad_user(_vpn_user)}' "
                 f"from {home_ip}/{random.randint(49152, 65535)} to {outside_ip}/443 "
                 f"on interface outside"
             )

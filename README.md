@@ -7,7 +7,7 @@ A modular, high-fidelity log simulation tool for **Palo Alto Networks Cortex XSI
 - **Modular Architecture** — each log source is a self-contained Python module; the simulator auto-discovers any module in `modules/`
 - **Flask Web Dashboard** — real-time UI for controlling all modules, adjusting threat levels and event rates, firing individual threats, scheduling jobs, and monitoring health checks
 - **Centralized Configuration** — all settings (IPs, users, hostnames, threat intel, transport) in a single `config.json`
-- **Multiple Transports** — Syslog (TCP with persistent connections), HTTP Collector, AWS S3 (cached client), Google Cloud Pub/Sub
+- **Multiple Transports** — Syslog (TCP with persistent connections), HTTP Collector, AWS S3 (cached client), Google Cloud Pub/Sub, WEC (Windows Event Collector via WS-Management)
 - **Dynamic Threat Levels** — six levels from Benign Traffic Only to Insane; controls threat event frequency per module
 - **XSIAM Detection-Ready Sequences** — attack generators produce complete detection patterns (e.g., failed logins followed by success) that trigger XSIAM UEBA analytics out of the box
 - **Correlated Attack Scenarios** — 17 pre-built multi-module kill chains (phishing, cloud pentest, ransomware precursor, AiTM session hijack, VPN compromise, web app compromise, insider threat, DNS C2, and more)
@@ -85,6 +85,108 @@ RDP lateral generators produce **3-8 blocked attempts followed by 1 successful c
 - **Cisco Firepower** — Block events then Allow with Allow_Internal_Admin rule
 - **Zscaler** — Blocked events then Allowed with Allow_Internal_Admin rule
 
+### Windows Events — XSIAM UEBA Detections
+
+The Windows Events module generates native Windows Security Event XML targeting XSIAM's Identity Analytics (UEBA) engine. Events are delivered to the Broker VM via the **WEC (Windows Event Collector)** transport using direct WS-Management over mutual TLS.
+
+**Confirmed Working Detections:**
+
+| Generator | XSIAM Detection | Severity | MITRE |
+|---|---|---|---|
+| `dcsync` | Possible DCSync by an unusual user | High | T1003.006 |
+| `delegation_change` | User account delegation to KRBTGT | High | T1558 |
+| `delegation_change` | User account delegation to a DC | Low | T1098 |
+| `dnshostname_spoofing` | dNSHostName attribute spoofing | Medium | T1078 |
+| `samaccountname_spoofing` | sAMAccountName spoofing | Medium | T1078 |
+| `multiple_service_tickets` | Abnormal issuance of weakly encrypted service tickets | Low | T1558.003 |
+| `priv_group_addition` | User added to a privileged group | Medium | T1098.002 |
+| `priv_group_add_remove` | User added to a privileged group and removed | Low-Medium | T1098.002 |
+| `account_lockout` | Excessive user lockouts | Low | T1110 |
+| `suspicious_account_lockout` | Suspicious account lockout pattern | Low | T1110 |
+| `default_account_enabled` | User enabled a default local account | Low | T1078.001 |
+| `sms_admins_addition` | User added to SMS Admins group | Medium | T1098 |
+| `suspicious_account_creation` | Suspicious hidden user account created | Low | T1136 |
+| `mass_account_deletion` | Multiple user accounts deleted | Medium | T1531 |
+
+**WIP Detections** (prefixed with `wip_` — generating events but not yet triggering detections):
+
+| Generator | Reason |
+|---|---|
+| `wip_adminsdholder_acl_modification` | Identity graph dependent — needs real AD object GUIDs/SIDs |
+| `wip_dmsa_privesc` | Events ingested correctly, detection not yet firing |
+| `wip_sensitive_password_reset` | Training period — needs 30-day Identity Analytics baseline |
+| `wip_password_never_expires` | Training period — needs identity graph baseline |
+| `wip_as_rep_roasting` | Identity graph dependent — needs baseline of normal TGT patterns |
+| `wip_irregular_service_tgs` | Identity graph dependent — needs baseline of normal service access |
+| `wip_priv_cert_request` | Not yet investigated |
+| `wip_sccm_container_recon` | Environment dependent — requires SCCM/ConfigMgr deployment |
+
+## WEC Transport Setup
+
+The Windows Events module uses **WEC (Windows Event Collector)** transport to deliver events directly to the XSIAM Broker VM via WS-Management (HTTPS port 5986) with mutual TLS client certificate authentication.
+
+This is the same protocol used by Windows Event Forwarding (WEF) source-initiated subscriptions. LogSim constructs the SOAP/XML envelopes directly, which allows it to simulate events from hundreds of different hostnames on a single machine — something native WEF cannot do since it always stamps the local machine's hostname.
+
+### Prerequisites
+
+1. **XSIAM Broker VM** with WEC (Windows Event Collector) activated
+2. **PFX client certificate** exported from the XSIAM console
+3. **Subscription Manager URL** from the XSIAM WEC configuration page
+
+### Getting the PFX Certificate and Subscription URL
+
+Follow the XSIAM documentation to configure WEC on your Broker VM:
+
+> **Cortex XSIAM → Settings → Configurations → Data Collection → Broker VMs → [your Broker VM] → Windows Event Collector**
+>
+> See: [Palo Alto Networks XSIAM Documentation — Configure WEC on the Broker VM](https://docs-cortex.paloaltonetworks.com/r/Cortex-XSIAM/Cortex-XSIAM-Administrator-Guide/Configure-WEC-on-the-Broker-VM)
+
+From the XSIAM console WEC configuration page:
+
+1. **Download the PFX certificate** — this is the client certificate used for mutual TLS authentication. Note the export password.
+2. **Copy the Subscription Manager URL** — it looks like:
+   ```
+   Server=HTTPS://<broker-host>:5986/wsman/SubscriptionManager/WEC,Refresh=600,IssuerCA=<thumbprint>
+   ```
+   Extract:
+   - **Broker URL**: `https://<broker-host>:5986/wsman` (everything before `/SubscriptionManager`)
+   - **IssuerCA thumbprint**: the hex string after `IssuerCA=`
+
+### Configuration
+
+Set these environment variables in your `.env` file:
+
+```bash
+WEC_BROKER_URL=https://brokervm1.local.lab:5986/wsman
+WEC_PFX_PATH=/path/to/broker-vm-cert.pfx
+WEC_PFX_PASSWORD=your-pfx-export-password
+WEC_ISSUER_CA=471F21505EB2B0F12A5E6063E2DDA5FF6D7534B1
+```
+
+In `config.json`, set the transport to `"wec"` in the `windows_events_config` section:
+
+```json
+{
+    "windows_events_config": {
+        "transport": "wec"
+    }
+}
+```
+
+### Broker VM Subscription Filter
+
+Configure the Broker VM WEC subscription to accept **all Event IDs** from the Security channel rather than listing specific Event IDs. LogSim generates 20+ different Event IDs (4624, 4625, 4634, 4647, 4648, 4656, 4662, 4663, 4672, 4688, 4689, 4720, 4722, 4724, 4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4741, 4742, 4756, 4757, 4767, 4768, 4769, 4771, 4776, 4886, 4887, 4888, 5136, 5137), and accepting all Security events avoids needing to update the filter every time a new generator is added.
+
+### How It Works
+
+1. LogSim establishes a mutual TLS session with the Broker VM using the PFX certificate
+2. Sends a WS-Management `Enumerate` request to discover the active subscription
+3. Generates Windows Event XML with per-event `<Computer>` hostnames (simulating hundreds of machines)
+4. Delivers events in SOAP envelopes via `Events` requests to the subscription endpoint
+5. Sends periodic heartbeats to keep the subscription alive
+
+Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the simulated hostname in the `<Computer>` field.
+
 ## Documentation
 
 | Topic | File |
@@ -99,6 +201,7 @@ RDP lateral generators produce **3-8 blocked attempts followed by 1 successful c
 
 | Module | Transport | Benign Event Types | Threat Event Types | Reference |
 |---|---|---|---|---|
+| Windows Events | WEC (WS-Management) | 20 types (interactive logon, network share, RDP, service, cached, unlock, logoff, process, DC Kerberos, DC directory service, LDAP, NTLM, SQL, web app access) | 21 named threat generators (13 confirmed, 8 WIP) | See WEC Transport Setup above |
 | AWS CloudTrail | S3 | 69 event types across 15+ AWS services | 40 named threat scenarios | [docs/modules/aws.md](docs/modules/aws.md) |
 | GCP Cloud Audit Logs | Pub/Sub | 42 event types with @type proto annotations and LRO operation pairs | 75 named threat scenarios | [docs/modules/gcp.md](docs/modules/gcp.md) |
 | Okta SSO | HTTP Collector | 183+ event types across auth, SSO, MFA, lifecycle, policy, OAuth2, IAM, device, and zone domains | 82 named threat scenarios | [docs/modules/okta.md](docs/modules/okta.md) |
@@ -112,9 +215,20 @@ RDP lateral generators produce **3-8 blocked attempts followed by 1 successful c
 | Proofpoint Email | HTTP Collector | 1 type (delivered email) | 11 types | [docs/modules/proofpoint.md](docs/modules/proofpoint.md) |
 | Google Workspace | HTTP Collector | *(not operational)* | *(not operational)* | [docs/modules/google-workspace.md](docs/modules/google-workspace.md) |
 
-**Totals:** 356 unique threat event types and 400+ benign event types across all modules.
+**Totals:** 377 unique threat event types and 420+ benign event types across all modules.
 
 ## Recent Changes
+
+### Windows Events Module
+- New module generating native Windows Security Event XML for XSIAM UEBA/Identity Analytics detection testing
+- **WEC transport** — delivers events directly to the Broker VM via WS-Management (HTTPS/mutual TLS), bypassing the need for Filebeat/XDRC
+- Multi-hostname simulation — generates events from 500+ simulated hostnames on a single machine, each with a unique `<Computer>` field
+- Parallel internal threading — separate DC, workstation, and threat workers with output queue for consistent delivery
+- 20 benign generators covering interactive logon, network share, RDP, service, cached, unlock, logoff, process creation, DC Kerberos, DC directory service, LDAP, NTLM, SQL, and web app access patterns
+- 21 threat generators targeting 14+ XSIAM UEBA detections, 13 confirmed working
+- Event XML validated field-by-field against real Windows events from production DCs (single quotes, lowercase GUIDs, `%{GUID}` ObjectName format, nanosecond timestamps, correct `%%` code rendering in message fields)
+- 5136 directory service events use proper delete/add pairs (`%%14675`/`%%14674`) matching real AD modification patterns
+- Filebeat transport removed — WEC is the primary transport for Windows events
 
 ### XSIAM Detection Completeness
 - All brute force generators (10 across Okta, ASA, Check Point, Fortinet) now end with a successful login

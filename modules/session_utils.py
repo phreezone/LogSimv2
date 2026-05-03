@@ -485,6 +485,7 @@ def get_users_by_department(session_context):
             'display_name': profile.get('display_name', username),
             'department':   dept,
             'has_aws':      bool(profile.get('aws_iam_user')),
+            'primary_os':   profile.get('primary_os_type', ''),
         }
         groups.setdefault(dept, []).append(entry)
     # Sort departments alphabetically, users by display_name within each

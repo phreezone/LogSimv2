@@ -461,6 +461,13 @@ def _format_fortinet_cef(config, logid, log_type, subtype, log_level, extensions
 
     merged = {**base, **extensions_dict}
 
+    # AD domain-qualify bare usernames so XSIAM Identity can stitch
+    # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com)
+    for _ufield in ("suser", "duser", "FTNTFGTxauthuser"):
+        _uval = merged.get(_ufield)
+        if _uval and "\\" not in _uval and "@" not in _uval:
+            merged[_ufield] = f"EXAMPLECORP\\{_uval}"
+
     ext_string = " ".join(
         f"{k}={_cef_escape(v)}" for k, v in merged.items() if v is not None
     )
