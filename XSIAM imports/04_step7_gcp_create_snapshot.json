@@ -1,0 +1,42 @@
+[
+  {
+    "name": "GCP \u2014 Disk Snapshot or Instance Creation (Potential Data Staging)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type contains \"snapshot\" or xdm.event.operation_sub_type contains \"Snapshot\" or xdm.event.operation_sub_type = \"compute.disks.createSnapshot\" or xdm.event.operation_sub_type contains \"compute.instances.insert\"\n| bin _time span = 1h\n| comp count() as ops,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "compute.disks.createSnapshot, compute.snapshots.insert, or compute.instances.insert method \u2014 disk imaging or new compute resource potentially used to exfiltrate data.",
+    "alert_name": "GCP \u2014 Disk Snapshot or Instance Creation (Potential Data Staging)",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0010 - Exfiltration": [
+        "T1537 - Transfer Data to Cloud Account"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

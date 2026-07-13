@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Infoblox \u2014 NXDOMAIN Storm (DGA Indicator)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome_reason = \"NXDOMAIN\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| bin _time span = 10m\n| comp count() as nxd,\n       count_distinct(xdm.event.description) as distinct_nxd_queries,\n       values(domain) as failed_domains\n       by xdm.source.ipv4, _time\n| filter nxd >= 80 and distinct_nxd_queries >= 30\n| fields xdm.source.ipv4, failed_domains\n",
+    "is_enabled": true,
+    "description": "High volume of NXDOMAIN responses for one client \u2014 DGA / typosquat probing.",
+    "alert_name": "Infoblox \u2014 NXDOMAIN Storm (DGA Indicator)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "xdm_url": "failed_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1568.002 - Dynamic Resolution: Domain Generation Algorithms"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "30 minutes",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

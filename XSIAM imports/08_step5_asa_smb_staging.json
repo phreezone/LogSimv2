@@ -1,0 +1,44 @@
+[
+  {
+    "name": "Cisco ASA \u2014 Large SMB Session (Pre-Encryption Data Staging)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\"\n| alter scanner = _json -> generalCiscoLog.dst_ip,\n        tgt_ip = _json -> generalCiscoLog.src_ip,\n        svc_port = to_integer(_json -> generalCiscoLog.src_port),\n        int_port = to_integer(_json -> generalCiscoLog.dst_port),\n        proto    = _json -> generalCiscoLog.protocol,\n        bytes_n = to_integer(_json -> generalCiscoLog.transferred_bytes)\n| filter svc_port = 445 and bytes_n >= 100000000\n| comp sum(bytes_n) as total_bytes,\n       values(tgt_ip) as tgt_ips,\n       values(int_port) as int_ports,\n       values(proto) as protocols\n       by scanner, svc_port\n| filter total_bytes >= 100000000\n| fields tgt_ips, int_ports, protocols, scanner, svc_port\n",
+    "is_enabled": true,
+    "description": "ASA Teardown 302014 on src_port=445 with transferred_bytes \u2265 100MB \u2014 bulk SMB transfer indicating pre-encryption data staging.",
+    "alert_name": "Cisco ASA \u2014 Large SMB Session (Pre-Encryption Data Staging)",
+    "alert_category": "COLLECTION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "tgt_ips",
+      "action_local_port": "int_ports",
+      "action_app_protocol": "protocols",
+      "action_remote_ip": "scanner",
+      "action_remote_port": "svc_port"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0009 - Collection": [
+        "T1074 - Data Staged"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "scanner"
+    ]
+  }
+]

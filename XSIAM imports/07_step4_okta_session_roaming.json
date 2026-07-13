@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Okta \u2014 Client Roaming Detected (Native AiTM Signal)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType = \"security.session.detect_client_roaming\"\n| alter user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter user_name != null\n| filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\n| bin _time span = 30m\n| comp count() as roaming_events, values(ip) as ip_list by user_name, _time\n| filter roaming_events >= 2\n| fields user_name, ip_list\n",
+    "is_enabled": true,
+    "description": "Okta security.session.detect_client_roaming event \u2014 Okta's built-in AiTM/session-hijack detector fired.",
+    "alert_name": "Okta \u2014 Client Roaming Detected (Native AiTM Signal)",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip_list"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1557 - Adversary-in-the-Middle"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  }
+]

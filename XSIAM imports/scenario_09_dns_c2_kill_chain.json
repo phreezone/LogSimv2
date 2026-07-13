@@ -1,0 +1,41 @@
+[
+  {
+    "name": "DNS C2 Kill Chain \u2014 NXDOMAIN Storm + Outbound Firewall Activity",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome_reason = \"NXDOMAIN\"\n| filter xdm.source.ipv4 != null\n| bin _time span = 60m\n| comp count() as nxd_count by xdm.source.ipv4, _time\n| filter nxd_count >= 20\n| join (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"302014\"\n    | alter int_host  = _json -> generalCiscoLog.dst_ip,\n            int_iface = _json -> generalCiscoLog.dst_interface\n    | filter int_iface = \"inside\"\n    | comp count() as outbound_sessions by int_host\n    | filter outbound_sessions >= 1\n  ) as fw xdm.source.ipv4 = fw.int_host\n| fields int_host\n",
+    "is_enabled": true,
+    "description": "Internal host with NXDOMAIN storm AND outbound TCP traffic from same IP.",
+    "alert_name": "DNS C2 Kill Chain \u2014 NXDOMAIN Storm + Outbound Firewall Activity",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "int_host"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1568.002 - Dynamic Resolution: DGA",
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "2 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

@@ -1,0 +1,45 @@
+[
+  {
+    "name": "Cisco ASA \u2014 Outbound C2 Connection Allowed (Post DNS Resolve)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302013\"\n| alter int_host = _json -> generalCiscoLog.dst_ip,\n        ext_host = _json -> generalCiscoLog.src_ip,\n        int_port = to_integer(_json -> generalCiscoLog.dst_port),\n        ext_port = to_integer(_json -> generalCiscoLog.src_port),\n        int_iface = _json -> generalCiscoLog.dst_interface,\n        proto = _json -> generalCiscoLog.protocol,\n        bytes_n = to_integer(_json -> generalCiscoLog.transferred_bytes)\n| filter int_iface = \"inside\" and int_host != null and ext_host != null\n| bin _time span = 1h\n| comp count() as outbound_conns,\n       sum(bytes_n) as total_bytes,\n       values(ext_port) as ext_ports,\n       values(int_port) as int_ports,\n       values(proto) as protocols\n       by int_host, ext_host, _time\n| join (\n    dataset = infoblox_infoblox_raw\n    | filter _raw_log contains \"NOERROR\" and (_raw_log contains \"c2-infra\" or _raw_log contains \"command-control\" or _raw_log contains \"phishing\" or _raw_log contains \"new-c2\")\n    | alter int_src = arrayindex(regextract(_raw_log, \"client (?:@0x\\w+ )?(\\d+\\.\\d+\\.\\d+\\.\\d+)#\"), 0),\n            bad_domain = arrayindex(regextract(_raw_log, \"query: (\\S+) IN\"), 0)\n    | filter int_src != null\n    | comp count() as dns_count, values(bad_domain) as bad_domains by int_src\n    | fields int_src, dns_count, bad_domains\n  ) as dns int_host = dns.int_src\n| fields ext_ports, int_ports, protocols, bad_domains, int_host, ext_host\n",
+    "is_enabled": true,
+    "description": "Cisco ASA Built 302013 outbound connection from an internal host that also resolved a c2-infra/command-control domain (NOERROR) \u2014 bypassed both DNS RPZ and threat-block layers.",
+    "alert_name": "Cisco ASA \u2014 Outbound C2 Connection Allowed (Post DNS Resolve)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_port": "ext_ports",
+      "action_local_port": "int_ports",
+      "action_app_protocol": "protocols",
+      "xdm_url": "bad_domains",
+      "action_local_ip": "int_host",
+      "action_remote_ip": "ext_host"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071 - Application Layer Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "int_host"
+    ]
+  }
+]

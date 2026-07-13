@@ -1,0 +1,40 @@
+[
+  {
+    "name": "Infoblox \u2014 DGA NXDOMAIN Storm (\u226520 NXDOMAINs From One Client)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome_reason = \"NXDOMAIN\"\n| filter xdm.source.ipv4 != null\n| bin _time span = 10m\n| comp count() as nxd_count by xdm.source.ipv4, _time\n| filter nxd_count >= 20\n| fields xdm.source.ipv4\n",
+    "is_enabled": true,
+    "description": "\u226520 Infoblox DNS responses with outcome_reason = NXDOMAIN from one client within 10 minutes \u2014 DGA cycling indicating implant attempting many C2 candidates.",
+    "alert_name": "Infoblox \u2014 DGA NXDOMAIN Storm (\u226520 NXDOMAINs From One Client)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1568.002 - Dynamic Resolution: Domain Generation Algorithms"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Okta \u2014 Adversary-in-the-Middle Authentication Indicator",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType = \"user.session.start\" or eventType = \"user.authentication.sso\"\n| filter debugContext contains \"threatSuspected\\\":\\\"true\"\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"SUCCESS\" and user_name != null\n| filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\n| bin _time span = 15m\n| comp count() as threat_auths, values(ip) as ip_list by user_name, _time\n| filter threat_auths >= 3\n| fields user_name, ip_list\n",
+    "is_enabled": true,
+    "description": "\u22653 SUCCESS Okta user.session.start/user.authentication.sso events for one user in 15 min with debugContext threatSuspected=true \u2014 ThreatInsight-flagged auth burst from an AiTM reverse proxy (session.start + rapid SSO to sensitive apps).",
+    "alert_name": "Okta \u2014 Adversary-in-the-Middle Authentication Indicator",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip_list"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1557 - Adversary-in-the-Middle"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  }
+]

@@ -1,0 +1,44 @@
+[
+  {
+    "name": "Apache \u2014 Command Injection Pattern in HTTP Request",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = apache_httpd_raw\n| alter url = xdm.network.http.url,\n        status = to_integer(xdm.network.http.response_code),\n        method = xdm.network.http.method,\n        ua = xdm.source.user_agent\n| filter url contains \"cmd=\" and (url contains \"wget\" or url contains \"curl\" or url contains \"bash\" or url contains \"/etc/passwd\")\n       or url contains \"exec=\" and (url contains \"wget\" or url contains \"curl\" or url contains \"bash\")\n       or url contains \"shell_exec\"\n       or url contains \"passthru(\"\n       or url contains \"system(\"\n       or url contains \"..%2f..%2f\"\n       or url contains \"/etc/passwd\"\n       or url contains \"/etc/shadow\"\n| filter status in (200, 201, 500)\n| bin _time span = 30m\n| comp count() as hits,\n       count_distinct(url) as distinct_payloads,\n       values(url) as payload_urls,\n       values(method) as methods,\n       values(ua) as user_agents,\n       values(xdm.target.ipv4) as tgt_ips\n       by xdm.source.ipv4, _time\n| filter hits >= 2\n| fields xdm.source.ipv4, tgt_ips, payload_urls, methods, user_agents\n",
+    "is_enabled": true,
+    "description": "Apache request URL containing 'cmd=', 'exec=', 'shell_exec', 'passthru', 'system(', '/etc/passwd', 'wget', or 'curl' \u2014 command injection or LFI exploitation attempt.",
+    "alert_name": "Apache \u2014 Command Injection Pattern in HTTP Request",
+    "alert_category": "EXECUTION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "action_local_ip": "tgt_ips",
+      "xdm_url": "payload_urls",
+      "action_evtlog_message": "methods",
+      "actor_process_image_name": "user_agents"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0002 - Execution": [
+        "T1059 - Command and Scripting Interpreter"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

@@ -1,0 +1,44 @@
+[
+  {
+    "name": "Cisco ASA \u2014 Internal Web Server Initiating Outbound Connection",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302013\" or _raw_log contains \"302014\"\n| alter int_host = _json -> generalCiscoLog.dst_ip,\n        int_iface = _json -> generalCiscoLog.dst_interface,\n        ext_dest  = _json -> generalCiscoLog.src_ip,\n        int_port  = to_integer(_json -> generalCiscoLog.dst_port),\n        ext_port  = to_integer(_json -> generalCiscoLog.src_port),\n        proto     = _json -> generalCiscoLog.protocol,\n        bytes_n   = to_integer(_json -> generalCiscoLog.transferred_bytes)\n| filter int_iface = \"inside\" and int_host in (\"10.0.10.50\",\"10.0.10.51\",\"10.0.10.52\",\"192.168.110.243\")\n| comp sum(bytes_n) as c2_bytes,\n       values(ext_port) as ext_ports,\n       values(int_port) as int_ports,\n       values(proto) as protocols\n       by int_host, ext_dest\n| filter c2_bytes >= 10000\n| fields ext_ports, int_ports, protocols, int_host, ext_dest\n",
+    "is_enabled": true,
+    "description": "Cisco ASA Built/Teardown event where the internal host (xdm.target.ipv4) is a known web/app server IP making outbound \u2014 reversal of normal traffic direction indicates compromise.",
+    "alert_name": "Cisco ASA \u2014 Internal Web Server Initiating Outbound Connection",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_port": "ext_ports",
+      "action_local_port": "int_ports",
+      "action_app_protocol": "protocols",
+      "action_local_ip": "int_host",
+      "action_remote_ip": "ext_dest"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071 - Application Layer Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "int_host"
+    ]
+  }
+]

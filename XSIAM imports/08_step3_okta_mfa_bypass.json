@@ -1,0 +1,40 @@
+[
+  {
+    "name": "Okta \u2014 MFA Factor Reset or Deactivation",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = okta_sso_raw\n| filter okta_sso_raw.eventtype in (\"user.mfa.factor.deactivate\",\"user.mfa.factor.reset_all\",\"user.mfa.factor.suspend\")\n| alter user_name = xdm.target.user.upn,\n        admin_upn = xdm.source.user.upn,\n        outcome   = xdm.event.outcome\n| filter outcome = \"SUCCESS\" and user_name != null\n| filter not (admin_upn contains \"svc-\" or admin_upn contains \"api-\")\n| bin _time span = 15m\n| comp count() as mfa_changes,\n       values(admin_upn) as reset_by\n       by user_name, _time\n| filter mfa_changes >= 1\n| fields user_name\n",
+    "is_enabled": true,
+    "description": "user.mfa.factor.deactivate, user.mfa.factor.reset_all, user.mfa.factor.suspend, or system.mfa.factor.deactivate event \u2014 MFA being bypassed or reset to enable account takeover.",
+    "alert_name": "Okta \u2014 MFA Factor Reset or Deactivation",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1556.006 - Modify Authentication Process: Multi-Factor Authentication"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  }
+]

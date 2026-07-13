@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Infoblox \u2014 RPZ Threat-Intel DNS Blocks",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"RPZ-QNAME\" or infoblox_infoblox_raw._raw_log contains \"rpz QNAME\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        blocked_domain = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"rewrite (\\S+) \\[\"), 0)\n| filter src_ip != null\n| bin _time span = 10m\n| comp count() as blocks,\n       count_distinct(blocked_domain) as distinct_domains,\n       values(blocked_domain) as blocked_domains\n       by src_ip, _time\n| filter blocks >= 30 and distinct_domains >= 5\n| fields src_ip, blocked_domains\n",
+    "is_enabled": true,
+    "description": "Sustained RPZ blocks for one client \u2014 implant cycling through C2 candidates.",
+    "alert_name": "Infoblox \u2014 RPZ Threat-Intel DNS Blocks",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "xdm_url": "blocked_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ]
+  }
+]

@@ -1,0 +1,44 @@
+[
+  {
+    "name": "AWS \u2014 Console Login From Multiple External IPs",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = amazon_aws_raw\n| filter eventName = \"ConsoleLogin\"\n| alter login_outcome = arrayindex(regextract(responseElements, \"\\\"ConsoleLogin\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        identity_type = arrayindex(regextract(userIdentity, \"\\\"type\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(userIdentity, \"\\\"userName\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        arn = arrayindex(regextract(userIdentity, \"\\\"arn\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter login_outcome = \"Success\"\n       and identity_type = \"IAMUser\"\n       and user_name != null\n       and sourceIPAddress != null\n| filter not (user_name contains \"svc-\"\n       or user_name contains \"terraform\"\n       or user_name contains \"jenkins\"\n       or user_name contains \"github-actions\"\n       or arn contains \"AWSServiceRoleFor\"\n       or arn contains \"/aws-service-role/\"\n       or arn contains \"InstanceProfile\")\n| alter ip_16 = arrayindex(regextract(sourceIPAddress, \"^(\\d+\\.\\d+)\\.\"), 0)\n| filter ip_16 != null\n| bin _time span = 1h\n| comp count_distinct(sourceIPAddress) as distinct_ips,\n       count_distinct(ip_16) as distinct_networks,\n       values(sourceIPAddress) as ip_list,\n       count() as logins\n       by user_name, _time\n| filter distinct_networks >= 3 and distinct_ips >= 3\n| fields ip_list, user_name\n",
+    "is_enabled": true,
+    "description": "Same IAM user successfully logged into AWS console from \u22652 distinct non-RFC1918 source IPs within one hour.",
+    "alert_name": "AWS \u2014 Console Login From Multiple External IPs",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "ip_list",
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078.004 - Valid Accounts: Cloud Accounts"
+      ],
+      "TA0005 - Defense Evasion": [
+        "T1090 - Proxy"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  }
+]

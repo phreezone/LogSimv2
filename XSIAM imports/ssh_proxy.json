@@ -1,0 +1,40 @@
+[
+  {
+    "name": "Cisco ASA \u2014 SSH Proxy / Tunnel-Like Activity",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\"\n| alter proxy_host = _json -> generalCiscoLog.dst_ip,\n        ssh_tgt    = _json -> generalCiscoLog.src_ip,\n        svc_port   = to_integer(_json -> generalCiscoLog.src_port),\n        bytes_n    = to_integer(_json -> generalCiscoLog.transferred_bytes)\n| filter svc_port = 22\n| bin _time span = 30m\n| comp count_distinct(ssh_tgt) as victims, sum(bytes_n) as total_bytes by proxy_host, _time\n| filter victims >= 6 and total_bytes >= 10000000\n| fields proxy_host\n",
+    "is_enabled": true,
+    "description": "Single source SSH'ing to many internal targets with proxy-like byte volume.",
+    "alert_name": "Cisco ASA \u2014 SSH Proxy / Tunnel-Like Activity",
+    "alert_category": "LATERAL_MOVEMENT",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "proxy_host"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0008 - Lateral Movement": [
+        "T1021.004 - SSH"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "proxy_host"
+    ]
+  }
+]

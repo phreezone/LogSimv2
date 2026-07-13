@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Zscaler \u2014 DLP Block on Upload to Cloud Storage (Insider Exfil)",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter reason = \"DLP Block\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dlp_rule = cs3, dst_ip = dst\n",
+    "is_enabled": true,
+    "description": "Zscaler NSS web log Blocked action with reason=DLP Block \u2014 insider uploading sensitive data (Source Code / PII) to external cloud storage (Online Storage category, e.g. mega.nz). Correlated to the insider by src and suser.",
+    "alert_name": "Zscaler \u2014 DLP Block on Upload to Cloud Storage (Insider Exfil)",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "actor_effective_username": "user_name",
+      "xdm_url": "url",
+      "action_local_ip": "dst_ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0010 - Exfiltration": [
+        "T1567.002 - Exfiltration to Cloud Storage"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  }
+]

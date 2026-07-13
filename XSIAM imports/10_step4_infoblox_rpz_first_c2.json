@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Infoblox \u2014 RPZ NXDOMAIN Block (Device C2 Attempt Blocked at DNS)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"RPZ-QNAME\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        blocked_domain = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"qname=(\\S+)\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as rpz_nxd,\n       count_distinct(blocked_domain) as distinct_domains,\n       values(blocked_domain) as blocked_domains\n       by src_ip, _time\n| filter rpz_nxd >= 1\n| fields src_ip, blocked_domains\n",
+    "is_enabled": true,
+    "description": "Infoblox xdm.event.type = 'Threat' with RPZ-QNAME and NXDOMAIN \u2014 compromised device's first C2 lookup blocked at DNS layer.",
+    "alert_name": "Infoblox \u2014 RPZ NXDOMAIN Block (Device C2 Attempt Blocked at DNS)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "xdm_url": "blocked_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ]
+  }
+]

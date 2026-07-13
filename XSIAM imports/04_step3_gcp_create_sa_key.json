@@ -1,0 +1,42 @@
+[
+  {
+    "name": "GCP \u2014 Service Account Key Created (Persistence)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type = \"google.iam.admin.v1.CreateServiceAccountKey\"\n| bin _time span = 1h\n| comp count() as keys_created,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "google.iam.admin.v1.CreateServiceAccountKey method \u2014 new SA key created, providing persistent credential access.",
+    "alert_name": "GCP \u2014 Service Account Key Created (Persistence)",
+    "alert_category": "PERSISTENCE",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0003 - Persistence": [
+        "T1098.001 - Account Manipulation: Additional Cloud Credentials"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

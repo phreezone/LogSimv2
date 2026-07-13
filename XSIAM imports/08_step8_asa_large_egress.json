@@ -1,0 +1,44 @@
+[
+  {
+    "name": "Cisco ASA \u2014 Large Outbound Egress (Pre-Encryption Exfil)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\"\n| alter int_host = _json -> generalCiscoLog.dst_ip,\n        ext_host = _json -> generalCiscoLog.src_ip,\n        int_port = to_integer(_json -> generalCiscoLog.dst_port),\n        ext_port = to_integer(_json -> generalCiscoLog.src_port),\n        proto    = _json -> generalCiscoLog.protocol,\n        bytes_n  = to_integer(_json -> generalCiscoLog.transferred_bytes),\n        int_iface = _json -> generalCiscoLog.dst_interface\n| filter int_iface = \"inside\" and bytes_n >= 50000000\n| comp sum(bytes_n) as exfil_bytes,\n       values(ext_host) as ext_hosts,\n       values(ext_port) as ext_ports,\n       values(int_port) as int_ports,\n       values(proto) as protocols\n       by int_host\n| filter exfil_bytes >= 50000000\n| fields ext_hosts, ext_ports, int_ports, protocols, int_host\n",
+    "is_enabled": true,
+    "description": "ASA Teardown 302014 from internal host with transferred_bytes summing to \u226550MB outbound per hour \u2014 exfiltration before encryption phase.",
+    "alert_name": "Cisco ASA \u2014 Large Outbound Egress (Pre-Encryption Exfil)",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "ext_hosts",
+      "action_remote_port": "ext_ports",
+      "action_local_port": "int_ports",
+      "action_app_protocol": "protocols",
+      "action_local_ip": "int_host"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0010 - Exfiltration": [
+        "T1041 - Exfiltration Over C2 Channel"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "int_host"
+    ]
+  }
+]

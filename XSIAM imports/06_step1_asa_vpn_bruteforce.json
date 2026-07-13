@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Cisco ASA \u2014 VPN Authentication Brute Force From Single IP",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"109006\"\n| comp count() as fails,\n       values(xdm.source.user.username) as users,\n       count_distinct(xdm.source.user.username) as targeted_users\n       by xdm.source.ipv4\n| filter fails >= 3\n| fields xdm.source.ipv4, users\n",
+    "is_enabled": true,
+    "description": "\u22653 ASA 109006 authentication-failed events grouped by source IP within 30 minutes \u2014 VPN credential brute force / password spray.",
+    "alert_name": "Cisco ASA \u2014 VPN Authentication Brute Force From Single IP",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1110.003 - Brute Force: Password Spraying"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

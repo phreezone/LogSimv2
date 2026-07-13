@@ -1,0 +1,44 @@
+[
+  {
+    "name": "Ransomware Precursor \u2014 SMB Enumeration + Large Outbound Egress",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"302013\" and xdm.source.port = 445\n| filter xdm.target.ipv4 != null\n| alter scanner = xdm.target.ipv4\n| bin _time span = 30m\n| comp count_distinct(xdm.source.ipv4) as smb_hosts by scanner, _time\n| filter smb_hosts >= 10\n| join (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"302014\"\n    | alter int_host = _json -> generalCiscoLog.dst_ip,\n            int_iface = _json -> generalCiscoLog.dst_interface,\n            bytes_n = to_integer(_json -> generalCiscoLog.transferred_bytes)\n    | filter int_iface = \"inside\"\n    | comp sum(bytes_n) as exfil_bytes by int_host\n    | filter exfil_bytes >= 50000000\n  ) as fw scanner = fw.int_host\n| fields int_host, scanner\n",
+    "is_enabled": true,
+    "description": "Same host enumerating SMB shares and uploading large outbound volume.",
+    "alert_name": "Ransomware Precursor \u2014 SMB Enumeration + Large Outbound Egress",
+    "alert_category": "TAMPERING",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "int_host",
+      "action_remote_ip": "scanner"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0040 - Impact": [
+        "T1486 - Data Encrypted for Impact"
+      ],
+      "TA0010 - Exfiltration": [
+        "T1041 - Exfiltration Over C2 Channel"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "scanner"
+    ]
+  }
+]
