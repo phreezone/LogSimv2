@@ -1482,9 +1482,45 @@ for _e in _DEFAULT_THREAT_EVENTS:
     _DISPLAY_TO_EVENT[_name]    = _key
     _DISPLAY_TO_EVENT[_key]     = _key      # also accept raw key for back-compat
 
+def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info):
+    """Web-layer C2 beacon (nssweblog) — repeated small HTTP callbacks to a C2 host at a
+    regular cadence. The web-proxy counterpart to the DNS C2 beacon: same host, same
+    tempo, uncategorized destination, non-browser user-agent, tiny symmetric byte counts.
+    """
+    zscaler_conf = config.get('zscaler_config', {})
+    c2_domain = random.choice(zscaler_conf.get('c2_domains',
+                ["cdn-analytics-sync.com", "telemetry-edge-api.net", "update-check-svc.org", "cloud-metric-relay.io"]))
+    c2_ip     = f"{random.randint(45,223)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
+    beacon_ua = random.choice(["python-requests/2.31.0", "Go-http-client/1.1", "curl/8.4.0",
+                               "Mozilla/5.0 (Windows NT 10.0) WinHTTP/1.0"])
+    logs = []
+    for _ in range(random.randint(12, 20)):
+        method = random.choices(["GET", "POST"], weights=[70, 30])[0]
+        uri    = random.choice(["/api/v1/checkin", "/gate.php", "/submit.php", "/beacon", "/j/collect"])
+        fields = {
+            "action": "Allowed",
+            "urlcat": "Miscellaneous or Unknown", "urlsupercat": "Miscellaneous",
+            "urlclass": "Uncategorized", "riskscore": str(random.randint(60, 90)),
+            "responsecode": "200", "reason": "Allowed", "reqmethod": method,
+            "useragent": beacon_ua, "appname": "General Browsing", "appclass": "Web",
+            "contenttype": "application/octet-stream",
+            "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
+            "deviceostype": device_info['os_type'], "deviceosversion": device_info['os_version'],
+            "eurl": f"http://{c2_domain}{uri}", "ehost": c2_domain,
+            "cip": internal_host_ip, "sip": c2_ip, "proto": "HTTP",
+            "bytesin": random.randint(120, 400), "bytesout": random.randint(200, 900),  # small, regular
+            "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+            "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
+            "cefSeverity": "5",
+        }
+        logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
+    return logs
+
+
 # Module-level dispatch map for named-threat mode.
 # Functions accept (config, user, dept, internal_host_ip, device_info).
 _NAMED_THREATS = {
+    "web_c2_beacon":        _generate_web_c2_beacon,
     "web_threat":           _generate_threat_web_traffic,
     "data_exfil":           _generate_data_exfil_web_traffic,
     "dlp_threat":           _generate_dlp_web_traffic,
@@ -1748,6 +1784,10 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     if scenario_event and scenario_event in _NAMED_THREATS:
         user, dept, internal_host_ip, device_info = _get_user_and_device_info(
             config, session_context=session_context)
+        # Pin the source host from context so a scenario keys the web stage to one host.
+        _ctx_src = (context or {}).get("src_ip")
+        if _ctx_src:
+            internal_host_ip = _ctx_src
         if not internal_host_ip:
             internal_host_ip = _get_random_internal_ip(config)
         return _NAMED_THREATS[scenario_event](config, user, dept, internal_host_ip, device_info)

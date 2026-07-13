@@ -3581,7 +3581,11 @@ def _generate_s3_ransomware_encrypt(config, context=None):
     # AIDA principalId prefix, user ARN, AKIA access key, no sessionContext.
     # Coercing an AssumedRole identity to type=IAMUser leaves AROA/role fields intact,
     # which breaks XIF field extraction and potentially the detection query.
-    _raw_user = _get_random_user(config)
+    # Honor a pinned principal/IP from context so a scenario can key every cloud stage
+    # to one compromised actor (falls back to a random user/IP when unpinned).
+    _ctx      = context or {}
+    _ctx_user = _ctx.get('user_identity') or {}
+    _raw_user = _ctx_user if (_ctx_user.get('name') or _ctx_user.get('userName')) else _get_random_user(config)
     _user_name = _raw_user.get('name', _raw_user.get('userName', 'svc-backup-user'))
     account_id = _raw_user.get('accountId', account_id)
     user_identity = {
@@ -3591,9 +3595,8 @@ def _generate_s3_ransomware_encrypt(config, context=None):
         "arn_suffix": f"user/{_user_name}",
     }
 
-    # VPN-only source IP — single consistent IP per run, rotates across runs.
-    # Tor excluded: too slow/unreliable for bulk S3 throughput.
-    ip_address = get_random_vpn_ip_ctx(config)["ip"]
+    # Single consistent source IP per run — pinned from context when a scenario provides it.
+    ip_address = _ctx.get('ip_address') or get_random_vpn_ip_ctx(config)["ip"]
 
     # Foreign-account KMS key — the primary cross-account detection signal
     foreign_account = random.choice(aws_conf.get("foreign_account_ids", ["999988887777"]))
@@ -5023,9 +5026,9 @@ def _generate_cross_account_assume_role(config, context=None):
         "OrganizationAccountAccessRole", "ReadOnlyAccess", "SecurityAudit",
         "AdministratorAccess", "DevOpsRole", "DeploymentRole",
     ])
-    target_role   = random.choice(target_role_names)
+    target_role   = (context or {}).get('target_role') or random.choice(target_role_names)
     target_role_arn = f"arn:aws:iam::{account_id}:role/{target_role}"
-    session_name  = f"{''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))}-session"
+    session_name  = (context or {}).get('role_session_name') or f"{''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))}-session"
     assumed_role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
     assumed_arn   = f"arn:aws:sts::{account_id}:assumed-role/{target_role}/{session_name}"
     credentials_expiry = (
@@ -6238,7 +6241,10 @@ def _generate_assume_role_with_saml(config, context=None):
     role_arn  = f"arn:aws:iam::{account_id}:role/{role_name}"
 
     user_names = aws_conf.get('sso_user_names', ['alice', 'bob', 'carol', 'dave', 'eve'])
-    user_name  = random.choice(user_names)
+    # Honor a pinned federated username so an Okta→AWS scenario ties the SAML session
+    # back to the same Okta user (pre-stages the cross-identity link the identity graph
+    # will resolve). roleSessionName is the IdP-asserted username = the Okta login.
+    user_name  = (context or {}).get('saml_user') or (context or {}).get('target_user') or random.choice(user_names)
     session_name = user_name
 
     assumed_role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
@@ -6881,9 +6887,70 @@ def _generate_athena_query_exfil(config, context=None):
     return [event]
 
 
+def _generate_kms_key_destruction(config, context=None):
+    """(Threat) Attacker disables and schedules deletion of a KMS key — destroys the
+    ability to decrypt data (ransomware/sabotage impact). DisableKey → ScheduleKeyDeletion.
+    Triggers XSIAM: destructive KMS operation on a customer-managed key.
+    """
+    _ctx = context or {}
+    user_identity = _ctx.get('user_identity') or _get_random_user(config)
+    ip_address    = _ctx.get('ip_address') or _get_random_ip(config, force_external=True)
+    aws_conf   = config.get(CONFIG_KEY, {})
+    region     = aws_conf.get('aws_region', 'us-east-1')
+    account_id = user_identity.get('accountId', aws_conf.get('aws_account_id', '123456789012'))
+    key_id     = str(uuid.uuid4())
+    key_arn    = f"arn:aws:kms:{region}:{account_id}:key/{key_id}"
+    key_res    = [{"accountId": account_id, "type": "AWS::KMS::Key", "ARN": key_arn}]
+
+    e1 = _get_base_event(config, user_identity, ip_address, region,
+                         "DisableKey", "kms.amazonaws.com", api_version="2014-11-01", read_only=False)
+    e1.update({"requestParameters": {"keyId": key_id}, "responseElements": None, "resources": key_res})
+
+    e2 = _get_base_event(config, user_identity, ip_address, region,
+                         "ScheduleKeyDeletion", "kms.amazonaws.com", api_version="2014-11-01", read_only=False)
+    _del = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=7)).strftime("%b %d, %Y, %I:%M:%S %p")
+    e2.update({"requestParameters": {"keyId": key_id, "pendingWindowInDays": 7},
+               "responseElements": {"keyId": key_arn, "deletionDate": _del}, "resources": key_res})
+    return [e1, e2]
+
+
+def _generate_imds_credential_theft(config, context=None):
+    """(Threat) EC2 instance-profile credentials stolen via SSRF/IMDSv1 and used from an
+    EXTERNAL IP — the temporary role credentials have left the instance. userIdentity is
+    the instance role but sourceIPAddress is the attacker's, not an AWS/EC2 address.
+    GetCallerIdentity → environment recon. Triggers XSIAM: instance credentials used off-instance.
+    """
+    _ctx = context or {}
+    ip_address = _ctx.get('ip_address') or _get_random_ip(config, force_external=True)
+    aws_conf   = config.get(CONFIG_KEY, {})
+    region     = aws_conf.get('aws_region', 'us-east-1')
+    account_id = aws_conf.get('aws_account_id', '123456789012')
+    role_name  = random.choice(aws_conf.get('ec2_instance_roles',
+                 ['ec2-app-server-role', 'ec2-web-role', 'ec2-backend-role']))
+    instance_id = f"i-{''.join(random.choices('0123456789abcdef', k=17))}"
+    user_identity = {
+        "type": "AssumedRole",
+        "name": f"{role_name}/{instance_id}",
+        "arn":  f"arn:aws:sts::{account_id}:assumed-role/{role_name}/{instance_id}",
+        "accountId": account_id,
+    }
+    # Attacker enumerates the environment with the stolen instance-role credentials.
+    calls = [("GetCallerIdentity", "sts.amazonaws.com"),
+             ("DescribeInstances", "ec2.amazonaws.com"),
+             ("ListBuckets",       "s3.amazonaws.com"),
+             ("ListAttachedRolePolicies", "iam.amazonaws.com")]
+    events = []
+    for name, src in calls:
+        events.append(_get_base_event(config, user_identity, ip_address, region,
+                                      name, src, read_only=True))
+    return events
+
+
 # --- Scenario-specific functions map ---
 # Maps scenario_event strings to the corresponding function
 SCENARIO_FUNCTIONS = {
+    "KMS_KEY_DESTRUCTION": _generate_kms_key_destruction,
+    "IMDS_CREDENTIAL_THEFT": _generate_imds_credential_theft,
     "TOR_LOGIN": _generate_login_from_tor,
     "PENTEST_LAUNCH": _generate_pentest_instance_launch,
     "DISABLE_GUARDDUTY": _generate_guardduty_detector_deleted,
@@ -6900,6 +6967,7 @@ SCENARIO_FUNCTIONS = {
     "S3_RANSOMWARE_ENCRYPT": _generate_s3_ransomware_encrypt,
     "BEDROCK_DELETE_LOGGING": _generate_bedrock_delete_model_invocation_logging,
     "CROSS_ACCOUNT_ASSUME_ROLE": _generate_cross_account_assume_role,
+    "ASSUME_ROLE_WITH_SAML": _generate_assume_role_with_saml,
     "DISABLE_SECURITY_HUB": _generate_security_hub_disabled,
     "STOP_CONFIG_RECORDER": _generate_config_recorder_stopped,
     "DELETE_WAF_RULE": _generate_waf_rule_deleted,

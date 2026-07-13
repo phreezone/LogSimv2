@@ -63,10 +63,18 @@ All 17 available scenarios are documented in detail in [Attack Scenarios](attack
 | 15 | Infoblox — NXDOMAIN Storm / DGA | Infoblox | 20–50 query+NXDOMAIN pairs from one source IP |
 | 16 | Infoblox — DNS Flood | Infoblox | 20–50 rapid queries across diverse domains and record types |
 | 17 | Infoblox — DHCP Starvation | Infoblox | 20–50 DHCPDISCOVER events from spoofed random MACs |
+| 18 | Domain Dominance — Phish → AD Recon → Kerberoast → DCSync → Lateral → Persistence | Windows, Infoblox, Proofpoint, **All firewalls** | Host+user pivot. A 4624 network-logon binding links the IP-keyed DNS/SMB alerts to the DC-side AD alerts. **Requires Windows Events + Infoblox.** |
+| 19 | Beaconing Implant — Execution → DNS/Web C2 → Egress → Persistence → Anti-Forensics | Windows, Infoblox, Zscaler, **All firewalls** | Single-host pivot. 4688 process tree → DNS + web C2 → 4697 service install → 1102 log clear. |
+| 20 | Server Breach → Cloud Takeover — Web Exploit → Reverse Shell → DNS Exfil → S3 Exfil | Apache httpd, **All firewalls**, Infoblox, AWS | Server-IP pivot on-prem; IMDS/SSRF steals the EC2 instance role to exfil S3. |
+| 21 | Cloud Ransomware — Brute Force → Admin → Defense Evasion → Exfil → Encrypt → Key Destruction | AWS CloudTrail | AWS-principal pivot. S3 re-encryption with a foreign KMS key + `ScheduleKeyDeletion`. |
+| 22 | Perimeter Intrusion — Port Scan → Denied Inbound → VPN Brute Force → Web Exploit | **All firewalls**, Apache httpd | External attacker-IP pivot, pinned across all Cisco ASA stages. |
+| 23 | Identity Attack → Cloud — MFA Fatigue + Tor → AWS SAML Federation → Privesc → Exfil | Okta, AWS CloudTrail | Identity pivot. The Okta user = AWS SAML `roleSessionName` (cross-identity link pre-staged for XSIAM identity unification). |
 
 > **Scenarios 1–8** do not require Infoblox. Any module marked *(optional)* will have its steps gracefully skipped if not loaded — the scenario still runs with the remaining modules.
 
 > **Scenarios 9–10** require Infoblox NIOS. Scenarios 11–17 are Infoblox standalone validation tests.
+
+> **Scenarios 18–23** are *advanced linked kill chains* — each is built around a single pivot entity (host, server IP, external attacker IP, AWS principal, or user identity) with full alert-field enrichment so every stage stitches into one case. See [attack-scenarios.md](attack-scenarios.md).
 
 **When to use:** Testing XSIAM correlation rules, incident response playbook validation, SOC analyst training exercises.
 

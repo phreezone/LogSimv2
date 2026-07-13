@@ -86,6 +86,25 @@ def _get_process_and_send():
     from log_simulator import process_and_send
     return process_and_send
 
+
+def _run_scenario_and_flush(func, modules, cfg):
+    """Run a scenario, then flush the run's batched S3 upload (so the AWS events land
+    as ONE CloudTrail object) and any queued WEC/Windows events (so a scenario emitting
+    fewer than a full WEC batch — e.g. a single 4697 — still delivers on completion)."""
+    try:
+        func(modules, cfg)
+    finally:
+        try:
+            from log_simulator import flush_s3_batch
+            flush_s3_batch()
+        except Exception:
+            pass
+        try:
+            from log_simulator import _flush_wec_batch
+            _flush_wec_batch(cfg)
+        except Exception:
+            pass
+
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 app.jinja_env.auto_reload = True          # always read template from disk
@@ -835,6 +854,12 @@ def _get_scenarios():
             run_dns_c2_killchain_scenario,
             run_device_compromise_scenario,
             run_infoblox_single_threat,
+            run_domain_dominance_scenario,
+            run_beaconing_implant_scenario,
+            run_server_breach_cloud_scenario,
+            run_cloud_ransomware_scenario,
+            run_perimeter_intrusion_scenario,
+            run_identity_attack_cloud_scenario,
         )
         _SCENARIOS = [
             {"id": "1",  "name": "AWS Pentest & Defense Evasion",                          "func": run_aws_pentest_scenario},
@@ -854,6 +879,12 @@ def _get_scenarios():
             {"id": "15", "name": "Infoblox — NXDOMAIN Storm",                              "func": lambda m, c: run_infoblox_single_threat("NXDOMAIN_STORM", m, c)},
             {"id": "16", "name": "Infoblox — DNS Flood",                                   "func": lambda m, c: run_infoblox_single_threat("DNS_FLOOD", m, c)},
             {"id": "17", "name": "Infoblox — DHCP Starvation",                             "func": lambda m, c: run_infoblox_single_threat("DHCP_STARVATION", m, c)},
+            {"id": "18", "name": "Domain Dominance (Phish → AD Recon → Kerberoast → DCSync → Lateral → Persistence)", "func": run_domain_dominance_scenario},
+            {"id": "19", "name": "Beaconing Implant (DNS C2 → tunnel → web exfil → FW egress → service persistence)", "func": run_beaconing_implant_scenario},
+            {"id": "20", "name": "Server Breach → Cloud Takeover (Apache exploit → reverse shell → DNS exfil → S3 exfil)", "func": run_server_breach_cloud_scenario},
+            {"id": "21", "name": "Cloud Ransomware (brute force → admin → stop logging → exfil → S3 encrypt + ransom)", "func": run_cloud_ransomware_scenario},
+            {"id": "22", "name": "Perimeter Intrusion (port scan → denied inbound → VPN brute force → web exploit)", "func": run_perimeter_intrusion_scenario},
+            {"id": "23", "name": "Identity Attack → Cloud (Okta MFA-fatigue + Tor → AWS SAML federation → privesc → exfil)", "func": run_identity_attack_cloud_scenario},
         ]
     except Exception as e:
         print(f"[dashboard] Could not load scenarios from log_simulator: {e}")
@@ -876,7 +907,7 @@ def api_run_scenario(scenario_id: str):
     cfg = copy.deepcopy(CONFIG)
     modules = {name: state.module for name, state in MODULE_STATES.items()}
     t = threading.Thread(
-        target=s["func"], args=(modules, cfg), daemon=True,
+        target=_run_scenario_and_flush, args=(s["func"], modules, cfg), daemon=True,
         name=f"scenario-{scenario_id}-{int(time.time())}",
     )
     t.start()
@@ -913,7 +944,7 @@ def _execute_job(job: dict) -> None:
             if s:
                 cfg = copy.deepcopy(CONFIG)
                 mods = {n: st.module for n, st in MODULE_STATES.items()}
-                threading.Thread(target=s["func"], args=(mods, cfg), daemon=True).start()
+                threading.Thread(target=_run_scenario_and_flush, args=(s["func"], mods, cfg), daemon=True).start()
         elif t == "rate_change":
             targets = ([MODULE_STATES[p["name"]]] if p.get("name") and p["name"] in MODULE_STATES
                        else list(MODULE_STATES.values()))

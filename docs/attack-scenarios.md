@@ -2,6 +2,8 @@
 
 The following scenarios can be run using **Mode 2**. Scenarios 2 and 3 include optional Infoblox DNS/DHCP correlation steps that activate automatically when the Infoblox NIOS module is loaded. Scenarios 9–10 require Infoblox NIOS. Scenarios 1–8 require no Infoblox and run with any combination of the other modules.
 
+**Scenarios 18–23** are *advanced linked kill chains* — each is deliberately built around a **single pivot entity** (a host, a server IP, an external attacker IP, an AWS principal, or a user identity) so that every stage's alert stitches into **one incident** without relying on cross-entity resolution. They also carry **full alert-field enrichment** (user + IP + host wherever the event type allows it), so alerts arrive case-ready. See the "Advanced Linked Kill Chains" section below.
+
 ---
 
 > **XSIAM Out-of-the-Box Detection Coverage**
@@ -236,6 +238,134 @@ These single-event scenarios allow direct testing and validation of any specific
 | 15 | Infoblox — NXDOMAIN Storm / DGA | 20–50 query+NXDOMAIN pairs (40–100 total events) from one source IP |
 | 16 | Infoblox — DNS Flood | 20–50 rapid queries across diverse domains/types |
 | 17 | Infoblox — DHCP Starvation | 20–50 DHCPDISCOVER events from spoofed random MACs |
+
+---
+
+## Advanced Linked Kill Chains (Scenarios 18–23)
+
+Each of these is engineered around a **single pivot entity** so alerts group into one case, and around **full field enrichment** so alerts are case-ready. Where a chain crosses an entity boundary that XSIAM cannot yet resolve automatically (e.g. Okta user ↔ AWS federated identity, or on-prem server ↔ cloud role), the matching value is **pre-staged on both sides** so the alerts merge automatically once XSIAM's identity-unification feature ships.
+
+These scenarios also exercise telemetry added specifically for them: Windows **4697** (service installed), **1102** (audit log cleared), and multi-event **4688 process trees** (Office → PowerShell → cmd → LOLBin); Zscaler **web-layer C2 beacon** (`zscaler_nssweblog_raw`); and AWS **KMS key destruction**, **IMDS/SSRF credential theft**, and **`AssumeRoleWithSAML`** federation.
+
+---
+
+### Scenario 18 — Domain Dominance (Phish → AD Recon → Kerberoast → DCSync → Lateral → Persistence)
+
+*Narrative:* A phishing email lands on a domain user. The compromised host performs reverse-DNS and zone-transfer reconnaissance, then the attacker Kerberoasts service accounts, abuses directory-replication rights (DCSync) to pull credentials, moves laterally over SMB, and grants themselves delegation rights for persistence. **Pivot:** the victim user + host. A DHCP anchor (IP↔host) and a 4624 network-logon binding (IP↔user) let the IP-keyed DNS/SMB alerts resolve to the same identity as the DC-side AD alerts.
+
+| Step | Module | Dataset | Event | Key Hunt Fields |
+|---|---|---|---|---|
+| Anchor | Infoblox | `infoblox_infoblox_raw` | DHCP_ACK — binds victim IP ↔ host | `xdm.source.ipv4`; MAC; hostname |
+| Bind | Windows | `microsoft_windows_raw` | 4624 type-3 network logon — binds IP ↔ user | `IpAddress`; `TargetUserName` |
+| 1 | Proofpoint | `proofpoint_tap_raw` | Malware attachment delivered to victim | `xdm.email.recipients` |
+| 2 | Infoblox | `infoblox_infoblox_raw` | PTR reverse-DNS sweep + AXFR/IXFR zone transfer | ≥100 PTR / ≥50 distinct; AXFR queries |
+| 3 | Windows | `microsoft_windows_raw` | Kerberoasting — 4769 RC4 service-ticket burst | `xdm.event.id` = 4769; weak encryption |
+| 4 | Windows | `microsoft_windows_raw` | DCSync — 4662 directory-replication rights | `xdm.event.id` = 4662; replication GUID |
+| 5 | **All loaded firewalls** | `cisco_asa_raw`, … | SMB share enumeration to unseen hosts | Port 445; ≥10 distinct targets |
+| 6 | Windows | `microsoft_windows_raw` | Delegation rights modified (persistence) | delegation change event |
+
+*Hunt:* Timeline the victim user + host across `microsoft_windows_raw` (Kerberoast → DCSync → delegation) and `infoblox_infoblox_raw`/`cisco_asa_raw` (recon + SMB) joined on the workstation IP via the 4624 binding.
+
+*OOB Detections:* Kerberoast, DCSync, and delegation-change fire as native XSIAM analytics. PTR sweep, zone transfer, and SMB enumeration fire via custom correlation rules (user-enriched through the 4624 binding).
+
+---
+
+### Scenario 19 — Beaconing Implant (Execution → DNS/Web C2 → Egress → Persistence → Anti-Forensics)
+
+*Narrative:* A single infected workstation runs an implant end-to-end: a phishing document spawns a hidden-PowerShell process tree, the implant beacons to C2 over DNS and the web proxy, exfiltrates over HTTPS and periodic firewall egress, installs an auto-start service for persistence, and finally clears the Security event log. **Pivot:** the infected host (IP + hostname) — every stage keys to it, so the whole chain lands in one case.
+
+| Step | Module | Dataset | Event | Key Hunt Fields |
+|---|---|---|---|---|
+| Anchor | Infoblox | `infoblox_infoblox_raw` | DHCP_ACK — binds host IP ↔ hostname | `xdm.source.ipv4`; MAC; hostname |
+| Bind | Windows | `microsoft_windows_raw` | 4624 type-3 network logon — binds IP ↔ user | `IpAddress`; `TargetUserName` |
+| 0 | Windows | `microsoft_windows_raw` | 4688 process tree — WINWORD → PowerShell → cmd → LOLBin | `NewProcessName`; `ParentProcessName`; `CommandLine` |
+| 1 | Infoblox | `infoblox_infoblox_raw` | DNS C2 beacon — recurring queries to one domain | same `xdm.source.ipv4`; ≥10 queries/domain |
+| 2 | Infoblox | `infoblox_infoblox_raw` | DNS tunneling — TXT query burst | ≥15 TXT queries |
+| 2b | Zscaler | `zscaler_nssweblog_raw` | Web-layer C2 beacon — periodic HTTP callbacks | uncategorized URL; non-browser UA; small symmetric bytes |
+| 3 | Zscaler | `zscaler_nssweblog_raw` | Data exfil / DLP upload over HTTPS | large `bytesout` |
+| 4 | **All loaded firewalls** | `cisco_asa_raw`, … | Periodic outbound to the C2 IP | `xdm.source.ipv4` = host; C2 dst |
+| 5 | Windows | `microsoft_windows_raw` | 4697 — implant service installed (auto-start) | `ServiceName`; suspicious `ServiceFileName` |
+| 6 | Windows | `microsoft_windows_raw` | 1102 — Security audit log cleared (anti-forensics) | `xdm.event.id` = 1102 |
+
+*Hunt:* Pivot on the host IP across `infoblox_infoblox_raw` (C2 beacon + tunnel), `zscaler_nssweblog_raw` (web C2), and `microsoft_windows_raw` (process tree, service install, log clear). The DNS C2/tunnel alerts carry the resolved user via the 4624 binding.
+
+*OOB Detections:* 4688 process-tree, 4697 service install, and 1102 log-clear surface via native Windows analytics. DNS C2 beacon and DNS tunnel fire via custom correlation rules (now user-enriched).
+
+---
+
+### Scenario 20 — Server Breach → Cloud Takeover (Web Exploit → Reverse Shell → DNS Exfil → S3 Exfil)
+
+*Narrative:* A public web server is scanned, a web shell is uploaded and used to run commands, the server opens a reverse shell outbound, stages a DNS-tunnel exfil, and the attacker steals the server's EC2 instance-role credentials via SSRF/IMDS and uses them from an external IP to bulk-read and exfiltrate S3. **Pivot (on-prem):** the web server IP. The cloud stage links via the instance role; the on-prem↔cloud merge pre-stages for the identity feature.
+
+| Step | Module | Dataset | Event | Key Hunt Fields |
+|---|---|---|---|---|
+| 1 | Apache httpd | `apache_httpd_raw` | Recon scan — 4xx burst from one attacker IP | `src_ip` = attacker; ≥50 4xx |
+| 2 | Apache httpd | `apache_httpd_raw` | Web-shell upload — POST to script path | small response; upload path |
+| 3 | Apache httpd | `apache_httpd_raw` | Command-injection payload via web shell | SQL/cmd patterns in URL |
+| 4 | **All loaded firewalls** | `cisco_asa_raw`, … | Reverse shell / egress from the server IP | `xdm.source.ipv4` = server (not client!) |
+| 5 | Infoblox | `infoblox_infoblox_raw` | DNS tunneling exfil from the server | ≥15 TXT queries from server IP |
+| 6 | AWS CloudTrail | `amazon_aws_raw` | IMDS/SSRF credential theft — instance role used from external IP | `userIdentity.type` = AssumedRole; external `sourceIPAddress` |
+| 7 | AWS CloudTrail | `amazon_aws_raw` | S3 read-exfil chain — ListBuckets → bulk GetObject | many GetObject; sensitive bucket |
+
+*Hunt:* Find the web server IP in `apache_httpd_raw` (web shell) then as `xdm.source.ipv4` in firewall egress and `infoblox_infoblox_raw` DNS tunnel. In `amazon_aws_raw`, find the instance role used from a non-AWS `sourceIPAddress` (IMDS theft) followed by bulk S3 reads.
+
+*OOB Detections:* AWS S3 data-exfil and off-instance credential use may fire native detectors. Apache web-attack, firewall egress, and DNS tunnel require custom correlation rules.
+
+---
+
+### Scenario 21 — Cloud Ransomware (Brute Force → Admin → Defense Evasion → Exfil → Encrypt → Key Destruction)
+
+*Narrative:* A compromised AWS principal brute-forces the console, attaches AdministratorAccess, stops CloudTrail and S3 access logging, bulk-reads and exfiltrates S3 (double extortion), re-encrypts objects with a foreign-account KMS key and drops a ransom note, then disables and schedules deletion of the KMS keys so the data can never be recovered. **Pivot:** the AWS principal + attacker IP, threaded across every CloudTrail stage.
+
+| Step | Module | Dataset | Event | Key Hunt Fields |
+|---|---|---|---|---|
+| 1 | AWS CloudTrail | `amazon_aws_raw` | Console-login credential brute force | high-volume ConsoleLogin failures |
+| 2 | AWS CloudTrail | `amazon_aws_raw` | AttachUserPolicy (AdministratorAccess) | privilege escalation |
+| 3 | AWS CloudTrail | `amazon_aws_raw` | StopLogging (CloudTrail) | defense evasion |
+| 4 | AWS CloudTrail | `amazon_aws_raw` | PutBucketLogging disabled (S3 access logs) | defense evasion |
+| 5 | AWS CloudTrail | `amazon_aws_raw` | S3 read-exfil chain (before encryption) | ListBuckets → bulk GetObject |
+| 6 | AWS CloudTrail | `amazon_aws_raw` | CopyObject + GenerateDataKey ×N → DeleteObjects → ransom-note PutObject | foreign-account KMS key; ransom note key |
+| 7 | AWS CloudTrail | `amazon_aws_raw` | DisableKey → ScheduleKeyDeletion (KMS) | `eventName` = ScheduleKeyDeletion |
+
+*Hunt:* Chain the same principal / `sourceIPAddress` across AttachPolicy → StopLogging → S3 exfil → mass CopyObject-with-foreign-KMS → ScheduleKeyDeletion. The paired `GenerateDataKey` calls correctly show `sourceIPAddress` = s3.amazonaws.com.
+
+*OOB Detections:* AWS console brute force, AdministratorAccess grant, StopLogging, and "Suspicious objects encryption in an AWS bucket" fire as native detectors. KMS key destruction pairs with them for the impact stage.
+
+---
+
+### Scenario 22 — Perimeter Intrusion (Port Scan → Denied Inbound → VPN Brute Force → Web Exploit)
+
+*Narrative:* A single external attacker IP probes the edge: it port-scans the perimeter firewalls, floods high-volume denied-inbound connections, brute-forces the VPN gateway, then attempts to exploit the public web server (Log4Shell and injection). **Pivot:** the external attacker IP — pinned through the firewall generators so every ASA stage shares it.
+
+| Step | Module | Dataset | Event | Key Hunt Fields |
+|---|---|---|---|---|
+| 1 | **All loaded firewalls** | `cisco_asa_raw`, … | External port scan against the perimeter | one src IP → many ports |
+| 2 | **All loaded firewalls** | `cisco_asa_raw`, … | High-volume denied inbound connections | 50–150 106023 denies from one IP |
+| 3 | **All loaded firewalls** | `cisco_asa_raw`, … | VPN credential brute force | 109006 auth failures from one IP |
+| 4 | Apache httpd | `apache_httpd_raw` | Log4Shell exploitation probe | `${jndi:` pattern in request |
+| 5 | Apache httpd | `apache_httpd_raw` | Command/SQL injection payloads | injection patterns in URL |
+
+*Hunt:* Pivot on the attacker IP across `cisco_asa_raw` (port scan → denied burst → VPN brute force) and `apache_httpd_raw` (Log4Shell + injection). All ASA stages now share the pinned attacker IP for clean grouping.
+
+*OOB Detections:* Cisco ASA port scan, high-volume denied inbound, and VPN brute force fire via correlation rules; Apache Log4Shell/injection via web rules.
+
+---
+
+### Scenario 23 — Identity Attack → Cloud (MFA Fatigue + Tor Login → AWS SAML Federation → Privesc → Exfil)
+
+*Narrative:* An attacker MFA-fatigues an Okta user and logs in from a Tor exit node, then the compromised identity federates into AWS via `AssumeRoleWithSAML` (the SAML `roleSessionName` is the Okta username), escalates to AdministratorAccess, and bulk-exfiltrates S3 — all as the same identity. **Pivot:** the victim username, carried from Okta into the AWS SAML session and every subsequent AWS call.
+
+| Step | Module | Dataset | Event | Key Hunt Fields |
+|---|---|---|---|---|
+| 1 | Okta | `okta_sso_raw` | MFA-fatigue push bombing | repeated MFA prompts; one user |
+| 2 | Okta | `okta_sso_raw` | Account takeover — successful login from Tor | `xdm.source.ipv4` = Tor; victim user |
+| 3 | AWS CloudTrail | `amazon_aws_raw` | AssumeRoleWithSAML — Okta identity federates into AWS | `roleSessionName` = Okta user; SAML provider |
+| 4 | AWS CloudTrail | `amazon_aws_raw` | AttachUserPolicy (AdministratorAccess) — as the victim | privilege escalation; victim principal |
+| 5 | AWS CloudTrail | `amazon_aws_raw` | S3 read-exfil chain — as the victim | ListBuckets → bulk GetObject |
+
+*Hunt:* Follow the victim username from `okta_sso_raw` (MFA bombing → Tor login) into `amazon_aws_raw` (`AssumeRoleWithSAML` roleSessionName → AttachUserPolicy → S3 exfil). The username is matched on both sides; XSIAM's identity-unification feature will collapse the Okta and AWS incidents into one.
+
+*OOB Detections:* Okta MFA bombing and Tor/impossible-travel login fire as native ThreatInsight analytics; AWS AdministratorAccess grant and S3 exfil surface as native/rule detectors.
 
 ---
 

@@ -925,7 +925,9 @@ def _generate_brute_force_sequence(config, user_info, session_context=None):
     print("    - Okta Module generating brute force + lockout + unlock sequence...")
     logs = []
     ip_ctx = _get_random_ip_and_context(config, "tor_exit_nodes")
-    for _ in range(random.randint(3, 7)):
+    # ≥6 failures so the "≥5 auth FAILURE from one IP" brute-force detection
+    # reliably trips (was randint(3,7), which could roll below the threshold).
+    for _ in range(random.randint(6, 10)):
         logs.append(_generate_failed_login(config, user_info, ip_ctx=ip_ctx))
     logs.append(_generate_account_lock(config, user_info))
     logs.append(_generate_account_unlock_by_admin(config, user_info))
@@ -1733,8 +1735,10 @@ def _generate_impossible_travel_sequence(config, user_info, session_context=None
     all_apps = _get_sensitive_apps(config)
     sso_apps = random.sample(all_apps, k=min(random.randint(2, 3), len(all_apps)))
     # Location 1 login, then 5-30 min gap, then location 2 login + SSO
-    t0 = datetime.now(timezone.utc)
-    t1 = t0 + timedelta(minutes=random.randint(5, 30))
+    # Benign login a few minutes ago; attacker login now. Do NOT future-date the
+    # attacker login — a future _time falls outside detection search windows.
+    t1 = datetime.now(timezone.utc)
+    t0 = t1 - timedelta(minutes=random.randint(2, 6))
     ts_loc2 = _event_times(1 + len(sso_apps), base=t1)
 
     # Location 1: benign home country
@@ -6157,11 +6161,13 @@ def get_threat_names():
     return list(_make_threat_dict({}, {"username": "", "full_name": ""}, None).keys())
 
 
-def _generate_threat_log(config, session_context=None, forced_event=None):
+def _generate_threat_log(config, session_context=None, forced_event=None, forced_user=None):
     """Return a list of threat-level JSON event strings.
     If forced_event is a known threat key, that specific threat is generated instead of a random one.
+    If forced_user is provided, the threat targets that user instead of a fresh random one —
+    lets a scenario thread one consistent victim across multiple Okta steps.
     """
-    user_info = _get_random_user_info(config, session_context)
+    user_info = forced_user or _get_random_user_info(config, session_context)
     threats   = _make_threat_dict(config, user_info, session_context)
     label = forced_event if (forced_event and forced_event in threats) else random.choice(list(threats.keys()))
     return (threats[label](), label)
@@ -6246,8 +6252,11 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         elif scenario_event == "ADMIN_UNLOCK":
             return [_generate_account_unlock_by_admin(config, user_info, session_context)]
         else:
-            # Treat any other scenario_event as a named internal threat
-            return _generate_threat_log(config, session_context, forced_event=scenario_event)
+            # Treat any other scenario_event as a named internal threat. Pass the
+            # resolved (context-aware) user_info so the threat targets the scenario
+            # victim instead of picking a fresh random user.
+            return _generate_threat_log(config, session_context,
+                                        forced_event=scenario_event, forced_user=user_info)
 
     if benign_only:
         result = _generate_background_log(config, session_context)

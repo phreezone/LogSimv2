@@ -723,14 +723,17 @@ def _generate_malicious_macro(config, session_context=None):
     return json.dumps(msg, default=str)
 
 
-def _generate_qr_code_phishing(config, session_context=None):
+def _generate_qr_code_phishing(config, session_context=None, target_email=None):
     """QR code phishing — image attachment contains URL opaque to URL scanners.
 
     Hunt: message-blocked where modulesRun contains 'qr-scanner' AND classification='PHISH'.
     Attackers use this to bypass URL rewriting since the URL lives inside a PNG.
+
+    target_email: when set (scenario mode), deliver to that specific victim so the
+    alert stitches to the same identity as the downstream Okta/AWS stages.
     """
     all_emails = _get_all_emails(config, session_context)
-    recipients  = _pick_recipients(all_emails, count=random.randint(1, 4))
+    recipients  = [target_email] if target_email else _pick_recipients(all_emails, count=random.randint(1, 4))
     guid        = _make_guid()
     sender      = _threat_sender(config)
     sender_ip   = _random_external_ip()
@@ -902,7 +905,7 @@ def _generate_click_permitted(config, session_context=None, guid_override=None,
 
     _sender   = sender_override or _threat_sender(config)
     _camp_id  = _campaign_id(config)
-    _click_t  = _offset_iso(random.randint(30, 3600))   # Clicked a while back
+    _click_t  = _offset_iso(random.randint(5, 90))       # Clicked just now (scenario timeline)
     _threat_t = _offset_iso(random.randint(0, 30))       # TAP identified threat just before/after click
     event = {
         "_log_type":      "click-permitted",
@@ -931,7 +934,7 @@ def _generate_click_permitted(config, session_context=None, guid_override=None,
         "impostorScore":  0,
         "policyRoutes":   ["default_inbound"],
         "modulesRun":     ["urldefense"],
-        "messageTime":    _offset_iso(random.randint(900, 7200)),  # Original message was older
+        "messageTime":    _offset_iso(random.randint(120, 420)),  # Delivered a few min before the click (keeps parser _time recent — _time=coalesce(messageTime,clickTime))
     }
     return json.dumps(event, default=str)
 
@@ -1086,6 +1089,12 @@ def _generate_scenario_event(scenario_event, config, context):
     elif scenario_event == "BEC_EMAIL":
         log = _generate_bec_impostor(config, session_context)
         return log, "BEC_EMAIL"
+
+    elif scenario_event == "qr_code_phishing":
+        # Route through the target_email-aware path so the QR phish is delivered
+        # to the scenario victim (not a random recipient) for identity stitching.
+        return _generate_qr_code_phishing(config, session_context,
+                                          target_email=target_email), "qr_code_phishing"
 
     elif scenario_event in _THREAT_GENERATORS:
         return _THREAT_GENERATORS[scenario_event](config, session_context)
