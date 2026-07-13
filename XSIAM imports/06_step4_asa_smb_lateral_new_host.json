@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Cisco ASA \u2014 SMB Lateral Movement to Previously Unseen Internal Hosts",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"302013\" and xdm.source.port = 445\n| comp count_distinct(xdm.source.ipv4) as smb_hosts,\n       values(xdm.source.ipv4) as source_hosts\n       by xdm.target.ipv4\n| filter smb_hosts >= 5 and smb_hosts < 10\n| alter initiator_ip = xdm.target.ipv4\n| join type = left (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"722051\" and _raw_log contains \"assigned to session\"\n    | alter pool_ip = arrayindex(regextract(_raw_log, \"Address <(\\d+\\.\\d+\\.\\d+\\.\\d+)>\"), 0),\n            vpn_user = arrayindex(regextract(_raw_log, \"User <([^>]+)>\"), 0)\n    | filter pool_ip != null\n    | comp values(vpn_user) as user_name by pool_ip\n    | fields pool_ip, user_name\n  ) as bind bind.pool_ip = initiator_ip\n| fields xdm.target.ipv4, source_hosts, user_name\n",
+    "is_enabled": true,
+    "description": "Internal host establishing SMB/445 connections to 5\u20139 distinct internal hosts within 15 minutes \u2014 lateral movement after VPN compromise.",
+    "alert_name": "Cisco ASA \u2014 SMB Lateral Movement to Previously Unseen Internal Hosts",
+    "alert_category": "LATERAL_MOVEMENT",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.target.ipv4",
+      "action_remote_ip": "source_hosts",
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0008 - Lateral Movement": [
+        "T1021.002 - Remote Services: SMB/Windows Admin Shares"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.target.ipv4"
+    ]
+  }
+]

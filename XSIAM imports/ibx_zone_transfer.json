@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Infoblox \u2014 DNS Zone Transfer Attempt",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.event.description contains \" IN AXFR \" or xdm.event.description contains \" IN IXFR \"\n| filter xdm.source.ipv4 != null\n| bin _time span = 60m\n| comp count() as xfers by xdm.source.ipv4, _time\n| filter xfers >= 3\n| join type = left (\n    dataset = microsoft_windows_raw\n    | filter _raw_log contains \"4624\" and _raw_log contains \"IpAddress\"\n    | alter logon_ip = arrayindex(regextract(_raw_log, \"Name='IpAddress'>([\\d\\.]+)<\"), 0),\n            user_name = arrayindex(regextract(_raw_log, \"Name='TargetUserName'>([^<]+)<\"), 0)\n    | filter logon_ip != null and user_name != null\n    | comp values(user_name) as user_name by logon_ip\n    | fields logon_ip, user_name\n  ) as wbind wbind.logon_ip = xdm.source.ipv4\n| fields xdm.source.ipv4, user_name\n",
+    "is_enabled": true,
+    "description": "AXFR or IXFR query observed \u2014 DNS zone transfer reconnaissance.",
+    "alert_name": "Infoblox \u2014 DNS Zone Transfer Attempt",
+    "alert_category": "DISCOVERY",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0007 - Discovery": [
+        "T1018 - Remote System Discovery"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "4 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

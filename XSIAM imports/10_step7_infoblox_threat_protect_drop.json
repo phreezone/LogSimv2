@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Infoblox \u2014 BloxOne Threat Protect DROP (Post-Connection C2 Detection)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"threat-protect-log\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        category = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"cat=\\\"([^\\\"]+)\\\"\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as drops,\n       count_distinct(category) as distinct_categories,\n       values(category) as categories\n       by src_ip, _time\n| filter drops >= 1\n| fields src_ip, categories\n",
+    "is_enabled": true,
+    "description": "Infoblox xdm.event.type = 'Threat' with threat-protect-log marker \u2014 BloxOne Threat-Protect dropped a C2 / malware-category connection from the compromised device.",
+    "alert_name": "Infoblox \u2014 BloxOne Threat Protect DROP (Post-Connection C2 Detection)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "action_evtlog_message": "categories"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ]
+  }
+]

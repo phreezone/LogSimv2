@@ -1,0 +1,44 @@
+[
+  {
+    "name": "GCP \u2014 API Access From External / Non-Corporate IP",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.source.ipv4 != null\n| filter not (xdm.source.ipv4 contains \"10.\" or xdm.source.ipv4 contains \"192.168.\" or xdm.source.ipv4 contains \"172.16.\" or xdm.source.ipv4 contains \"172.17.\" or xdm.source.ipv4 contains \"172.18.\" or xdm.source.ipv4 contains \"172.19.\" or xdm.source.ipv4 contains \"172.2\" or xdm.source.ipv4 contains \"172.3\" or xdm.source.ipv4 contains \"35.235.240.\")\n| bin _time span = 1h\n| comp count_distinct(xdm.source.ipv4) as ips, count() as api_calls,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.event.description, _time\n| filter api_calls >= 5\n| fields users, events_seen\n",
+    "is_enabled": true,
+    "description": "GCP Cloud Audit event with caller IP outside RFC1918 ranges and not in GCP's IAP forwarding range (35.235.240.0/20) \u2014 \u22655 API calls per hour from external IP.",
+    "alert_name": "GCP \u2014 API Access From External / Non-Corporate IP",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078.004 - Valid Accounts: Cloud Accounts"
+      ],
+      "TA0005 - Defense Evasion": [
+        "T1090 - Proxy"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.event.description"
+    ]
+  }
+]

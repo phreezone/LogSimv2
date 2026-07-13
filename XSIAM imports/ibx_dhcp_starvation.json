@@ -1,0 +1,38 @@
+[
+  {
+    "name": "Infoblox \u2014 DHCP Starvation",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DHCP\"\n| filter xdm.event.description contains \"DHCPDISCOVER\"\n| bin _time span = 5m\n| comp count() as discovers by _time\n| filter discovers >= 150\n",
+    "is_enabled": true,
+    "description": "High volume of DHCPDISCOVER events \u2014 DHCP pool exhaustion attempt.",
+    "alert_name": "Infoblox \u2014 DHCP Starvation",
+    "alert_category": "TAMPERING",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {},
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0040 - Impact": [
+        "T1498 - Network Denial of Service"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "_time"
+    ]
+  }
+]

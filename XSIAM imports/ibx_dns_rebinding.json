@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Infoblox \u2014 DNS Rebinding Attempt",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome = \"SUCCESS\"\n| filter xdm.source.ipv4 != null\n| alter domain    = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0),\n        answer_ip = arrayindex(regextract(xdm.event.description, \" IN A (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0)\n| filter domain != null and answer_ip != null\n| filter answer_ip contains \"192.168.\" or answer_ip contains \"10.\" or answer_ip contains \"172.16.\" or answer_ip contains \"127.0.0.1\" or answer_ip contains \"169.254.\"\n| filter not (domain contains \".local\" or domain contains \".lan\" or domain contains \".internal\" or domain contains \".corp\")\n| bin _time span = 10m\n| comp count_distinct(answer_ip) as answers,\n       values(answer_ip) as ip_list\n       by xdm.source.ipv4, domain, _time\n| filter answers >= 2\n| fields xdm.source.ipv4, ip_list, domain\n",
+    "is_enabled": true,
+    "description": "Same client + domain resolving to multiple distinct answer IPs \u2014 rebinding attack.",
+    "alert_name": "Infoblox \u2014 DNS Rebinding Attempt",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "action_remote_ip": "ip_list",
+      "xdm_url": "domain"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1568 - Dynamic Resolution"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

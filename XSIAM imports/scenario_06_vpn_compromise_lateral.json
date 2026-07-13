@@ -1,0 +1,44 @@
+[
+  {
+    "name": "VPN Compromise Confirmed \u2014 Brute Force + Successful Login Same User",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"109006\"\n| filter xdm.source.user.username != null\n| bin _time span = 30m\n| comp count() as vpn_fails,\n       values(xdm.source.ipv4) as source_ips\n       by xdm.source.user.username, _time\n| filter vpn_fails >= 3\n| join (\n    datamodel dataset = cisco_asa_raw\n    | filter _raw_log contains \"113039\"\n    | filter xdm.source.user.username != null\n    | comp count() as vpn_logins by xdm.source.user.username\n  ) as ok xdm.source.user.username = ok.xdm.source.user.username\n| fields source_ips, xdm.source.user.username\n",
+    "is_enabled": true,
+    "description": "Same user has VPN auth failures AND successful AnyConnect login.",
+    "alert_name": "VPN Compromise Confirmed \u2014 Brute Force + Successful Login Same User",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "source_ips",
+      "actor_effective_username": "xdm.source.user.username"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1110 - Brute Force"
+      ],
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.user.username"
+    ]
+  }
+]

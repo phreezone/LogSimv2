@@ -1,0 +1,42 @@
+[
+  {
+    "name": "AWS \u2014 Security Hub Disabled or Standards Removed",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"DisableSecurityHub\",\"DeleteInsight\",\"BatchDisableStandards\",\"UpdateStandardsControl\",\"DeleteHub\",\"DisableImportFindingsForProduct\")\n| bin _time span = 1h\n| comp count() as events,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "DisableSecurityHub, DeleteInsight, BatchDisableStandards, UpdateStandardsControl, DeleteHub, or DisableImportFindingsForProduct event.",
+    "alert_name": "AWS \u2014 Security Hub Disabled or Standards Removed",
+    "alert_category": "EVASION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0005 - Defense Evasion": [
+        "T1562.001 - Impair Defenses: Disable or Modify Tools"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

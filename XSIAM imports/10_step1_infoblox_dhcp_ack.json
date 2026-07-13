@@ -1,0 +1,36 @@
+[
+  {
+    "name": "Infoblox \u2014 Device Joined Network (DHCP ACK Baseline, Disabled)",
+    "severity": "SEV_010_INFO",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DHCP\" and xdm.event.description contains \"DHCPACK\"\n| alter mac = arrayindex(regextract(xdm.event.description, \"([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})\"), 0),\n        ip  = arrayindex(regextract(xdm.event.description, \"DHCPACK on (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        hostname = arrayindex(regextract(xdm.event.description, \"\\((\\S+?)\\) via\"), 0)\n| filter mac != null and ip != null\n| bin _time span = 24h\n| comp count_distinct(ip) as unique_ips,\n       values(ip) as tgt_ips\n       by mac, _time\n| fields tgt_ips\n",
+    "is_enabled": false,
+    "description": "Infoblox DHCPACK events grouped by MAC \u2014 informational baseline. DISABLED by default because every device-join triggers it (5k+/day). Use as a pivot query for case investigation, not as an alert.",
+    "alert_name": "Infoblox \u2014 Device Joined Network (DHCP ACK Baseline, Disabled)",
+    "alert_category": "OTHER",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "tgt_ips"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {},
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "mac"
+    ]
+  }
+]

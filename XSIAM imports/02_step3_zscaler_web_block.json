@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Zscaler \u2014 Malicious Web Content Blocked (Post-Phishing)",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter cs1 = \"Malicious Content\"\n       or cat contains \"Spyware\" or cat contains \"Malware\" or cat contains \"Phishing\"\n       or cat contains \"Adware\" or cat contains \"Botnet\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
+    "is_enabled": true,
+    "description": "Zscaler NSS web log Blocked action on malicious web content (Malicious Content / Malware / Spyware / Phishing / Adware / Botnet category) \u2014 victim browser reached the payload host after the phishing click. Correlated to the victim by src IP and suser.",
+    "alert_name": "Zscaler \u2014 Malicious Web Content Blocked (Post-Phishing)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "actor_effective_username": "user_name",
+      "xdm_url": "url",
+      "action_local_ip": "dst_ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.001 - Application Layer Protocol: Web Protocols"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  }
+]

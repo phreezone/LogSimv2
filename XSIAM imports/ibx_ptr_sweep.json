@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Infoblox \u2014 PTR Reverse-DNS Sweep",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.event.description contains \"PTR\"\n| filter xdm.source.ipv4 != null\n| alter ptr_query = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN PTR\"), 0)\n| bin _time span = 5m\n| comp count() as ptr_queries,\n       count_distinct(ptr_query) as distinct_ptrs,\n       values(ptr_query) as queried_ptrs\n       by xdm.source.ipv4, _time\n| filter ptr_queries >= 100 and distinct_ptrs >= 50\n| join type = left (\n    dataset = microsoft_windows_raw\n    | filter _raw_log contains \"4624\" and _raw_log contains \"IpAddress\"\n    | alter logon_ip = arrayindex(regextract(_raw_log, \"Name='IpAddress'>([\\d\\.]+)<\"), 0),\n            user_name = arrayindex(regextract(_raw_log, \"Name='TargetUserName'>([^<]+)<\"), 0)\n    | filter logon_ip != null and user_name != null\n    | comp values(user_name) as user_name by logon_ip\n    | fields logon_ip, user_name\n  ) as wbind wbind.logon_ip = xdm.source.ipv4\n| fields xdm.source.ipv4, queried_ptrs, user_name\n",
+    "is_enabled": true,
+    "description": "One client issuing many PTR queries \u2014 reverse-DNS reconnaissance.",
+    "alert_name": "Infoblox \u2014 PTR Reverse-DNS Sweep",
+    "alert_category": "DISCOVERY",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "xdm_url": "queried_ptrs",
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0007 - Discovery": [
+        "T1018 - Remote System Discovery"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

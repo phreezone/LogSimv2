@@ -1,0 +1,47 @@
+[
+  {
+    "name": "Apache \u2014 Suspicious POST to Server-Side Script Path",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = apache_httpd_raw\n| alter method = xdm.network.http.method,\n        status = to_integer(xdm.network.http.response_code),\n        url = xdm.network.http.url,\n        ua = xdm.source.user_agent\n| filter method = \"POST\" and status in (200, 201, 302)\n| filter url contains \"/uploads/\" and (url contains \".php\" or url contains \".jsp\" or url contains \".aspx\")\n       or url contains \"shell.php\"\n       or url contains \"cmd.php\"\n       or url contains \"c99.php\"\n       or url contains \"r57.php\"\n       or url contains \"webshell\"\n       or url contains \".php?cmd=\"\n       or url contains \"eval(\"\n| bin _time span = 30m\n| comp count() as posts,\n       count_distinct(url) as distinct_paths,\n       values(url) as posted_paths,\n       values(ua) as user_agents,\n       values(status) as response_codes,\n       values(xdm.target.ipv4) as tgt_ips\n       by xdm.source.ipv4, _time\n| filter posts >= 3 and distinct_paths >= 2\n| fields xdm.source.ipv4, tgt_ips, posted_paths, user_agents, response_codes\n",
+    "is_enabled": true,
+    "description": "Apache HTTP POST with 200/201/302 response to a path containing 'upload', 'shell', 'cmd', '.php?cmd', '/admin', or 'eval' \u2014 possible web shell installation.",
+    "alert_name": "Apache \u2014 Suspicious POST to Server-Side Script Path",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "action_local_ip": "tgt_ips",
+      "xdm_url": "posted_paths",
+      "actor_process_image_name": "user_agents",
+      "action_evtlog_message": "response_codes"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1190 - Exploit Public-Facing Application"
+      ],
+      "TA0003 - Persistence": [
+        "T1505.003 - Server Software Component: Web Shell"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  }
+]

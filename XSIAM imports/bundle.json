@@ -1,0 +1,3516 @@
+[
+  {
+    "name": "Cisco ASA \u2014 High Volume of Denied Inbound Connections from One IP",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"106023\" and xdm.observer.action = \"Deny\"\n| bin _time span = 10m\n| comp count() as denies,\n       values(xdm.target.ipv4) as dst_ips,\n       values(xdm.target.port) as dst_ports,\n       values(xdm.network.ip_protocol) as protocols\n       by xdm.source.ipv4, _time\n| filter denies >= 138\n| fields dst_ips, xdm.source.ipv4, dst_ports, protocols\n",
+    "is_enabled": true,
+    "description": "External IP generating an abnormal count of 106023 denies \u2014 scanner or attack pattern.",
+    "alert_name": "Cisco ASA \u2014 High Volume of Denied Inbound Connections from One IP",
+    "alert_category": "DISCOVERY",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "dst_ips",
+      "action_remote_ip": "xdm.source.ipv4",
+      "action_local_port": "dst_ports",
+      "action_app_protocol": "protocols"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0007 - Discovery": [
+        "T1046 - Network Service Discovery"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 DNS C2 Beacon (Recurring Domain Queries)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| filter domain != null\n| bin _time span = 15m\n| comp count() as queries by xdm.source.ipv4, domain, _time\n| filter queries >= 10\n| join type = left (\n    dataset = microsoft_windows_raw\n    | filter _raw_log contains \"4624\" and _raw_log contains \"IpAddress\"\n    | alter logon_ip = arrayindex(regextract(_raw_log, \"Name='IpAddress'>([\\d\\.]+)<\"), 0),\n            user_name = arrayindex(regextract(_raw_log, \"Name='TargetUserName'>([^<]+)<\"), 0)\n    | filter logon_ip != null and user_name != null\n    | comp values(user_name) as user_name by logon_ip\n    | fields logon_ip, user_name\n  ) as wbind wbind.logon_ip = xdm.source.ipv4\n| fields xdm.source.ipv4, user_name, domain\n",
+    "is_enabled": true,
+    "description": "Repeated DNS queries from one client to the same domain \u2014 beacon pattern.",
+    "alert_name": "Infoblox \u2014 DNS C2 Beacon (Recurring Domain Queries)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "actor_effective_username": "user_name",
+      "xdm_url": "domain"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "15 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 DHCP Starvation",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DHCP\"\n| filter xdm.event.description contains \"DHCPDISCOVER\"\n| bin _time span = 5m\n| comp count() as discovers by _time\n| filter discovers >= 150\n",
+    "is_enabled": true,
+    "description": "High volume of DHCPDISCOVER events \u2014 DHCP pool exhaustion attempt.",
+    "alert_name": "Infoblox \u2014 DHCP Starvation",
+    "alert_category": "TAMPERING",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {},
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0040 - Impact": [
+        "T1498 - Network Denial of Service"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "_time"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 DNS Query Flood From Single Client",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| bin _time span = 5m\n| comp count() as queries,\n       count_distinct(xdm.event.description) as distinct_queries,\n       values(domain) as queried_domains\n       by xdm.source.ipv4, _time\n| filter queries >= 200 and distinct_queries >= 50\n| fields xdm.source.ipv4, queried_domains\n",
+    "is_enabled": true,
+    "description": "Anomalous DNS query volume from one client \u2014 DoS or flood signal.",
+    "alert_name": "Infoblox \u2014 DNS Query Flood From Single Client",
+    "alert_category": "TAMPERING",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "xdm_url": "queried_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0040 - Impact": [
+        "T1498 - Network Denial of Service"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "30 minutes",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 DNS Rebinding Attempt",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome = \"SUCCESS\"\n| filter xdm.source.ipv4 != null\n| alter domain    = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0),\n        answer_ip = arrayindex(regextract(xdm.event.description, \" IN A (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0)\n| filter domain != null and answer_ip != null\n| filter answer_ip contains \"192.168.\" or answer_ip contains \"10.\" or answer_ip contains \"172.16.\" or answer_ip contains \"127.0.0.1\" or answer_ip contains \"169.254.\"\n| filter not (domain contains \".local\" or domain contains \".lan\" or domain contains \".internal\" or domain contains \".corp\")\n| bin _time span = 10m\n| comp count_distinct(answer_ip) as answers,\n       values(answer_ip) as ip_list\n       by xdm.source.ipv4, domain, _time\n| filter answers >= 2\n| fields xdm.source.ipv4, ip_list, domain\n",
+    "is_enabled": true,
+    "description": "Same client + domain resolving to multiple distinct answer IPs \u2014 rebinding attack.",
+    "alert_name": "Infoblox \u2014 DNS Rebinding Attempt",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "action_remote_ip": "ip_list",
+      "xdm_url": "domain"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1568 - Dynamic Resolution"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 DNS Tunneling (TXT Query Burst)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.event.description contains \" IN TXT \"\n| filter xdm.source.ipv4 != null\n| bin _time span = 15m\n| comp count() as txt_queries by xdm.source.ipv4, _time\n| filter txt_queries >= 15\n| join type = left (\n    dataset = microsoft_windows_raw\n    | filter _raw_log contains \"4624\" and _raw_log contains \"IpAddress\"\n    | alter logon_ip = arrayindex(regextract(_raw_log, \"Name='IpAddress'>([\\d\\.]+)<\"), 0),\n            user_name = arrayindex(regextract(_raw_log, \"Name='TargetUserName'>([^<]+)<\"), 0)\n    | filter logon_ip != null and user_name != null\n    | comp values(user_name) as user_name by logon_ip\n    | fields logon_ip, user_name\n  ) as wbind wbind.logon_ip = xdm.source.ipv4\n| fields xdm.source.ipv4, user_name\n",
+    "is_enabled": true,
+    "description": "High volume of TXT queries from one client \u2014 DNS tunneling exfiltration channel.",
+    "alert_name": "Infoblox \u2014 DNS Tunneling (TXT Query Burst)",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0010 - Exfiltration": [
+        "T1048.003 - Exfiltration Over Unencrypted Non-C2 Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "15 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 Fast Flux DNS",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome = \"SUCCESS\"\n| alter domain    = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN A\"), 0),\n        answer_ip = arrayindex(regextract(xdm.event.description, \" IN A (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0)\n| filter domain != null and answer_ip != null\n| bin _time span = 15m\n| comp count_distinct(answer_ip) as flux_ips,\n       values(answer_ip) as answer_ips\n       by domain, _time\n| filter flux_ips >= 50\n| fields answer_ips, domain\n",
+    "is_enabled": true,
+    "description": "One domain resolving to many distinct A-record IPs in short window.",
+    "alert_name": "Infoblox \u2014 Fast Flux DNS",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "answer_ips",
+      "xdm_url": "domain"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1568.001 - Dynamic Resolution: Fast Flux DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "15 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "domain"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 NXDOMAIN Storm (DGA Indicator)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome_reason = \"NXDOMAIN\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| bin _time span = 10m\n| comp count() as nxd,\n       count_distinct(xdm.event.description) as distinct_nxd_queries,\n       values(domain) as failed_domains\n       by xdm.source.ipv4, _time\n| filter nxd >= 80 and distinct_nxd_queries >= 30\n| fields xdm.source.ipv4, failed_domains\n",
+    "is_enabled": true,
+    "description": "High volume of NXDOMAIN responses for one client \u2014 DGA / typosquat probing.",
+    "alert_name": "Infoblox \u2014 NXDOMAIN Storm (DGA Indicator)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "xdm_url": "failed_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1568.002 - Dynamic Resolution: Domain Generation Algorithms"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "30 minutes",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 PTR Reverse-DNS Sweep",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.event.description contains \"PTR\"\n| filter xdm.source.ipv4 != null\n| alter ptr_query = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN PTR\"), 0)\n| bin _time span = 5m\n| comp count() as ptr_queries,\n       count_distinct(ptr_query) as distinct_ptrs,\n       values(ptr_query) as queried_ptrs\n       by xdm.source.ipv4, _time\n| filter ptr_queries >= 100 and distinct_ptrs >= 50\n| join type = left (\n    dataset = microsoft_windows_raw\n    | filter _raw_log contains \"4624\" and _raw_log contains \"IpAddress\"\n    | alter logon_ip = arrayindex(regextract(_raw_log, \"Name='IpAddress'>([\\d\\.]+)<\"), 0),\n            user_name = arrayindex(regextract(_raw_log, \"Name='TargetUserName'>([^<]+)<\"), 0)\n    | filter logon_ip != null and user_name != null\n    | comp values(user_name) as user_name by logon_ip\n    | fields logon_ip, user_name\n  ) as wbind wbind.logon_ip = xdm.source.ipv4\n| fields xdm.source.ipv4, queried_ptrs, user_name\n",
+    "is_enabled": true,
+    "description": "One client issuing many PTR queries \u2014 reverse-DNS reconnaissance.",
+    "alert_name": "Infoblox \u2014 PTR Reverse-DNS Sweep",
+    "alert_category": "DISCOVERY",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "xdm_url": "queried_ptrs",
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0007 - Discovery": [
+        "T1018 - Remote System Discovery"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 RPZ Threat-Intel DNS Blocks",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"RPZ-QNAME\" or infoblox_infoblox_raw._raw_log contains \"rpz QNAME\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        blocked_domain = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"rewrite (\\S+) \\[\"), 0)\n| filter src_ip != null\n| bin _time span = 10m\n| comp count() as blocks,\n       count_distinct(blocked_domain) as distinct_domains,\n       values(blocked_domain) as blocked_domains\n       by src_ip, _time\n| filter blocks >= 30 and distinct_domains >= 5\n| fields src_ip, blocked_domains\n",
+    "is_enabled": true,
+    "description": "Sustained RPZ blocks for one client \u2014 implant cycling through C2 candidates.",
+    "alert_name": "Infoblox \u2014 RPZ Threat-Intel DNS Blocks",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "xdm_url": "blocked_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 Threat Protect DROP",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"threat-protect-log\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        category = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"cat=\\\"([^\\\"]+)\\\"\"), 0),\n        qname = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"qname=(\\S+)\"), 0)\n| filter src_ip != null\n| bin _time span = 10m\n| comp count() as alerts,\n       count_distinct(category) as distinct_categories,\n       values(category) as categories,\n       values(qname) as blocked_domains\n       by src_ip, _time\n| filter alerts >= 30 and distinct_categories >= 3\n| fields src_ip, categories, blocked_domains\n",
+    "is_enabled": true,
+    "description": "Threat-Protect drops for one client \u2014 BloxOne C&C / malware category detection.",
+    "alert_name": "Infoblox \u2014 Threat Protect DROP",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "action_evtlog_message": "categories",
+      "xdm_url": "blocked_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 DNS Zone Transfer Attempt",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.event.description contains \" IN AXFR \" or xdm.event.description contains \" IN IXFR \"\n| filter xdm.source.ipv4 != null\n| bin _time span = 60m\n| comp count() as xfers by xdm.source.ipv4, _time\n| filter xfers >= 3\n| join type = left (\n    dataset = microsoft_windows_raw\n    | filter _raw_log contains \"4624\" and _raw_log contains \"IpAddress\"\n    | alter logon_ip = arrayindex(regextract(_raw_log, \"Name='IpAddress'>([\\d\\.]+)<\"), 0),\n            user_name = arrayindex(regextract(_raw_log, \"Name='TargetUserName'>([^<]+)<\"), 0)\n    | filter logon_ip != null and user_name != null\n    | comp values(user_name) as user_name by logon_ip\n    | fields logon_ip, user_name\n  ) as wbind wbind.logon_ip = xdm.source.ipv4\n| fields xdm.source.ipv4, user_name\n",
+    "is_enabled": true,
+    "description": "AXFR or IXFR query observed \u2014 DNS zone transfer reconnaissance.",
+    "alert_name": "Infoblox \u2014 DNS Zone Transfer Attempt",
+    "alert_category": "DISCOVERY",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0007 - Discovery": [
+        "T1018 - Remote System Discovery"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "4 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 Internal Port Scan Against Internal Host",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter (cisco_asa_raw._raw_log contains \"302013\" or cisco_asa_raw._raw_log contains \"302014\" or cisco_asa_raw._raw_log contains \"106023\")\n| bin _time span = 10m\n| comp count_distinct(xdm.source.port) as distinct_ports,\n       values(xdm.source.port) as scanned_ports,\n       count() as connection_attempts\n       by xdm.target.ipv4, xdm.source.ipv4, _time\n| filter distinct_ports >= 168\n| fields xdm.target.ipv4, xdm.source.ipv4, scanned_ports\n",
+    "is_enabled": true,
+    "description": "One source IP probing many distinct ports against a single target \u2014 internal port scan.",
+    "alert_name": "Cisco ASA \u2014 Internal Port Scan Against Internal Host",
+    "alert_category": "DISCOVERY",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.target.ipv4",
+      "action_remote_ip": "xdm.source.ipv4",
+      "action_remote_port": "scanned_ports"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0007 - Discovery": [
+        "T1046 - Network Service Discovery"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "30 minutes",
+    "suppression_fields": [
+      "xdm.target.ipv4"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Cloud Pentest Kill Chain (Multi-Op Privilege Escalation + Defense Evasion)",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"RunInstances\",\"ConsoleLogin\",\"AttachUserPolicy\",\"AttachRolePolicy\",\"StopLogging\",\"DeleteTrail\",\"DisableDetector\",\"BatchDisableStandards\",\"DisableSecurityHub\",\"PutBucketAcl\",\"StopConfigurationRecorder\",\"Disable\",\"DeleteConfigurationRecorder\")\n| filter xdm.source.ipv4 != null\n| bin _time span = 24h\n| comp count_distinct(xdm.event.type) as distinct_ops, values(xdm.event.type) as ops,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| filter distinct_ops >= 3\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "Same user performing 3+ sensitive AWS operations from a single source within 24h.",
+    "alert_name": "AWS \u2014 Cloud Pentest Kill Chain (Multi-Op Privilege Escalation + Defense Evasion)",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0004 - Privilege Escalation": [
+        "T1078.004 - Valid Accounts: Cloud Accounts"
+      ],
+      "TA0005 - Defense Evasion": [
+        "T1562 - Impair Defenses"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "24 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "24 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Phishing Kill Chain \u2014 DNS Resolution of Known-Bad Domain",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type in (\"DNS Query\",\"DNS Response\",\"Threat\")\n| filter xdm.event.description contains \"credential-stealer\"\n       or xdm.event.description contains \"command-control\"\n       or xdm.event.description contains \"phishing-kit\"\n       or xdm.event.description contains \"phishing-login\"\n       or xdm.event.description contains \"malware-distro\"\n       or xdm.event.description contains \"ransomware-payload\"\n       or xdm.event.description contains \"exploit-kit\"\n| alter src_ip = coalesce(xdm.source.ipv4, arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0)),\n        domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as bad_events,\n       count_distinct(domain) as distinct_bad_domains\n       by src_ip, _time\n| filter bad_events >= 3 and distinct_bad_domains >= 2\n| fields src_ip\n",
+    "is_enabled": true,
+    "description": "Internal host resolving phishing / C2 / malware-distro domain.",
+    "alert_name": "Phishing Kill Chain \u2014 DNS Resolution of Known-Bad Domain",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1566 - Phishing"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Insider Threat: Credential Access + Defense Evasion",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"GetSecretValue\",\"GetParameter\",\"DisableSecurityHub\",\"BatchDisableStandards\",\"StopConfigurationRecorder\",\"DeleteConfigurationRecorder\",\"UpdateConfigurationRecorder\")\n| filter xdm.source.ipv4 != null\n| filter not (xdm.event.description contains \"AWSServiceRoleFor\"\n       or xdm.event.description contains \"InstanceProfile\"\n       or xdm.event.description contains \"/aws-service-role/\")\n| bin _time span = 4h\n| comp count_distinct(xdm.event.type) as distinct_ops,\n       count() as total_ops,\n       values(xdm.event.type) as ops\n       by xdm.source.ipv4, xdm.source.user.username, _time\n| filter distinct_ops >= 3 and total_ops >= 5\n| fields xdm.source.ipv4, xdm.source.user.username\n",
+    "is_enabled": true,
+    "description": "Same user performing multiple credential-access and defense-evasion ops.",
+    "alert_name": "AWS \u2014 Insider Threat: Credential Access + Defense Evasion",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "xdm.source.user.username"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1552.001 - Credentials In Files"
+      ],
+      "TA0005 - Defense Evasion": [
+        "T1562 - Impair Defenses"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "4 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "4 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "GCP \u2014 Cloud Pentest (IAM Escalation + Logging Tamper)",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type contains \"SetIamPolicy\"\n       or xdm.event.operation_sub_type contains \"setIamPolicy\"\n       or xdm.event.operation_sub_type contains \"CreateServiceAccountKey\"\n       or xdm.event.operation_sub_type contains \"UpdateSink\"\n       or xdm.event.operation_sub_type contains \"DeleteSink\"\n       or xdm.event.operation_sub_type contains \"DeleteBucket\"\n       or xdm.event.operation_sub_type contains \"DeleteNotificationConfig\"\n| alter principal = arrayindex(regextract(xdm.event.description, \"principalEmail\\\":\\\"([^\\\"]+)\"), 0)\n| filter principal != null\n| comp count_distinct(xdm.event.operation_sub_type) as distinct_ops, values(xdm.event.operation_sub_type) as ops,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by principal\n| filter distinct_ops >= 2\n| fields principal, events_seen\n",
+    "is_enabled": true,
+    "description": "Same principal performing multiple sensitive GCP API methods.",
+    "alert_name": "GCP \u2014 Cloud Pentest (IAM Escalation + Logging Tamper)",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "principal",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0004 - Privilege Escalation": [
+        "T1078.004 - Valid Accounts: Cloud Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "4 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "4 hours",
+    "suppression_fields": [
+      "principal"
+    ]
+  },
+  {
+    "name": "Web Application Reconnaissance \u2014 High Volume of 4xx Responses",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = apache_httpd_raw\n| alter status = to_integer(xdm.network.http.response_code),\n        uri = xdm.network.http.url,\n        ua = xdm.source.user_agent,\n        method = xdm.network.http.method\n| filter xdm.source.ipv4 != null and status >= 400\n| filter uri contains \"/admin\"\n       or uri contains \"/login\"\n       or uri contains \"/wp-\"\n       or uri contains \"/phpmyadmin\"\n       or uri contains \"/.env\"\n       or uri contains \"/.git\"\n       or uri contains \"/config\"\n       or uri contains \"/backup\"\n       or uri contains \"/console\"\n       or uri contains \"/.aws\"\n       or uri contains \"/actuator\"\n| bin _time span = 30m\n| comp count() as recon_4xx,\n       count_distinct(uri) as distinct_paths,\n       values(uri) as scanned_paths,\n       values(ua) as user_agents,\n       values(xdm.target.ipv4) as tgt_ips\n       by xdm.source.ipv4, _time\n| filter recon_4xx >= 50 and distinct_paths >= 15\n| fields xdm.source.ipv4, tgt_ips, scanned_paths, user_agents\n",
+    "is_enabled": true,
+    "description": "External IP scanning Apache for vulnerabilities \u2014 many 4xx errors.",
+    "alert_name": "Web Application Reconnaissance \u2014 High Volume of 4xx Responses",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "action_local_ip": "tgt_ips",
+      "xdm_url": "scanned_paths",
+      "actor_process_image_name": "user_agents"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0043 - Reconnaissance": [
+        "T1595 - Active Scanning"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "4 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "VPN Compromise Confirmed \u2014 Brute Force + Successful Login Same User",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"109006\"\n| filter xdm.source.user.username != null\n| bin _time span = 30m\n| comp count() as vpn_fails,\n       values(xdm.source.ipv4) as source_ips\n       by xdm.source.user.username, _time\n| filter vpn_fails >= 3\n| join (\n    datamodel dataset = cisco_asa_raw\n    | filter _raw_log contains \"113039\"\n    | filter xdm.source.user.username != null\n    | comp count() as vpn_logins by xdm.source.user.username\n  ) as ok xdm.source.user.username = ok.xdm.source.user.username\n| fields source_ips, xdm.source.user.username\n",
+    "is_enabled": true,
+    "description": "Same user has VPN auth failures AND successful AnyConnect login.",
+    "alert_name": "VPN Compromise Confirmed \u2014 Brute Force + Successful Login Same User",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "source_ips",
+      "actor_effective_username": "xdm.source.user.username"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1110 - Brute Force"
+      ],
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.user.username"
+    ]
+  },
+  {
+    "name": "Ransomware Precursor \u2014 SMB Enumeration + Large Outbound Egress",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"302013\" and xdm.source.port = 445\n| filter xdm.target.ipv4 != null\n| alter scanner = xdm.target.ipv4\n| bin _time span = 30m\n| comp count_distinct(xdm.source.ipv4) as smb_hosts by scanner, _time\n| filter smb_hosts >= 10\n| join (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"302014\"\n    | alter int_host = _json -> generalCiscoLog.dst_ip,\n            int_iface = _json -> generalCiscoLog.dst_interface,\n            bytes_n = to_integer(_json -> generalCiscoLog.transferred_bytes)\n    | filter int_iface = \"inside\"\n    | comp sum(bytes_n) as exfil_bytes by int_host\n    | filter exfil_bytes >= 50000000\n  ) as fw scanner = fw.int_host\n| fields int_host, scanner\n",
+    "is_enabled": true,
+    "description": "Same host enumerating SMB shares and uploading large outbound volume.",
+    "alert_name": "Ransomware Precursor \u2014 SMB Enumeration + Large Outbound Egress",
+    "alert_category": "TAMPERING",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "int_host",
+      "action_remote_ip": "scanner"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0040 - Impact": [
+        "T1486 - Data Encrypted for Impact"
+      ],
+      "TA0010 - Exfiltration": [
+        "T1041 - Exfiltration Over C2 Channel"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "scanner"
+    ]
+  },
+  {
+    "name": "DNS C2 Kill Chain \u2014 NXDOMAIN Storm + Outbound Firewall Activity",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome_reason = \"NXDOMAIN\"\n| filter xdm.source.ipv4 != null\n| bin _time span = 60m\n| comp count() as nxd_count by xdm.source.ipv4, _time\n| filter nxd_count >= 20\n| join (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"302014\"\n    | alter int_host  = _json -> generalCiscoLog.dst_ip,\n            int_iface = _json -> generalCiscoLog.dst_interface\n    | filter int_iface = \"inside\"\n    | comp count() as outbound_sessions by int_host\n    | filter outbound_sessions >= 1\n  ) as fw xdm.source.ipv4 = fw.int_host\n| fields int_host\n",
+    "is_enabled": true,
+    "description": "Internal host with NXDOMAIN storm AND outbound TCP traffic from same IP.",
+    "alert_name": "DNS C2 Kill Chain \u2014 NXDOMAIN Storm + Outbound Firewall Activity",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "int_host"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1568.002 - Dynamic Resolution: DGA",
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "2 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Device Compromise Lifecycle \u2014 RPZ Block + Threat-Protect DROP Same IP",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"RPZ-QNAME\" or infoblox_infoblox_raw._raw_log contains \"rpz QNAME\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0)\n| filter src_ip != null\n| bin _time span = 60m\n| comp count() as rpz_blocks by src_ip, _time\n| filter rpz_blocks >= 1\n| join (\n    datamodel dataset = infoblox_infoblox_raw\n    | filter xdm.event.type = \"Threat\"\n    | filter _raw_log contains \"threat-protect-log\"\n    | alter src_ip = arrayindex(regextract(_raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0)\n    | filter src_ip != null\n    | comp count() as tp_drops by src_ip\n    | filter tp_drops >= 1\n  ) as tp src_ip = tp.src_ip\n| fields src_ip\n",
+    "is_enabled": true,
+    "description": "Same internal IP triggered both RPZ DNS block AND BloxOne Threat-Protect drop.",
+    "alert_name": "Device Compromise Lifecycle \u2014 RPZ Block + Threat-Protect DROP Same IP",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "2 hours",
+    "suppression_fields": [
+      "src_ip"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 SMB Share Enumeration",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"302013\" and xdm.source.port = 445\n| bin _time span = 15m\n| comp count_distinct(xdm.source.ipv4) as distinct_hosts,\n       values(xdm.source.ipv4) as source_hosts\n       by xdm.target.ipv4, _time\n| filter distinct_hosts >= 10\n| alter initiator_ip = xdm.target.ipv4\n| join type = left (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"722051\" and _raw_log contains \"assigned to session\"\n    | alter pool_ip = arrayindex(regextract(_raw_log, \"Address <(\\d+\\.\\d+\\.\\d+\\.\\d+)>\"), 0),\n            vpn_user = arrayindex(regextract(_raw_log, \"User <([^>]+)>\"), 0)\n    | filter pool_ip != null\n    | comp values(vpn_user) as vpn_user by pool_ip\n    | fields pool_ip, vpn_user\n  ) as vbind vbind.pool_ip = initiator_ip\n| join type = left (\n    dataset = microsoft_windows_raw\n    | filter _raw_log contains \"4624\" and _raw_log contains \"IpAddress\"\n    | alter logon_ip = arrayindex(regextract(_raw_log, \"Name='IpAddress'>([\\d\\.]+)<\"), 0),\n            ad_user  = arrayindex(regextract(_raw_log, \"Name='TargetUserName'>([^<]+)<\"), 0)\n    | filter logon_ip != null and ad_user != null\n    | comp values(ad_user) as ad_user by logon_ip\n    | fields logon_ip, ad_user\n  ) as wbind wbind.logon_ip = initiator_ip\n| alter uname = coalesce(arrayindex(vpn_user, 0), arrayindex(ad_user, 0)),\n        src_list = arraystring(source_hosts, \",\")\n| comp values(uname) as user_name, values(src_list) as source_hosts, max(distinct_hosts) as distinct_hosts by xdm.target.ipv4, _time\n| fields xdm.target.ipv4, source_hosts, user_name\n",
+    "is_enabled": true,
+    "description": "One internal host establishing SMB sessions to many distinct internal hosts \u2014 share enumeration.",
+    "alert_name": "Cisco ASA \u2014 SMB Share Enumeration",
+    "alert_category": "DISCOVERY",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.target.ipv4",
+      "action_remote_ip": "source_hosts",
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0007 - Discovery": [
+        "T1135 - Network Share Discovery",
+        "T1083 - File and Directory Discovery"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "30 minutes",
+    "suppression_fields": [
+      "xdm.target.ipv4"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 Outbound SMTP Spam Bot Activity",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter (cisco_asa_raw._raw_log contains \"302013\" or cisco_asa_raw._raw_log contains \"302014\")\n       and xdm.source.port in (25, 587)\n       and xdm.target.interface = \"inside\"\n| bin _time span = 15m\n| comp count_distinct(xdm.source.ipv4) as distinct_mx,\n       values(xdm.source.ipv4) as source_mx,\n       values(xdm.source.port) as source_ports\n       by xdm.target.ipv4, _time\n| filter distinct_mx >= 34\n| fields xdm.target.ipv4, source_mx, source_ports\n",
+    "is_enabled": true,
+    "description": "Internal host fanning out SMTP connections to many distinct external mail destinations \u2014 spam-bot indicator.",
+    "alert_name": "Cisco ASA \u2014 Outbound SMTP Spam Bot Activity",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.target.ipv4",
+      "action_remote_ip": "source_mx",
+      "action_remote_port": "source_ports"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071 - Application Layer Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "15 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "15 minutes",
+    "suppression_fields": [
+      "xdm.target.ipv4"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 SSH Proxy / Tunnel-Like Activity",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\"\n| alter proxy_host = _json -> generalCiscoLog.dst_ip,\n        ssh_tgt    = _json -> generalCiscoLog.src_ip,\n        svc_port   = to_integer(_json -> generalCiscoLog.src_port),\n        bytes_n    = to_integer(_json -> generalCiscoLog.transferred_bytes)\n| filter svc_port = 22\n| bin _time span = 30m\n| comp count_distinct(ssh_tgt) as victims, sum(bytes_n) as total_bytes by proxy_host, _time\n| filter victims >= 6 and total_bytes >= 10000000\n| fields proxy_host\n",
+    "is_enabled": true,
+    "description": "Single source SSH'ing to many internal targets with proxy-like byte volume.",
+    "alert_name": "Cisco ASA \u2014 SSH Proxy / Tunnel-Like Activity",
+    "alert_category": "LATERAL_MOVEMENT",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "proxy_host"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0008 - Lateral Movement": [
+        "T1021.004 - SSH"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "proxy_host"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 VPN Credential Brute Force",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"109006\"\n| bin _time span = 30m\n| comp count() as fails,\n       values(xdm.source.user.username) as users,\n       count_distinct(xdm.source.user.username) as targeted_users\n       by xdm.source.ipv4, _time\n| filter fails >= 25\n| fields xdm.source.ipv4, users\n",
+    "is_enabled": true,
+    "description": "Many 109006 auth failures from a single IP against the VPN gateway.",
+    "alert_name": "Cisco ASA \u2014 VPN Credential Brute Force",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1110 - Brute Force",
+        "T1110.003 - Password Spraying"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Kali / Penetration-Testing AMI Launched",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type = \"RunInstances\"\n| filter xdm.event.description contains \"kali\" or xdm.event.description contains \"Kali\" or xdm.event.description contains \"parrot\" or xdm.event.description contains \"blackarch\" or xdm.event.description contains \"pentoo\" or xdm.event.description contains \"caine\" or xdm.event.description contains \"remnux\" or xdm.event.description contains \"santoku\" or xdm.event.description contains \"samurai\" or xdm.event.description contains \"ami-01b4cff60c681b957\" or xdm.event.description contains \"ami-0d52e51e479a0e69e\" or xdm.event.description contains \"t3.medium\"\n| bin _time span = 1h\n| comp count() as kali_launches,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "RunInstances event referencing a known Kali Linux, Parrot, BlackArch, Pentoo, or similar offensive-security AMI ID, or a t3.medium pentest-pattern instance type.",
+    "alert_name": "AWS \u2014 Kali / Penetration-Testing AMI Launched",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0042 - Resource Development": [
+        "T1583 - Acquire Infrastructure"
+      ],
+      "TA0002 - Execution": [
+        "T1078.004 - Valid Accounts: Cloud Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Console Login From Multiple External IPs",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = amazon_aws_raw\n| filter eventName = \"ConsoleLogin\"\n| alter login_outcome = arrayindex(regextract(responseElements, \"\\\"ConsoleLogin\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        identity_type = arrayindex(regextract(userIdentity, \"\\\"type\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(userIdentity, \"\\\"userName\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        arn = arrayindex(regextract(userIdentity, \"\\\"arn\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter login_outcome = \"Success\"\n       and identity_type = \"IAMUser\"\n       and user_name != null\n       and sourceIPAddress != null\n| filter not (user_name contains \"svc-\"\n       or user_name contains \"terraform\"\n       or user_name contains \"jenkins\"\n       or user_name contains \"github-actions\"\n       or arn contains \"AWSServiceRoleFor\"\n       or arn contains \"/aws-service-role/\"\n       or arn contains \"InstanceProfile\")\n| alter ip_16 = arrayindex(regextract(sourceIPAddress, \"^(\\d+\\.\\d+)\\.\"), 0)\n| filter ip_16 != null\n| bin _time span = 1h\n| comp count_distinct(sourceIPAddress) as distinct_ips,\n       count_distinct(ip_16) as distinct_networks,\n       values(sourceIPAddress) as ip_list,\n       count() as logins\n       by user_name, _time\n| filter distinct_networks >= 3 and distinct_ips >= 3\n| fields ip_list, user_name\n",
+    "is_enabled": true,
+    "description": "Same IAM user successfully logged into AWS console from \u22652 distinct non-RFC1918 source IPs within one hour.",
+    "alert_name": "AWS \u2014 Console Login From Multiple External IPs",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "ip_list",
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078.004 - Valid Accounts: Cloud Accounts"
+      ],
+      "TA0005 - Defense Evasion": [
+        "T1090 - Proxy"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Administrator Privilege Granted via AttachUserPolicy",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"AttachUserPolicy\",\"AttachRolePolicy\",\"AttachGroupPolicy\",\"PutUserPolicy\",\"PutRolePolicy\")\n| filter xdm.event.description contains \"AdministratorAccess\" or xdm.event.description contains \"PowerUserAccess\" or xdm.event.description contains \"iam:*\"\n| bin _time span = 1h\n| comp count() as attaches,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "AttachUserPolicy, AttachRolePolicy, AttachGroupPolicy, PutUserPolicy, or PutRolePolicy event with requestParameters containing AdministratorAccess, PowerUserAccess, or iam:* \u2014 broad IAM privilege grant.",
+    "alert_name": "AWS \u2014 Administrator Privilege Granted via AttachUserPolicy",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0004 - Privilege Escalation": [
+        "T1098.003 - Account Manipulation: Additional Cloud Roles"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "AWS \u2014 CloudTrail Logging Disabled",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"StopLogging\",\"DeleteTrail\",\"UpdateTrail\")\n| bin _time span = 1h\n| comp count() as events,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "StopLogging, DeleteTrail, or UpdateTrail event \u2014 CloudTrail audit logging being disabled or tampered with to evade forensic visibility.",
+    "alert_name": "AWS \u2014 CloudTrail Logging Disabled",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0005 - Defense Evasion": [
+        "T1562.008 - Impair Defenses: Disable Cloud Logs"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "AWS \u2014 GuardDuty / Inspector / Security Hub Detector Disabled",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"DisableDetector\",\"DeleteDetector\",\"Disable\",\"UpdateDetector\",\"StopFindingsExportTask\")\n| bin _time span = 1h\n| comp count() as events,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "DisableDetector, DeleteDetector, Disable, UpdateDetector, or StopFindingsExportTask event against GuardDuty, Inspector2, or Security Hub.",
+    "alert_name": "AWS \u2014 GuardDuty / Inspector / Security Hub Detector Disabled",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0005 - Defense Evasion": [
+        "T1562.001 - Impair Defenses: Disable or Modify Tools"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "AWS \u2014 S3 Bucket Made Publicly Accessible",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"PutBucketAcl\",\"PutBucketPolicy\",\"PutObjectAcl\",\"PutPublicAccessBlock\")\n| filter xdm.event.description contains \"AllUsers\" or xdm.event.description contains \"public-read\" or xdm.event.description contains \"public-read-write\" or xdm.event.description contains \"AuthenticatedUsers\" or xdm.event.description contains \"PublicReadGetObject\"\n| bin _time span = 1h\n| comp count() as events,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "PutBucketAcl, PutBucketPolicy, PutObjectAcl, or PutPublicAccessBlock event where requestParameters reference AllUsers, AuthenticatedUsers, public-read, or public-read-write.",
+    "alert_name": "AWS \u2014 S3 Bucket Made Publicly Accessible",
+    "alert_category": "COLLECTION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0009 - Collection": [
+        "T1530 - Data from Cloud Storage Object"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Proofpoint \u2014 Phishing or Impostor Email Delivered",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = proofpoint_tap_raw\n| filter proofpoint_tap_raw._log_type = \"message-delivered\"\n| filter proofpoint_tap_raw.classification in (\"PHISHING\", \"IMPOSTOR\")\n| alter recip = arrayindex(xdm.email.recipients, 0)\n| alter senderIP = proofpoint_tap_raw.senderIP,\n        clickIP = proofpoint_tap_raw.clickIP,\n        id = proofpoint_tap_raw.id,\n        GUID = proofpoint_tap_raw.GUID,\n        subject = proofpoint_tap_raw.subject,\n        xmailer = proofpoint_tap_raw.xmailer,\n        headerCC = proofpoint_tap_raw.headerCC,\n        headerTo = proofpoint_tap_raw.headerTo,\n        policyRoutes = proofpoint_tap_raw.policyRoutes,\n        threatID = proofpoint_tap_raw.threatID,\n        clickTime = proofpoint_tap_raw.clickTime,\n        messageID = proofpoint_tap_raw.messageID,\n        spamScore = proofpoint_tap_raw.spamScore,\n        threatURL = proofpoint_tap_raw.threatURL,\n        campaignId = proofpoint_tap_raw.campaignId,\n        sender = proofpoint_tap_raw.sender,\n        threatTime = proofpoint_tap_raw.threatTime,\n        headerFrom = proofpoint_tap_raw.headerFrom,\n        messageSize = proofpoint_tap_raw.messageSize,\n        malwareScore = proofpoint_tap_raw.malwareScore,\n        messageParts = proofpoint_tap_raw.messageParts,\n        threatStatus = proofpoint_tap_raw.threatStatus,\n        impostorScore = proofpoint_tap_raw.impostorScore,\n        phishScore = proofpoint_tap_raw.phishScore,\n        url = proofpoint_tap_raw.url,\n        threatsInfoMap = proofpoint_tap_raw.threatsInfoMap,\n        classification = proofpoint_tap_raw.classification,\n        headerReplyTo = proofpoint_tap_raw.headerReplyTo,\n        quarantineRule = proofpoint_tap_raw.quarantineRule,\n        replyToAddress = proofpoint_tap_raw.replyToAddress,\n        quarantineFolder = proofpoint_tap_raw.quarantineFolder\n",
+    "is_enabled": true,
+    "description": "Proofpoint TAP message-delivered event with classification = PHISHING or IMPOSTOR \u2014 a known-malicious email that slipped past filters and was delivered to the mailbox.",
+    "alert_name": "Proofpoint \u2014 Phishing or Impostor Email Delivered",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "emailsenderip": "senderIP",
+      "action_local_ip": "clickIP",
+      "action_remote_ip": "senderIP",
+      "fw_email_recipient": "recip",
+      "actor_effective_username": "recip",
+      "proofpointtapid": "id",
+      "proofpointtapguid": "GUID",
+      "proofpointtapclickip": "clickIP",
+      "proofpointtapsubject": "subject",
+      "proofpointtapxmailer": "xmailer",
+      "proofpointtapheadercc": "headerCC",
+      "proofpointtapheaderto": "headerTo",
+      "proofpointtappolicies": "policyRoutes",
+      "proofpointtapsenderip": "senderIP",
+      "proofpointtapthreatid": "threatID",
+      "proofpointtapclicktime": "clickTime",
+      "proofpointtapmessageid": "messageID",
+      "proofpointtapspamscore": "spamScore",
+      "proofpointtapthreaturl": "threatURL",
+      "proofpointtapcampaignid": "campaignId",
+      "proofpointtapsmtpsender": "sender",
+      "proofpointtapthreattime": "threatTime",
+      "proofpointtapheadersfrom": "headerFrom",
+      "proofpointtapmessagesize": "messageSize",
+      "proofpointtapmalwarescore": "malwareScore",
+      "proofpointtapmessageparts": "messageParts",
+      "proofpointtapthreatstatus": "threatStatus",
+      "proofpointtapimposterscore": "impostorScore",
+      "proofpointtapphishingscore": "phishScore",
+      "proofpointtapsuspiciousurl": "url",
+      "proofpointtapthreatinfomap": "threatsInfoMap",
+      "proofpointtapclassification": "classification",
+      "proofpointtapheadersreplyto": "headerReplyTo",
+      "proofpointtapquarantinerule": "quarantineRule",
+      "proofpointtapreplytoaddress": "replyToAddress",
+      "proofpointtapquarantinefolder": "quarantineFolder"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1566.002 - Phishing: Spearphishing Link"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  },
+  {
+    "name": "Proofpoint \u2014 Malicious URL Click Permitted",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = proofpoint_tap_raw\n| filter proofpoint_tap_raw._log_type = \"click-permitted\"\n| filter proofpoint_tap_raw.clickIP != null\n| filter proofpoint_tap_raw.classification in (\"PHISHING\", \"IMPOSTOR\", \"MALWARE\")\n| alter recip = arrayindex(xdm.email.recipients, 0)\n| alter senderIP = proofpoint_tap_raw.senderIP,\n        clickIP = proofpoint_tap_raw.clickIP,\n        id = proofpoint_tap_raw.id,\n        GUID = proofpoint_tap_raw.GUID,\n        subject = proofpoint_tap_raw.subject,\n        xmailer = proofpoint_tap_raw.xmailer,\n        headerCC = proofpoint_tap_raw.headerCC,\n        headerTo = proofpoint_tap_raw.headerTo,\n        policyRoutes = proofpoint_tap_raw.policyRoutes,\n        threatID = proofpoint_tap_raw.threatID,\n        clickTime = proofpoint_tap_raw.clickTime,\n        messageID = proofpoint_tap_raw.messageID,\n        spamScore = proofpoint_tap_raw.spamScore,\n        threatURL = proofpoint_tap_raw.threatURL,\n        campaignId = proofpoint_tap_raw.campaignId,\n        sender = proofpoint_tap_raw.sender,\n        threatTime = proofpoint_tap_raw.threatTime,\n        headerFrom = proofpoint_tap_raw.headerFrom,\n        messageSize = proofpoint_tap_raw.messageSize,\n        malwareScore = proofpoint_tap_raw.malwareScore,\n        messageParts = proofpoint_tap_raw.messageParts,\n        threatStatus = proofpoint_tap_raw.threatStatus,\n        impostorScore = proofpoint_tap_raw.impostorScore,\n        phishScore = proofpoint_tap_raw.phishScore,\n        url = proofpoint_tap_raw.url,\n        threatsInfoMap = proofpoint_tap_raw.threatsInfoMap,\n        classification = proofpoint_tap_raw.classification,\n        headerReplyTo = proofpoint_tap_raw.headerReplyTo,\n        quarantineRule = proofpoint_tap_raw.quarantineRule,\n        replyToAddress = proofpoint_tap_raw.replyToAddress,\n        quarantineFolder = proofpoint_tap_raw.quarantineFolder\n",
+    "is_enabled": true,
+    "description": "Proofpoint TAP record showing a user clicked a previously-flagged URL (clickIP and clickTime populated).",
+    "alert_name": "Proofpoint \u2014 Malicious URL Click Permitted",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "emailsenderip": "senderIP",
+      "action_local_ip": "clickIP",
+      "action_remote_ip": "senderIP",
+      "fw_email_recipient": "recip",
+      "actor_effective_username": "recip",
+      "proofpointtapid": "id",
+      "proofpointtapguid": "GUID",
+      "proofpointtapclickip": "clickIP",
+      "proofpointtapsubject": "subject",
+      "proofpointtapxmailer": "xmailer",
+      "proofpointtapheadercc": "headerCC",
+      "proofpointtapheaderto": "headerTo",
+      "proofpointtappolicies": "policyRoutes",
+      "proofpointtapsenderip": "senderIP",
+      "proofpointtapthreatid": "threatID",
+      "proofpointtapclicktime": "clickTime",
+      "proofpointtapmessageid": "messageID",
+      "proofpointtapspamscore": "spamScore",
+      "proofpointtapthreaturl": "threatURL",
+      "proofpointtapcampaignid": "campaignId",
+      "proofpointtapsmtpsender": "sender",
+      "proofpointtapthreattime": "threatTime",
+      "proofpointtapheadersfrom": "headerFrom",
+      "proofpointtapmessagesize": "messageSize",
+      "proofpointtapmalwarescore": "malwareScore",
+      "proofpointtapmessageparts": "messageParts",
+      "proofpointtapthreatstatus": "threatStatus",
+      "proofpointtapimposterscore": "impostorScore",
+      "proofpointtapphishingscore": "phishScore",
+      "proofpointtapsuspiciousurl": "url",
+      "proofpointtapthreatinfomap": "threatsInfoMap",
+      "proofpointtapclassification": "classification",
+      "proofpointtapheadersreplyto": "headerReplyTo",
+      "proofpointtapquarantinerule": "quarantineRule",
+      "proofpointtapreplytoaddress": "replyToAddress",
+      "proofpointtapquarantinefolder": "quarantineFolder"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1566.002 - Phishing: Spearphishing Link"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  },
+  {
+    "name": "Infoblox \u2014 DNS Resolution of Phishing or C2 Domain",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.event.description contains \"credential-stealer\"\n       or xdm.event.description contains \"command-control\"\n       or xdm.event.description contains \"phishing-kit\"\n       or xdm.event.description contains \"phishing-login\"\n       or xdm.event.description contains \"malware-distro\"\n       or xdm.event.description contains \"ransomware-payload\"\n       or xdm.event.description contains \"exploit-kit\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| filter domain != null\n| bin _time span = 30m\n| comp count_distinct(domain) as bad_domains,\n       count() as bad_queries,\n       values(domain) as domain_list\n       by xdm.source.ipv4, _time\n| filter bad_queries >= 3 and bad_domains >= 2\n| fields xdm.source.ipv4, bad_domains\n",
+    "is_enabled": true,
+    "description": "Infoblox DNS query event for a domain matching known phishing-kit, credential-stealer, command-control, malware-distro, ransomware-payload, adware-injector, or exploit-kit keywords.",
+    "alert_name": "Infoblox \u2014 DNS Resolution of Phishing or C2 Domain",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "xdm_url": "bad_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Zscaler \u2014 Malicious Web Content Blocked (Post-Phishing)",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter cs1 = \"Malicious Content\"\n       or cat contains \"Spyware\" or cat contains \"Malware\" or cat contains \"Phishing\"\n       or cat contains \"Adware\" or cat contains \"Botnet\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
+    "is_enabled": true,
+    "description": "Zscaler NSS web log Blocked action on malicious web content (Malicious Content / Malware / Spyware / Phishing / Adware / Botnet category) \u2014 victim browser reached the payload host after the phishing click. Correlated to the victim by src IP and suser.",
+    "alert_name": "Zscaler \u2014 Malicious Web Content Blocked (Post-Phishing)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "actor_effective_username": "user_name",
+      "xdm_url": "url",
+      "action_local_ip": "dst_ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.001 - Application Layer Protocol: Web Protocols"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  },
+  {
+    "name": "Cisco ASA \u2014 Large Outbound C2 Callback Post-Click",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\"\n| alter int_host = _json -> generalCiscoLog.dst_ip,\n        ext_host = _json -> generalCiscoLog.src_ip,\n        int_port = to_integer(_json -> generalCiscoLog.dst_port),\n        ext_port = to_integer(_json -> generalCiscoLog.src_port),\n        proto    = _json -> generalCiscoLog.protocol,\n        bytes_n  = to_integer(_json -> generalCiscoLog.transferred_bytes),\n        int_iface = _json -> generalCiscoLog.dst_interface\n| filter int_iface = \"inside\" and bytes_n >= 5000000\n| bin _time span = 1h\n| comp sum(bytes_n) as c2_bytes,\n       values(ext_host) as ext_hosts,\n       values(ext_port) as ext_ports,\n       values(int_port) as int_ports,\n       values(proto) as protocols\n       by int_host, _time\n| filter c2_bytes >= 20000000\n| fields ext_hosts, ext_ports, int_ports, protocols, int_host\n",
+    "is_enabled": true,
+    "description": "Cisco ASA Teardown (302014) event from an internal host with transferred_bytes \u2265 5MB, totaling \u226520MB outbound in one hour.",
+    "alert_name": "Cisco ASA \u2014 Large Outbound C2 Callback Post-Click",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "ext_hosts",
+      "action_remote_port": "ext_ports",
+      "action_local_port": "int_ports",
+      "action_app_protocol": "protocols",
+      "action_local_ip": "int_host"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071 - Application Layer Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "int_host"
+    ]
+  },
+  {
+    "name": "Okta \u2014 Successful Login From Multiple External IPs",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType = \"user.session.start\" or eventType = \"user.authentication.sso\"\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        country = arrayindex(regextract(client, \"\\\"country\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"SUCCESS\" and ip != null and user_name != null\n| filter not (ip contains \"192.168.\" or ip contains \"10.\" or ip contains \"172.\")\n| filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\n| alter ip_16 = arrayindex(regextract(ip, \"^(\\d+\\.\\d+)\\.\"), 0)\n| filter ip_16 != null\n| bin _time span = 30m\n| comp count_distinct(ip) as ips,\n       count_distinct(ip_16) as distinct_networks,\n       count_distinct(country) as countries,\n       values(country) as country_list, values(ip) as ip_list\n       by user_name, _time\n| filter distinct_networks >= 3 and ips >= 3\n| fields user_name, ip_list, country_list\n",
+    "is_enabled": true,
+    "description": "Okta user.session.start or user.authentication.sso SUCCESS for one user from \u22652 distinct non-RFC1918 source IPs within one hour.",
+    "alert_name": "Okta \u2014 Successful Login From Multiple External IPs",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip_list",
+      "src_geo_country_name": "country_list"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  },
+  {
+    "name": "Okta \u2014 Victim Successful Login From External IP (Post-Phishing)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType = \"user.session.start\" or eventType = \"user.authentication.sso\"\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"SUCCESS\" and ip != null and user_name != null\n| filter not (ip contains \"192.168.\" or ip contains \"10.\" or ip contains \"172.\")\n| filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\n",
+    "is_enabled": true,
+    "description": "Okta user.session.start/sso SUCCESS for a user from a single non-RFC1918 external IP \u2014 per-event kill-chain signal that harvested credentials were used. Complements the multi-IP impossible-travel rule (02_step5).",
+    "alert_name": "Okta \u2014 Victim Successful Login From External IP (Post-Phishing)",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  },
+  {
+    "name": "Okta \u2014 Internal Network Login (Baseline, Disabled)",
+    "severity": "SEV_010_INFO",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType = \"user.session.start\"\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"SUCCESS\"\n| filter ip contains \"192.168.\" or ip contains \"10.\" or ip contains \"172.16.\" or ip contains \"172.17.\" or ip contains \"172.18.\" or ip contains \"172.19.\" or ip contains \"172.2\" or ip contains \"172.31.\"\n| bin _time span = 1h\n| comp count() as logins, values(ip) as ip_list by user_name, _time\n| fields user_name, ip_list\n",
+    "is_enabled": false,
+    "description": "Okta user.session.start SUCCESS from RFC1918 source IP \u2014 every internal employee login. DISABLED by default; informational only for case timeline.",
+    "alert_name": "Okta \u2014 Internal Network Login (Baseline, Disabled)",
+    "alert_category": "OTHER",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip_list"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Secret or Parameter Retrieval Targeting Credentials",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"GetSecretValue\",\"GetParameter\",\"GetParameters\",\"GetParametersByPath\",\"DescribeSecret\",\"ListSecrets\")\n| filter xdm.event.description contains \"rootCredentials\"\n       or xdm.event.description contains \"MasterKey\"\n       or xdm.event.description contains \"SuperUser\"\n       or xdm.event.description contains \"BreakGlass\"\n       or xdm.event.description contains \"service_account_key\"\n       or xdm.event.description contains \"encryption_key\"\n| filter not (xdm.event.description contains \"AssumedRole\"\n       or xdm.event.description contains \"AWSServiceRoleFor\"\n       or xdm.event.description contains \"/aws-service-role/\"\n       or xdm.event.description contains \"InstanceProfile\")\n| filter xdm.source.ipv4 != null\n| bin _time span = 1h\n| comp count() as access_count,\n       count_distinct(xdm.event.description) as distinct_secrets,\n       values(xdm.event.description) as accessed_secrets,\n       values(xdm.event.type) as operations\n       by xdm.source.ipv4, xdm.source.user.username, _time\n| filter access_count >= 5 or distinct_secrets >= 3\n| fields xdm.source.ipv4, xdm.source.user.username, operations, accessed_secrets\n",
+    "is_enabled": true,
+    "description": "GetSecretValue, GetParameter, GetParameters, GetParametersByPath, DescribeSecret, or ListSecrets event where requestParameters contain 'credential', 'password', 'token', 'api_key', '/secret', '/key', or 'private'.",
+    "alert_name": "AWS \u2014 Secret or Parameter Retrieval Targeting Credentials",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "xdm.source.user.username",
+      "action_evtlog_message": "operations",
+      "xdm_url": "accessed_secrets"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1552.001 - Unsecured Credentials: Credentials In Files"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Security Hub Disabled or Standards Removed",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"DisableSecurityHub\",\"DeleteInsight\",\"BatchDisableStandards\",\"UpdateStandardsControl\",\"DeleteHub\",\"DisableImportFindingsForProduct\")\n| bin _time span = 1h\n| comp count() as events,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "DisableSecurityHub, DeleteInsight, BatchDisableStandards, UpdateStandardsControl, DeleteHub, or DisableImportFindingsForProduct event.",
+    "alert_name": "AWS \u2014 Security Hub Disabled or Standards Removed",
+    "alert_category": "EVASION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0005 - Defense Evasion": [
+        "T1562.001 - Impair Defenses: Disable or Modify Tools"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Config Recorder Stopped or Deleted",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"StopConfigurationRecorder\",\"DeleteConfigurationRecorder\",\"DeleteDeliveryChannel\",\"DeleteConfigurationAggregator\",\"DeleteConfigRule\")\n| bin _time span = 1h\n| comp count() as events,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "StopConfigurationRecorder, DeleteConfigurationRecorder, DeleteDeliveryChannel, DeleteConfigurationAggregator, or DeleteConfigRule event.",
+    "alert_name": "AWS \u2014 Config Recorder Stopped or Deleted",
+    "alert_category": "EVASION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0005 - Defense Evasion": [
+        "T1562.008 - Impair Defenses: Disable Cloud Logs"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 DNS Resolution of Unsanctioned Cloud Storage",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.event.description contains \"mega.nz\" or xdm.event.description contains \"anonfiles\" or xdm.event.description contains \"pcloud\" or xdm.event.description contains \"tresorit\" or xdm.event.description contains \"wetransfer\" or xdm.event.description contains \"filebin\" or xdm.event.description contains \"transfer.sh\" or xdm.event.description contains \"send.now\" or xdm.event.description contains \"dropbox\" or xdm.event.description contains \"drive.google\" or xdm.event.description contains \"box.com\" or xdm.event.description contains \"pastebin\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| bin _time span = 1h\n| comp count_distinct(domain) as lookups,\n       values(domain) as bad_domains,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, events_seen, bad_domains\n",
+    "is_enabled": true,
+    "description": "Infoblox DNS query for mega.nz, anonfiles, pcloud, tresorit, wetransfer, filebin, transfer.sh, send.now, dropbox, drive.google, box.com, or pastebin \u2014 potential cloud-storage exfiltration target.",
+    "alert_name": "Infoblox \u2014 DNS Resolution of Unsanctioned Cloud Storage",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "action_evtlog_message": "events_seen",
+      "xdm_url": "bad_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0010 - Exfiltration": [
+        "T1567.002 - Exfiltration Over Web Service: Cloud Storage"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Zscaler \u2014 DLP Block on Upload to Cloud Storage (Insider Exfil)",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter reason = \"DLP Block\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dlp_rule = cs3, dst_ip = dst\n",
+    "is_enabled": true,
+    "description": "Zscaler NSS web log Blocked action with reason=DLP Block \u2014 insider uploading sensitive data (Source Code / PII) to external cloud storage (Online Storage category, e.g. mega.nz). Correlated to the insider by src and suser.",
+    "alert_name": "Zscaler \u2014 DLP Block on Upload to Cloud Storage (Insider Exfil)",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "actor_effective_username": "user_name",
+      "xdm_url": "url",
+      "action_local_ip": "dst_ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0010 - Exfiltration": [
+        "T1567.002 - Exfiltration to Cloud Storage"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  },
+  {
+    "name": "Cisco ASA \u2014 Large Outbound TCP Egress (\u226550MB)",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\"\n| alter int_host = _json -> generalCiscoLog.dst_ip,\n        ext_host = _json -> generalCiscoLog.src_ip,\n        int_port = to_integer(_json -> generalCiscoLog.dst_port),\n        ext_port = to_integer(_json -> generalCiscoLog.src_port),\n        proto    = _json -> generalCiscoLog.protocol,\n        bytes_n  = to_integer(_json -> generalCiscoLog.transferred_bytes),\n        int_iface = _json -> generalCiscoLog.dst_interface\n| filter int_iface = \"inside\" and bytes_n >= 50000000\n| bin _time span = 1h\n| comp sum(bytes_n) as exfil_bytes,\n       values(ext_host) as ext_hosts,\n       values(ext_port) as ext_ports,\n       values(int_port) as int_ports,\n       values(proto) as protocols\n       by int_host, _time\n| filter exfil_bytes >= 50000000\n| fields ext_hosts, ext_ports, int_ports, protocols, int_host\n",
+    "is_enabled": true,
+    "description": "Cisco ASA Teardown (302014) from internal host with transferred_bytes \u2265 50MB summed across one hour \u2014 bulk data exfiltration.",
+    "alert_name": "Cisco ASA \u2014 Large Outbound TCP Egress (\u226550MB)",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "ext_hosts",
+      "action_remote_port": "ext_ports",
+      "action_local_port": "int_ports",
+      "action_app_protocol": "protocols",
+      "action_local_ip": "int_host"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0010 - Exfiltration": [
+        "T1041 - Exfiltration Over C2 Channel"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "int_host"
+    ]
+  },
+  {
+    "name": "GCP \u2014 API Access From External / Non-Corporate IP",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.source.ipv4 != null\n| filter not (xdm.source.ipv4 contains \"10.\" or xdm.source.ipv4 contains \"192.168.\" or xdm.source.ipv4 contains \"172.16.\" or xdm.source.ipv4 contains \"172.17.\" or xdm.source.ipv4 contains \"172.18.\" or xdm.source.ipv4 contains \"172.19.\" or xdm.source.ipv4 contains \"172.2\" or xdm.source.ipv4 contains \"172.3\" or xdm.source.ipv4 contains \"35.235.240.\")\n| bin _time span = 1h\n| comp count_distinct(xdm.source.ipv4) as ips, count() as api_calls,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.event.description, _time\n| filter api_calls >= 5\n| fields users, events_seen\n",
+    "is_enabled": true,
+    "description": "GCP Cloud Audit event with caller IP outside RFC1918 ranges and not in GCP's IAP forwarding range (35.235.240.0/20) \u2014 \u22655 API calls per hour from external IP.",
+    "alert_name": "GCP \u2014 API Access From External / Non-Corporate IP",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078.004 - Valid Accounts: Cloud Accounts"
+      ],
+      "TA0005 - Defense Evasion": [
+        "T1090 - Proxy"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.event.description"
+    ]
+  },
+  {
+    "name": "GCP \u2014 IAM Privilege Escalation via SetIamPolicy",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type contains \"SetIamPolicy\" or xdm.event.operation_sub_type contains \"setIamPolicy\"\n| filter xdm.event.description contains \"roles/owner\" or xdm.event.description contains \"roles/editor\" or xdm.event.description contains \"roles/iam.serviceAccountUser\" or xdm.event.description contains \"roles/iam.serviceAccountTokenCreator\"\n| bin _time span = 1h\n| comp count() as priv_grants,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "GCP SetIamPolicy or setIamPolicy method assigning roles/owner, roles/editor, roles/iam.serviceAccountUser, or roles/iam.serviceAccountTokenCreator.",
+    "alert_name": "GCP \u2014 IAM Privilege Escalation via SetIamPolicy",
+    "alert_category": "PRIVILEGE_ESCALATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0004 - Privilege Escalation": [
+        "T1098.003 - Account Manipulation: Additional Cloud Roles"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "GCP \u2014 Service Account Key Created (Persistence)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type = \"google.iam.admin.v1.CreateServiceAccountKey\"\n| bin _time span = 1h\n| comp count() as keys_created,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "google.iam.admin.v1.CreateServiceAccountKey method \u2014 new SA key created, providing persistent credential access.",
+    "alert_name": "GCP \u2014 Service Account Key Created (Persistence)",
+    "alert_category": "PERSISTENCE",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0003 - Persistence": [
+        "T1098.001 - Account Manipulation: Additional Cloud Credentials"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "GCP \u2014 Cloud Logging Sink Modified or Deleted",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type in (\"google.logging.v2.ConfigServiceV2.UpdateSink\",\"google.logging.v2.ConfigServiceV2.DeleteSink\",\"google.logging.v2.ConfigServiceV2.DeleteBucket\")\n| bin _time span = 1h\n| comp count() as sink_changes,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "google.logging.v2.ConfigServiceV2.UpdateSink, DeleteSink, or DeleteBucket method \u2014 audit log routing being tampered to evade detection.",
+    "alert_name": "GCP \u2014 Cloud Logging Sink Modified or Deleted",
+    "alert_category": "EVASION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0005 - Defense Evasion": [
+        "T1562.008 - Impair Defenses: Disable Cloud Logs"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "GCP \u2014 Security Command Center Notification Disabled",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type contains \"SecurityCenter\" and (xdm.event.operation_sub_type contains \"Delete\" or xdm.event.operation_sub_type contains \"Update\")\n| bin _time span = 1h\n| comp count() as scc_changes,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "google.cloud.securitycenter Delete* or Update* method \u2014 SCC notification routing disabled to suppress findings.",
+    "alert_name": "GCP \u2014 Security Command Center Notification Disabled",
+    "alert_category": "EVASION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0005 - Defense Evasion": [
+        "T1562.001 - Impair Defenses: Disable or Modify Tools"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "GCP \u2014 Cloud Storage Bucket Made Publicly Accessible",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type = \"storage.setIamPolicy\" or xdm.event.operation_sub_type contains \"storage.buckets\"\n| filter xdm.event.description contains \"allUsers\" or xdm.event.description contains \"allAuthenticatedUsers\"\n| bin _time span = 1h\n| comp count() as exposures,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "storage.setIamPolicy or storage.buckets method granting allUsers or allAuthenticatedUsers \u2014 bucket exposed to the internet.",
+    "alert_name": "GCP \u2014 Cloud Storage Bucket Made Publicly Accessible",
+    "alert_category": "COLLECTION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0009 - Collection": [
+        "T1530 - Data from Cloud Storage Object"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "GCP \u2014 Disk Snapshot or Instance Creation (Potential Data Staging)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type contains \"snapshot\" or xdm.event.operation_sub_type contains \"Snapshot\" or xdm.event.operation_sub_type = \"compute.disks.createSnapshot\" or xdm.event.operation_sub_type contains \"compute.instances.insert\"\n| bin _time span = 1h\n| comp count() as ops,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "compute.disks.createSnapshot, compute.snapshots.insert, or compute.instances.insert method \u2014 disk imaging or new compute resource potentially used to exfiltrate data.",
+    "alert_name": "GCP \u2014 Disk Snapshot or Instance Creation (Potential Data Staging)",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0010 - Exfiltration": [
+        "T1537 - Transfer Data to Cloud Account"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Apache \u2014 High-Volume 4xx Recon Scanning From Single Client",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = apache_httpd_raw\n| alter status = to_integer(xdm.network.http.response_code),\n        uri = xdm.network.http.url,\n        ua = xdm.source.user_agent,\n        method = xdm.network.http.method\n| filter xdm.source.ipv4 != null and status >= 400\n| filter uri contains \"/admin\"\n       or uri contains \"/login\"\n       or uri contains \"/wp-\"\n       or uri contains \"/phpmyadmin\"\n       or uri contains \"/.env\"\n       or uri contains \"/.git\"\n       or uri contains \"/config\"\n       or uri contains \"/backup\"\n       or uri contains \"/console\"\n       or uri contains \"/.aws\"\n       or uri contains \"/actuator\"\n| bin _time span = 30m\n| comp count() as recon_4xx,\n       count_distinct(uri) as distinct_paths,\n       values(uri) as scanned_paths,\n       values(ua) as user_agents,\n       values(method) as methods,\n       values(status) as response_codes,\n       values(xdm.target.ipv4) as tgt_ips\n       by xdm.source.ipv4, _time\n| filter recon_4xx >= 50 and distinct_paths >= 15\n| fields xdm.source.ipv4, tgt_ips, scanned_paths, user_agents, response_codes\n",
+    "is_enabled": true,
+    "description": "Apache httpd showing \u226520 HTTP 4xx responses from a single client IP within one hour \u2014 vulnerability scanning or directory traversal recon.",
+    "alert_name": "Apache \u2014 High-Volume 4xx Recon Scanning From Single Client",
+    "alert_category": "RECONNAISSANCE",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "action_local_ip": "tgt_ips",
+      "xdm_url": "scanned_paths",
+      "actor_process_image_name": "user_agents",
+      "action_evtlog_message": "response_codes"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0043 - Reconnaissance": [
+        "T1595.002 - Active Scanning: Vulnerability Scanning"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Apache \u2014 Suspicious POST to Server-Side Script Path",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = apache_httpd_raw\n| alter method = xdm.network.http.method,\n        status = to_integer(xdm.network.http.response_code),\n        url = xdm.network.http.url,\n        ua = xdm.source.user_agent\n| filter method = \"POST\" and status in (200, 201, 302)\n| filter url contains \"/uploads/\" and (url contains \".php\" or url contains \".jsp\" or url contains \".aspx\")\n       or url contains \"shell.php\"\n       or url contains \"cmd.php\"\n       or url contains \"c99.php\"\n       or url contains \"r57.php\"\n       or url contains \"webshell\"\n       or url contains \".php?cmd=\"\n       or url contains \"eval(\"\n| bin _time span = 30m\n| comp count() as posts,\n       count_distinct(url) as distinct_paths,\n       values(url) as posted_paths,\n       values(ua) as user_agents,\n       values(status) as response_codes,\n       values(xdm.target.ipv4) as tgt_ips\n       by xdm.source.ipv4, _time\n| filter posts >= 3 and distinct_paths >= 2\n| fields xdm.source.ipv4, tgt_ips, posted_paths, user_agents, response_codes\n",
+    "is_enabled": true,
+    "description": "Apache HTTP POST with 200/201/302 response to a path containing 'upload', 'shell', 'cmd', '.php?cmd', '/admin', or 'eval' \u2014 possible web shell installation.",
+    "alert_name": "Apache \u2014 Suspicious POST to Server-Side Script Path",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "action_local_ip": "tgt_ips",
+      "xdm_url": "posted_paths",
+      "actor_process_image_name": "user_agents",
+      "action_evtlog_message": "response_codes"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1190 - Exploit Public-Facing Application"
+      ],
+      "TA0003 - Persistence": [
+        "T1505.003 - Server Software Component: Web Shell"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Apache \u2014 Command Injection Pattern in HTTP Request",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = apache_httpd_raw\n| alter url = xdm.network.http.url,\n        status = to_integer(xdm.network.http.response_code),\n        method = xdm.network.http.method,\n        ua = xdm.source.user_agent\n| filter url contains \"cmd=\" and (url contains \"wget\" or url contains \"curl\" or url contains \"bash\" or url contains \"/etc/passwd\")\n       or url contains \"exec=\" and (url contains \"wget\" or url contains \"curl\" or url contains \"bash\")\n       or url contains \"shell_exec\"\n       or url contains \"passthru(\"\n       or url contains \"system(\"\n       or url contains \"..%2f..%2f\"\n       or url contains \"/etc/passwd\"\n       or url contains \"/etc/shadow\"\n| filter status in (200, 201, 500)\n| bin _time span = 30m\n| comp count() as hits,\n       count_distinct(url) as distinct_payloads,\n       values(url) as payload_urls,\n       values(method) as methods,\n       values(ua) as user_agents,\n       values(xdm.target.ipv4) as tgt_ips\n       by xdm.source.ipv4, _time\n| filter hits >= 2\n| fields xdm.source.ipv4, tgt_ips, payload_urls, methods, user_agents\n",
+    "is_enabled": true,
+    "description": "Apache request URL containing 'cmd=', 'exec=', 'shell_exec', 'passthru', 'system(', '/etc/passwd', 'wget', or 'curl' \u2014 command injection or LFI exploitation attempt.",
+    "alert_name": "Apache \u2014 Command Injection Pattern in HTTP Request",
+    "alert_category": "EXECUTION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "action_local_ip": "tgt_ips",
+      "xdm_url": "payload_urls",
+      "action_evtlog_message": "methods",
+      "actor_process_image_name": "user_agents"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0002 - Execution": [
+        "T1059 - Command and Scripting Interpreter"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 Internal Web Server Initiating Outbound Connection",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302013\" or _raw_log contains \"302014\"\n| alter int_host = _json -> generalCiscoLog.dst_ip,\n        int_iface = _json -> generalCiscoLog.dst_interface,\n        ext_dest  = _json -> generalCiscoLog.src_ip,\n        int_port  = to_integer(_json -> generalCiscoLog.dst_port),\n        ext_port  = to_integer(_json -> generalCiscoLog.src_port),\n        proto     = _json -> generalCiscoLog.protocol,\n        bytes_n   = to_integer(_json -> generalCiscoLog.transferred_bytes)\n| filter int_iface = \"inside\" and int_host in (\"10.0.10.50\",\"10.0.10.51\",\"10.0.10.52\",\"192.168.110.243\")\n| comp sum(bytes_n) as c2_bytes,\n       values(ext_port) as ext_ports,\n       values(int_port) as int_ports,\n       values(proto) as protocols\n       by int_host, ext_dest\n| filter c2_bytes >= 10000\n| fields ext_ports, int_ports, protocols, int_host, ext_dest\n",
+    "is_enabled": true,
+    "description": "Cisco ASA Built/Teardown event where the internal host (xdm.target.ipv4) is a known web/app server IP making outbound \u2014 reversal of normal traffic direction indicates compromise.",
+    "alert_name": "Cisco ASA \u2014 Internal Web Server Initiating Outbound Connection",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_port": "ext_ports",
+      "action_local_port": "int_ports",
+      "action_app_protocol": "protocols",
+      "action_local_ip": "int_host",
+      "action_remote_ip": "ext_dest"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071 - Application Layer Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "int_host"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 VPN Authentication Brute Force From Single IP",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"109006\"\n| comp count() as fails,\n       values(xdm.source.user.username) as users,\n       count_distinct(xdm.source.user.username) as targeted_users\n       by xdm.source.ipv4\n| filter fails >= 3\n| fields xdm.source.ipv4, users\n",
+    "is_enabled": true,
+    "description": "\u22653 ASA 109006 authentication-failed events grouped by source IP within 30 minutes \u2014 VPN credential brute force / password spray.",
+    "alert_name": "Cisco ASA \u2014 VPN Authentication Brute Force From Single IP",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1110.003 - Brute Force: Password Spraying"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 VPN Login From \u22652 Distinct IPs for Same User",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"113039\"\n| filter xdm.source.user.username != null and xdm.source.ipv4 != null\n| alter ip_16 = arrayindex(regextract(xdm.source.ipv4, \"^(\\d+\\.\\d+)\\.\"), 0)\n| filter ip_16 != null\n| comp count_distinct(xdm.source.ipv4) as ips,\n       count_distinct(ip_16) as distinct_networks,\n       values(xdm.source.ipv4) as ip_list\n       by xdm.source.user.username\n| filter distinct_networks >= 2 and ips >= 2\n| fields ip_list, xdm.source.user.username\n",
+    "is_enabled": true,
+    "description": "ASA 113039 AnyConnect parent session start events for the same xdm.source.user.username from \u22652 distinct source IPs within 30 minutes \u2014 impossible travel via VPN.",
+    "alert_name": "Cisco ASA \u2014 VPN Login From \u22652 Distinct IPs for Same User",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "ip_list",
+      "actor_effective_username": "xdm.source.user.username"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.user.username"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 SMB Lateral Movement to Previously Unseen Internal Hosts",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"302013\" and xdm.source.port = 445\n| comp count_distinct(xdm.source.ipv4) as smb_hosts,\n       values(xdm.source.ipv4) as source_hosts\n       by xdm.target.ipv4\n| filter smb_hosts >= 5 and smb_hosts < 10\n| alter initiator_ip = xdm.target.ipv4\n| join type = left (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"722051\" and _raw_log contains \"assigned to session\"\n    | alter pool_ip = arrayindex(regextract(_raw_log, \"Address <(\\d+\\.\\d+\\.\\d+\\.\\d+)>\"), 0),\n            vpn_user = arrayindex(regextract(_raw_log, \"User <([^>]+)>\"), 0)\n    | filter pool_ip != null\n    | comp values(vpn_user) as user_name by pool_ip\n    | fields pool_ip, user_name\n  ) as bind bind.pool_ip = initiator_ip\n| fields xdm.target.ipv4, source_hosts, user_name\n",
+    "is_enabled": true,
+    "description": "Internal host establishing SMB/445 connections to 5\u20139 distinct internal hosts within 15 minutes \u2014 lateral movement after VPN compromise.",
+    "alert_name": "Cisco ASA \u2014 SMB Lateral Movement to Previously Unseen Internal Hosts",
+    "alert_category": "LATERAL_MOVEMENT",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.target.ipv4",
+      "action_remote_ip": "source_hosts",
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0008 - Lateral Movement": [
+        "T1021.002 - Remote Services: SMB/Windows Admin Shares"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.target.ipv4"
+    ]
+  },
+  {
+    "name": "Okta \u2014 Same User Authenticated From \u22652 Countries",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType in (\"user.session.start\",\"user.authentication.sso\",\"user.authentication.auth_via_mfa\")\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        country = arrayindex(regextract(client, \"\\\"country\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"SUCCESS\" and ip != null and user_name != null and country != null\n| filter not (ip contains \"192.168.\" or ip contains \"10.\" or ip contains \"172.\")\n| filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\n| alter ip_16 = arrayindex(regextract(ip, \"^(\\d+\\.\\d+)\\.\"), 0)\n| filter ip_16 != null\n| comp count_distinct(country) as countries,\n       count_distinct(ip) as ips,\n       count_distinct(ip_16) as distinct_networks,\n       values(country) as country_list, values(ip) as ip_list\n       by user_name\n| filter countries >= 2 and distinct_networks >= 2 and ips >= 2\n| fields user_name, ip_list, country_list\n",
+    "is_enabled": true,
+    "description": "Okta user.session.start, user.authentication.sso, or user.authentication.auth_via_mfa SUCCESS events for one user from \u22652 distinct geographic countries within 30 minutes.",
+    "alert_name": "Okta \u2014 Same User Authenticated From \u22652 Countries",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip_list",
+      "src_geo_country_name": "country_list"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  },
+  {
+    "name": "Proofpoint \u2014 Image-Based (QR) Phishing Attachment Delivered",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = proofpoint_tap_raw\n| filter (proofpoint_tap_raw.classification = \"PHISHING\" or proofpoint_tap_raw.classification = \"IMPOSTOR\" or proofpoint_tap_raw.phishScore > 50)\n| filter proofpoint_tap_raw.messageParts contains \"image/png\" or proofpoint_tap_raw.messageParts contains \"image/jpeg\" or proofpoint_tap_raw.messageParts contains \".png\" or proofpoint_tap_raw.messageParts contains \".jpg\"\n| alter recip = arrayindex(xdm.email.recipients, 0)\n| alter senderIP = proofpoint_tap_raw.senderIP,\n        clickIP = proofpoint_tap_raw.clickIP,\n        id = proofpoint_tap_raw.id,\n        GUID = proofpoint_tap_raw.GUID,\n        subject = proofpoint_tap_raw.subject,\n        xmailer = proofpoint_tap_raw.xmailer,\n        headerCC = proofpoint_tap_raw.headerCC,\n        headerTo = proofpoint_tap_raw.headerTo,\n        policyRoutes = proofpoint_tap_raw.policyRoutes,\n        threatID = proofpoint_tap_raw.threatID,\n        clickTime = proofpoint_tap_raw.clickTime,\n        messageID = proofpoint_tap_raw.messageID,\n        spamScore = proofpoint_tap_raw.spamScore,\n        threatURL = proofpoint_tap_raw.threatURL,\n        campaignId = proofpoint_tap_raw.campaignId,\n        sender = proofpoint_tap_raw.sender,\n        threatTime = proofpoint_tap_raw.threatTime,\n        headerFrom = proofpoint_tap_raw.headerFrom,\n        messageSize = proofpoint_tap_raw.messageSize,\n        malwareScore = proofpoint_tap_raw.malwareScore,\n        messageParts = proofpoint_tap_raw.messageParts,\n        threatStatus = proofpoint_tap_raw.threatStatus,\n        impostorScore = proofpoint_tap_raw.impostorScore,\n        phishScore = proofpoint_tap_raw.phishScore,\n        url = proofpoint_tap_raw.url,\n        threatsInfoMap = proofpoint_tap_raw.threatsInfoMap,\n        classification = proofpoint_tap_raw.classification,\n        headerReplyTo = proofpoint_tap_raw.headerReplyTo,\n        quarantineRule = proofpoint_tap_raw.quarantineRule,\n        replyToAddress = proofpoint_tap_raw.replyToAddress,\n        quarantineFolder = proofpoint_tap_raw.quarantineFolder\n",
+    "is_enabled": true,
+    "description": "Proofpoint delivered email with PHISHING/IMPOSTOR classification AND messageParts containing image/png, image/jpeg, .png, or .jpg \u2014 QR-code phishing pattern.",
+    "alert_name": "Proofpoint \u2014 Image-Based (QR) Phishing Attachment Delivered",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "emailsenderip": "senderIP",
+      "action_local_ip": "clickIP",
+      "action_remote_ip": "senderIP",
+      "fw_email_recipient": "recip",
+      "actor_effective_username": "recip",
+      "proofpointtapid": "id",
+      "proofpointtapguid": "GUID",
+      "proofpointtapclickip": "clickIP",
+      "proofpointtapsubject": "subject",
+      "proofpointtapxmailer": "xmailer",
+      "proofpointtapheadercc": "headerCC",
+      "proofpointtapheaderto": "headerTo",
+      "proofpointtappolicies": "policyRoutes",
+      "proofpointtapsenderip": "senderIP",
+      "proofpointtapthreatid": "threatID",
+      "proofpointtapclicktime": "clickTime",
+      "proofpointtapmessageid": "messageID",
+      "proofpointtapspamscore": "spamScore",
+      "proofpointtapthreaturl": "threatURL",
+      "proofpointtapcampaignid": "campaignId",
+      "proofpointtapsmtpsender": "sender",
+      "proofpointtapthreattime": "threatTime",
+      "proofpointtapheadersfrom": "headerFrom",
+      "proofpointtapmessagesize": "messageSize",
+      "proofpointtapmalwarescore": "malwareScore",
+      "proofpointtapmessageparts": "messageParts",
+      "proofpointtapthreatstatus": "threatStatus",
+      "proofpointtapimposterscore": "impostorScore",
+      "proofpointtapphishingscore": "phishScore",
+      "proofpointtapsuspiciousurl": "url",
+      "proofpointtapthreatinfomap": "threatsInfoMap",
+      "proofpointtapclassification": "classification",
+      "proofpointtapheadersreplyto": "headerReplyTo",
+      "proofpointtapquarantinerule": "quarantineRule",
+      "proofpointtapreplytoaddress": "replyToAddress",
+      "proofpointtapquarantinefolder": "quarantineFolder"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1566.001 - Phishing: Spearphishing Attachment"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  },
+  {
+    "name": "Okta \u2014 Adversary-in-the-Middle Authentication Indicator",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType = \"user.session.start\" or eventType = \"user.authentication.sso\"\n| filter debugContext contains \"threatSuspected\\\":\\\"true\"\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"SUCCESS\" and user_name != null\n| filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\n| bin _time span = 15m\n| comp count() as threat_auths, values(ip) as ip_list by user_name, _time\n| filter threat_auths >= 3\n| fields user_name, ip_list\n",
+    "is_enabled": true,
+    "description": "\u22653 SUCCESS Okta user.session.start/user.authentication.sso events for one user in 15 min with debugContext threatSuspected=true \u2014 ThreatInsight-flagged auth burst from an AiTM reverse proxy (session.start + rapid SSO to sensitive apps).",
+    "alert_name": "Okta \u2014 Adversary-in-the-Middle Authentication Indicator",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip_list"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1557 - Adversary-in-the-Middle"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  },
+  {
+    "name": "Okta \u2014 OAuth Token Reuse Detected (Session Hijack)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType = \"app.oauth2.as.token.detect_reuse\"\n| alter user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter user_name != null\n| filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\n| bin _time span = 30m\n| comp count() as reuse_events, values(ip) as ip_list by user_name, _time\n| filter reuse_events >= 1\n| fields user_name, ip_list\n",
+    "is_enabled": true,
+    "description": "Okta app.oauth2.as.token.detect_reuse event \u2014 Okta natively detected a one-time refresh token being replayed, indicating a stolen/hijacked session token.",
+    "alert_name": "Okta \u2014 OAuth Token Reuse Detected (Session Hijack)",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip_list"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1539 - Steal Web Session Cookie"
+      ],
+      "TA0008 - Lateral Movement": [
+        "T1550.004 - Use Alternate Authentication Material: Web Session Cookie"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  },
+  {
+    "name": "Okta \u2014 Client Roaming Detected (Native AiTM Signal)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType = \"security.session.detect_client_roaming\"\n| alter user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter user_name != null\n| filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\n| bin _time span = 30m\n| comp count() as roaming_events, values(ip) as ip_list by user_name, _time\n| filter roaming_events >= 2\n| fields user_name, ip_list\n",
+    "is_enabled": true,
+    "description": "Okta security.session.detect_client_roaming event \u2014 Okta's built-in AiTM/session-hijack detector fired.",
+    "alert_name": "Okta \u2014 Client Roaming Detected (Native AiTM Signal)",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip_list"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1557 - Adversary-in-the-Middle"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Cross-Source AssumeRole or Cross-Account Token Issuance",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"AssumeRole\",\"AssumeRoleWithSAML\",\"AssumeRoleWithWebIdentity\")\n| filter xdm.event.outcome = \"SUCCESS\"\n| filter xdm.event.description contains \"AdministratorAccess\"\n       or xdm.event.description contains \"PowerUserAccess\"\n       or xdm.event.description contains \"OrganizationAccountAccess\"\n       or xdm.event.description contains \"BreakGlass\"\n| filter not (xdm.event.description contains \"AWSServiceRoleFor\"\n       or xdm.event.description contains \"InstanceProfile\"\n       or xdm.event.description contains \"/aws-service-role/\")\n| filter xdm.source.user.username != null\n| bin _time span = 1h\n| comp count() as assumes,\n       values(xdm.source.ipv4) as source_ips,\n       values(xdm.event.description) as roles\n       by xdm.source.user.username, _time\n| filter assumes >= 1\n| fields source_ips, xdm.source.user.username\n",
+    "is_enabled": true,
+    "description": "AWS AssumeRole, AssumeRoleWithSAML, or AssumeRoleWithWebIdentity SUCCESS with \u22652 distinct source IPs for same role ARN within one hour \u2014 possible token replay or cross-account pivot.",
+    "alert_name": "AWS \u2014 Cross-Source AssumeRole or Cross-Account Token Issuance",
+    "alert_category": "LATERAL_MOVEMENT",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "source_ips",
+      "actor_effective_username": "xdm.source.user.username"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0008 - Lateral Movement": [
+        "T1550.001 - Use Alternate Authentication Material: Application Access Token"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.user.username"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Security Hub Disabled Post-Compromise",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"DisableSecurityHub\",\"BatchDisableStandards\",\"UpdateStandardsControl\",\"DeleteInsight\")\n| filter xdm.source.user.username != null\n| bin _time span = 1h\n| comp count() as events,\n       values(xdm.event.type) as operations,\n       values(xdm.source.ipv4) as source_ips,\n       values(xdm.event.description) as events_seen\n       by xdm.source.user.username, _time\n| fields source_ips, xdm.source.user.username, events_seen\n",
+    "is_enabled": true,
+    "description": "DisableSecurityHub, BatchDisableStandards, UpdateStandardsControl, or DeleteInsight event \u2014 defense evasion following session hijack.",
+    "alert_name": "AWS \u2014 Security Hub Disabled Post-Compromise",
+    "alert_category": "EVASION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "source_ips",
+      "actor_effective_username": "xdm.source.user.username",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0005 - Defense Evasion": [
+        "T1562.001 - Impair Defenses: Disable or Modify Tools"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.user.username"
+    ]
+  },
+  {
+    "name": "Proofpoint \u2014 Malware Attachment Delivered",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = proofpoint_tap_raw\n| filter proofpoint_tap_raw.classification = \"MALWARE\" and proofpoint_tap_raw.malwareScore != null and proofpoint_tap_raw.malwareScore > 75\n| filter proofpoint_tap_raw.messageParts contains \".exe\"\n       or proofpoint_tap_raw.messageParts contains \".zip\"\n       or proofpoint_tap_raw.messageParts contains \".docm\"\n       or proofpoint_tap_raw.messageParts contains \".xlsm\"\n       or proofpoint_tap_raw.messageParts contains \".js\"\n       or proofpoint_tap_raw.messageParts contains \".lnk\"\n       or proofpoint_tap_raw.messageParts contains \".iso\"\n| alter recip = arrayindex(xdm.email.recipients, 0)\n| alter senderIP = proofpoint_tap_raw.senderIP,\n        clickIP = proofpoint_tap_raw.clickIP,\n        id = proofpoint_tap_raw.id,\n        GUID = proofpoint_tap_raw.GUID,\n        subject = proofpoint_tap_raw.subject,\n        xmailer = proofpoint_tap_raw.xmailer,\n        headerCC = proofpoint_tap_raw.headerCC,\n        headerTo = proofpoint_tap_raw.headerTo,\n        policyRoutes = proofpoint_tap_raw.policyRoutes,\n        threatID = proofpoint_tap_raw.threatID,\n        clickTime = proofpoint_tap_raw.clickTime,\n        messageID = proofpoint_tap_raw.messageID,\n        spamScore = proofpoint_tap_raw.spamScore,\n        threatURL = proofpoint_tap_raw.threatURL,\n        campaignId = proofpoint_tap_raw.campaignId,\n        sender = proofpoint_tap_raw.sender,\n        threatTime = proofpoint_tap_raw.threatTime,\n        headerFrom = proofpoint_tap_raw.headerFrom,\n        messageSize = proofpoint_tap_raw.messageSize,\n        malwareScore = proofpoint_tap_raw.malwareScore,\n        messageParts = proofpoint_tap_raw.messageParts,\n        threatStatus = proofpoint_tap_raw.threatStatus,\n        impostorScore = proofpoint_tap_raw.impostorScore,\n        phishScore = proofpoint_tap_raw.phishScore,\n        url = proofpoint_tap_raw.url,\n        threatsInfoMap = proofpoint_tap_raw.threatsInfoMap,\n        classification = proofpoint_tap_raw.classification,\n        headerReplyTo = proofpoint_tap_raw.headerReplyTo,\n        quarantineRule = proofpoint_tap_raw.quarantineRule,\n        replyToAddress = proofpoint_tap_raw.replyToAddress,\n        quarantineFolder = proofpoint_tap_raw.quarantineFolder\n",
+    "is_enabled": true,
+    "description": "Proofpoint delivered message with classification = MALWARE or malwareScore > 50, AND messageParts containing .exe, .zip, .docm, .xlsm, .js, or application/* MIME types.",
+    "alert_name": "Proofpoint \u2014 Malware Attachment Delivered",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "emailsenderip": "senderIP",
+      "action_local_ip": "clickIP",
+      "action_remote_ip": "senderIP",
+      "fw_email_recipient": "recip",
+      "actor_effective_username": "recip",
+      "proofpointtapid": "id",
+      "proofpointtapguid": "GUID",
+      "proofpointtapclickip": "clickIP",
+      "proofpointtapsubject": "subject",
+      "proofpointtapxmailer": "xmailer",
+      "proofpointtapheadercc": "headerCC",
+      "proofpointtapheaderto": "headerTo",
+      "proofpointtappolicies": "policyRoutes",
+      "proofpointtapsenderip": "senderIP",
+      "proofpointtapthreatid": "threatID",
+      "proofpointtapclicktime": "clickTime",
+      "proofpointtapmessageid": "messageID",
+      "proofpointtapspamscore": "spamScore",
+      "proofpointtapthreaturl": "threatURL",
+      "proofpointtapcampaignid": "campaignId",
+      "proofpointtapsmtpsender": "sender",
+      "proofpointtapthreattime": "threatTime",
+      "proofpointtapheadersfrom": "headerFrom",
+      "proofpointtapmessagesize": "messageSize",
+      "proofpointtapmalwarescore": "malwareScore",
+      "proofpointtapmessageparts": "messageParts",
+      "proofpointtapthreatstatus": "threatStatus",
+      "proofpointtapimposterscore": "impostorScore",
+      "proofpointtapphishingscore": "phishScore",
+      "proofpointtapsuspiciousurl": "url",
+      "proofpointtapthreatinfomap": "threatsInfoMap",
+      "proofpointtapclassification": "classification",
+      "proofpointtapheadersreplyto": "headerReplyTo",
+      "proofpointtapquarantinerule": "quarantineRule",
+      "proofpointtapreplytoaddress": "replyToAddress",
+      "proofpointtapquarantinefolder": "quarantineFolder"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1566.001 - Phishing: Spearphishing Attachment"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  },
+  {
+    "name": "Okta \u2014 Authentication Brute Force From Single IP",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType contains \"session.start\" or eventType contains \"authentication\"\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"FAILURE\" and ip != null and user_name != null\n| filter not (ip contains \"192.168.\" or ip contains \"10.\" or ip contains \"172.\")\n| bin _time span = 15m\n| comp count() as fails by ip, user_name, _time\n| filter fails >= 5\n| fields user_name, ip\n",
+    "is_enabled": true,
+    "description": "\u22655 Okta authentication FAILURE events from one source IP within 30 minutes \u2014 credential spraying / brute force.",
+    "alert_name": "Okta \u2014 Authentication Brute Force From Single IP",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1110 - Brute Force"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "ip"
+    ]
+  },
+  {
+    "name": "Okta \u2014 MFA Factor Reset or Deactivation",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = okta_sso_raw\n| filter okta_sso_raw.eventtype in (\"user.mfa.factor.deactivate\",\"user.mfa.factor.reset_all\",\"user.mfa.factor.suspend\")\n| alter user_name = xdm.target.user.upn,\n        admin_upn = xdm.source.user.upn,\n        outcome   = xdm.event.outcome\n| filter outcome = \"SUCCESS\" and user_name != null\n| filter not (admin_upn contains \"svc-\" or admin_upn contains \"api-\")\n| bin _time span = 15m\n| comp count() as mfa_changes,\n       values(admin_upn) as reset_by\n       by user_name, _time\n| filter mfa_changes >= 1\n| fields user_name\n",
+    "is_enabled": true,
+    "description": "user.mfa.factor.deactivate, user.mfa.factor.reset_all, user.mfa.factor.suspend, or system.mfa.factor.deactivate event \u2014 MFA being bypassed or reset to enable account takeover.",
+    "alert_name": "Okta \u2014 MFA Factor Reset or Deactivation",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0006 - Credential Access": [
+        "T1556.006 - Modify Authentication Process: Multi-Factor Authentication"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 Large SMB Session (Pre-Encryption Data Staging)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\"\n| alter scanner = _json -> generalCiscoLog.dst_ip,\n        tgt_ip = _json -> generalCiscoLog.src_ip,\n        svc_port = to_integer(_json -> generalCiscoLog.src_port),\n        int_port = to_integer(_json -> generalCiscoLog.dst_port),\n        proto    = _json -> generalCiscoLog.protocol,\n        bytes_n = to_integer(_json -> generalCiscoLog.transferred_bytes)\n| filter svc_port = 445 and bytes_n >= 100000000\n| comp sum(bytes_n) as total_bytes,\n       values(tgt_ip) as tgt_ips,\n       values(int_port) as int_ports,\n       values(proto) as protocols\n       by scanner, svc_port\n| filter total_bytes >= 100000000\n| fields tgt_ips, int_ports, protocols, scanner, svc_port\n",
+    "is_enabled": true,
+    "description": "ASA Teardown 302014 on src_port=445 with transferred_bytes \u2265 100MB \u2014 bulk SMB transfer indicating pre-encryption data staging.",
+    "alert_name": "Cisco ASA \u2014 Large SMB Session (Pre-Encryption Data Staging)",
+    "alert_category": "COLLECTION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "tgt_ips",
+      "action_local_port": "int_ports",
+      "action_app_protocol": "protocols",
+      "action_remote_ip": "scanner",
+      "action_remote_port": "svc_port"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0009 - Collection": [
+        "T1074 - Data Staged"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "scanner"
+    ]
+  },
+  {
+    "name": "AWS \u2014 Config Recorder Stopped (Pre-Ransomware Evasion)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"StopConfigurationRecorder\",\"DeleteConfigurationRecorder\")\n| bin _time span = 1h\n| comp count() as events,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "StopConfigurationRecorder or DeleteConfigurationRecorder event \u2014 defense evasion preceding impact-phase activity.",
+    "alert_name": "AWS \u2014 Config Recorder Stopped (Pre-Ransomware Evasion)",
+    "alert_category": "EVASION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0005 - Defense Evasion": [
+        "T1562.008 - Impair Defenses: Disable Cloud Logs"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "AWS WAF \u2014 WebACL, Rule, or IPSet Deleted",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = amazon_aws_raw\n| filter xdm.event.type in (\"DeleteWebACL\",\"DisassociateWebACL\",\"UpdateWebACL\",\"DeleteRule\",\"DeleteRuleGroup\",\"DeleteIPSet\",\"DeleteFirewallPolicy\")\n| bin _time span = 1h\n| comp count() as events,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "is_enabled": true,
+    "description": "DeleteWebACL, DisassociateWebACL, UpdateWebACL, DeleteRule, DeleteRuleGroup, DeleteIPSet, or DeleteFirewallPolicy event \u2014 inbound protection being removed.",
+    "alert_name": "AWS WAF \u2014 WebACL, Rule, or IPSet Deleted",
+    "alert_category": "EVASION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "xdm.source.ipv4",
+      "actor_effective_username": "users",
+      "action_evtlog_message": "events_seen"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0005 - Defense Evasion": [
+        "T1562.007 - Impair Defenses: Disable or Modify Cloud Firewall"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 Large Outbound Egress (Pre-Encryption Exfil)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\"\n| alter int_host = _json -> generalCiscoLog.dst_ip,\n        ext_host = _json -> generalCiscoLog.src_ip,\n        int_port = to_integer(_json -> generalCiscoLog.dst_port),\n        ext_port = to_integer(_json -> generalCiscoLog.src_port),\n        proto    = _json -> generalCiscoLog.protocol,\n        bytes_n  = to_integer(_json -> generalCiscoLog.transferred_bytes),\n        int_iface = _json -> generalCiscoLog.dst_interface\n| filter int_iface = \"inside\" and bytes_n >= 50000000\n| comp sum(bytes_n) as exfil_bytes,\n       values(ext_host) as ext_hosts,\n       values(ext_port) as ext_ports,\n       values(int_port) as int_ports,\n       values(proto) as protocols\n       by int_host\n| filter exfil_bytes >= 50000000\n| fields ext_hosts, ext_ports, int_ports, protocols, int_host\n",
+    "is_enabled": true,
+    "description": "ASA Teardown 302014 from internal host with transferred_bytes summing to \u226550MB outbound per hour \u2014 exfiltration before encryption phase.",
+    "alert_name": "Cisco ASA \u2014 Large Outbound Egress (Pre-Encryption Exfil)",
+    "alert_category": "EXFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "ext_hosts",
+      "action_remote_port": "ext_ports",
+      "action_local_port": "int_ports",
+      "action_app_protocol": "protocols",
+      "action_local_ip": "int_host"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0010 - Exfiltration": [
+        "T1041 - Exfiltration Over C2 Channel"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "int_host"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 DHCP ACK Activity (Baseline, Disabled)",
+    "severity": "SEV_010_INFO",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DHCP\" and xdm.event.description contains \"DHCPACK\"\n| alter mac = arrayindex(regextract(xdm.event.description, \"([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})\"), 0),\n        ip  = arrayindex(regextract(xdm.event.description, \"DHCPACK on (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        hostname = arrayindex(regextract(xdm.event.description, \"\\((\\S+?)\\) via\"), 0)\n| filter mac != null and ip != null\n| bin _time span = 24h\n| comp count_distinct(mac) as new_devices,\n       values(ip) as tgt_ips,\n       values(mac) as device_macs\n       by hostname, _time\n| fields tgt_ips\n",
+    "is_enabled": false,
+    "description": "Infoblox DHCPACK events grouped by hostname \u2014 informational baseline. DISABLED by default because DHCP fires on every device-join (5k+/day). Keep available as a pivot query for case investigation, but not as an active detection.",
+    "alert_name": "Infoblox \u2014 DHCP ACK Activity (Baseline, Disabled)",
+    "alert_category": "OTHER",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "tgt_ips"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {},
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "hostname"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 RPZ NXDOMAIN Block (First C2 Domain Blocked at DNS)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"RPZ-QNAME\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        blocked_domain = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"qname=(\\S+)\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as rpz_nxd,\n       count_distinct(blocked_domain) as distinct_domains,\n       values(blocked_domain) as blocked_domains\n       by src_ip, _time\n| filter rpz_nxd >= 1\n| fields src_ip, blocked_domains\n",
+    "is_enabled": true,
+    "description": "Infoblox xdm.event.type = 'Threat' with RPZ-QNAME and NXDOMAIN markers \u2014 C2 domain matched RPZ threat intel and was returned NXDOMAIN.",
+    "alert_name": "Infoblox \u2014 RPZ NXDOMAIN Block (First C2 Domain Blocked at DNS)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "xdm_url": "blocked_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 DGA NXDOMAIN Storm (\u226520 NXDOMAINs From One Client)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome_reason = \"NXDOMAIN\"\n| filter xdm.source.ipv4 != null\n| bin _time span = 10m\n| comp count() as nxd_count by xdm.source.ipv4, _time\n| filter nxd_count >= 20\n| fields xdm.source.ipv4\n",
+    "is_enabled": true,
+    "description": "\u226520 Infoblox DNS responses with outcome_reason = NXDOMAIN from one client within 10 minutes \u2014 DGA cycling indicating implant attempting many C2 candidates.",
+    "alert_name": "Infoblox \u2014 DGA NXDOMAIN Storm (\u226520 NXDOMAINs From One Client)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1568.002 - Dynamic Resolution: Domain Generation Algorithms"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Zscaler \u2014 C2 / Malicious Domain Blocked (Post-DNS Beacon)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter cs1 = \"Malicious Content\" or cat contains \"Malware\" or cat contains \"Spyware\"\n       or cat contains \"Botnet\" or cat contains \"Command\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
+    "is_enabled": true,
+    "description": "Zscaler NSS web log Blocked action on a malicious/C2 category \u2014 the web proxy blocking the C2 domain attempt after the DNS RPZ block + NXDOMAIN cycling. Correlated to the victim by src and suser.",
+    "alert_name": "Zscaler \u2014 C2 / Malicious Domain Blocked (Post-DNS Beacon)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "actor_effective_username": "user_name",
+      "xdm_url": "url",
+      "action_local_ip": "dst_ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071 - Application Layer Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  },
+  {
+    "name": "Infoblox \u2014 C2 Domain Resolves NOERROR (New Infrastructure)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome = \"SUCCESS\"\n| filter xdm.event.description contains \"c2-infra\" or xdm.event.description contains \"command-control\" or xdm.event.description contains \"new-c2\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| filter domain != null\n| bin _time span = 1h\n| comp count() as resolves by xdm.source.ipv4, domain, _time\n| filter resolves >= 1\n| fields xdm.source.ipv4, domain\n",
+    "is_enabled": true,
+    "description": "Infoblox DNS Response with outcome = SUCCESS for a domain containing 'c2-infra' or 'command-control' \u2014 third C2 candidate resolved successfully (not yet on blocklist).",
+    "alert_name": "Infoblox \u2014 C2 Domain Resolves NOERROR (New Infrastructure)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "xdm_url": "domain"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Cisco ASA \u2014 Outbound C2 Connection Allowed (Post DNS Resolve)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302013\"\n| alter int_host = _json -> generalCiscoLog.dst_ip,\n        ext_host = _json -> generalCiscoLog.src_ip,\n        int_port = to_integer(_json -> generalCiscoLog.dst_port),\n        ext_port = to_integer(_json -> generalCiscoLog.src_port),\n        int_iface = _json -> generalCiscoLog.dst_interface,\n        proto = _json -> generalCiscoLog.protocol,\n        bytes_n = to_integer(_json -> generalCiscoLog.transferred_bytes)\n| filter int_iface = \"inside\" and int_host != null and ext_host != null\n| bin _time span = 1h\n| comp count() as outbound_conns,\n       sum(bytes_n) as total_bytes,\n       values(ext_port) as ext_ports,\n       values(int_port) as int_ports,\n       values(proto) as protocols\n       by int_host, ext_host, _time\n| join (\n    dataset = infoblox_infoblox_raw\n    | filter _raw_log contains \"NOERROR\" and (_raw_log contains \"c2-infra\" or _raw_log contains \"command-control\" or _raw_log contains \"phishing\" or _raw_log contains \"new-c2\")\n    | alter int_src = arrayindex(regextract(_raw_log, \"client (?:@0x\\w+ )?(\\d+\\.\\d+\\.\\d+\\.\\d+)#\"), 0),\n            bad_domain = arrayindex(regextract(_raw_log, \"query: (\\S+) IN\"), 0)\n    | filter int_src != null\n    | comp count() as dns_count, values(bad_domain) as bad_domains by int_src\n    | fields int_src, dns_count, bad_domains\n  ) as dns int_host = dns.int_src\n| fields ext_ports, int_ports, protocols, bad_domains, int_host, ext_host\n",
+    "is_enabled": true,
+    "description": "Cisco ASA Built 302013 outbound connection from an internal host that also resolved a c2-infra/command-control domain (NOERROR) \u2014 bypassed both DNS RPZ and threat-block layers.",
+    "alert_name": "Cisco ASA \u2014 Outbound C2 Connection Allowed (Post DNS Resolve)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_port": "ext_ports",
+      "action_local_port": "int_ports",
+      "action_app_protocol": "protocols",
+      "xdm_url": "bad_domains",
+      "action_local_ip": "int_host",
+      "action_remote_ip": "ext_host"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071 - Application Layer Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "int_host"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 Device Joined Network (DHCP ACK Baseline, Disabled)",
+    "severity": "SEV_010_INFO",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DHCP\" and xdm.event.description contains \"DHCPACK\"\n| alter mac = arrayindex(regextract(xdm.event.description, \"([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})\"), 0),\n        ip  = arrayindex(regextract(xdm.event.description, \"DHCPACK on (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        hostname = arrayindex(regextract(xdm.event.description, \"\\((\\S+?)\\) via\"), 0)\n| filter mac != null and ip != null\n| bin _time span = 24h\n| comp count_distinct(ip) as unique_ips,\n       values(ip) as tgt_ips\n       by mac, _time\n| fields tgt_ips\n",
+    "is_enabled": false,
+    "description": "Infoblox DHCPACK events grouped by MAC \u2014 informational baseline. DISABLED by default because every device-join triggers it (5k+/day). Use as a pivot query for case investigation, not as an alert.",
+    "alert_name": "Infoblox \u2014 Device Joined Network (DHCP ACK Baseline, Disabled)",
+    "alert_category": "OTHER",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "tgt_ips"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {},
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "mac"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 RPZ NXDOMAIN Block (Device C2 Attempt Blocked at DNS)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"RPZ-QNAME\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        blocked_domain = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"qname=(\\S+)\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as rpz_nxd,\n       count_distinct(blocked_domain) as distinct_domains,\n       values(blocked_domain) as blocked_domains\n       by src_ip, _time\n| filter rpz_nxd >= 1\n| fields src_ip, blocked_domains\n",
+    "is_enabled": true,
+    "description": "Infoblox xdm.event.type = 'Threat' with RPZ-QNAME and NXDOMAIN \u2014 compromised device's first C2 lookup blocked at DNS layer.",
+    "alert_name": "Infoblox \u2014 RPZ NXDOMAIN Block (Device C2 Attempt Blocked at DNS)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "xdm_url": "blocked_domains"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ]
+  },
+  {
+    "name": "Zscaler \u2014 Second C2 Domain Blocked (Web Proxy)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter cs1 = \"Malicious Content\" or cat contains \"Malware\" or cat contains \"Spyware\"\n       or cat contains \"Botnet\" or cat contains \"Command\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
+    "is_enabled": true,
+    "description": "Zscaler NSS web log Blocked action on a malicious/C2 category \u2014 web proxy blocking the second C2 candidate after the first DNS RPZ block. Correlated to the victim by src and suser.",
+    "alert_name": "Zscaler \u2014 Second C2 Domain Blocked (Web Proxy)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "actor_effective_username": "user_name",
+      "xdm_url": "url",
+      "action_local_ip": "dst_ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071 - Application Layer Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  },
+  {
+    "name": "Infoblox \u2014 Third C2 Domain Resolves Successfully (New Infrastructure)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome = \"SUCCESS\"\n| filter xdm.event.description contains \"c2-infra\" or xdm.event.description contains \"command-control\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| bin _time span = 1h\n| comp count() as resolves by xdm.source.ipv4, domain, _time\n| fields xdm.source.ipv4, domain\n",
+    "is_enabled": true,
+    "description": "Infoblox DNS NOERROR response for a domain containing 'c2-infra' or 'command-control' \u2014 third domain attempt succeeds (not yet on threat-intel feeds).",
+    "alert_name": "Infoblox \u2014 Third C2 Domain Resolves Successfully (New Infrastructure)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.source.ipv4",
+      "xdm_url": "domain"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ]
+  },
+  {
+    "name": "Infoblox \u2014 BloxOne Threat Protect DROP (Post-Connection C2 Detection)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"threat-protect-log\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        category = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"cat=\\\"([^\\\"]+)\\\"\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as drops,\n       count_distinct(category) as distinct_categories,\n       values(category) as categories\n       by src_ip, _time\n| filter drops >= 1\n| fields src_ip, categories\n",
+    "is_enabled": true,
+    "description": "Infoblox xdm.event.type = 'Threat' with threat-protect-log marker \u2014 BloxOne Threat-Protect dropped a C2 / malware-category connection from the compromised device.",
+    "alert_name": "Infoblox \u2014 BloxOne Threat Protect DROP (Post-Connection C2 Detection)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "action_evtlog_message": "categories"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.004 - Application Layer Protocol: DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ]
+  }
+]

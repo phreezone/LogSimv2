@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Okta \u2014 Same User Authenticated From \u22652 Countries",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType in (\"user.session.start\",\"user.authentication.sso\",\"user.authentication.auth_via_mfa\")\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        country = arrayindex(regextract(client, \"\\\"country\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"SUCCESS\" and ip != null and user_name != null and country != null\n| filter not (ip contains \"192.168.\" or ip contains \"10.\" or ip contains \"172.\")\n| filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\n| alter ip_16 = arrayindex(regextract(ip, \"^(\\d+\\.\\d+)\\.\"), 0)\n| filter ip_16 != null\n| comp count_distinct(country) as countries,\n       count_distinct(ip) as ips,\n       count_distinct(ip_16) as distinct_networks,\n       values(country) as country_list, values(ip) as ip_list\n       by user_name\n| filter countries >= 2 and distinct_networks >= 2 and ips >= 2\n| fields user_name, ip_list, country_list\n",
+    "is_enabled": true,
+    "description": "Okta user.session.start, user.authentication.sso, or user.authentication.auth_via_mfa SUCCESS events for one user from \u22652 distinct geographic countries within 30 minutes.",
+    "alert_name": "Okta \u2014 Same User Authenticated From \u22652 Countries",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip_list",
+      "src_geo_country_name": "country_list"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  }
+]

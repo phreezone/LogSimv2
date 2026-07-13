@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Infoblox \u2014 Fast Flux DNS",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome = \"SUCCESS\"\n| alter domain    = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN A\"), 0),\n        answer_ip = arrayindex(regextract(xdm.event.description, \" IN A (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0)\n| filter domain != null and answer_ip != null\n| bin _time span = 15m\n| comp count_distinct(answer_ip) as flux_ips,\n       values(answer_ip) as answer_ips\n       by domain, _time\n| filter flux_ips >= 50\n| fields answer_ips, domain\n",
+    "is_enabled": true,
+    "description": "One domain resolving to many distinct A-record IPs in short window.",
+    "alert_name": "Infoblox \u2014 Fast Flux DNS",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "answer_ips",
+      "xdm_url": "domain"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1568.001 - Dynamic Resolution: Fast Flux DNS"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "15 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "domain"
+    ]
+  }
+]

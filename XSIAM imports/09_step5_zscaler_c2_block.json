@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Zscaler \u2014 C2 / Malicious Domain Blocked (Post-DNS Beacon)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter cs1 = \"Malicious Content\" or cat contains \"Malware\" or cat contains \"Spyware\"\n       or cat contains \"Botnet\" or cat contains \"Command\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
+    "is_enabled": true,
+    "description": "Zscaler NSS web log Blocked action on a malicious/C2 category \u2014 the web proxy blocking the C2 domain attempt after the DNS RPZ block + NXDOMAIN cycling. Correlated to the victim by src and suser.",
+    "alert_name": "Zscaler \u2014 C2 / Malicious Domain Blocked (Post-DNS Beacon)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_remote_ip": "src_ip",
+      "actor_effective_username": "user_name",
+      "xdm_url": "url",
+      "action_local_ip": "dst_ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071 - Application Layer Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  }
+]

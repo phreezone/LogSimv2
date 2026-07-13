@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Cisco ASA \u2014 Outbound SMTP Spam Bot Activity",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter (cisco_asa_raw._raw_log contains \"302013\" or cisco_asa_raw._raw_log contains \"302014\")\n       and xdm.source.port in (25, 587)\n       and xdm.target.interface = \"inside\"\n| bin _time span = 15m\n| comp count_distinct(xdm.source.ipv4) as distinct_mx,\n       values(xdm.source.ipv4) as source_mx,\n       values(xdm.source.port) as source_ports\n       by xdm.target.ipv4, _time\n| filter distinct_mx >= 34\n| fields xdm.target.ipv4, source_mx, source_ports\n",
+    "is_enabled": true,
+    "description": "Internal host fanning out SMTP connections to many distinct external mail destinations \u2014 spam-bot indicator.",
+    "alert_name": "Cisco ASA \u2014 Outbound SMTP Spam Bot Activity",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "action_local_ip": "xdm.target.ipv4",
+      "action_remote_ip": "source_mx",
+      "action_remote_port": "source_ports"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071 - Application Layer Protocol"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "15 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "15 minutes",
+    "suppression_fields": [
+      "xdm.target.ipv4"
+    ]
+  }
+]

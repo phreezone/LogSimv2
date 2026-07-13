@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Okta \u2014 Internal Network Login (Baseline, Disabled)",
+    "severity": "SEV_010_INFO",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType = \"user.session.start\"\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"SUCCESS\"\n| filter ip contains \"192.168.\" or ip contains \"10.\" or ip contains \"172.16.\" or ip contains \"172.17.\" or ip contains \"172.18.\" or ip contains \"172.19.\" or ip contains \"172.2\" or ip contains \"172.31.\"\n| bin _time span = 1h\n| comp count() as logins, values(ip) as ip_list by user_name, _time\n| fields user_name, ip_list\n",
+    "is_enabled": false,
+    "description": "Okta user.session.start SUCCESS from RFC1918 source IP \u2014 every internal employee login. DISABLED by default; informational only for case timeline.",
+    "alert_name": "Okta \u2014 Internal Network Login (Baseline, Disabled)",
+    "alert_category": "OTHER",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip_list"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ]
+  }
+]

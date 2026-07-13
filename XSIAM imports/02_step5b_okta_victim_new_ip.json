@@ -1,0 +1,39 @@
+[
+  {
+    "name": "Okta \u2014 Victim Successful Login From External IP (Post-Phishing)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType = \"user.session.start\" or eventType = \"user.authentication.sso\"\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"SUCCESS\" and ip != null and user_name != null\n| filter not (ip contains \"192.168.\" or ip contains \"10.\" or ip contains \"172.\")\n| filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\n",
+    "is_enabled": true,
+    "description": "Okta user.session.start/sso SUCCESS for a user from a single non-RFC1918 external IP \u2014 per-event kill-chain signal that harvested credentials were used. Complements the multi-IP impossible-travel rule (02_step5).",
+    "alert_name": "Okta \u2014 Victim Successful Login From External IP (Post-Phishing)",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "actor_effective_username": "user_name",
+      "action_remote_ip": "ip"
+    },
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": [],
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null
+  }
+]
