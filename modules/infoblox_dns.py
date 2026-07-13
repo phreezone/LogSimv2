@@ -543,11 +543,14 @@ def _generate_c2_beacon(config, client_ip=None, session_context=None):
         internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
         client_ip    = rand_ip_from_network(ip_network(internal_net))
 
-    print(f"    - Infoblox Module simulating: C2 Beacon DNS Query from {client_ip}")
-    domain    = random.choice(config.get('infoblox_threats', {}).get('malicious_domains', ["malware-distro-site.ru"]))
-    query_log = _build_dns_query_log(config, client_ip, domain, "A")
-    resp_log  = _build_dns_response_log(config, client_ip, domain, "A", "NXDOMAIN", response_records=[" "])
-    return [query_log, resp_log]
+    domain  = random.choice(config.get('infoblox_threats', {}).get('malicious_domains', ["malware-distro-site.ru"]))
+    beacons = random.randint(12, 18)   # rule fires on >=10 queries to one domain from one IP
+    print(f"    - Infoblox Module simulating: C2 Beacon ({beacons} queries to {domain}) from {client_ip}")
+    logs = []
+    for _ in range(beacons):
+        logs.append(_build_dns_query_log(config, client_ip, domain, "A"))
+        logs.append(_build_dns_response_log(config, client_ip, domain, "A", "NXDOMAIN", response_records=[" "]))
+    return logs
 
 
 def _generate_dns_tunnel(config, client_ip=None, session_context=None):
@@ -562,15 +565,16 @@ def _generate_dns_tunnel(config, client_ip=None, session_context=None):
         internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
         client_ip    = rand_ip_from_network(ip_network(internal_net))
 
-    print(f"    - Infoblox Module simulating: DNS Tunneling TXT query from {client_ip}")
-    base_domain  = random.choice(config.get('infoblox_threats', {}).get('dga_domains', ["asjkhdfkjahsdf.com"]))
-    subdomain_len = random.randint(16, 48)
-    subdomain     = ''.join(random.choices(_DGA_CHARSET, k=subdomain_len))
-    domain        = f"{subdomain}.{base_domain}"
-
-    query_log = _build_dns_query_log(config, client_ip, domain, "TXT")
-    resp_log  = _build_dns_response_log(config, client_ip, domain, "TXT", "SERVFAIL", response_records=[" "])
-    return [query_log, resp_log]
+    base_domain = random.choice(config.get('infoblox_threats', {}).get('dga_domains', ["asjkhdfkjahsdf.com"]))
+    txt_count   = random.randint(18, 26)   # rule fires on >=15 TXT queries from one IP
+    print(f"    - Infoblox Module simulating: DNS Tunneling ({txt_count} TXT queries) from {client_ip}")
+    logs = []
+    for _ in range(txt_count):
+        subdomain = ''.join(random.choices(_DGA_CHARSET, k=random.randint(16, 48)))
+        domain    = f"{subdomain}.{base_domain}"
+        logs.append(_build_dns_query_log(config, client_ip, domain, "TXT"))
+        logs.append(_build_dns_response_log(config, client_ip, domain, "TXT", "SERVFAIL", response_records=[" "]))
+    return logs
 
 
 def _generate_rpz_block(config, client_ip=None, session_context=None):
@@ -584,14 +588,17 @@ def _generate_rpz_block(config, client_ip=None, session_context=None):
         internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
         client_ip    = rand_ip_from_network(ip_network(internal_net))
 
-    rpz_type, rpz_action = random.choice(_RPZ_ACTIONS)
-    q_type = "A"
-    domain = random.choice(config.get('infoblox_threats', {}).get('malicious_domains', ["blocked-c2-domain.ru"]))
-
-    print(f"    - Infoblox Module simulating: RPZ {rpz_type} {rpz_action} for {domain} from {client_ip}")
-    query_log = _build_dns_query_log(config, client_ip, domain, q_type)
-    rpz_log   = _build_rpz_cef_log(config, client_ip, domain, rpz_type, rpz_action, q_type)
-    return [query_log, rpz_log]
+    base_domains = config.get('infoblox_threats', {}).get('malicious_domains', ["blocked-c2-domain.ru"])
+    blocks = random.randint(50, 65)   # rule needs >=30 blocks; extra margin for syslog burst loss
+    print(f"    - Infoblox Module simulating: RPZ block storm ({blocks} blocks) from {client_ip}")
+    logs = []
+    for _ in range(blocks):
+        rpz_type, rpz_action = random.choice(_RPZ_ACTIONS)
+        label  = ''.join(random.choices(_DGA_CHARSET, k=random.randint(8, 14)))   # unique blocked domain each time
+        domain = f"{label}.{random.choice(base_domains)}"
+        logs.append(_build_dns_query_log(config, client_ip, domain, "A"))
+        logs.append(_build_rpz_cef_log(config, client_ip, domain, rpz_type, rpz_action, "A"))
+    return logs
 
 
 def _generate_threat_protect(config, client_ip=None, session_context=None):
@@ -606,14 +613,20 @@ def _generate_threat_protect(config, client_ip=None, session_context=None):
         internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
         client_ip    = rand_ip_from_network(ip_network(internal_net))
 
-    threat_category = random.choice(
-        config.get('infoblox_threats', {}).get('threat_categories', _NIOS_THREAT_CATEGORIES)
-    )
-    domain      = random.choice(config.get('infoblox_threats', {}).get('malicious_domains', ["blocked-malware.ru"]))
-    client_port = random.randint(49152, 65535)
-
-    print(f"    - Infoblox Module simulating: Threat Protect DROP ({threat_category}) for {domain} from {client_ip}")
-    return _build_threat_cef_log(config, client_ip, client_port, domain, threat_category, "DROP")
+    cats         = config.get('infoblox_threats', {}).get('threat_categories', _NIOS_THREAT_CATEGORIES)
+    base_domains = config.get('infoblox_threats', {}).get('malicious_domains', ["blocked-malware.ru"])
+    alerts = random.randint(36, 48)   # rule fires on >=30 alerts AND >=3 distinct categories from one src
+    print(f"    - Infoblox Module simulating: Threat Protect DROP storm ({alerts} drops) from {client_ip}")
+    logs = []
+    for i in range(alerts):
+        category    = cats[i % len(cats)]   # cycle categories to guarantee >=3 distinct
+        label       = ''.join(random.choices(_DGA_CHARSET, k=random.randint(8, 14)))
+        domain      = f"{label}.{random.choice(base_domains)}"
+        client_port = random.randint(49152, 65535)
+        entry = _build_threat_cef_log(config, client_ip, client_port, domain, category, "DROP")
+        if entry:
+            logs.extend(entry if isinstance(entry, list) else [entry])
+    return logs
 
 
 def _generate_nxdomain_storm(config, client_ip=None, session_context=None):
@@ -631,7 +644,7 @@ def _generate_nxdomain_storm(config, client_ip=None, session_context=None):
 
     dga_tlds  = config.get('infoblox_threats', {}).get('dga_domains', ["dga-c2-host.com"])
     tld       = random.choice(dga_tlds)
-    count     = random.randint(20, 50)
+    count     = random.randint(95, 125)   # rule counts NXDOMAIN RESPONSES only (=pairs); needs >=80
 
     print(f"    - Infoblox Module simulating: NXDOMAIN Storm ({count} DGA pairs) from {client_ip}")
     logs = []
@@ -659,7 +672,7 @@ def _generate_dns_flood(config, client_ip=None, session_context=None):
     benign_domains = config.get('benign_domains', ["www.google.com"])
     dga_tlds       = config.get('infoblox_threats', {}).get('dga_domains', ["scan-target.com"])
     q_types        = ["A", "AAAA", "MX", "NS", "TXT", "SOA"]
-    count          = random.randint(20, 50)
+    count          = random.randint(220, 260)   # rule fires on >=200 queries AND >=50 distinct
 
     print(f"    - Infoblox Module simulating: DNS Flood ({count} rapid queries) from {client_ip}")
     logs = []
@@ -688,7 +701,7 @@ def _generate_dhcp_starvation(config, client_ip=None, session_context=None):
     internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
     net_obj      = ip_network(internal_net)
     relay_ip     = str(net_obj.network_address + 1)
-    count        = random.randint(20, 50)
+    count        = random.randint(160, 200)   # rule fires on >=150 DHCPDISCOVER
 
     print(f"    - Infoblox Module simulating: DHCP Starvation ({count} spoofed DISCOVERs)")
     logs = []
@@ -716,13 +729,18 @@ def _generate_zone_transfer(config, client_ip=None, session_context=None):
 
     infoblox_conf    = config.get(CONFIG_KEY, {})
     internal_domains = infoblox_conf.get('internal_domains', ['corp.local', 'ad.corp.local'])
-    domain           = random.choice(internal_domains)
-    xfr_type         = random.choices(["AXFR", "IXFR"], weights=[70, 30])[0]
+    attempts         = random.randint(4, 6)  # attacker probes several internal zones → rule needs >=3 xfer queries/60m
+    zones            = list(internal_domains)
+    random.shuffle(zones)
 
-    print(f"    - Infoblox Module simulating: Zone Transfer ({xfr_type}) for {domain} from {client_ip}")
-    query_log = _build_dns_query_log(config, client_ip, domain, xfr_type)
-    resp_log  = _build_dns_response_log(config, client_ip, domain, xfr_type, "REFUSED", response_records=[" "])
-    return [query_log, resp_log]
+    print(f"    - Infoblox Module simulating: Zone Transfer x{attempts} for internal zones from {client_ip}")
+    logs = []
+    for i in range(attempts):
+        z        = zones[i % len(zones)]
+        xfr_type = random.choices(["AXFR", "IXFR"], weights=[70, 30])[0]
+        logs.append(_build_dns_query_log(config, client_ip, z, xfr_type))
+        logs.append(_build_dns_response_log(config, client_ip, z, xfr_type, "REFUSED", response_records=[" "]))
+    return logs
 
 
 def _generate_fast_flux_dns(config, client_ip=None, session_context=None):
@@ -789,9 +807,9 @@ def _generate_ptr_sweep(config, client_ip=None, session_context=None):
     int_net      = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
     net_obj      = ip_network(int_net)
     base_int     = int(net_obj.network_address)
-    max_start    = max(1, net_obj.num_addresses - 45)
-    start_offset = random.randint(1, min(50, max_start))
-    count        = random.randint(20, 40)
+    max_start    = max(1, net_obj.num_addresses - 230)
+    start_offset = random.randint(1, min(4, max_start))
+    count        = random.randint(140, 220)  # realistic reverse-DNS /24 sweep → rule needs >=100 queries / >=50 distinct PTRs
 
     print(f"    - Infoblox Module simulating: PTR Sweep ({count} sequential) from {client_ip}")
     logs = []

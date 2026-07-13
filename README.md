@@ -10,7 +10,7 @@ A modular, high-fidelity log simulation tool for **Palo Alto Networks Cortex XSI
 - **Multiple Transports** — Syslog (TCP with persistent connections), HTTP Collector, AWS S3 (cached client), Google Cloud Pub/Sub, WEC (Windows Event Collector via WS-Management)
 - **Dynamic Threat Levels** — six levels from Benign Traffic Only to Insane; controls threat event frequency per module
 - **XSIAM Detection-Ready Sequences** — attack generators produce complete detection patterns (e.g., failed logins followed by success) that trigger XSIAM UEBA analytics out of the box
-- **Correlated Attack Scenarios** — 17 pre-built multi-module kill chains (phishing, cloud pentest, ransomware precursor, AiTM session hijack, VPN compromise, web app compromise, insider threat, DNS C2, and more)
+- **Correlated Attack Scenarios** — 23 pre-built multi-module kill chains (phishing, cloud pentest, ransomware precursor, AiTM session hijack, VPN compromise, web app compromise, insider threat, DNS C2, and more) — including 6 *advanced linked kill chains* (Domain Dominance, Beaconing Implant, Server Breach → Cloud, Cloud Ransomware, Perimeter Intrusion, Identity Attack → Cloud) built around a single pivot entity with full alert-field enrichment
 - **Live Threat Intel** — fetches current Tor exit nodes on startup for realistic indicators
 - **Job Scheduler** — queue module start/stop, rate changes, and scenario runs at specific times or delays
 - **Health Checks** — validates .env configuration, syslog connectivity, HTTP collector reachability, AWS S3 permissions, and GCP Pub/Sub credentials
@@ -38,7 +38,7 @@ The web dashboard provides full control over log generation without touching the
 - **Real-Time Metrics** — per-module log counts, events/sec rate, threat counts, and threat breakdown histograms
 - **Event Timeline** — rolling 2-minute chart showing event volume per module with red dots marking threat events
 - **Fire Individual Threats** — select any module and any of its named threats to fire on demand
-- **Attack Scenarios** — run any of the 17 pre-built multi-module kill chains from the UI
+- **Attack Scenarios** — run any of the 23 pre-built multi-module kill chains from the UI
 - **Job Scheduler** — queue future actions (module start/stop, rate changes, scenario runs) by delay or exact time
 - **Health Checks** — preflight validation of all transport connections, credentials, and environment variables
 - **Live Notifications** — browser notifications on module errors and health status changes
@@ -121,6 +121,8 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `wip_priv_cert_request` | Not yet investigated |
 | `wip_sccm_container_recon` | Environment dependent — requires SCCM/ConfigMgr deployment |
 
+**Endpoint execution telemetry** (for the advanced linked kill chains): the module also generates **4688 process trees** (Office → PowerShell → cmd → LOLBin, with real parent/child linkage and command lines), **4697** (a service was installed — malware persistence), and **1102** (the audit log was cleared — anti-forensics). Emitted via the `PROCESS_TREE`, `SERVICE_INSTALL`, and `CLEAR_LOGS` scenario events. Verified to ingest and parse in `microsoft_windows_raw`. *Note:* the Broker VM's WEC subscription must forward these Event IDs for them to reach XSIAM — see the Subscription Filter note below.
+
 ## WEC Transport Setup
 
 The Windows Events module uses **WEC (Windows Event Collector)** transport to deliver events directly to the XSIAM Broker VM via WS-Management (HTTPS port 5986) with mutual TLS client certificate authentication.
@@ -194,14 +196,14 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 | Installation & `.env` setup | [docs/getting-started.md](docs/getting-started.md) |
 | `config.json` reference (all sections) | [docs/configuration.md](docs/configuration.md) |
 | Running modes & available modules | [docs/how-to-run.md](docs/how-to-run.md) |
-| Attack scenarios (17 kill chains) | [docs/attack-scenarios.md](docs/attack-scenarios.md) |
+| Attack scenarios (23 kill chains) | [docs/attack-scenarios.md](docs/attack-scenarios.md) |
 | Adding a new module | [docs/extensibility.md](docs/extensibility.md) |
 
 ## Module Reference
 
 | Module | Transport | Benign Event Types | Threat Event Types | Reference |
 |---|---|---|---|---|
-| Windows Events | WEC (WS-Management) | 20 types (interactive logon, network share, RDP, service, cached, unlock, logoff, process, DC Kerberos, DC directory service, LDAP, NTLM, SQL, web app access) | 21 named threat generators (13 confirmed, 8 WIP) | See WEC Transport Setup above |
+| Windows Events | WEC (WS-Management) | 20 types (interactive logon, network share, RDP, service, cached, unlock, logoff, process, DC Kerberos, DC directory service, LDAP, NTLM, SQL, web app access) | 21 named threat generators (13 confirmed, 8 WIP) + endpoint execution (4688 trees, 4697, 1102) | [docs/modules/windows.md](docs/modules/windows.md) |
 | AWS CloudTrail | S3 | 69 event types across 15+ AWS services | 40 named threat scenarios | [docs/modules/aws.md](docs/modules/aws.md) |
 | GCP Cloud Audit Logs | Pub/Sub | 42 event types with @type proto annotations and LRO operation pairs | 75 named threat scenarios | [docs/modules/gcp.md](docs/modules/gcp.md) |
 | Okta SSO | HTTP Collector | 183+ event types across auth, SSO, MFA, lifecycle, policy, OAuth2, IAM, device, and zone domains | 82 named threat scenarios | [docs/modules/okta.md](docs/modules/okta.md) |
@@ -218,6 +220,13 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 **Totals:** 377 unique threat event types and 420+ benign event types across all modules.
 
 ## Recent Changes
+
+### Advanced Linked Kill Chains & Enrichment
+- **6 new advanced scenarios** (18–23), each built around a single pivot entity for clean case stitching: Domain Dominance, Beaconing Implant, Server Breach → Cloud, Cloud Ransomware, Perimeter Intrusion, and Identity Attack → Cloud — see [docs/attack-scenarios.md](docs/attack-scenarios.md)
+- **New telemetry:** Windows 4697 (service install), 1102 (log cleared), and 4688 process trees; Zscaler web-layer C2 beacon (`zscaler_nssweblog_raw`); AWS KMS key destruction, IMDS/SSRF credential theft, and `AssumeRoleWithSAML` federation
+- **Full alert-field enrichment** — IP-keyed DNS/SMB detections resolve the user via a 4624 network-logon binding (`actor_effective_username`); AWS identity-scenario stages pin the victim principal; user-less external-attacker rules left correctly user-less
+- **Single-pivot pinning** — firewall (port scan / denied inbound / VPN brute force) and AWS (ransomware, SAML) generators honor a pinned attacker IP / principal so all stages of a chain group into one case
+- **Cross-identity pre-staging** — Okta↔AWS and on-prem↔cloud chains carry the matching identity value on both sides, ready for XSIAM's identity-unification feature to merge them automatically
 
 ### Windows Events Module
 - New module generating native Windows Security Event XML for XSIAM UEBA/Identity Analytics detection testing

@@ -4138,11 +4138,27 @@
     "recon_urls": [
       "/admin.php",
       "/wp-login.php",
+      "/wp-admin/",
       "/backup.zip",
+      "/backup.sql",
       "/.env",
       "/phpinfo.php",
       "/config.json.bak",
-      "/.git/config"
+      "/.git/config",
+      "/.aws/credentials",
+      "/phpmyadmin/",
+      "/console",
+      "/actuator/health",
+      "/server-status",
+      "/.svn/entries",
+      "/config.php.bak",
+      "/administrator/",
+      "/login.action"
+    ],
+    "server_ips": [
+      "10.0.10.50",
+      "10.0.10.51",
+      "10.0.10.52"
     ],
     "attack_payloads": [
       "' OR 1=1--",

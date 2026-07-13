@@ -102,7 +102,7 @@ Context-dependent events that are common in legitimate admin workflows but also 
 
 ---
 
-## Threat Scenarios (34 Types)
+## Threat Scenarios (37 Types)
 
 ### Reconnaissance
 
@@ -116,6 +116,7 @@ Context-dependent events that are common in legitimate admin workflows but also 
 * **`IAM_UPDATE_LOGIN_PROFILE`** — `UpdateLoginProfile` resetting another user's console password — account takeover without creating new credentials.
 * **`IAM_DELETE_MFA`** — `DeleteVirtualMFADevice` or `DeactivateMFADevice` removing MFA from an account to enable password-only access.
 * **`CROSS_ACCOUNT_ASSUME_ROLE`** — `sts:AssumeRole` where the calling `userIdentity.accountId` differs from `recipientAccountId` — cross-account trust boundary traversal. *Signal: unexpected account ID in the caller identity.*
+* **`ASSUME_ROLE_WITH_SAML`** — `sts:AssumeRoleWithSAML` — the CloudTrail footprint of a SAML/SSO federated login (Okta, Azure AD). The `roleSessionName` carries the IdP-asserted username; scenarios can pin it via `context['saml_user']` so the AWS session ties back to the same IdP identity (used by the Identity Attack → Cloud chain to pre-stage cross-identity linking). *Signal: federated role assumption from an unusual IdP user or source IP.*
 
 ### Persistence
 
@@ -154,6 +155,7 @@ Context-dependent events that are common in legitimate admin workflows but also 
 * **`TRAIL_DELETED`** — `DeleteTrail` permanently removing a CloudTrail trail.
 * **`CLOUDWATCH_DELETE_LOG_STREAM`** — `DeleteLogStream` removing CloudWatch Logs streams — destroying audit evidence.
 * **`KMS_KEY_DISABLED`** — `DisableKey` on a KMS CMK — renders all data encrypted with it inaccessible.
+* **`KMS_KEY_DESTRUCTION`** — `DisableKey` → `ScheduleKeyDeletion` (7-day window) on a customer-managed KMS key — permanent, unrecoverable data destruction. The impact finale of the Cloud Ransomware chain. *Signal: ScheduleKeyDeletion on a CMK, especially paired with a preceding DisableKey.*
 
 ### Lateral Movement & Compute Abuse
 
@@ -163,6 +165,7 @@ Context-dependent events that are common in legitimate admin workflows but also 
 * **`LAMBDA_CREATE_FUNCTION_UNUSUAL_RUNTIME`** — Lambda function created with a deprecated or atypical runtime (Python 3.6, Node 10, Java 8, `provided`) — evasion or legacy exploit delivery.
 * **`EC2_MODIFY_USER_DATA`** — `ModifyInstanceAttribute` changing the UserData script — arbitrary code execution on next reboot.
 * **`K8S_SA_OUTSIDE_CLUSTER`** — EKS service account token used from a non-cluster IP — credential theft / token exfiltration.
+* **`IMDS_CREDENTIAL_THEFT`** — EC2 instance-profile credentials stolen via SSRF/IMDSv1 and used from an **external** IP: `GetCallerIdentity` → `DescribeInstances` → `ListBuckets` → `ListAttachedRolePolicies`. `userIdentity.type` = AssumedRole (the instance role) but `sourceIPAddress` is the attacker's, not the instance's. The cloud-access stage of the Server Breach → Cloud chain. *Signal: instance-role temporary credentials used from a non-AWS source IP.*
 
 ### AI / ML Threats
 
