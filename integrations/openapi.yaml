@@ -1,0 +1,134 @@
+openapi: 3.0.3
+info:
+  title: LogSim Control API
+  version: "1.0"
+  description: >
+    External control surface for LogSimv2. Drives an already-running dashboard.
+    Auth is opt-in: when LOGSIM_API_KEY is set on the server, every path here requires
+    the token (header X-API-Key or Authorization: Bearer). When unset, all paths are open.
+servers:
+  - url: "{scheme}://{host}:{port}/api/v1"
+    description: LogSim dashboard (set host/port to match yours)
+    variables:
+      scheme: { default: http, enum: [http, https] }
+      host:   { default: "127.0.0.1" }
+      port:   { default: "5000" }
+components:
+  securitySchemes:
+    ApiKeyHeader: { type: apiKey, in: header, name: X-API-Key }
+    BearerAuth:   { type: http, scheme: bearer }
+  schemas:
+    Scenario:
+      type: object
+      properties: { id: { type: string }, name: { type: string } }
+    RunStarted:
+      type: object
+      properties:
+        started:  { type: boolean }
+        scenario: { type: string }
+        run_id:   { type: string }
+    Run:
+      type: object
+      properties:
+        run_id:        { type: string }
+        scenario_id:   { type: string }
+        scenario_name: { type: string }
+        status:        { type: string, enum: [queued, running, done, error] }
+        created_at:    { type: number }
+        started_at:    { type: number, nullable: true }
+        finished_at:   { type: number, nullable: true }
+        error:         { type: string, nullable: true }
+        emitted:
+          type: object
+          nullable: true
+          description: What LogSim SENT (not what fired in XSIAM). Populated when status=done.
+          properties:
+            total_events: { type: integer }
+            by_module:    { type: object, additionalProperties: { type: integer } }
+            by_event:     { type: object, additionalProperties: { type: integer } }
+    Error:
+      type: object
+      properties: { error: { type: string } }
+security:
+  - ApiKeyHeader: []
+  - BearerAuth: []
+paths:
+  /scenarios:
+    get:
+      summary: List scenarios
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Scenario" } } } }
+  /scenarios/{scenario_id}/run:
+    post:
+      summary: Trigger a scenario (async)
+      parameters: [ { name: scenario_id, in: path, required: true, schema: { type: string } } ]
+      responses:
+        "202":
+          description: Run started
+          content: { application/json: { schema: { $ref: "#/components/schemas/RunStarted" } } }
+        "404":
+          description: Unknown scenario
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /scenarios/runs:
+    get:
+      summary: List recent runs (newest first)
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Run" } } } }
+  /scenarios/runs/{run_id}:
+    get:
+      summary: Get a run's status and emission manifest
+      parameters: [ { name: run_id, in: path, required: true, schema: { type: string } } ]
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { $ref: "#/components/schemas/Run" } } }
+        "404":
+          description: Unknown run
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /modules:
+    get:
+      summary: List modules and their state
+      responses: { "200": { description: OK } }
+  /modules/{name}/start:
+    post:
+      summary: Start a module
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                threat_level:   { type: string, example: "Realistic" }
+                event_interval: { type: number, example: 5 }
+            example: { threat_level: "Realistic" }
+      responses: { "200": { description: OK }, "404": { description: Not found }, "409": { description: Already running / training active } }
+  /modules/{name}/stop:
+    post:
+      summary: Stop a module
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      responses: { "200": { description: OK }, "404": { description: Not found } }
+  /modules/{name}/fire:
+    post:
+      summary: Fire one event from a module
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [event], properties: { event: { type: string, example: "TOR_LOGIN" } } }
+            example: { event: "TOR_LOGIN" }
+      responses: { "200": { description: OK }, "400": { description: Missing event }, "404": { description: Not found } }
+  /modules/start_all:
+    post: { summary: Start all modules, responses: { "200": { description: OK } } }
+  /modules/stop_all:
+    post: { summary: Stop all modules, responses: { "200": { description: OK } } }
+  /health:
+    get: { summary: Health snapshot, responses: { "200": { description: OK } } }
+  /metrics:
+    get: { summary: Throughput metrics, responses: { "200": { description: OK } } }

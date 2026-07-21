@@ -14,6 +14,7 @@ import datetime # Added for S3 transport and timestamp fixes
 import sys
 import threading
 import copy
+import contextvars  # per-run emission capture (external API run-tracking)
 from dotenv import load_dotenv
 
 # Session context helper (imported after modules dir is on path)
@@ -745,6 +746,63 @@ _dry_run = False
 # so the payload can actually be sent, and unlike _dry_run it is training-only.
 _bulk_collector = None
 
+# ── Per-run emission capture (external API / MCP run-tracking) ────────────────
+# A ContextVar (NOT a module global) so concurrent scenario runs stay isolated and
+# baseline module traffic — which flows through the async _SEND_QUEUE on a different
+# thread — is never miscounted into a run. The dashboard sets this around a scenario's
+# thread via capture_run(); every process_and_send in THAT thread records into it.
+# Scenarios are single-threaded and call process_and_send directly (verified), so the
+# ContextVar set at the top of the scenario thread is visible to all of the run's sends.
+_run_collector: "contextvars.ContextVar" = contextvars.ContextVar("logsim_run_collector", default=None)
+
+
+class RunCapture:
+    """Thread-safe tally of what a single scenario run emitted. `.record()` is called
+    from process_and_send for every payload sent during the run. Reports EMISSION only
+    (what LogSim sent) — NOT what fired/detected in XSIAM (that's the xql-builder side)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.total = 0
+        self.by_module = {}   # module_name -> count
+        self.by_event = {}    # "module_name/event_name" -> count
+
+    def record(self, module_name, event_name, payload):
+        # For list payloads (HTTP/WEC multi-event), count each element; else one event.
+        n = len(payload) if isinstance(payload, list) else 1
+        key = f"{module_name}/{event_name}" if event_name else module_name
+        with self._lock:
+            self.total += n
+            self.by_module[module_name] = self.by_module.get(module_name, 0) + n
+            self.by_event[key] = self.by_event.get(key, 0) + n
+
+    def manifest(self):
+        with self._lock:
+            return {
+                "total_events": self.total,
+                "by_module": dict(self.by_module),
+                "by_event": dict(self.by_event),
+            }
+
+
+class capture_run:
+    """Context manager: while active, every process_and_send call in the CURRENT thread
+    records into *collector*. Usage:  with capture_run(collector): scenario_func(...)."""
+
+    def __init__(self, collector):
+        self._collector = collector
+        self._token = None
+
+    def __enter__(self):
+        self._token = _run_collector.set(self._collector)
+        return self._collector
+
+    def __exit__(self, *exc):
+        if self._token is not None:
+            _run_collector.reset(self._token)
+        return False
+
+
 # Regexes for blanking volatile timestamps so two runs can be compared on content
 # alone (event-time intentionally differs between bulk backfill and live stream).
 _MON = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
@@ -801,6 +859,12 @@ def process_and_send(log_content, module, config, event_name=None):
 
     if _capture_sink is not None:
         _capture_sink.append((getattr(module, 'NAME', '?'), event_name, log_content))
+    _rc = _run_collector.get()
+    if _rc is not None:
+        try:
+            _rc.record(getattr(module, 'NAME', '?'), event_name, log_content)
+        except Exception:
+            pass
     if _dry_run:
         return
     if _bulk_collector is not None:

@@ -87,23 +87,94 @@ def _get_process_and_send():
     return process_and_send
 
 
-def _run_scenario_and_flush(func, modules, cfg):
+def _run_scenario_and_flush(func, modules, cfg, run_id=None):
     """Run a scenario, then flush the run's batched S3 upload (so the AWS events land
     as ONE CloudTrail object) and any queued WEC/Windows events (so a scenario emitting
-    fewer than a full WEC batch — e.g. a single 4697 — still delivers on completion)."""
+    fewer than a full WEC batch — e.g. a single 4697 — still delivers on completion).
+
+    When *run_id* is given, wrap the whole run in a per-run emission capture and update
+    the run registry (queued→running→done/error) so external callers can poll it. The
+    capture context spans the flushes too — S3/WEC events are counted at process_and_send
+    time (when enqueued), which happens inside func()."""
+    from log_simulator import capture_run, flush_s3_batch, _flush_wec_batch
+    collector = _RUNS[run_id]["_collector"] if run_id and run_id in _RUNS else None
+    ctx = capture_run(collector) if collector is not None else _nullctx()
+    if run_id:
+        _update_run(run_id, status="running", started_at=time.time())
     try:
-        func(modules, cfg)
+        with ctx:
+            func(modules, cfg)
+    except Exception as e:
+        if run_id:
+            _update_run(run_id, status="error", error=str(e))
+        raise
     finally:
         try:
-            from log_simulator import flush_s3_batch
             flush_s3_batch()
         except Exception:
             pass
         try:
-            from log_simulator import _flush_wec_batch
             _flush_wec_batch(cfg)
         except Exception:
             pass
+        if run_id and _RUNS.get(run_id, {}).get("status") != "error":
+            _update_run(run_id, status="done", emitted=collector.manifest() if collector else None)
+        elif run_id:
+            _update_run(run_id, emitted=collector.manifest() if collector else None)
+
+
+import contextlib as _contextlib
+
+
+def _nullctx():
+    return _contextlib.nullcontext()
+
+
+# ── Scenario run registry (external API run-tracking) ─────────────────────────
+# Fire-and-forget /run got a run_id + poll-able record so callers can wait for a
+# scenario to finish and see what it EMITTED (datasets/counts). Detection outcome
+# (what fired in XSIAM) is the logsim-xql-builder's job, not this process's.
+_RUNS: dict = {}
+_RUNS_LOCK = threading.Lock()
+_RUNS_MAX = 200  # cap history; evict oldest beyond this
+
+
+def _new_run(scenario_id, scenario_name):
+    from log_simulator import RunCapture
+    run_id = _uuid.uuid4().hex
+    with _RUNS_LOCK:
+        _RUNS[run_id] = {
+            "run_id": run_id,
+            "scenario_id": scenario_id,
+            "scenario_name": scenario_name,
+            "status": "queued",           # queued | running | done | error
+            "created_at": time.time(),
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+            "emitted": None,
+            "_collector": RunCapture(),
+        }
+        # Evict oldest finished runs beyond the cap.
+        if len(_RUNS) > _RUNS_MAX:
+            for old in sorted(_RUNS.values(), key=lambda r: r["created_at"])[:len(_RUNS) - _RUNS_MAX]:
+                _RUNS.pop(old["run_id"], None)
+    return run_id
+
+
+def _update_run(run_id, **fields):
+    with _RUNS_LOCK:
+        rec = _RUNS.get(run_id)
+        if not rec:
+            return
+        rec.update(fields)
+        if fields.get("status") in ("done", "error"):
+            rec["finished_at"] = time.time()
+
+
+def _run_view(rec):
+    """Public projection of a run record (drops the internal collector)."""
+    return {k: v for k, v in rec.items() if not k.startswith("_")}
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -127,6 +198,44 @@ for _ph, _val in _placeholders.items():
     if _val:
         _config_str = _config_str.replace(_ph, _val)
 CONFIG = json.loads(_config_str)
+
+# ── API authentication (Option B: invisible-to-UI, zero-config default) ───────
+# A token gates every /api/* route so external apps and the MCP server must present a
+# credential — but the browser UI never shows a login: index() injects the token into
+# the page and the UI's fetch() wrapper attaches it automatically (see index.html).
+# ZERO-CONFIG: if no key is configured (fresh install), enforcement is OFF and the
+# dashboard behaves exactly as before. Auth engages only once LOGSIM_API_KEY is set.
+# Accepted tradeoff: this gates automation, not humans — anyone who can load `/` in a
+# browser receives the token. A real login was deliberately out of scope for a lab tool.
+_API_KEY = (os.getenv("LOGSIM_API_KEY") or CONFIG.get("dashboard_api_key") or "").strip()
+
+# Paths served WITHOUT a token so the page can load and hand the UI its credential,
+# plus an unauthenticated liveness probe for orchestrators.
+_AUTH_EXEMPT_EXACT = {"/", "/favicon.ico", "/api/health"}
+
+
+def _request_token() -> str:
+    """Extract the caller's token from X-API-Key or 'Authorization: Bearer <token>'."""
+    tok = request.headers.get("X-API-Key", "")
+    if not tok:
+        auth = request.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            tok = auth[7:]
+    return tok.strip()
+
+
+@app.before_request
+def _require_api_key():
+    if not _API_KEY:
+        return None  # zero-config: no key set → open, exactly as before
+    path = request.path or "/"
+    if path in _AUTH_EXEMPT_EXACT or path.startswith("/static/"):
+        return None
+    if not path.startswith("/api/"):
+        return None  # only the API surface is gated
+    if _request_token() == _API_KEY:
+        return None
+    return make_response(jsonify({"error": "unauthorized — missing or invalid API key"}), 401)
 
 # ── Live Tor exit node fetch ──────────────────────────────────────────────────
 # Overwrites the static fallback list in config.json so that all Tor-themed
@@ -860,50 +969,11 @@ def _get_scenarios():
     if _SCENARIOS is not None:
         return _SCENARIOS
     try:
-        from log_simulator import (
-            run_aws_pentest_scenario,
-            run_phishing_kill_chain_scenario,
-            run_insider_threat_scenario,
-            run_gcp_cloud_pentest_scenario,
-            run_web_app_compromise_scenario,
-            run_vpn_compromise_scenario,
-            run_aitm_session_hijack_scenario,
-            run_ransomware_precursor_scenario,
-            run_dns_c2_killchain_scenario,
-            run_device_compromise_scenario,
-            run_infoblox_single_threat,
-            run_domain_dominance_scenario,
-            run_beaconing_implant_scenario,
-            run_server_breach_cloud_scenario,
-            run_cloud_ransomware_scenario,
-            run_perimeter_intrusion_scenario,
-            run_identity_attack_cloud_scenario,
-        )
-        _SCENARIOS = [
-            {"id": "1",  "name": "AWS Pentest & Defense Evasion",                          "func": run_aws_pentest_scenario},
-            {"id": "2",  "name": "Phishing Kill Chain (Email → DNS → C2 → Credential Theft)", "func": run_phishing_kill_chain_scenario},
-            {"id": "3",  "name": "Insider Threat / Cloud Data Exfiltration",               "func": run_insider_threat_scenario},
-            {"id": "4",  "name": "GCP Cloud Pentest (Privilege Escalation + Defense Evasion)", "func": run_gcp_cloud_pentest_scenario},
-            {"id": "5",  "name": "Web App Compromise → Server C2",                         "func": run_web_app_compromise_scenario},
-            {"id": "6",  "name": "VPN Compromise → Lateral Movement",                      "func": run_vpn_compromise_scenario},
-            {"id": "7",  "name": "AiTM Session Hijack → Cloud Abuse",                      "func": run_aitm_session_hijack_scenario},
-            {"id": "8",  "name": "Ransomware Precursor Kill Chain",                         "func": run_ransomware_precursor_scenario},
-            {"id": "9",  "name": "DNS C2 Kill Chain [requires Infoblox]",                  "func": run_dns_c2_killchain_scenario},
-            {"id": "10", "name": "Device Compromise Full Lifecycle [requires Infoblox]",   "func": run_device_compromise_scenario},
-            {"id": "11", "name": "Infoblox — C2 Beacon",                                   "func": lambda m, c: run_infoblox_single_threat("C2_BEACON", m, c)},
-            {"id": "12", "name": "Infoblox — DNS Tunneling",                               "func": lambda m, c: run_infoblox_single_threat("DNS_TUNNEL", m, c)},
-            {"id": "13", "name": "Infoblox — RPZ Block",                                   "func": lambda m, c: run_infoblox_single_threat("RPZ_BLOCK", m, c)},
-            {"id": "14", "name": "Infoblox — Threat Protect Block",                        "func": lambda m, c: run_infoblox_single_threat("THREAT_PROTECT", m, c)},
-            {"id": "15", "name": "Infoblox — NXDOMAIN Storm",                              "func": lambda m, c: run_infoblox_single_threat("NXDOMAIN_STORM", m, c)},
-            {"id": "16", "name": "Infoblox — DNS Flood",                                   "func": lambda m, c: run_infoblox_single_threat("DNS_FLOOD", m, c)},
-            {"id": "17", "name": "Infoblox — DHCP Starvation",                             "func": lambda m, c: run_infoblox_single_threat("DHCP_STARVATION", m, c)},
-            {"id": "18", "name": "Domain Dominance (Phish → AD Recon → Kerberoast → DCSync → Lateral → Persistence)", "func": run_domain_dominance_scenario},
-            {"id": "19", "name": "Beaconing Implant (DNS C2 → tunnel → web exfil → FW egress → service persistence)", "func": run_beaconing_implant_scenario},
-            {"id": "20", "name": "Server Breach → Cloud Takeover (Apache exploit → reverse shell → DNS exfil → S3 exfil)", "func": run_server_breach_cloud_scenario},
-            {"id": "21", "name": "Cloud Ransomware (brute force → admin → stop logging → exfil → S3 encrypt + ransom)", "func": run_cloud_ransomware_scenario},
-            {"id": "22", "name": "Perimeter Intrusion (port scan → denied inbound → VPN brute force → web exploit)", "func": run_perimeter_intrusion_scenario},
-            {"id": "23", "name": "Identity Attack → Cloud (Okta MFA-fatigue + Tor → AWS SAML federation → privesc → exfil)", "func": run_identity_attack_cloud_scenario},
-        ]
+        # Single source of truth: log_simulator.get_scenarios() (shared with the CLI
+        # and the training engine), so the id→name→func map never drifts here.
+        from log_simulator import get_scenarios
+        _SCENARIOS = [{"id": sid, "name": s["name"], "func": s["func"]}
+                      for sid, s in get_scenarios().items()]
     except Exception as e:
         print(f"[dashboard] Could not load scenarios from log_simulator: {e}")
         _SCENARIOS = []
@@ -924,12 +994,212 @@ def api_run_scenario(scenario_id: str):
         return jsonify({"error": f"Scenario '{scenario_id}' not found"}), 404
     cfg = copy.deepcopy(CONFIG)
     modules = {name: state.module for name, state in MODULE_STATES.items()}
+    run_id = _new_run(scenario_id, s["name"])
     t = threading.Thread(
-        target=_run_scenario_and_flush, args=(s["func"], modules, cfg), daemon=True,
-        name=f"scenario-{scenario_id}-{int(time.time())}",
+        target=_run_scenario_and_flush, args=(s["func"], modules, cfg, run_id), daemon=True,
+        name=f"scenario-{scenario_id}-{run_id[:8]}",
     )
     t.start()
-    return jsonify({"started": True, "scenario": s["name"]})
+    # 202 Accepted — the run is async; poll /api/scenarios/runs/<run_id> for completion.
+    return jsonify({"started": True, "scenario": s["name"], "run_id": run_id}), 202
+
+
+@app.get("/api/scenarios/runs")
+def api_list_runs():
+    with _RUNS_LOCK:
+        runs = [_run_view(r) for r in _RUNS.values()]
+    runs.sort(key=lambda r: r["created_at"], reverse=True)
+    return jsonify(runs)
+
+
+@app.get("/api/scenarios/runs/<run_id>")
+def api_get_run(run_id: str):
+    with _RUNS_LOCK:
+        rec = _RUNS.get(run_id)
+        view = _run_view(rec) if rec else None
+    if not view:
+        return jsonify({"error": f"Run '{run_id}' not found"}), 404
+    return jsonify(view)
+
+
+# ── Training Mode (deterministic Bulk stage / Live stream) ────────────────────
+# Single-flight: one training run at a time, and never concurrent with manual module
+# generation — the engine seeds the global RNG and (for bulk) freezes the clock, so a
+# concurrent generator would corrupt both. The Bulk stage backfills ~4h of history
+# (now-4h..now); the Live stream replays the SAME seeded story live over ~4h.
+_training_lock = threading.Lock()
+_training_state = {
+    "active": False, "mode": None, "pack": None, "status": "idle",
+    "index": 0, "total": 0, "offset": 0, "duration": 0,
+    "started_at": None, "message": "",
+}
+_training_stop = None           # threading.Event for the active stream
+_bulk_done = {}                 # {pack_id: 'YYYY-MM-DD'} last date a bulk run completed
+_training_durations = {}        # {(pack_id, mode): [seconds, ...]} recent completed runs, for ETA
+
+
+def _record_duration(pack_id, mode, seconds):
+    lst = _training_durations.setdefault((pack_id, mode), [])
+    lst.append(seconds)
+    del lst[:-5]                 # keep only the last 5 runs
+
+
+def _avg_duration(pack_id, mode):
+    lst = _training_durations.get((pack_id, mode))
+    return (sum(lst) / len(lst)) if lst else None
+
+
+def _compute_eta(st, now):
+    """Estimated seconds-to-completion for the active run, or None.
+
+    Stream: exact remaining wall-clock (it runs for `duration`). Bulk: extrapolate from
+    progress once there's enough signal, else fall back to the average of recent runs of
+    the same pack+mode (so the estimate is good from the first event once you've run it
+    a few times)."""
+    if not st.get("active"):
+        return None
+    started = st.get("started_at")
+    elapsed = (now - started) if started else 0.0
+    if st.get("mode") == "stream":
+        dur = st.get("duration") or 0
+        return max(0.0, dur - elapsed) if dur else None
+    total = st.get("total") or 0
+    index = st.get("index") or 0
+    if index > 0 and total > 0 and elapsed > 1 and (index / total) >= 0.02:
+        return max(0.0, elapsed * (total - index) / index)
+    avg = _avg_duration(st.get("pack"), "bulk")
+    return max(0.0, avg - elapsed) if avg is not None else None
+
+
+def _training_packs():
+    return (CONFIG.get("training_config") or {}).get("packs", [])
+
+
+def _find_pack(pack_id):
+    return next((p for p in _training_packs() if p.get("id") == pack_id), None)
+
+
+def _any_module_running():
+    return any(s.status == "running" for s in MODULE_STATES.values())
+
+
+def _training_progress(info):
+    with _training_lock:
+        _training_state["index"] = info.get("index", 0)
+        _training_state["total"] = info.get("total", 0)
+        _training_state["offset"] = info.get("offset", 0)
+        _training_state["duration"] = info.get("duration", 0)
+
+
+def _run_training(pack, mode, stop_event):
+    import datetime as _dt
+    from modules import training_engine as te
+    modules = {name: state.module for name, state in MODULE_STATES.items()}
+    start_ts = time.time()
+    with _training_lock:
+        _training_state.update(active=True, mode=mode, pack=pack.get("id"),
+                               status="running", started_at=start_ts,
+                               index=0, total=0, offset=0,
+                               duration=pack.get("duration_seconds", 0), message="")
+    try:
+        te.run_pack(pack, modules, CONFIG, mode=mode, stop_event=stop_event,
+                    progress=_training_progress)
+        stopped = bool(stop_event and stop_event.is_set())
+        with _training_lock:
+            _training_state["status"] = "stopped" if stopped else "done"
+        if not stopped:
+            _record_duration(pack.get("id"), mode, time.time() - start_ts)
+        if mode == "bulk" and not stopped:
+            _bulk_done[pack.get("id")] = _dt.date.today().isoformat()
+    except Exception as exc:
+        with _training_lock:
+            _training_state["status"] = "error"
+            _training_state["message"] = str(exc)
+        print(f"[dashboard] training run error: {exc}")
+    finally:
+        with _training_lock:
+            _training_state["active"] = False
+
+
+def _start_training_thread(pack, mode, stop_event=None):
+    threading.Thread(target=_run_training, args=(pack, mode, stop_event), daemon=True,
+                     name=f"training-{mode}-{pack.get('id')}").start()
+
+
+@app.get("/api/training/packs")
+def api_training_packs():
+    import datetime as _dt
+    today = _dt.date.today().isoformat()
+    return jsonify([
+        {"id": p.get("id"), "description": p.get("description", ""),
+         "duration_seconds": p.get("duration_seconds", 14400),
+         "bulk_done_today": _bulk_done.get(p.get("id")) == today}
+        for p in _training_packs()
+    ])
+
+
+@app.get("/api/training/status")
+def api_training_status():
+    now = time.time()
+    with _training_lock:
+        st = dict(_training_state)
+    started = st.get("started_at")
+    st["elapsed_seconds"] = (now - started) if (st.get("active") and started) else None
+    st["eta_seconds"] = _compute_eta(st, now)
+    st["avg_run_seconds"] = _avg_duration(st.get("pack"), st.get("mode"))
+    return jsonify(st)
+
+
+def _guard_can_start_training():
+    """Return (ok, json_response, code). Enforces single-flight + no manual generation."""
+    with _training_lock:
+        if _training_state["active"]:
+            return False, {"error": "A training run is already active"}, 409
+    if _any_module_running():
+        return False, {"error": "Stop manual module generation before starting a training run"}, 409
+    return True, None, 200
+
+
+@app.post("/api/training/bulk")
+def api_training_bulk():
+    body = request.get_json(silent=True) or {}
+    pack = _find_pack(body.get("pack"))
+    if not pack:
+        return jsonify({"error": "pack not found"}), 404
+    ok, resp, code = _guard_can_start_training()
+    if not ok:
+        return jsonify(resp), code
+    _start_training_thread(pack, "bulk")
+    return jsonify({"started": True, "mode": "bulk", "pack": pack.get("id")})
+
+
+@app.post("/api/training/stream")
+def api_training_stream():
+    global _training_stop
+    body = request.get_json(silent=True) or {}
+    pack = _find_pack(body.get("pack"))
+    if not pack:
+        return jsonify({"error": "pack not found"}), 404
+    # Soft gate: warn (do not block) if no Bulk stage completed for this pack today.
+    if not bool(body.get("confirm")):
+        import datetime as _dt
+        if _bulk_done.get(pack.get("id")) != _dt.date.today().isoformat():
+            return jsonify({"needs_confirm": True,
+                            "warning": "No Bulk stage has completed for this pack today. "
+                                       "Stream live anyway?"}), 409
+    ok, resp, code = _guard_can_start_training()
+    if not ok:
+        return jsonify(resp), code
+    _training_stop = threading.Event()
+    _start_training_thread(pack, "stream", _training_stop)
+    return jsonify({"started": True, "mode": "stream", "pack": pack.get("id")})
+
+
+@app.post("/api/training/stop")
+def api_training_stop():
+    if _training_stop is not None:
+        _training_stop.set()
+    return jsonify({"stopping": True})
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -1504,9 +1774,44 @@ def api_baduser_status():
 
 @app.get("/")
 def index():
-    resp = make_response(render_template("index.html"))
+    # Option B: hand the browser the API token at page load so its fetch() wrapper can
+    # attach it transparently — no login screen. Empty when auth is disabled (zero-config).
+    resp = make_response(render_template("index.html", api_key=_API_KEY))
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+# ── Versioned external contract (/api/v1) ─────────────────────────────────────
+# External apps and the MCP server target /api/v1/* so the UI-shaped legacy routes can
+# evolve without breaking integrations. Each alias reuses the existing view function, so
+# there is exactly one implementation. Register AFTER the views above are defined.
+def _register_v1_aliases():
+    aliases = [
+        ("/api/v1/scenarios",                 "api_get_scenarios",   ["GET"]),
+        ("/api/v1/scenarios/<scenario_id>/run", "api_run_scenario",  ["POST"]),
+        ("/api/v1/scenarios/runs",            "api_list_runs",       ["GET"]),
+        ("/api/v1/scenarios/runs/<run_id>",   "api_get_run",         ["GET"]),
+        ("/api/v1/modules",                   "api_get_modules",     ["GET"]),
+        ("/api/v1/modules/<name>/start",      "api_start_module",    ["POST"]),
+        ("/api/v1/modules/<name>/stop",       "api_stop_module",     ["POST"]),
+        ("/api/v1/modules/<name>/fire",       "api_fire_threat",     ["POST"]),
+        ("/api/v1/modules/start_all",         "api_start_all",       ["POST"]),
+        ("/api/v1/modules/stop_all",          "api_stop_all",        ["POST"]),
+        ("/api/v1/health",                    "api_health",          ["GET"]),
+        ("/api/v1/metrics",                   "api_metrics",         ["GET"]),
+    ]
+    view_funcs = app.view_functions
+    for rule, endpoint_name, methods in aliases:
+        view = view_funcs.get(endpoint_name)
+        if view is None:
+            print(f"[dashboard] v1 alias skipped — view '{endpoint_name}' not found")
+            continue
+        app.add_url_rule(rule, endpoint=f"v1_{endpoint_name}", view_func=view, methods=methods)
+
+
+# Register the versioned external contract now that every view above exists (runs at
+# import for both `python dashboard/app.py` and `flask --app dashboard/app.py run`).
+_register_v1_aliases()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -1516,4 +1821,12 @@ if __name__ == "__main__":
     port = int(os.getenv("DASHBOARD_PORT", "5000"))
     print(f"\nLogSim Dashboard -> http://{host}:{port}")
     print(f"Loaded {len(MODULE_STATES)} modules: {', '.join(MODULE_STATES.keys())}\n")
+    if _API_KEY:
+        print("[dashboard] API auth ENABLED — /api/* requires a token "
+              "(UI carries it automatically; external callers use X-API-Key or Bearer).")
+    else:
+        print("[dashboard] API auth DISABLED (no LOGSIM_API_KEY set) — all routes open.")
+        if host not in ("127.0.0.1", "localhost"):
+            print(f"[dashboard] WARNING: bound to {host} with NO API key — the control API is "
+                  "reachable off-box unauthenticated. Set LOGSIM_API_KEY to gate it.")
     app.run(host=host, port=port, debug=False, threaded=True)

@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- API token injected server-side (Option B). Empty when auth is disabled; the
+       api() fetch wrapper attaches it as X-API-Key so the UI needs no login. -->
+  <meta name="logsim-api-key" content="{{ api_key }}" />
   <title>LogSim Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <style>
@@ -575,6 +578,34 @@
 
   </div>
 
+  <!-- Training Mode — deterministic Bulk stage / Live stream -->
+  <div class="threats-panel" style="margin-top:16px;">
+    <div class="panel-title">Training Mode — Deterministic Bulk Stage / Live Stream</div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px;">
+      Same seeded story every run — identical events, order, and transport.
+      <b>Bulk stage</b> backfills ~4&nbsp;hours of history (now&minus;4h&nbsp;&rarr;&nbsp;now) so students can
+      explore a populated tenant and build correlation rules. <b>Stream now</b> replays the identical
+      story live over ~4&nbsp;hours so those rules fire in real time.
+      Runs are exclusive — stop manual module generation first.
+    </p>
+    <div class="form-row" style="align-items:flex-end;gap:12px;flex-wrap:wrap;">
+      <div class="form-group">
+        <label class="form-label">Pack</label>
+        <select id="training-pack-select" class="level-select" style="width:340px;">
+          <option value="">— loading packs —</option>
+        </select>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="training-bulk-btn" onclick="runBulk()">Bulk stage (backfill 4h)</button>
+      <button class="btn btn-ghost btn-sm" id="training-stream-btn" onclick="runStream(false)">Stream now (4h live)</button>
+      <button class="btn btn-stop btn-sm" id="training-stop-btn" onclick="stopTraining()">Stop</button>
+    </div>
+    <div class="bar-track" id="training-bar" style="display:none;height:8px;margin-top:14px;">
+      <div class="bar-fill" id="training-bar-fill" style="width:0%;background:var(--accent);"></div>
+    </div>
+    <div id="training-progress" style="font-size:12px;color:var(--text-muted);margin-top:8px;min-height:18px;"></div>
+    <div class="result-msg" id="training-result"></div>
+  </div>
+
 </div><!-- /tab-threats -->
 
 <!-- ── Schedule tab ───────────────────────────────────────────────────────── -->
@@ -829,8 +860,12 @@
     setTimeout(() => el.classList.remove('show'), dur);
   }
 
+  const API_KEY = (document.querySelector('meta[name="logsim-api-key"]') || {}).content || '';
+
   async function api(path, method = 'GET', body = null) {
-    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    const headers = { 'Content-Type': 'application/json' };
+    if (API_KEY) headers['X-API-Key'] = API_KEY;   // Option B: token rides along, no login
+    const opts = { method, headers };
     if (body) opts.body = JSON.stringify(body);
     const r = await fetch(path, opts);
     if (!r.ok) {
@@ -1514,6 +1549,139 @@
     }
   }
 
+  // ── Training Mode ─────────────────────────────────────────────────────────
+  async function loadTrainingPacks() {
+    try {
+      const packs = await api('/api/training/packs');
+      const sel = document.getElementById('training-pack-select');
+      if (!packs.length) {
+        sel.innerHTML = '<option value="">No training packs configured</option>';
+        return;
+      }
+      window._trainingPacks = packs;
+      sel.innerHTML = packs.map(p =>
+        `<option value="${escHtml(p.id)}">${escHtml(p.id)}${p.description ? ' — ' + escHtml(p.description) : ''}</option>`
+      ).join('');
+    } catch (e) {
+      document.getElementById('training-result').innerHTML =
+        `<span style="color:var(--red);">Failed to load packs: ${escHtml(e.message)}</span>`;
+    }
+  }
+
+  function _selectedTrainingPack() {
+    return document.getElementById('training-pack-select').value;
+  }
+
+  async function runBulk() {
+    const pack = _selectedTrainingPack();
+    const resultEl = document.getElementById('training-result');
+    if (!pack) { resultEl.style.color = 'var(--red)'; resultEl.textContent = 'Select a pack first'; return; }
+    resultEl.style.color = 'var(--text-muted)';
+    resultEl.textContent = `Starting bulk stage for "${pack}"…`;
+    try {
+      const data = await api('/api/training/bulk', 'POST', { pack });
+      resultEl.style.color = 'var(--green)';
+      resultEl.textContent = `✓ Bulk stage started for "${data.pack}" — backfilling ~4h of history`;
+    } catch (e) {
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = e.message;
+    }
+  }
+
+  async function runStream(confirmed) {
+    const pack = _selectedTrainingPack();
+    const resultEl = document.getElementById('training-result');
+    if (!pack) { resultEl.style.color = 'var(--red)'; resultEl.textContent = 'Select a pack first'; return; }
+    resultEl.style.color = 'var(--text-muted)';
+    resultEl.textContent = `Starting live stream for "${pack}"…`;
+    // Raw fetch so the 409 soft-gate (needs_confirm) can be read instead of thrown.
+    const _streamHeaders = { 'Content-Type': 'application/json' };
+    if (API_KEY) _streamHeaders['X-API-Key'] = API_KEY;
+    const r = await fetch('/api/training/stream', {
+      method: 'POST', headers: _streamHeaders,
+      body: JSON.stringify({ pack, confirm: !!confirmed }),
+    });
+    const data = await r.json().catch(() => ({ error: r.statusText }));
+    if (r.ok && data.started) {
+      resultEl.style.color = 'var(--green)';
+      resultEl.textContent = `✓ Live stream started for "${data.pack}" — events stream over ~4h`;
+      return;
+    }
+    if (r.status === 409 && data.needs_confirm) {
+      if (window.confirm(data.warning + '\n\nStream anyway?')) { return runStream(true); }
+      resultEl.style.color = 'var(--text-muted)';
+      resultEl.textContent = 'Stream cancelled';
+      return;
+    }
+    resultEl.style.color = 'var(--red)';
+    resultEl.textContent = data.error || 'Failed to start';
+  }
+
+  async function stopTraining() {
+    const resultEl = document.getElementById('training-result');
+    try {
+      await api('/api/training/stop', 'POST');
+      resultEl.style.color = 'var(--text-muted)';
+      resultEl.textContent = 'Stop requested…';
+    } catch (e) {
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = e.message;
+    }
+  }
+
+  function _fmtDuration(secs) {
+    if (secs == null || !isFinite(secs)) return '—';
+    secs = Math.max(0, Math.round(secs));
+    if (secs < 1) return '<1s';
+    const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  async function pollTraining() {
+    try {
+      const st = await api('/api/training/status');
+      const el = document.getElementById('training-progress');
+      const bar = document.getElementById('training-bar');
+      const fill = document.getElementById('training-bar-fill');
+      if (st.active) {
+        const pct = st.total ? Math.min(100, Math.floor(100 * st.index / st.total)) : 0;
+        const finalizing = st.total && st.index >= st.total;
+        const offMin = Math.floor((st.offset || 0) / 60);
+        const durMin = Math.floor((st.duration || 0) / 60);
+        const label = st.mode === 'bulk' ? 'Bulk stage (backfill)' : 'Live stream';
+        bar.style.display = 'block';
+        fill.style.background = 'var(--accent)';
+        fill.style.width = pct + '%';
+        const eta = `ETA ${_fmtDuration(st.eta_seconds)}`;
+        const elapsed = `elapsed ${_fmtDuration(st.elapsed_seconds)}`;
+        if (finalizing) {
+          el.innerHTML = `<b>${label}</b> [${escHtml(st.pack || '')}] — finalizing: `
+                       + `flushing / uploading batched events… (${elapsed})`;
+        } else {
+          el.innerHTML = `<b>${label}</b> [${escHtml(st.pack || '')}] — `
+            + `event ${st.index.toLocaleString()}/${st.total.toLocaleString()} (${pct}%), `
+            + `sim ${offMin}/${durMin} min · <b>${eta}</b> · ${elapsed}`;
+        }
+      } else if (st.status && st.status !== 'idle') {
+        const done = st.status === 'done';
+        bar.style.display = 'block';
+        fill.style.width = '100%';
+        fill.style.background = done ? 'var(--green)'
+                             : (st.status === 'error' ? 'var(--red)' : 'var(--text-muted)');
+        const col = st.status === 'error' ? 'var(--red)' : 'var(--green)';
+        const avg = st.avg_run_seconds ? ` (avg run ${_fmtDuration(st.avg_run_seconds)})` : '';
+        el.innerHTML = `<span style="color:${col};">Last run [${escHtml(st.pack || '')}] ${escHtml(st.status)}`
+                     + `${st.message ? ' — ' + escHtml(st.message) : ''}</span>${avg}`;
+      } else {
+        bar.style.display = 'none';
+        el.textContent = '';
+      }
+    } catch (e) { /* dashboard may be mid-reload */ }
+  }
+  setInterval(pollTraining, 2000);
+
   // ── Health tab ────────────────────────────────────────────────────────────
   async function runHealthCheck() {
     const overallEl = document.getElementById('health-overall');
@@ -1769,6 +1937,7 @@
           modules.map(m => `<option value="${escHtml(m.name)}">${escHtml(m.name)}</option>`).join('');
       }
       loadScenarios();
+      loadTrainingPacks();
       updateSchedFields();
       // Bad User tab setup
       loadBadUserUsers();

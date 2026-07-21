@@ -1,0 +1,326 @@
+{
+  "info": {
+    "name": "LogSim Control API",
+    "description": "External control surface for LogSimv2. Drives an already-running dashboard. Auth is opt-in: when LOGSIM_API_KEY is set on the server, every path here requires the token (header X-API-Key or Authorization: Bearer). When unset, all paths are open.\n\n\nSet the `baseUrl` and `apiKey` collection variables. `apiKey` is only needed when the dashboard has auth enabled; leave it blank when running open.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "X-API-Key"
+      },
+      {
+        "key": "value",
+        "value": "{{apiKey}}"
+      },
+      {
+        "key": "in",
+        "value": "header"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:5000/api/v1"
+    },
+    {
+      "key": "apiKey",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Scenarios",
+      "item": [
+        {
+          "name": "List scenarios",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/scenarios",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "scenarios"
+              ]
+            },
+            "description": "List scenarios"
+          }
+        },
+        {
+          "name": "Trigger a scenario (async)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/scenarios/:scenario_id/run",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "scenarios",
+                ":scenario_id",
+                "run"
+              ],
+              "variable": [
+                {
+                  "key": "scenario_id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "Trigger a scenario (async)"
+          }
+        },
+        {
+          "name": "List recent runs (newest first)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/scenarios/runs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "scenarios",
+                "runs"
+              ]
+            },
+            "description": "List recent runs (newest first)"
+          }
+        },
+        {
+          "name": "Get a run's status and emission manifest",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/scenarios/runs/:run_id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "scenarios",
+                "runs",
+                ":run_id"
+              ],
+              "variable": [
+                {
+                  "key": "run_id",
+                  "value": "REPLACE_WITH_RUN_ID"
+                }
+              ]
+            },
+            "description": "Get a run's status and emission manifest"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Modules",
+      "item": [
+        {
+          "name": "List modules and their state",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/modules",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules"
+              ]
+            },
+            "description": "List modules and their state"
+          }
+        },
+        {
+          "name": "Start a module",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/modules/:name/start",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules",
+                ":name",
+                "start"
+              ],
+              "variable": [
+                {
+                  "key": "name",
+                  "value": "Cisco ASA"
+                }
+              ]
+            },
+            "description": "Start a module",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"threat_level\": \"Realistic\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Stop a module",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/modules/:name/stop",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules",
+                ":name",
+                "stop"
+              ],
+              "variable": [
+                {
+                  "key": "name",
+                  "value": "Cisco ASA"
+                }
+              ]
+            },
+            "description": "Stop a module"
+          }
+        },
+        {
+          "name": "Fire one event from a module",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/modules/:name/fire",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules",
+                ":name",
+                "fire"
+              ],
+              "variable": [
+                {
+                  "key": "name",
+                  "value": "Cisco ASA"
+                }
+              ]
+            },
+            "description": "Fire one event from a module",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event\": \"TOR_LOGIN\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Start all modules",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/modules/start_all",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules",
+                "start_all"
+              ]
+            },
+            "description": "Start all modules"
+          }
+        },
+        {
+          "name": "Stop all modules",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/modules/stop_all",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules",
+                "stop_all"
+              ]
+            },
+            "description": "Stop all modules"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Status",
+      "item": [
+        {
+          "name": "Health snapshot",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Health snapshot"
+          }
+        },
+        {
+          "name": "Throughput metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/metrics",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "metrics"
+              ]
+            },
+            "description": "Throughput metrics"
+          }
+        }
+      ]
+    }
+  ]
+}

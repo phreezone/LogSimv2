@@ -1,0 +1,4 @@
+# Dependencies for the LogSim MCP server (integrations/mcp_server.py).
+# Kept separate from the main project requirements — MCP is an optional integration.
+mcp>=1.2.0
+requests>=2.31.0
