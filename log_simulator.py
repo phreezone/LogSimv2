@@ -2,6 +2,7 @@ import socket
 import time
 import random
 import json
+import re
 import importlib
 import os
 import requests
@@ -32,6 +33,19 @@ HTTP_CB_POST_TIMEOUT = 15      # seconds for a single POST request
 _http_cb_state = {}   # {collector_id: {"fails": int, "open_since": float|None}}
 _http_cb_lock  = threading.Lock()   # protects _http_cb_state for parallel thread safety
 _print_lock    = threading.Lock()   # ensures one complete line prints at a time
+
+# Shared HTTP session with connection pooling: high-volume runs reuse keep-alive TLS
+# connections instead of doing a fresh handshake per event (the dominant cost in bulk
+# training runs). pool_maxsize covers the concurrent bulk sender threads.
+_http_session = requests.Session()
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=32, pool_maxsize=32, max_retries=0)
+_http_session.mount('https://', _http_adapter)
+_http_session.mount('http://', _http_adapter)
+
+# When True, suppress the routine per-event "Sending ..." success prints. A bulk run emits
+# 100k+ events and the per-event console I/O (under _print_lock) is itself a bottleneck.
+# Errors are always printed regardless.
+_quiet_sends = False
 
 
 def _tprint(*args, **kwargs):
@@ -160,7 +174,8 @@ def send_syslog_message(message, host, port, app_name="LogSim"):
                 sock = _get_syslog_sock(host, port)
                 sock.sendall(payload)
                 _syslog_last_used[(host, port)] = time.time()
-            _tprint(f"Sending Syslog for {app_name}: {host}:{port}")
+            if not _quiet_sends:
+                _tprint(f"Sending Syslog for {app_name}: {host}:{port}")
             return
         except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, OSError) as e:
             last_err = e
@@ -294,14 +309,15 @@ def send_http_message(message, module, config):
             cb["open_since"] = None
 
     try:
-        response = requests.post(url, headers=headers, data=message,
-                                 verify=False, timeout=HTTP_CB_POST_TIMEOUT)
+        response = _http_session.post(url, headers=headers, data=message,
+                                      verify=False, timeout=HTTP_CB_POST_TIMEOUT)
         if response.status_code not in [200, 202, 204]:
             _tprint(f"HTTP send error for {module.NAME}: status {response.status_code} — {response.text[:120]}")
             cb["fails"] += 1
         else:
             cb["fails"] = 0
-            _tprint(f"Sending HTTP for {module.NAME}: {collector_id} -> {response.status_code}")
+            if not _quiet_sends:
+                _tprint(f"Sending HTTP for {module.NAME}: {collector_id} -> {response.status_code}")
 
     except requests.exceptions.Timeout:
         cb["fails"] += 1
@@ -715,10 +731,80 @@ def send_wec_message(message, module, config):
             _wec_batch_timer.start()
 
 
+# ── Capture / dry-run hook (used by the training-mode determinism verifier) ──
+# When _capture_sink is a list, every payload passed to process_and_send is
+# appended as (module_name, event_name, payload) BEFORE sending. When _dry_run
+# is True, process_and_send records and returns without actually sending — so a
+# pack can be replayed for a content-equality diff with no network I/O.
+_capture_sink = None      # list | None
+_dry_run = False
+# When set (list), process_and_send COLLECTS (module, payload, event_name) and returns
+# without sending. Training bulk generates under a frozen clock (freezegun serializes calls
+# while active, so sends can't parallelize there) then replays the collected payloads through
+# a parallel sender AFTER leaving the freeze. Unlike _capture_sink this keeps the module object
+# so the payload can actually be sent, and unlike _dry_run it is training-only.
+_bulk_collector = None
+
+# Regexes for blanking volatile timestamps so two runs can be compared on content
+# alone (event-time intentionally differs between bulk backfill and live stream).
+_MON = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
+_TS_ISO_RE   = re.compile(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?')
+# Apache Common Log Format:  18/Jul/2026:14:38:51 +0000
+_TS_CLF_RE   = re.compile(r'\d{1,2}/' + _MON + r'/\d{4}:\d{2}:\d{2}:\d{2}\s*[+-]\d{4}')
+# BSD syslog header:  Jul 18 14:38:51  (day may be space-padded)
+_TS_SYSLOG_RE = re.compile(_MON + r'\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}')
+# LDAP/AD GeneralizedTime (Windows whenChanged etc.):  20260719132733.0Z
+# (no leading \b — it is often preceded by a word char like the 't' of a literal \t)
+_TS_GENTIME_RE = re.compile(r'(?<!\d)\d{14}(?:\.\d+)?Z')
+# US human-readable (AWS consoles etc.):  Jul 26, 2026, 01:30:01 PM
+_TS_USDATE_RE = re.compile(_MON + r' \d{1,2}, \d{4}, \d{2}:\d{2}:\d{2} [AP]M')
+# Epoch seconds (10), milliseconds (13), microseconds (16), or nanoseconds (19 digits;
+# e.g. FortiGate FTNTFGTeventtime), optional fraction.
+_TS_EPOCH_RE = re.compile(r'\b\d{10}(?:\d{3}){0,3}(?:\.\d+)?\b')
+
+
+def _strip_volatile(payload):
+    """Return a copy of *payload* with all timestamp formats blanked, so two runs can
+    be diffed on content (users, IPs, hostnames, GUIDs, ordering) alone. Event-time is
+    intentionally different between bulk backfill and live stream, so it must not count
+    as a content difference. Covers ISO-8601, Apache CLF, BSD syslog, and epoch
+    (s/ms/µs) timestamps."""
+    if isinstance(payload, (bytes, bytearray)):
+        # S3/CloudTrail events arrive gzipped; decompress so the JSON inside can be
+        # compared on content (raw gzip bytes differ by embedded mtime + compressed
+        # timestamps and are not meaningful to diff).
+        if len(payload) >= 2 and payload[0] == 0x1f and payload[1] == 0x8b:
+            try:
+                payload = gzip.decompress(bytes(payload))
+            except Exception:
+                pass
+        try:
+            payload = payload.decode('utf-8', 'replace')
+        except Exception:
+            return payload
+    if not isinstance(payload, str):
+        payload = str(payload)
+    payload = _TS_ISO_RE.sub('<TS>', payload)
+    payload = _TS_CLF_RE.sub('<CLF>', payload)
+    payload = _TS_SYSLOG_RE.sub('<SYSLOG>', payload)
+    payload = _TS_USDATE_RE.sub('<USDATE>', payload)
+    payload = _TS_GENTIME_RE.sub('<GENTIME>', payload)
+    payload = _TS_EPOCH_RE.sub('<EPOCH>', payload)
+    return payload
+
+
 def process_and_send(log_content, module, config, event_name=None):
     """Determines how to send the log and sends it. Counts logs for throughput reporting."""
     transport = "syslog"
     if not log_content:
+        return
+
+    if _capture_sink is not None:
+        _capture_sink.append((getattr(module, 'NAME', '?'), event_name, log_content))
+    if _dry_run:
+        return
+    if _bulk_collector is not None:
+        _bulk_collector.append((module, log_content, event_name))
         return
 
     conf_key = getattr(module, 'CONFIG_KEY', None)
@@ -3302,8 +3388,12 @@ def run_identity_attack_cloud_scenario(all_modules, config):
     print(f"  Cross-identity (Okta↔AWS) shares the username now; full merge lands with XSIAM identity unification.")
 
 
-def select_scenario_mode(all_modules, config):
-    """Handles the attack scenario generation mode."""
+def get_scenarios():
+    """Return the id→{name, func} map of all attack scenarios.
+
+    Module-level so both the CLI menu (select_scenario_mode) and the Web-UI
+    training engine (modules/training_engine.py) resolve scenarios by the same id.
+    """
     # NOTE: Scenario "Compromised Account & Data Exfiltration via Google Drive" is disabled
     # until the Google Workspace module is restored. The function remains in the codebase.
     scenarios = {
@@ -3403,6 +3493,12 @@ def select_scenario_mode(all_modules, config):
             "func": run_identity_attack_cloud_scenario
         },
     }
+    return scenarios
+
+
+def select_scenario_mode(all_modules, config):
+    """Handles the attack scenario generation mode (CLI)."""
+    scenarios = get_scenarios()
 
     print("\nSelect an Attack Scenario to run:")
     for key, value in scenarios.items():

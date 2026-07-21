@@ -197,6 +197,7 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 | `config.json` reference (all sections) | [docs/configuration.md](docs/configuration.md) |
 | Running modes & available modules | [docs/how-to-run.md](docs/how-to-run.md) |
 | Attack scenarios (23 kill chains) | [docs/attack-scenarios.md](docs/attack-scenarios.md) |
+| Training Mode (deterministic bulk stage + live stream) | [docs/training-mode.md](docs/training-mode.md) |
 | Adding a new module | [docs/extensibility.md](docs/extensibility.md) |
 
 ## Module Reference

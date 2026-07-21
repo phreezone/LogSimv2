@@ -19327,5 +19327,69 @@
         "anomalous_workstation_logon": 5
       }
     }
+  },
+  "training_config": {
+    "packs": [
+      {
+        "id": "domain-dominance-day",
+        "description": "Scenario 18 — Domain Dominance (Phish -> AD Recon -> Kerberoast -> DCSync -> Lateral -> Persistence). 4-hour day with Okta/Windows/Infoblox/Zscaler baseline.",
+        "seed": "domain-dominance-day",
+        "duration_seconds": 14400,
+        "benign_events_per_second_per_module": 2,
+        "benign_threat_level": "High",
+        "benign_modules": ["Okta SSO", "Windows Event Log", "Infoblox NIOS", "Zscaler Web Gateway"],
+        "scenario": { "id": "18", "start_offset_seconds": 5400 }
+      },
+      {
+        "id": "beaconing-implant-day",
+        "description": "Scenario 19 — Beaconing Implant (DNS C2 -> DNS tunnel -> web exfil -> FW egress -> service persistence). 4-hour day with Infoblox/Zscaler/FortiGate/Windows baseline.",
+        "seed": "beaconing-implant-day",
+        "duration_seconds": 14400,
+        "benign_events_per_second_per_module": 2,
+        "benign_threat_level": "High",
+        "benign_modules": ["Infoblox NIOS", "Zscaler Web Gateway", "Fortinet FortiGate", "Windows Event Log"],
+        "scenario": { "id": "19", "start_offset_seconds": 5400 }
+      },
+      {
+        "id": "server-breach-cloud-day",
+        "description": "Scenario 20 — Server Breach -> Cloud Takeover (Apache exploit -> reverse shell -> DNS exfil -> S3 exfil). 4-hour day with Apache/Infoblox/AWS/Zscaler baseline.",
+        "seed": "server-breach-cloud-day",
+        "duration_seconds": 14400,
+        "benign_events_per_second_per_module": 2,
+        "benign_threat_level": "High",
+        "benign_modules": ["Apache httpd", "Infoblox NIOS", "aws", "Zscaler Web Gateway"],
+        "scenario": { "id": "20", "start_offset_seconds": 5400 }
+      },
+      {
+        "id": "cloud-ransomware-day",
+        "description": "Scenario 21 — Cloud Ransomware (brute force -> admin -> stop logging -> exfil -> S3 encrypt + ransom). 4-hour day with AWS/Okta/Zscaler baseline.",
+        "seed": "cloud-ransomware-day",
+        "duration_seconds": 14400,
+        "benign_events_per_second_per_module": 2,
+        "benign_threat_level": "High",
+        "benign_modules": ["aws", "Okta SSO", "Zscaler Web Gateway"],
+        "scenario": { "id": "21", "start_offset_seconds": 5400 }
+      },
+      {
+        "id": "perimeter-intrusion-day",
+        "description": "Scenario 22 — Perimeter Intrusion (port scan -> denied inbound -> VPN brute force -> web exploit). 4-hour day with Cisco ASA/FortiGate/Apache/Zscaler baseline.",
+        "seed": "perimeter-intrusion-day",
+        "duration_seconds": 14400,
+        "benign_events_per_second_per_module": 2,
+        "benign_threat_level": "High",
+        "benign_modules": ["Cisco Firepower", "Fortinet FortiGate", "Apache httpd", "Zscaler Web Gateway"],
+        "scenario": { "id": "22", "start_offset_seconds": 5400 }
+      },
+      {
+        "id": "identity-cloud-day",
+        "description": "Scenario 23 — Identity Attack -> Cloud (Okta MFA-fatigue + Tor login -> AWS SAML federation -> privesc -> exfil). 4-hour day with Okta/AWS/Zscaler baseline.",
+        "seed": "identity-cloud-day",
+        "duration_seconds": 14400,
+        "benign_events_per_second_per_module": 2,
+        "benign_threat_level": "High",
+        "benign_modules": ["Okta SSO", "aws", "Zscaler Web Gateway"],
+        "scenario": { "id": "23", "start_offset_seconds": 5400 }
+      }
+    ]
   }
 }

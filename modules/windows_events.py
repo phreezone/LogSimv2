@@ -1261,6 +1261,23 @@ _orchestrator_lock = threading.Lock()
 _workers_stop = threading.Event()
 
 
+def reset_state():
+    """Reset module-level mutable state to its initial values.
+
+    Called by the deterministic Training-Mode engine before a seeded run so that
+    a long-lived process (e.g. the dashboard running both the morning bulk stage
+    and the afternoon live stream) reproduces identical content each run instead
+    of carrying over monotonic counters (RecordNumber, last threat time, etc.).
+    """
+    global last_threat_event_time, _BUILD_EVENT_OS_SUBTYPE, _orchestrator_started
+    with _STATE_LOCK:
+        _RECORD_NUMBERS.clear()
+        _USER_SIDS.clear()
+    last_threat_event_time = 0
+    _BUILD_EVENT_OS_SUBTYPE = "Windows 10"
+    _orchestrator_started = False
+
+
 def _stable_user_sid(username: str) -> str:
     """Deterministic domain SID for a username (last-RID from hash)."""
     with _STATE_LOCK:
