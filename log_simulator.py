@@ -356,8 +356,11 @@ def _get_s3_client(region: str):
 # S3 object; doing the same here means one object per run for the collector to
 # pull instead of ~8 tiny objects, which eliminates the per-object partial
 # pickup we were seeing (steps landing intermittently).
-_s3_batch = []
-_s3_batch_meta = {}
+# Batches are keyed PER MODULE so different AWS log types (CloudTrail vs GuardDuty)
+# never merge into one object — they use different S3 prefixes AND different on-disk
+# formats (CloudTrail = {"Records":[...]}.json.gz, GuardDuty = newline-delimited
+# .jsonl.gz), which the collector parses with different log-type parsers.
+_s3_batches = {}          # module.NAME -> {"blobs": [...], "module": mod, "config": cfg}
 _s3_batch_lock = threading.Lock()
 
 
@@ -366,7 +369,7 @@ _s3_flusher_started = [False]
 
 
 def _ensure_s3_flusher():
-    """Start a background thread that auto-flushes the S3 batch a few seconds
+    """Start a background thread that auto-flushes the S3 batches a few seconds
     after events stop arriving. This makes batching work even if no explicit
     flush hook runs (e.g. an entry point that never calls flush_s3_batch) — so
     AWS events can never get stranded in the buffer."""
@@ -379,7 +382,7 @@ def _ensure_s3_flusher():
         while True:
             time.sleep(2)
             with _s3_batch_lock:
-                pending = len(_s3_batch)
+                pending = sum(len(g["blobs"]) for g in _s3_batches.values())
                 idle = time.time() - _s3_last_enqueue[0]
             if pending and idle >= 4:
                 try:
@@ -391,43 +394,57 @@ def _ensure_s3_flusher():
 
 
 def _enqueue_s3(content_bytes, module, config):
-    """Buffer one gzipped single-event blob for the current run."""
+    """Buffer one gzipped single-event blob for the current run, grouped by module."""
     with _s3_batch_lock:
-        _s3_batch.append(content_bytes)
-        _s3_batch_meta["module"] = module
-        _s3_batch_meta["config"] = config
+        key = getattr(module, 'NAME', 'unknown')
+        grp = _s3_batches.setdefault(key, {"blobs": [], "module": module, "config": config})
+        grp["blobs"].append(content_bytes)
+        grp["module"] = module
+        grp["config"] = config
         _s3_last_enqueue[0] = time.time()
     _ensure_s3_flusher()
 
 
 def flush_s3_batch():
-    """Merge all buffered single-event blobs into one gzipped {"Records":[...]}
-    object and upload it. Called at the end of each scenario run."""
+    """Merge each module's buffered blobs into ONE object and upload it, using that
+    module's on-disk format. Called at the end of each scenario run."""
     with _s3_batch_lock:
-        if not _s3_batch:
+        if not _s3_batches:
             return
-        blobs = list(_s3_batch)
-        _s3_batch.clear()
-        module = _s3_batch_meta.get("module")
-        config = _s3_batch_meta.get("config")
-    if not module or not config:
-        return
-    records = []
-    for b in blobs:
-        try:
-            obj = json.loads(gzip.decompress(b).decode("utf-8"))
-        except Exception:
+        groups = list(_s3_batches.values())
+        _s3_batches.clear()
+
+    for grp in groups:
+        module = grp.get("module")
+        config = grp.get("config")
+        blobs = grp.get("blobs", [])
+        if not module or not config or not blobs:
             continue
-        if isinstance(obj, dict) and "Records" in obj:
-            records.extend(obj["Records"])
-        elif isinstance(obj, list):
-            records.extend(obj)
+        records = []
+        for b in blobs:
+            try:
+                obj = json.loads(gzip.decompress(b).decode("utf-8"))
+            except Exception:
+                continue
+            if isinstance(obj, dict) and "Records" in obj:
+                records.extend(obj["Records"])
+            elif isinstance(obj, list):
+                records.extend(obj)
+            else:
+                records.append(obj)
+        if not records:
+            continue
+
+        # Format the merged object per the module's declared S3 record format.
+        fmt = getattr(module, 'S3_RECORD_FORMAT', 'cloudtrail_records')
+        if fmt == 'jsonl':
+            # GuardDuty findings export: newline-delimited JSON, one finding per line.
+            body = "\n".join(json.dumps(r, default=str) for r in records)
         else:
-            records.append(obj)
-    if not records:
-        return
-    merged = gzip.compress(json.dumps({"Records": records}, default=str).encode("utf-8"))
-    send_s3_message(merged, module, config, f"batch:{len(records)} events")
+            # CloudTrail: single {"Records":[...]} envelope.
+            body = json.dumps({"Records": records}, default=str)
+        merged = gzip.compress(body.encode("utf-8"))
+        send_s3_message(merged, module, config, f"batch:{len(records)} events")
 
 
 def send_s3_message(content_bytes, module, config, event_name):
@@ -452,16 +469,27 @@ def send_s3_message(content_bytes, module, config, event_name):
         # AWS_REGION
         region = os.getenv('AWS_REGION', aws_conf.get('aws_region', 'us-east-1'))
 
-        # S3_BUCKET_NAME (This is the most critical variable that was showing 'None')
-        bucket_name = os.getenv('S3_BUCKET_NAME', aws_conf.get('s3_bucket_name'))
+        # S3 bucket. A module may declare its own bucket env var (S3_BUCKET_ENV) so a
+        # separate log type (e.g. GuardDuty) can land in its own bucket; otherwise it
+        # falls back to the shared S3_BUCKET_NAME (same bucket, different prefix).
+        bucket_env = getattr(module, 'S3_BUCKET_ENV', None)
+        bucket_name = (os.getenv(bucket_env) if bucket_env else None) \
+                      or os.getenv('S3_BUCKET_NAME') or aws_conf.get('s3_bucket_name')
 
         if not bucket_name:
-            print(f"ERROR: S3_BUCKET_NAME is not defined in the .env file and is missing from the '{conf_key}' block in config.json. Cannot upload log.")
+            print(f"ERROR: S3 bucket is not defined ({bucket_env or 'S3_BUCKET_NAME'} in .env / '{conf_key}' in config.json). Cannot upload log.")
             return
 
-        # Construct the CloudTrail-like file path
-        file_name = f"{account_id}_CloudTrail_{region}_{now.strftime('%Y%m%dT%H%MZ')}_{str(uuid.uuid4())[:6].upper()}.json.gz"
-        s3_key = f"AWSLogs/{account_id}/CloudTrail/{region}/{now.strftime('%Y/%m/%d')}/{file_name}"
+        # Build the object key from the module's declared log type. GuardDuty's native
+        # export is <prefix>/<UUID>.jsonl.gz (flat, no date partition); CloudTrail is a
+        # date-partitioned {"Records":[...]}.json.gz object.
+        log_type = getattr(module, 'S3_LOG_TYPE', 'CloudTrail')
+        if log_type == 'GuardDuty':
+            file_name = f"{uuid.uuid4().hex}.jsonl.gz"
+            s3_key = f"AWSLogs/{account_id}/GuardDuty/{region}/{file_name}"
+        else:
+            file_name = f"{account_id}_CloudTrail_{region}_{now.strftime('%Y%m%dT%H%MZ')}_{str(uuid.uuid4())[:6].upper()}.json.gz"
+            s3_key = f"AWSLogs/{account_id}/CloudTrail/{region}/{now.strftime('%Y/%m/%d')}/{file_name}"
 
         _tprint(f"Sending S3 for {module.NAME}{event_str}: Uploading {file_name} to {bucket_name}/{s3_key}")
 
@@ -1124,6 +1152,24 @@ def run_compromised_account_gdrive_exfil_scenario(modules, config):
 
     print("\n--- Scenario Complete ---")
 
+def _emit_guardduty(all_modules, config, context, finding_event):
+    """Fire a corroborating Amazon GuardDuty finding on the SAME pivot/context as the
+    CloudTrail step it backs up, if the 'AWS GuardDuty' module is loaded. Optional —
+    silently skipped when the module isn't present, like other optional scenario modules.
+    GuardDuty findings model to xdm.alert.* (an alert), so they raise the corroborating
+    step from a raw event to a vendor-confirmed detection on the same account/principal/IP."""
+    gd = all_modules.get("AWS GuardDuty")
+    if not gd:
+        return
+    try:
+        result = gd.generate_log(config, context=context, scenario_event=finding_event)
+        if result:
+            process_and_send(result, gd, config, finding_event)
+            print(f"    -> GuardDuty finding: {finding_event}")
+    except Exception as e:
+        print(f"    (GuardDuty finding {finding_event} skipped: {e})")
+
+
 def run_aws_pentest_scenario(modules, config):
     """Generates a sequence of logs simulating a pentest/attack scenario in AWS."""
     print("\n--- Running 'AWS Pentest & Defense Evasion' Scenario ---")
@@ -1194,15 +1240,20 @@ def run_aws_pentest_scenario(modules, config):
             log_2, name_2 = aws_module.generate_log(config, scenario_event="TOR_LOGIN", context=tor_context)
             process_and_send(log_2, aws_module, config, name_2)
             time.sleep(1)
+        # GuardDuty corroboration: Tor-sourced API call on the hijacked identity.
+        _emit_guardduty(modules, config,
+                        {'ip_address': tor_ips[0], 'user_identity': tor_user}, "GD_TOR_LOGIN")
 
         print("[STEP 3] Simulating Privilege Escalation (Attach Admin Policy to pentest user)...")
         log_3, name_3 = aws_module.generate_log(config, scenario_event="ATTACH_ADMIN_POLICY", context=context)
         process_and_send(log_3, aws_module, config, name_3)
+        _emit_guardduty(modules, config, context, "GD_ADMIN_PRIVESC")
         time.sleep(1)
 
         print("[STEP 4] Simulating Defense Evasion (Stop CloudTrail)...")
         log_4, name_4 = aws_module.generate_log(config, scenario_event="STOP_CLOUDTRAIL", context=context)
         process_and_send(log_4, aws_module, config, name_4)
+        _emit_guardduty(modules, config, context, "GD_CLOUDTRAIL_DISABLED")
         time.sleep(1)
 
         print("[STEP 5] Simulating Defense Evasion (Disable GuardDuty)...")
@@ -1213,6 +1264,7 @@ def run_aws_pentest_scenario(modules, config):
         print("[STEP 6] Simulating Persistence (Make S3 Bucket Public)...")
         log_6, name_6 = aws_module.generate_log(config, scenario_event="MAKE_S3_PUBLIC", context=context)
         process_and_send(log_6, aws_module, config, name_6)
+        _emit_guardduty(modules, config, context, "GD_S3_PUBLIC")
         time.sleep(1)
 
     except Exception as e:
@@ -2966,6 +3018,10 @@ def run_server_breach_cloud_scenario(all_modules, config):
                                           context={"session_context": session_context,
                                                    "ip_address": attacker_ip}),
                   aws_module, "IMDS_CREDENTIAL_THEFT")
+            # GuardDuty corroboration: instance-role credentials used from outside AWS.
+            _emit_guardduty(all_modules, config,
+                            {"session_context": session_context, "ip_address": attacker_ip},
+                            "GD_INSTANCE_CRED_EXFIL")
             time.sleep(2)
 
         # STEP 7 — Cloud exfil: the stolen EC2-role credentials bulk-read + exfil S3.
@@ -2975,6 +3031,9 @@ def run_server_breach_cloud_scenario(all_modules, config):
                                           context={"session_context": session_context,
                                                    "ip_address": attacker_ip}),
                   aws_module, "S3_READ_EXFIL_CHAIN")
+            _emit_guardduty(all_modules, config,
+                            {"session_context": session_context, "ip_address": attacker_ip},
+                            "GD_S3_EXFIL")
 
     except Exception as e:
         print(f"\nAn error occurred during scenario execution: {e}")
@@ -3030,11 +3089,24 @@ def run_cloud_ransomware_scenario(all_modules, config):
         ("STEP 7", "Impact: destroy KMS keys (DisableKey + ScheduleKeyDeletion)",  "KMS_KEY_DESTRUCTION"),
     ]
 
+    # Corroborating GuardDuty finding per CloudTrail stage (same principal/IP pivot).
+    _gd_for_stage = {
+        "CONSOLE_LOGIN_BRUTE_FORCE": "GD_MALICIOUS_IP",
+        "ATTACH_ADMIN_POLICY":       "GD_ADMIN_PRIVESC",
+        "STOP_CLOUDTRAIL":           "GD_CLOUDTRAIL_DISABLED",
+        "DISABLE_S3_LOGGING":        "GD_S3_LOGGING_DISABLED",
+        "S3_READ_EXFIL_CHAIN":       "GD_S3_EXFIL",
+        "S3_RANSOMWARE_ENCRYPT":     "GD_S3_IMPACT",
+    }
+
     try:
         for label, desc, ev in stages:
             print(f"[{label}] AWS: {desc}...")
             _emit(aws_module.generate_log(config, scenario_event=ev, context=aws_ctx),
                   aws_module, ev)
+            gd_ev = _gd_for_stage.get(ev)
+            if gd_ev:
+                _emit_guardduty(all_modules, config, aws_ctx, gd_ev)
             time.sleep(2)
     except Exception as e:
         print(f"\nAn error occurred during scenario execution: {e}")
@@ -3205,12 +3277,14 @@ def run_identity_attack_cloud_scenario(all_modules, config):
         print("[STEP 4] AWS: privilege escalation — attach AdministratorAccess...")
         _emit(aws_module.generate_log(config, scenario_event="ATTACH_ADMIN_POLICY", context=aws_ctx),
               aws_module, "ATTACH_ADMIN_POLICY")
+        _emit_guardduty(all_modules, config, aws_ctx, "GD_ADMIN_PRIVESC")
         time.sleep(2)
 
         # STEP 5 — Cloud data exfiltration as the federated session.
         print("[STEP 5] AWS: bulk S3 read + exfil as the federated identity...")
         _emit(aws_module.generate_log(config, scenario_event="S3_READ_EXFIL_CHAIN", context=aws_ctx),
               aws_module, "S3_READ_EXFIL_CHAIN")
+        _emit_guardduty(all_modules, config, aws_ctx, "GD_S3_EXFIL")
 
     except Exception as e:
         print(f"\nAn error occurred during scenario execution: {e}")

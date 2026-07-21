@@ -56,7 +56,17 @@
       "url_env_var": "WINDOWS_EVENTS_COLLECTOR_URL",
       "api_key_env_var": "WINDOWS_EVENTS_KEY",
       "content_type": "application/json"
+    },
+    "guardduty_collector": {
+      "url_env_var": "GUARDDUTY_COLLECTOR_URL",
+      "auth_type_env_var": "GUARDDUTY_AUTH_TYPE",
+      "api_key_env_var": "GUARDDUTY_KEY",
+      "content_type": "application/json"
     }
+  },
+  "aws_guardduty_config": {
+    "transport": "s3",
+    "collector_id": "guardduty_collector"
   },
   "aws_config": {
     "transport": "s3",
