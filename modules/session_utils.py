@@ -471,6 +471,22 @@ def weighted_dns_domain(user, domains=None):
     return random.choice(domains)
 
 
+def reset_caches():
+    """Clear all per-user memoization caches for a hermetic start.
+
+    These module-level dicts memoize per-user picks (home IPs, mail servers,
+    destination/byte/domain weightings) the first time each user is seen, so
+    subsequent picks stay stable within a run. Deterministic Training Mode calls
+    this before a seeded run so the very first pick for each user is reproducible
+    instead of depending on whatever an earlier run left cached.
+    """
+    _USER_HOME_IPS.clear()
+    _USER_MAIL_SERVERS.clear()
+    _USER_DEST_WEIGHTS.clear()
+    _USER_BYTE_BANDS.clear()
+    _USER_DOMAIN_WEIGHTS.clear()
+
+
 def get_users_by_department(session_context):
     """Return users grouped by department for the Bad User picker.
 

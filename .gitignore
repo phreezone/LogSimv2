@@ -51,3 +51,6 @@ db.sqlite3
 # Flask-specific files (if applicable)
 instance/
 .webassets-cache/
+
+# Local training-mode revert/backup artifacts (not repo content)
+.training-mode-checkpoint/

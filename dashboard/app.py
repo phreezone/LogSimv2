@@ -149,6 +149,12 @@ def _fetch_tor_exit_nodes() -> list[dict]:
               "Using static fallback list from config.json.")
         return []
 
+# Capture the static config.json Tor list BEFORE the daily live overwrite, so the
+# deterministic Training engine can pin a stable list — the morning Bulk stage and the
+# afternoon Live stream then pick identical anon IPs even though the live list differs
+# day to day. (See modules/training_engine.deterministic_env.)
+CONFIG["_static_tor_exit_nodes"] = copy.deepcopy(CONFIG.get("tor_exit_nodes", []))
+
 _live_tor = _fetch_tor_exit_nodes()
 if _live_tor:
     CONFIG["tor_exit_nodes"] = _live_tor
@@ -534,6 +540,9 @@ def _stop_baduser():
 _SEND_QUEUE: _queue.Queue = _queue.Queue(maxsize=5000)
 _SEND_WORKERS_STARTED = False
 _SEND_WORKERS_LOCK = threading.Lock()
+# Continuous module streaming + Bad User forward through this pool. More workers = higher
+# sustained events/sec (each now reuses pooled keep-alive HTTP connections). Tunable via env.
+_SEND_WORKER_COUNT = max(1, int(os.getenv("SEND_WORKERS", "8")))
 
 
 def _send_worker():
@@ -551,9 +560,12 @@ def _send_worker():
             pass
 
 
-def _ensure_send_workers(count=3):
-    """Start sender pool once (idempotent)."""
+def _ensure_send_workers(count=None):
+    """Start sender pool once (idempotent). Worker count defaults to _SEND_WORKER_COUNT
+    (SEND_WORKERS env, default 8)."""
     global _SEND_WORKERS_STARTED
+    if count is None:
+        count = _SEND_WORKER_COUNT
     with _SEND_WORKERS_LOCK:
         if _SEND_WORKERS_STARTED:
             return
@@ -689,6 +701,9 @@ def api_start_module(name: str):
         return jsonify({"error": f"Module '{name}' not found"}), 404
     if state.status == "running":
         return jsonify({"error": "Module is already running"}), 409
+    if _training_state["active"]:
+        return jsonify({"error": "A deterministic training run is active; "
+                                 "try again after it finishes"}), 409
     body = request.get_json(silent=True) or {}
     level = body.get("threat_level", state.threat_level)
     if level not in THREAT_LEVELS:
@@ -715,6 +730,9 @@ def api_stop_module(name: str):
 
 @app.post("/api/modules/start_all")
 def api_start_all():
+    if _training_state["active"]:
+        return jsonify({"error": "A deterministic training run is active; "
+                                 "try again after it finishes"}), 409
     body = request.get_json(silent=True) or {}
     level = body.get("threat_level", "Realistic")
     raw_iv = body.get("event_interval")
