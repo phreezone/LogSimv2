@@ -45,6 +45,27 @@ def _random_external_ip():
     return f"{random.choice(_EXT_FIRST_OCTETS)}.{random.randint(0,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
 
 
+# Realistic file names for upload / data-transfer events, grouped by the kind of
+# content being moved. Used to populate fileName/fileType/filesize (cn2) so web
+# upload events carry the file metadata a real Zscaler NSS web feed reports.
+_UPLOAD_FILES = {
+    "document": [("Q3_Financial_Report.xlsx", "xlsx"), ("Board_Deck_Draft.pptx", "pptx"),
+                 ("Contract_Amendment.docx", "docx"), ("2026_Budget_Forecast.xlsx", "xlsx"),
+                 ("Strategy_Review.pdf", "pdf"), ("Vendor_SOW.docx", "docx")],
+    "archive":  [("project_backup.zip", "zip"), ("export_bundle.tar.gz", "gz"),
+                 ("photos_archive.7z", "7z"), ("case_files.zip", "zip")],
+    "pii":      [("customer_records.csv", "csv"), ("employee_roster.xlsx", "xlsx"),
+                 ("account_export.csv", "csv"), ("payroll_run.xlsx", "xlsx")],
+    "source":   [("app_source.tar.gz", "gz"), ("build_pipeline.py", "py"),
+                 ("api_service.java", "java"), ("repo_snapshot.zip", "zip")],
+}
+
+
+def _pick_upload_file(kind="document"):
+    """Return (filename, filetype) for an upload event of the given content kind."""
+    return random.choice(_UPLOAD_FILES.get(kind, _UPLOAD_FILES["document"]))
+
+
 def _get_threat_interval(threat_level, config):
     levels = config.get('threat_generation_levels', {})
     return levels.get(threat_level, 7200)
@@ -290,6 +311,10 @@ def _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_in
     except Exception:
         dest_ip = "40.99.1.1"
     method = random.choice(["PUT", "POST"])
+    # bytesout = client→server (large: uploading files); bytesin = server→client (small: ACK)
+    upload_bytes = random.randint(500_000, 50_000_000)
+    ack_bytes    = random.randint(200, 2_000)
+    filename, filetype = _pick_upload_file(random.choice(["document", "archive"]))
     fields = {
         "action": "Allowed",
         "urlcat":      url_cat,
@@ -310,9 +335,11 @@ def _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_in
         "cip":   internal_host_ip,
         "sip":   dest_ip,
         "proto": "HTTPS",
-        # bytesout = client→server (large: uploading files); bytesin = server→client (small: ACK)
-        "bytesout": random.randint(500_000, 50_000_000),
-        "bytesin":  random.randint(200, 2_000),
+        "bytesout": upload_bytes,
+        "bytesin":  ack_bytes,
+        # file metadata: cn2=filesize (the uploaded file), cn3=totalsize (transaction)
+        "filename": filename, "filetype": filetype,
+        "filesize": upload_bytes, "totalsize": upload_bytes + ack_bytes,
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "2",
@@ -574,6 +601,7 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
         "malwareclass": malware_details.get('class'), "malwaretype": malware_details.get('type'),
         "reqmethod": "GET",
         "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "contenttype": "application/octet-stream",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"http://{details.get('domain', 'malware.example.com')}/{filename}",
@@ -583,6 +611,7 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
         "bytesin":  random.randint(200, 2_000),
         "bytesout": random.randint(300, 1_500),
         "filename": filename, "filetype": filetype,
+        "filesize": details.get('filesize', random.randint(50_000, 5_000_000)),
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "8",
@@ -600,6 +629,8 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
     _default_exfil = [{"url": "https://drive.google.com/upload", "domain": "drive.google.com"}]
     exfil_dest = random.choice(zscaler_conf.get('exfil_destinations', _default_exfil))
     file_size_bytes = random.randint(5_242_880, 104_857_600)  # 5MB–100MB
+    ack_bytes = random.randint(100, 500)
+    filename, filetype = _pick_upload_file(random.choice(["archive", "pii", "document"]))
     dest_ip = f"104.18.30.{random.randint(1, 254)}"
     logs = []
     # Log 1: DNS precursor
@@ -610,11 +641,13 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
                           "Allow", "Allow_Web_Outbound", "HTTPS",
                           "Data Exfiltration", "LargeUpload",
                           "Unknown", "7",
-                          random.randint(100, 500), file_size_bytes))
+                          ack_bytes, file_size_bytes))
     # Log 3: NSSWeblog — web proxy event
     fields = {
         "action": "Allowed",
         "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
+        "urlclass": "Business and Productivity",
+        "riskscore": str(random.randint(40, 70)),
         "responsecode": "201", "reason": "Allowed", "reqmethod": "POST",
         "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
         "appname": "File Transfer", "appclass": "General", "contenttype": "application/zip",
@@ -622,7 +655,10 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": exfil_dest.get('url'), "ehost": exfil_dest.get('domain'),
         "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
-        "bytesin": random.randint(100, 500), "bytesout": file_size_bytes,
+        "bytesin": ack_bytes, "bytesout": file_size_bytes,
+        # file metadata: cn2=filesize (uploaded file), cn3=totalsize (transaction)
+        "filename": filename, "filetype": filetype,
+        "filesize": file_size_bytes, "totalsize": file_size_bytes + ack_bytes,
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "7",
@@ -651,6 +687,10 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
     exfil_dest = random.choice(zscaler_conf.get('exfil_destinations', _default_exfil))
     dest_ip = f"104.18.30.{random.randint(1, 254)}"
     upload_bytes = random.randint(1000, 50000)
+    ack_bytes = random.randint(100, 500)
+    # Pick a filename whose type matches the DLP engine that fired.
+    _engine_kind = {"Source Code": "source", "PII": "pii"}.get(engine, "document")
+    filename, filetype = _pick_upload_file(_engine_kind)
     logs = []
     # Log 1: DNS precursor
     logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip))
@@ -660,11 +700,13 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
                           "Blocked", "Block_DLP_Upload", "HTTPS",
                           "DLP", "DLP_Block",
                           "Unknown", "6",
-                          random.randint(100, 500), upload_bytes))
+                          ack_bytes, upload_bytes))
     # Log 3: NSSWeblog — DLP block with engine details
     fields = {
         "action": "Blocked",
         "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
+        "urlclass": "Business and Productivity",
+        "riskscore": str(random.randint(45, 75)),
         "responsecode": "403", "reason": "DLP Block", "reqmethod": "POST",
         "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
         "contenttype": "application/zip",
@@ -672,7 +714,10 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": exfil_dest.get('url'), "ehost": exfil_dest.get('domain'),
         "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
-        "bytesin": random.randint(100, 500), "bytesout": upload_bytes,
+        "bytesin": ack_bytes, "bytesout": upload_bytes,
+        # file metadata: cn2=filesize (blocked upload), cn3=totalsize (transaction)
+        "filename": filename, "filetype": filetype,
+        "filesize": upload_bytes, "totalsize": upload_bytes + ack_bytes,
         "dlpengine": engine, "dlpdictionary": dictionary, "dlprule": rule,
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
@@ -709,14 +754,19 @@ def _generate_cloud_app_control_event(config, user, dept, internal_host_ip, devi
     fields = {
         "action": "Blocked" if blocked else "Allowed",
         "urlcat": "Information Technology", "urlsupercat": "Information Technology",
+        "urlclass": "Business and Productivity",
+        "riskscore": str(random.randint(30, 60)),
         "responsecode": "403" if blocked else "200",
         "reason": f"Cloud App Control: {app.get('name', 'Unknown App')}",
         "reqmethod": "GET", "appname": app.get('name'), "appclass": app.get('class'),
+        "contenttype": "text/html",
+        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"https://{app.get('name', 'app').lower()}.com",
         "ehost": f"{app.get('name', 'app').lower()}.com",
         "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
+        "bytesin": random.randint(500, 5_000), "bytesout": random.randint(200, 2_000),
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "5" if blocked else "2",
@@ -758,7 +808,10 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
         "malwarecat": threat.get('category', "Malware"), "threatname": threat.get('name', "Unknown"),
         "threatscore": "100", "malwareclass": "Sandbox", "malwaretype": threat.get('type', "exe"),
         "fileHash": file_hash, "filename": filename, "filetype": threat.get('type', "exe"),
+        "filesize": threat.get('filesize', random.randint(20_000, 8_000_000)),
         "reqmethod": "GET",
+        "contenttype": "application/octet-stream",
+        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"http://download.unsafe-storage.com/{filename}",
@@ -791,11 +844,15 @@ _THREAT_COUNTRIES = ["Russia", "China", "Iran", "North Korea", "Romania", "Ukrai
 
 def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
               action, rule, nwsvc, threat_cat, threat_name, dest_country, sev,
-              bytes_in=0, bytes_out=60):
-    """Build a single nssfwlog CEF event — used by all firewall scenario generators."""
+              bytes_in=0, bytes_out=60, event_time_ms=None):
+    """Build a single nssfwlog CEF event — used by all firewall scenario generators.
+
+    event_time_ms: optional ms-epoch to back-date the event (sets CEF rt -> XSIAM _time);
+                   used by time-spread threats such as impossible travel.
+    """
     zscaler_conf = config.get('zscaler_config', {})
     src_country = "United States" if _is_internal_ip(src_ip) else random.choice(_THREAT_COUNTRIES)
-    return _format_nss_log_as_cef({
+    fields = {
         "srcip": src_ip, "sport": random.randint(49152, 65535),
         "destip": dst_ip, "destport": dst_port, "proto": proto,
         "action": action, "rulelabel": rule,
@@ -811,7 +868,10 @@ def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "destinationTranslatedAddress": dst_ip,
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
-    }, user, dept, 'nssfwlog')
+    }
+    if event_time_ms is not None:
+        fields["rt"] = event_time_ms
+    return _format_nss_log_as_cef(fields, user, dept, 'nssfwlog')
 
 
 # ---------------------------------------------------------------------------
@@ -1016,6 +1076,9 @@ def _generate_brute_force(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
+_beacon_target_map: dict = {}   # internal_host_ip -> stable C2 resolver for recurring-rare-IP detection
+
+
 def _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info):
     """Repeated DNS queries (UDP/53) to a suspicious external resolver — C2 beacon pattern.
 
@@ -1025,12 +1088,16 @@ def _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info):
     Returns a list of CEF log strings.
     """
     print("    - Zscaler Module simulating: DNS C2 Beacon (volume DNS to suspicious resolver)")
-    # Suspicious resolvers that are not on standard block lists
-    suspicious_resolvers = (
-        [_random_external_ip() for _ in range(3)] +
-        ["91.108.4.1", "176.10.104.240", "185.220.101.1"]
-    )
-    resolver_ip = random.choice(suspicious_resolvers)
+    # Stable resolver per source so successive runs recur to the same rare IP
+    # (the recurring-rare-IP detection signal), not random noise.
+    resolver_ip = _beacon_target_map.get(internal_host_ip)
+    if not resolver_ip:
+        suspicious_resolvers = (
+            [_random_external_ip() for _ in range(3)] +
+            ["91.108.4.1", "176.10.104.240", "185.220.101.1"]
+        )
+        resolver_ip = random.choice(suspicious_resolvers)
+        _beacon_target_map[internal_host_ip] = resolver_ip
     n_queries   = random.randint(15, 40)
     logs = []
     for _ in range(n_queries):
@@ -1168,15 +1235,17 @@ def _generate_vpn_brute_force(config, user, dept, internal_host_ip, device_info)
 
 
 def _generate_vpn_impossible_travel(config, user, dept, internal_host_ip, device_info):
-    """Same user authenticates from geographically distant IPs within minutes (nssfwlog).
+    """Same user: FAILED then SUCCESSFUL VPN/ZPA auth from two distant IPs (nssfwlog).
 
-    Two ALLOWED VPN/ZPA sessions from the same user — the first from a benign
-    location, the second from a suspicious foreign location 5-10 minutes later.
-    Physical travel is impossible in that window. XSIAM detects the anomaly.
+    The XSIAM UEBA impossible-travel detector fires on a failed-then-succeeded auth
+    pattern (compromised creds) in EACH location — not on bare successful sessions. So
+    each of the two geos emits several Blocked auth attempts (door-knocking) followed
+    by an Allowed VPN session. Same user; the benign location is back-dated 5-10 min
+    (via rt) so the two successes sit an impossible distance apart in time.
 
     Returns list of CEF log strings (multi-event).
     """
-    print(f"    - Zscaler Module simulating: VPN Impossible Travel for {user}")
+    print(f"    - Zscaler Module simulating: VPN Impossible Travel (door-knock + success x2 geos) for {user}")
     zscaler_conf = config.get('zscaler_config', {})
     gateway_ip = zscaler_conf.get('vpn_gateway_ip',
                      random.choice(config.get('internal_servers', ['10.0.10.1'])))
@@ -1185,15 +1254,31 @@ def _generate_vpn_impossible_travel(config, user, dept, internal_host_ip, device
     benign_ip      = benign_loc.get('ip', '68.185.12.14')
     suspicious_ip  = suspicious_loc.get('ip', '175.45.176.10')
 
+    now_ms = int(time.time() * 1000)
+    gap_ms = random.randint(5, 10) * 60 * 1000
+
     logs = []
-    for vpn_src_ip, country in [(benign_ip, "United States"), (suspicious_ip, random.choice(_THREAT_COUNTRIES))]:
+    for vpn_src_ip, country, base_offset in [
+        (benign_ip,     "United States",                 -gap_ms),
+        (suspicious_ip, random.choice(_THREAT_COUNTRIES), 0),
+    ]:
+        n_fails = random.randint(3, 5)
+        for i in range(n_fails):     # door-knocking: blocked auth attempts
+            logs.append(_fw_event(config, user, dept, device_info,
+                                  vpn_src_ip, gateway_ip, 443, "6",
+                                  "Blocked", "Block_VPN_AuthFail", "HTTPS",
+                                  "Authentication", "VPN_AuthFailed",
+                                  country, "5",
+                                  random.randint(100, 400), random.randint(200, 800),
+                                  event_time_ms=now_ms + base_offset + i * 3000))
+        # successful session after the failures — the pattern the detector fires on
         logs.append(_fw_event(config, user, dept, device_info,
                               vpn_src_ip, gateway_ip, 443, "6",
                               "Allow", "Allow_VPN_Access", "HTTPS",
                               "N/A", "VPN_Session",
                               country, "3",
-                              random.randint(100_000, 2_000_000),
-                              random.randint(50_000, 500_000)))
+                              random.randint(100_000, 2_000_000), random.randint(50_000, 500_000),
+                              event_time_ms=now_ms + base_offset + n_fails * 3000))
     return logs
 
 
@@ -1470,6 +1555,10 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "New FTP Server"},
     {"event": "ddns_connection",      "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
+    {"event": "large_download",       "weight": 3,  "analytic": True,
+     "xsiam_alert": "Large Download"},
+    {"event": "reverse_ssh_tunnel",   "weight": 2,  "analytic": True,
+     "xsiam_alert": "Uncommon reverse SSH tunnel to external domain/ip"},
 ]
 
 # --- Display-name mapping (same pattern as checkpoint_firewall.py) ---
@@ -1519,8 +1608,77 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info):
 
 # Module-level dispatch map for named-threat mode.
 # Functions accept (config, user, dept, internal_host_ip, device_info).
+def _generate_large_download(config, user, dept, internal_host_ip, device_info):
+    """Large INBOUND web transfer — 'Large Download' volume anomaly. The proxy
+    counterpart to data_exfil: huge bytesin (download) / small bytesout (request).
+    Returns [DNS precursor, NSSFWlog TCP/443 allow, NSSWeblog allow]."""
+    print("    - Zscaler Module simulating: Large Download (inbound volume anomaly)")
+    zscaler_conf = config.get('zscaler_config', {})
+    _default_dl  = [{"url": "https://cdn.file-host.com/download", "domain": "cdn.file-host.com"}]
+    dl_dest      = random.choice(zscaler_conf.get('download_destinations',
+                                 zscaler_conf.get('exfil_destinations', _default_dl)))
+    download_bytes = random.randint(524_288_000, 4_294_967_296)  # 500 MB - 4 GB
+    req_bytes      = random.randint(200, 2000)
+    dest_ip        = f"104.18.30.{random.randint(1, 254)}"
+    filename, filetype = _pick_upload_file(random.choice(["archive", "document"]))
+
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
+    # NSSFWlog — bytes_in = download (large), bytes_out = request (small)
+    logs.append(_fw_event(config, user, dept, device_info,
+                          internal_host_ip, dest_ip, 443, "6",
+                          "Allow", "Allow_Web_Outbound", "HTTPS",
+                          "Large Download", "LargeDownload",
+                          "Unknown", "5",
+                          download_bytes, req_bytes))
+    fields = {
+        "action": "Allowed",
+        "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
+        "urlclass": "Business and Productivity",
+        "riskscore": str(random.randint(30, 60)),
+        "responsecode": "200", "reason": "Allowed", "reqmethod": "GET",
+        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "appname": "File Transfer", "appclass": "General", "contenttype": "application/octet-stream",
+        "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
+        "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
+        "eurl": dl_dest.get('url'), "ehost": dl_dest.get('domain'),
+        "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
+        "bytesin": download_bytes, "bytesout": req_bytes,
+        "filename": filename, "filetype": filetype,
+        "filesize": download_bytes, "totalsize": download_bytes + req_bytes,
+        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
+        "cefSeverity": "5",
+    }
+    logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
+    return logs
+
+
+def _generate_reverse_ssh_tunnel(config, user, dept, internal_host_ip, device_info):
+    """Internal host -> EXTERNAL IP on SSH/22 through the ZIA firewall — reverse SSH
+    tunnel / C2 over SSH. Long-lived, high bidirectional volume; a few sessions to the
+    SAME external host (stable destination = recurring-rare-destination signal).
+    Returns list of nssfwlog CEF events."""
+    print("    - Zscaler Module simulating: Reverse SSH tunnel to external host")
+    dest_ip = _beacon_target_map.get(f"revssh::{internal_host_ip}")
+    if not dest_ip:
+        dest_ip = _random_external_ip()
+        _beacon_target_map[f"revssh::{internal_host_ip}"] = dest_ip
+    logs = []
+    for _ in range(random.randint(2, 4)):
+        logs.append(_fw_event(config, user, dept, device_info,
+                              internal_host_ip, dest_ip, 22, "6",
+                              "Allow", "Allow_Web_Outbound", "SSH",
+                              "Remote Access", "ReverseSSHTunnel",
+                              "Unknown", "6",
+                              random.randint(5, 80) * 1024 * 1024,
+                              random.randint(5, 80) * 1024 * 1024))
+    return logs
+
+
 _NAMED_THREATS = {
     "web_c2_beacon":        _generate_web_c2_beacon,
+    "large_download":       _generate_large_download,
+    "reverse_ssh_tunnel":   _generate_reverse_ssh_tunnel,
     "web_threat":           _generate_threat_web_traffic,
     "data_exfil":           _generate_data_exfil_web_traffic,
     "dlp_threat":           _generate_dlp_web_traffic,
@@ -1590,7 +1748,9 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
     are both the action string (Allowed/Blocked for web, Allow/Blocked for FW).
     deviceProduct uses mixed case: NSSWeblog, NSSFWlog.
     """
-    rt = int(time.time() * 1000)
+    # XSIAM keys _time off the CEF rt field. Respect an explicitly-set rt (ms epoch)
+    # so time-spread threats (e.g. impossible travel) can back-date events; else now.
+    rt = fields.get("rt") or int(time.time() * 1000)
     # Zscaler NSS deviceProduct uses mixed case per XSIAM dataset naming
     _PRODUCT_MAP = {"nssweblog": "NSSWeblog", "nssfwlog": "NSSFWlog"}
     cef_product = _PRODUCT_MAP.get(log_product, log_product)
@@ -1599,7 +1759,10 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
         "rt": rt,
         "suser": user if '@' in user else f"{user}@examplecorp.com",
         "externalId": str(random.randint(1000000, 9999999999)),
-        "deviceHostName":              fields.get("devicehostname"),
+        # XSIAM's Zscaler modeling rule reads the custom lowercase key
+        # `devicehostname` (-> xdm.source.host.hostname), not CEF-standard
+        # deviceHostName. Emit lowercase to match the published datamodel.
+        "devicehostname":              fields.get("devicehostname"),
         "deviceOwner":                 fields.get("deviceowner"),
         "deviceOperatingSystem":       fields.get("deviceostype"),
         "deviceOperatingSystemVersion":fields.get("deviceosversion"),
@@ -1613,19 +1776,42 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
     }
 
     if log_product == 'nssweblog':
-        cef_name = "Web Traffic"
+        # totalsize = full transaction bytes. Fall back to bytesin+bytesout when a
+        # generator doesn't set it explicitly, so cn3 is never empty on a web
+        # transaction that reported byte counts.
+        _totalsize = fields.get("totalsize")
+        if _totalsize is None and (fields.get("bytesin") is not None
+                                   or fields.get("bytesout") is not None):
+            _totalsize = (fields.get("bytesin") or 0) + (fields.get("bytesout") or 0)
+        # Raw-completeness fields: present in the zscaler_nssweblog_raw schema but
+        # NOT XDM-mapped by the web modeling rule (queryable via XQL). Derive sane
+        # values from what the generator already provides.
+        _web_proto = fields.get("proto")
+        _web_dpt = fields.get("destport") or {"HTTPS": 443, "HTTP": 80}.get(_web_proto, 443)
+        _web_spt = fields.get("sport") or random.randint(49152, 65535)
+        _web_destcountry = fields.get("destCountry") or (
+            "United States" if fields.get("action") in ("Allow", "Allowed") else "Unknown")
+        _web_desttrans = fields.get("destinationTranslatedAddress") or fields.get("sip")
         cef_map  = {
-            # XIF-mapped cs/cn fields:
-            "cs2": fields.get("urlcat"),       "cs2Label": "urlcat",
-            "cs4": fields.get("malwarecat"),   "cs4Label": "malwarecat",
-            "cs5": fields.get("threatname"),   "cs5Label": "threatname",
-            "cn1": fields.get("threatscore"),  "cn1Label": "threatscore",
-            # Raw dataset hunting fields:
+            # XIF-mapped cs/cn fields (consumed by XSIAM ZscalerModelingRule):
+            "cs2": fields.get("urlcat"),       "cs2Label": "urlcat",       # -> http.url_category
+            "cs4": fields.get("malwarecat"),   "cs4Label": "malwarecat",   # -> alert.category
+            "cs5": fields.get("threatname"),   "cs5Label": "threatname",   # -> alert.name
+            # cn1 -> xdm.alert.severity: use threatscore on threats, else riskscore,
+            # so severity is populated on benign web events too.
+            "cn1": fields.get("threatscore") or fields.get("riskscore"), "cn1Label": "threatscore",
+            # URL class -> xdm.event.type. XSIAM reads the custom key
+            # ZscalerNSSWeblogURLClass; cs1 is kept for back-compat with
+            # correlation rules that filter `cs1 = "Malicious Content"`.
+            "ZscalerNSSWeblogURLClass": fields.get("urlclass"),
+            "spriv": fields.get("spriv", "domain users"),                  # -> source.zone
+            "destinationServiceName": fields.get("appname"),              # -> target.interface
+            # Raw dataset hunting fields (queryable, not XDM-mapped by XSIAM):
             "cs1": fields.get("urlclass"),     "cs1Label": "urlclass",
             "cs3": fields.get("malwareclass"), "cs3Label": "malwareclass",
             "cs6": fields.get("riskscore"),    "cs6Label": "riskscore",
             "cn2": fields.get("filesize"),     "cn2Label": "filesize",
-            "cn3": fields.get("totalsize"),    "cn3Label": "totalsize",
+            "cn3": _totalsize,                 "cn3Label": "totalsize",
             # Standard XIF-mapped fields:
             "act": fields.get("action"),
             "outcome": fields.get("responsecode"),
@@ -1641,7 +1827,14 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
             "in": fields.get("bytesin"),  "out": fields.get("bytesout"),
             "fileName": fields.get("filename"), "fileType": fields.get("filetype"),
             "fileHash": fields.get("fileHash"),
+            "appname": fields.get("appname"),
             "appclass": fields.get("appclass"),
+            "urlsupercat": fields.get("urlsupercat"),
+            # Raw schema columns (not XDM-mapped for web; complete the raw dataset):
+            "proto": _web_proto,
+            "spt": _web_spt, "dpt": _web_dpt,
+            "destCountry": _web_destcountry,
+            "destinationTranslatedAddress": _web_desttrans,
         }
         if fields.get("event_type") == "dlp":
             cef_map.update({
@@ -1650,11 +1843,12 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
                 "cs3": fields.get("dlprule"),      "cs3Label": "dlprulename",
                 "cs4": None, "cs4Label": None,
                 "cs5": None, "cs5Label": None,
-                "cn1": None, "cn1Label": None,
+                # DLP isn't a malware threat, so clear threatscore — but keep cn1
+                # populated from riskscore so xdm.alert.severity still resolves.
+                "cn1": fields.get("riskscore"),    "cn1Label": "riskscore",
             })
 
     else:  # nssfwlog
-        cef_name = "Firewall Traffic"
         cef_map  = {
             # XIF-mapped cs/cn fields:
             "cs2": fields.get("rulelabel"),    "cs2Label": "nwapp",
@@ -1682,6 +1876,12 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
 
     merged = dict(common_map)
     merged.update(cef_map)
+    # Drop any "<base>Label" whose partner value is absent — otherwise a dropped
+    # None value (e.g. filesize on a browsing event) leaves an orphan label like
+    # "cn2Label=filesize" with no matching cn2 in the output.
+    for _lbl in [k for k in merged if k.endswith("Label")]:
+        if merged.get(_lbl[:-5]) is None:
+            merged[_lbl] = None
     cef_severity = fields.get('cefSeverity', '3')
     # Zscaler uses the action string as both signatureId (pos 4) and name (pos 5)
     action_str   = fields.get('action', 'Allow')
@@ -1704,10 +1904,13 @@ def _generate_scenario_log(config, scenario):
     zscaler_conf = config.get('zscaler_config', {})
     fields = {
         "action": "Blocked", "urlcat": "Malware", "urlsupercat": "Security",
+        "urlclass": "Malicious Content",
+        "riskscore": str(random.randint(75, 100)),
         "responsecode": "403", "reason": "Threat Block",
         "malwarecat": scenario.get('threat_category', 'Adware'),
         "threatname":  scenario.get('threat_name',     'JS/Adware.Gen'),
         "reqmethod": "GET", "useragent": "Mozilla/5.0",
+        "contenttype": "text/html",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"http://{scenario.get('dest_domain', 'malware.example.com')}/",
@@ -1848,6 +2051,8 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         ("smtp_large_exfil",       2, lambda: _generate_smtp_large_exfil(config, user, dept, internal_host_ip, device_info)),
         ("ftp_large_exfil",        2, lambda: _generate_ftp_large_exfil(config, user, dept, internal_host_ip, device_info)),
         ("ddns_connection",        3, lambda: _generate_ddns_connection(config, user, dept, internal_host_ip, device_info)),
+        ("large_download",         3, lambda: _generate_large_download(config, user, dept, internal_host_ip, device_info)),
+        ("reverse_ssh_tunnel",     2, lambda: _generate_reverse_ssh_tunnel(config, user, dept, internal_host_ip, device_info)),
     ]
     labels    = [t[0] for t in _threat_map]
     weights   = [t[1] for t in _threat_map]

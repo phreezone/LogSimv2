@@ -1626,6 +1626,10 @@
         {
           "event": "anyconnect_vpn",
           "weight": 20
+        },
+        {
+          "event": "ad_auth_benign",
+          "weight": 5
         }
       ],
       "threat": [
@@ -1658,10 +1662,6 @@
           "weight": 2
         },
         {
-          "event": "vpn_bruteforce",
-          "weight": 2
-        },
-        {
           "event": "vpn_impossible_travel",
           "weight": 2
         },
@@ -1672,26 +1672,6 @@
         {
           "event": "server_outbound_http",
           "weight": 1
-        },
-        {
-          "event": "ips_alert",
-          "weight": 20
-        },
-        {
-          "event": "auth_brute_force",
-          "weight": 13
-        },
-        {
-          "event": "lateral_movement",
-          "weight": 12
-        },
-        {
-          "event": "url_filter_block",
-          "weight": 8
-        },
-        {
-          "event": "targeted_admin_bruteforce",
-          "weight": 4
         },
         {
           "event": "workstation_lateral_rdp",
@@ -1712,6 +1692,62 @@
         {
           "event": "smb_share_enumeration",
           "weight": 5
+        },
+        {
+          "event": "reverse_ssh_tunnel",
+          "weight": 2
+        },
+        {
+          "event": "ldap_recon",
+          "weight": 3
+        },
+        {
+          "event": "web_c2_beacon",
+          "weight": 2
+        },
+        {
+          "event": "cryptomining",
+          "weight": 2
+        },
+        {
+          "event": "rare_port_connection",
+          "weight": 2
+        },
+        {
+          "event": "vpn_data_exfil",
+          "weight": 2
+        },
+        {
+          "event": "vpn_concurrent_sessions",
+          "weight": 2
+        },
+        {
+          "event": "external_fanout",
+          "weight": 2
+        },
+        {
+          "event": "failed_connections_burst",
+          "weight": 10
+        },
+        {
+          "event": "smtp_spray",
+          "weight": 3
+        },
+        {
+          "event": "smtp_large_exfil",
+          "weight": 2
+        },
+        {
+          "event": "torrent_client",
+          "weight": 3
+        },
+        {
+          "event": "new_ftp_server",
+          "weight": 2
+        },
+        {
+          "event": "dc_smb_outbound",
+          "weight": 3
         }
       ]
     },
@@ -1811,6 +1847,46 @@
         {
           "event": "smb_share_enumeration",
           "weight": 5
+        },
+        {
+          "event": "large_download",
+          "weight": 3
+        },
+        {
+          "event": "dns_tunneling",
+          "weight": 3
+        },
+        {
+          "event": "reverse_ssh_tunnel",
+          "weight": 2
+        },
+        {
+          "event": "ldap_recon",
+          "weight": 3
+        },
+        {
+          "event": "external_port_scan",
+          "weight": 3
+        },
+        {
+          "event": "rare_external_rdp",
+          "weight": 3
+        },
+        {
+          "event": "smtp_spray",
+          "weight": 3
+        },
+        {
+          "event": "smtp_large_exfil",
+          "weight": 2
+        },
+        {
+          "event": "ftp_large_exfil",
+          "weight": 2
+        },
+        {
+          "event": "ddns_connection",
+          "weight": 3
         }
       ]
     }
@@ -1955,6 +2031,10 @@
         {
           "event": "inbound_block",
           "weight": 3
+        },
+        {
+          "event": "ad_auth",
+          "weight": 5
         }
       ],
       "threat": [
@@ -2007,6 +2087,14 @@
           "weight": 6
         },
         {
+          "event": "dos_anomaly",
+          "weight": 4
+        },
+        {
+          "event": "dlp_block",
+          "weight": 4
+        },
+        {
           "event": "server_outbound_http",
           "weight": 2
         },
@@ -2033,6 +2121,50 @@
         {
           "event": "smb_share_enumeration",
           "weight": 5
+        },
+        {
+          "event": "large_download",
+          "weight": 3
+        },
+        {
+          "event": "dns_tunneling",
+          "weight": 3
+        },
+        {
+          "event": "reverse_ssh_tunnel",
+          "weight": 2
+        },
+        {
+          "event": "ldap_recon",
+          "weight": 3
+        },
+        {
+          "event": "vpn_abnormal_os",
+          "weight": 2
+        },
+        {
+          "event": "external_port_scan",
+          "weight": 3
+        },
+        {
+          "event": "rare_external_rdp",
+          "weight": 2
+        },
+        {
+          "event": "smtp_spray",
+          "weight": 2
+        },
+        {
+          "event": "smtp_large_exfil",
+          "weight": 2
+        },
+        {
+          "event": "ftp_large_exfil",
+          "weight": 2
+        },
+        {
+          "event": "ddns_connection",
+          "weight": 2
         }
       ]
     }
@@ -3829,6 +3961,66 @@
         {
           "event": "smb_share_enumeration",
           "weight": 5
+        },
+        {
+          "event": "large_download",
+          "weight": 3
+        },
+        {
+          "event": "dns_tunneling",
+          "weight": 3
+        },
+        {
+          "event": "reverse_ssh_tunnel",
+          "weight": 2
+        },
+        {
+          "event": "ldap_recon",
+          "weight": 3
+        },
+        {
+          "event": "vpn_brute_force",
+          "weight": 6
+        },
+        {
+          "event": "vpn_impossible_travel",
+          "weight": 3
+        },
+        {
+          "event": "vpn_tor_login",
+          "weight": 3
+        },
+        {
+          "event": "rare_external_rdp",
+          "weight": 3
+        },
+        {
+          "event": "rare_ssh",
+          "weight": 3
+        },
+        {
+          "event": "smtp_spray",
+          "weight": 3
+        },
+        {
+          "event": "smtp_large_exfil",
+          "weight": 2
+        },
+        {
+          "event": "ftp_large_exfil",
+          "weight": 2
+        },
+        {
+          "event": "ddns_connection",
+          "weight": 3
+        },
+        {
+          "event": "app_control",
+          "weight": 4
+        },
+        {
+          "event": "network_anomaly",
+          "weight": 4
         }
       ]
     },
@@ -19329,64 +19521,81 @@
     }
   },
   "training_config": {
+    "anchor_epoch": "2020-01-01T00:00:00Z",
+    "eps_tiers": [
+      { "max_students": 5,  "eps": 2.0 },
+      { "max_students": 10, "eps": 1.0 },
+      { "eps": 0.5 }
+    ],
+    "student_profiles": {
+      "count": 20,
+      "template": {
+        "domain": "EXAMPLECORP",
+        "username_pattern": "student{n}",
+        "ip_block": "10.{n}.0.0/16",
+        "hostname_prefix": "STU{n}-",
+        "sid_rid_base": 5000,
+        "external_ip_block": "185.{n}.0.0/16"
+      }
+    },
     "packs": [
       {
         "id": "domain-dominance-day",
-        "description": "Scenario 18 — Domain Dominance (Phish -> AD Recon -> Kerberoast -> DCSync -> Lateral -> Persistence). 4-hour day with Okta/Windows/Infoblox/Zscaler baseline.",
+        "description": "Scenario 18 - Domain Dominance (Phish -> AD Recon -> Kerberoast -> DCSync -> Lateral -> Persistence). 4-hour day with Okta/Windows/Infoblox/Zscaler baseline.",
         "seed": "domain-dominance-day",
         "duration_seconds": 14400,
         "benign_events_per_second_per_module": 2,
-        "benign_threat_level": "High",
+        "benign_threat_level": "Extreme",
         "benign_modules": ["Okta SSO", "Windows Event Log", "Infoblox NIOS", "Zscaler Web Gateway"],
         "scenario": { "id": "18", "start_offset_seconds": 5400 }
       },
       {
         "id": "beaconing-implant-day",
-        "description": "Scenario 19 — Beaconing Implant (DNS C2 -> DNS tunnel -> web exfil -> FW egress -> service persistence). 4-hour day with Infoblox/Zscaler/FortiGate/Windows baseline.",
+        "description": "Scenario 19 - Beaconing Implant (DNS C2 -> DNS tunnel -> web exfil -> FW egress -> service persistence). 4-hour day with Infoblox/Zscaler/FortiGate/Windows baseline.",
         "seed": "beaconing-implant-day",
         "duration_seconds": 14400,
         "benign_events_per_second_per_module": 2,
-        "benign_threat_level": "High",
+        "benign_threat_level": "Extreme",
         "benign_modules": ["Infoblox NIOS", "Zscaler Web Gateway", "Fortinet FortiGate", "Windows Event Log"],
         "scenario": { "id": "19", "start_offset_seconds": 5400 }
       },
       {
         "id": "server-breach-cloud-day",
-        "description": "Scenario 20 — Server Breach -> Cloud Takeover (Apache exploit -> reverse shell -> DNS exfil -> S3 exfil). 4-hour day with Apache/Infoblox/AWS/Zscaler baseline.",
+        "description": "Scenario 20 - Server Breach -> Cloud Takeover (Apache exploit -> reverse shell -> DNS exfil -> S3 exfil). 4-hour day with Apache/Infoblox/AWS/Zscaler baseline.",
         "seed": "server-breach-cloud-day",
         "duration_seconds": 14400,
         "benign_events_per_second_per_module": 2,
-        "benign_threat_level": "High",
+        "benign_threat_level": "Extreme",
         "benign_modules": ["Apache httpd", "Infoblox NIOS", "aws", "Zscaler Web Gateway"],
         "scenario": { "id": "20", "start_offset_seconds": 5400 }
       },
       {
         "id": "cloud-ransomware-day",
-        "description": "Scenario 21 — Cloud Ransomware (brute force -> admin -> stop logging -> exfil -> S3 encrypt + ransom). 4-hour day with AWS/Okta/Zscaler baseline.",
+        "description": "Scenario 21 - Cloud Ransomware (brute force -> admin -> stop logging -> exfil -> S3 encrypt + ransom). 4-hour day with AWS/Okta/Zscaler baseline.",
         "seed": "cloud-ransomware-day",
         "duration_seconds": 14400,
         "benign_events_per_second_per_module": 2,
-        "benign_threat_level": "High",
+        "benign_threat_level": "Extreme",
         "benign_modules": ["aws", "Okta SSO", "Zscaler Web Gateway"],
         "scenario": { "id": "21", "start_offset_seconds": 5400 }
       },
       {
         "id": "perimeter-intrusion-day",
-        "description": "Scenario 22 — Perimeter Intrusion (port scan -> denied inbound -> VPN brute force -> web exploit). 4-hour day with Cisco ASA/FortiGate/Apache/Zscaler baseline.",
+        "description": "Scenario 22 - Perimeter Intrusion (port scan -> denied inbound -> VPN brute force -> web exploit). 4-hour day with Cisco ASA/FortiGate/Apache/Zscaler baseline.",
         "seed": "perimeter-intrusion-day",
         "duration_seconds": 14400,
         "benign_events_per_second_per_module": 2,
-        "benign_threat_level": "High",
+        "benign_threat_level": "Extreme",
         "benign_modules": ["Cisco Firepower", "Fortinet FortiGate", "Apache httpd", "Zscaler Web Gateway"],
         "scenario": { "id": "22", "start_offset_seconds": 5400 }
       },
       {
         "id": "identity-cloud-day",
-        "description": "Scenario 23 — Identity Attack -> Cloud (Okta MFA-fatigue + Tor login -> AWS SAML federation -> privesc -> exfil). 4-hour day with Okta/AWS/Zscaler baseline.",
+        "description": "Scenario 23 - Identity Attack -> Cloud (Okta MFA-fatigue + Tor login -> AWS SAML federation -> privesc -> exfil). 4-hour day with Okta/AWS/Zscaler baseline.",
         "seed": "identity-cloud-day",
         "duration_seconds": 14400,
         "benign_events_per_second_per_module": 2,
-        "benign_threat_level": "High",
+        "benign_threat_level": "Extreme",
         "benign_modules": ["Okta SSO", "aws", "Zscaler Web Gateway"],
         "scenario": { "id": "23", "start_offset_seconds": 5400 }
       }

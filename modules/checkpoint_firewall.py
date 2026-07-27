@@ -89,6 +89,16 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "New FTP Server"},
     {"event": "ddns_connection",       "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
+    {"event": "large_download",        "weight": 3,  "analytic": True,
+     "xsiam_alert": "Large Download"},
+    {"event": "dns_tunneling",         "weight": 3,  "analytic": True,
+     "xsiam_alert": "DNS Tunneling"},
+    {"event": "reverse_ssh_tunnel",    "weight": 2,  "analytic": True,
+     "xsiam_alert": "Uncommon reverse SSH tunnel to external domain/ip"},
+    {"event": "ldap_recon",            "weight": 3,  "analytic": True,
+     "xsiam_alert": "Suspicious reconnaissance using LDAP"},
+    {"event": "external_port_scan",    "weight": 3,  "analytic": True,
+     "xsiam_alert": "Port Scan"},
 ]
 
 
@@ -233,7 +243,6 @@ def _dns_precursor(config, src_ip, user, shost, domain, event_time=None):
         "cn1": 0, "cn1Label": "Elapsed Time in Seconds",
         "ifname": "eth0",
         "msg": f"Accept DNS query for {domain} from {src_ip}",
-        "cefDeviceEventClassId": "traffic",
     }
     return _format_checkpoint_cef(config, ext, event_time=event_time)
 
@@ -292,23 +301,26 @@ def _format_checkpoint_cef(config, extensions_dict, device_product=None, event_t
     device_version = "R81.10"
 
     signature_id = ext.pop("signatureId", "Log")
-    name         = ext.pop("name",        "Log")
-    raw_severity = ext.pop("severity",    "unknown")
+    # CEF Name (position 6): genuine Check Point Log Exporter sources this from the
+    # service / application (e.g. "https", "http", "domain-udp") for traffic, or the
+    # Protection/Application Name for blade events. Fall back to service_id/app.
+    name         = ext.pop("name", None) or ext.get("service_id") or ext.get("app") or "Log"
+    raw_severity = ext.pop("severity",    "Unknown")
 
-    # Map numeric CEF severity to Check Point text severity values.
-    # CP internal: 0-1=low, 2=medium, 3=high, 4=Very-high, default=unknown.
-    _TEXT_SEVERITIES = {"unknown", "low", "medium", "high", "Very-high"}
+    # Genuine Check Point severity text values: Unknown / Low / Medium / High / Critical
+    # (per R81 Log Exporter CefFieldsMapping; default is "Unknown").
+    _TEXT_SEVERITIES = {"Unknown", "Low", "Medium", "High", "Critical"}
     _sev = str(raw_severity)
     if _sev in _TEXT_SEVERITIES:
         severity = _sev
     else:
         _sev_map = {
-            "0": "low", "1": "low", "2": "low", "3": "low",
-            "5": "medium", "6": "medium",
-            "7": "high", "8": "high",
-            "9": "Very-high", "10": "Very-high",
+            "0": "Low", "1": "Low", "2": "Low", "3": "Low", "4": "Medium",
+            "5": "Medium", "6": "Medium",
+            "7": "High", "8": "High",
+            "9": "Critical", "10": "Critical",
         }
-        severity = _sev_map.get(_sev, "unknown")
+        severity = _sev_map.get(_sev, "Unknown")
 
     cef_header = (
         f"CEF:{cef_version}|{device_vendor}|{device_product}|"
@@ -336,6 +348,12 @@ def _format_checkpoint_cef(config, extensions_dict, device_product=None, event_t
         ext.setdefault("inzone", _in_iface)
     if _out_iface:
         ext.setdefault("outzone", _out_iface)
+    # Check Point connection logs report per-direction packet counts
+    # (client_outbound_packets → source.sent_packets, server_outbound_packets → target.sent_packets).
+    if ext.get("out") is not None:
+        ext.setdefault("client_outbound_packets", random.randint(1, 500))
+    if ext.get("in") is not None:
+        ext.setdefault("server_outbound_packets", random.randint(1, 800))
     # Auto-migrate cs1 "Rule Name" → cs2 for firewall traffic events.
     # Blade-specific events (IPS, App Control, URL Filtering, SmartDefense) use
     # distinct cs1Labels and are not affected by this migration.
@@ -379,11 +397,14 @@ def _generate_benign_log(config, session_context=None):
 
     log_type = random.choices(
         ['traffic', 'inbound_block', 'dns', 'icmp', 'smtp', 'ntp', 'smb_internal',
-         'rdp_internal', 'ftp_download', 'vpn_login', 'vpn_failure'],
+         'rdp_internal', 'ftp_download', 'vpn_login', 'vpn_failure', 'ad_auth'],
         weights=[40, 18, 8, 3, 4, 3, 3,
-                 3, 2, 3, 1],
+                 3, 2, 3, 1, 5],
         k=1,
     )[0]
+
+    if log_type == 'ad_auth':
+        return _generate_ldap_kerberos_benign(config, src_ip, user, shost)
 
     destination = weighted_destination(user, config.get('benign_egress_destinations', [{}]))
     try:
@@ -408,7 +429,6 @@ def _generate_benign_log(config, session_context=None):
             "duration": str(_icmp_dur),
             "ifname": "eth0",
             "msg": f"Accept ICMP echo from {src_ip} to {dest_ip}",
-            "cefDeviceEventClassId": "traffic",
         }
     elif log_type == 'dns':
         extensions = {
@@ -421,7 +441,6 @@ def _generate_benign_log(config, session_context=None):
             "deviceDirection": "1",
             "ifname": "eth0",
             "msg": f"Accept DNS query from {src_ip}",
-            "cefDeviceEventClassId": "traffic",
         }
     elif log_type == 'inbound_block':
         # Simulates routine inbound Drop/Reject of unsolicited external connection attempts.
@@ -455,7 +474,6 @@ def _generate_benign_log(config, session_context=None):
             "reason": "Policy",
             "ifname": "eth0",
             "msg": f"{act} inbound {service.upper()} from {ext_src_ip} to {target_ip}:{target_port}",
-            "cefDeviceEventClassId": "traffic",
         }
 
     elif log_type == 'smtp':
@@ -479,7 +497,6 @@ def _generate_benign_log(config, session_context=None):
             "in":  random.randint(200, 5_000),
             "ifname": "eth0",
             "msg": f"Accept SMTP relay from {src_ip} to {mail_dest_ip}:{smtp_port}",
-            "cefDeviceEventClassId": "traffic",
         }
 
     elif log_type == 'ntp':
@@ -501,7 +518,6 @@ def _generate_benign_log(config, session_context=None):
             "in":  random.randint(48, 76),
             "ifname": "eth0",
             "msg": f"Accept NTP sync from {src_ip} to {ntp_dest}",
-            "cefDeviceEventClassId": "traffic",
         }
 
     elif log_type == 'smb_internal':
@@ -522,7 +538,6 @@ def _generate_benign_log(config, session_context=None):
             "in":  random.randint(10_000, 50_000_000),
             "ifname": "eth1",
             "msg": f"Accept internal SMB from {src_ip} to {file_server}:445",
-            "cefDeviceEventClassId": "traffic",
         }
 
     elif log_type == 'rdp_internal':
@@ -545,7 +560,6 @@ def _generate_benign_log(config, session_context=None):
             "reason": "TCP FIN",
             "ifname": "eth1",
             "msg": f"Accept internal RDP from {src_ip} to {rdp_server}:3389",
-            "cefDeviceEventClassId": "traffic",
         }
 
     elif log_type == 'ftp_download':
@@ -568,16 +582,20 @@ def _generate_benign_log(config, session_context=None):
             "reason": "TCP FIN",
             "ifname": "eth1",
             "msg": f"Accept internal FTP download from {ftp_server}:21 to {src_ip}",
-            "cefDeviceEventClassId": "traffic",
         }
 
     elif log_type == 'vpn_login':
-        # Benign VPN session from user's stable home IP
+        # Benign VPN login — Identity Awareness "Log In" event. Routes to the
+        # check_point_identity_awareness_raw dataset (parallel to vpn_failure) so the
+        # login outcome models correctly; the VPN data session is logged separately by
+        # firewall traffic events.
         checkpoint_conf = config.get(CONFIG_KEY, {})
         gateway_ip = checkpoint_conf.get('gateway_ip', '203.0.113.10')
         home_ip = stable_vpn_ip(user)
-        vpn_dur = random.randint(1800, 28800)
         extensions = {
+            "signatureId": "45678",
+            "name": "Identity Awareness",
+            "severity": "1",
             "act": "Log In",
             "auth_status": "Log In",
             "src": home_ip, "dst": gateway_ip,
@@ -586,16 +604,14 @@ def _generate_benign_log(config, session_context=None):
             "suser": user,
             "deviceInboundInterface": "External", "deviceOutboundInterface": "Internal",
             "deviceDirection": "0",
-            "service_id": "https", "app": "SSL VPN",
-            "cs1": "VPN_Remote_Access", "cs1Label": "Rule Name",
-            "blade": "VPN",
-            "out": random.randint(100_000, 10_000_000),
-            "in":  random.randint(500_000, 50_000_000),
-            "cn1": vpn_dur, "cn1Label": "Elapsed Time in Seconds",
-            "reason": "TCP FIN",
+            "cs3": "user", "cs3Label": "User Type",
+            "cs5": "VPN", "cs5Label": "Authentication Method",
+            "blade": "Identity Awareness",
+            "dhost": "vpn-gateway.examplecorp.com",
             "ifname": "eth0",
-            "msg": f"Accept VPN for {user} from {home_ip}",
+            "msg": f"VPN login for {user} from {home_ip}",
         }
+        return _format_checkpoint_cef(config, extensions, device_product="Identity Awareness")
 
     elif log_type == 'vpn_failure':
         # Benign VPN auth failure — typo / expired cert
@@ -622,7 +638,6 @@ def _generate_benign_log(config, session_context=None):
             "dhost": "vpn-gateway.examplecorp.com",
             "ifname": "eth0",
             "msg": f"VPN auth failed for {user} from {home_ip}",
-            "cefDeviceEventClassId": "identity",
         }
         return _format_checkpoint_cef(config, extensions, device_product="Identity Awareness")
 
@@ -644,7 +659,6 @@ def _generate_benign_log(config, session_context=None):
             "in":  random.randint(10000, 200000),
             "ifname": "eth0",
             "msg": f"Accept {proto_name} from {src_ip} to {dest_ip}",
-            "cefDeviceEventClassId": "traffic",
         }
 
     return _format_checkpoint_cef(config, extensions)
@@ -784,7 +798,6 @@ def _simulate_rare_ssh(config, src_ip, user, shost):
         "in":  random.randint(1000, 50000),
         "ifname": "eth0",
         "msg": f"Accept SSH from {src_ip} to rare external IP {dest_ip}",
-        "cefDeviceEventClassId": "traffic",
     }
     logs.append(_format_checkpoint_cef(config, extensions,
                                         event_time=base_time + timedelta(seconds=0.5)))
@@ -904,7 +917,6 @@ def _simulate_auth_brute_force(config, src_ip, user, shost):
             "reason": "Authorization Failed",
             "ifname": "eth0",
             "msg": f"Authentication failed for {user} from {src_ip} to {dhost}:{auth_port} (attempt {i + 1})",
-            "cefDeviceEventClassId": "identity",
         }
         logs.append(_format_checkpoint_cef(config, extensions, device_product="Identity Awareness",
                                            event_time=base_time + timedelta(seconds=offset)))
@@ -932,7 +944,6 @@ def _simulate_auth_brute_force(config, src_ip, user, shost):
         "reason": "Authorization Succeeded",
         "ifname": "eth0",
         "msg": f"Authentication succeeded for {success_user} from {src_ip} to {dhost}:{auth_port}",
-        "cefDeviceEventClassId": "identity",
     }
     logs.append(_format_checkpoint_cef(config, success_ext, device_product="Identity Awareness",
                                        event_time=base_time + timedelta(seconds=offset)))
@@ -984,7 +995,6 @@ def _simulate_lateral_movement(config, src_ip, user, shost):
                 "reason": "Policy" if act == "Drop" else "TCP FIN",
                 "ifname": "eth1",
                 "msg": f"{act} {service.upper()} from {src_ip} to {dest_ip}:{port}",
-                "cefDeviceEventClassId": "traffic",
             }
             logs.append(_format_checkpoint_cef(config, extensions, event_time=base_time + timedelta(seconds=offset)))
     return logs
@@ -1028,7 +1038,6 @@ def _simulate_vpn_brute_force(config, src_ip, user, shost):
             "dhost": "vpn-gateway.examplecorp.com",
             "ifname": "eth0",
             "msg": f"VPN authentication failed for {user} from {attacker_ip} (attempt {i + 1})",
-            "cefDeviceEventClassId": "identity",
         }
         logs.append(_format_checkpoint_cef(config, extensions, device_product="Identity Awareness",
                                            event_time=base_time + timedelta(seconds=offset)))
@@ -1053,7 +1062,6 @@ def _simulate_vpn_brute_force(config, src_ip, user, shost):
         "dhost": "vpn-gateway.examplecorp.com",
         "ifname": "eth0",
         "msg": f"VPN authentication succeeded for {user} from {attacker_ip}",
-        "cefDeviceEventClassId": "identity",
     }
     logs.append(_format_checkpoint_cef(config, success_ext, device_product="Identity Awareness",
                                        event_time=base_time + timedelta(seconds=offset)))
@@ -1071,7 +1079,7 @@ def _simulate_vpn_impossible_travel(config, src_ip, user, shost):
 
     Triggers XSIAM: Impossible Travel / Anomalous VPN Location analytics detection.
     """
-    print(f"    - Check Point Module simulating: VPN Impossible Travel for {user}")
+    print(f"    - Check Point Module simulating: VPN Impossible Travel (door-knock + success x2 geos) for {user}")
     checkpoint_conf = config.get(CONFIG_KEY, {})
     gateway_ip      = checkpoint_conf.get('gateway_ip', '203.0.113.10')
 
@@ -1081,43 +1089,46 @@ def _simulate_vpn_impossible_travel(config, src_ip, user, shost):
     suspicious_ip  = suspicious_loc.get('ip', '175.45.176.10')
 
     # Legitimate user logged in 5–10 minutes ago; attacker logs in now.
-    gap_minutes    = random.randint(5, 10)
-    t_benign_start = datetime.now(timezone.utc) - timedelta(minutes=gap_minutes)
-    t_suspicious   = datetime.now(timezone.utc)
+    gap_minutes  = random.randint(5, 10)
+    t_benign     = datetime.now(timezone.utc) - timedelta(minutes=gap_minutes)
+    t_suspicious = datetime.now(timezone.utc)
 
-    logs = []
-    for vpn_src_ip, label, t_start, vpn_shost in [
-        (benign_ip,    'home-office',       t_benign_start, shost),
-        (suspicious_ip, 'suspicious-foreign', t_suspicious, None),
-    ]:
-        src_port  = random.randint(49152, 65535)
-        duration  = random.randint(60, 300)
-        bytes_out = random.randint(50000, 500000)
-        bytes_in  = random.randint(100000, 2000000)
-        t_end     = t_start + timedelta(seconds=duration)
+    def _auth(vpn_src_ip, label, vpn_shost, event_time, success):
+        # Identity Awareness auth: auth_status "Log In" -> outcome SUCCESS,
+        # "Failed Log In" -> FAILED. The detector needs the fail->success pattern.
         ext = {
-            "act": "Log In",
-            "auth_status": "Log In",
+            "signatureId": "45678",
+            "name": "Identity Awareness",
+            "severity": "3" if success else "4",
+            "act": "Log In" if success else "Failed Log In",
+            "auth_status": "Log In" if success else "Failed Log In",
             "src": vpn_src_ip, "dst": gateway_ip,
-            "spt": src_port, "dpt": 443,
-            "proto": "6",
+            "spt": random.randint(49152, 65535), "dpt": 443, "proto": "6",
             "suser": user, "shost": vpn_shost,
             "deviceInboundInterface": "External", "deviceOutboundInterface": "Internal",
             "deviceDirection": "0",
-            "service_id": "https", "app": "SSL VPN",
-            "cs1": "VPN_Remote_Access", "cs1Label": "Rule Name",
-            "blade": "VPN",
-            "out": bytes_out, "in": bytes_in,
-            "cn1": duration, "cn1Label": "Elapsed Time in Seconds",
-            "duration": str(duration),
-            "reason": "TCP FIN",
+            "cs3": "user", "cs3Label": "User Type",
+            "cs5": "VPN", "cs5Label": "Authentication Method",
+            "blade": "Identity Awareness",
+            "dhost": "vpn-gateway.examplecorp.com",
             "ifname": "eth0",
-            "msg": (
-                f"Accept VPN for {user} from {vpn_src_ip} ({label}) — "
-                f"{bytes_out // 1024}KB out / {bytes_in // 1024}KB in"
-            ),
+            "msg": f"VPN {'login' if success else 'login failed'} for {user} from {vpn_src_ip} ({label})",
         }
-        logs.append(_format_checkpoint_cef(config, ext, event_time=t_end))
+        if not success:
+            ext["reason"] = "Authentication failed"
+        return _format_checkpoint_cef(config, ext, event_time=event_time,
+                                       device_product="Identity Awareness")
+
+    logs = []
+    for vpn_src_ip, label, t_base, vpn_shost in [
+        (benign_ip,     'home-office',        t_benign,     shost),
+        (suspicious_ip, 'suspicious-foreign', t_suspicious, None),
+    ]:
+        n_fails = random.randint(3, 5)
+        for i in range(n_fails):     # door-knocking: failed logins
+            logs.append(_auth(vpn_src_ip, label, vpn_shost, t_base + timedelta(seconds=i * 3), success=False))
+        # successful login after the failures — the pattern the detector fires on
+        logs.append(_auth(vpn_src_ip, label, vpn_shost, t_base + timedelta(seconds=n_fails * 3), success=True))
     return logs
 
 
@@ -1167,6 +1178,9 @@ def _simulate_vpn_tor_login(config, src_ip, user, shost):
     bytes_out = random.randint(50000, 2_000_000)
     bytes_in  = random.randint(100000, 5_000_000)
     auth_ext = {
+        "signatureId": "45678",
+        "name": "Identity Awareness",
+        "severity": "5",
         "act": "Log In",
         "auth_status": "Log In",
         "src": tor_ip, "dst": gateway_ip,
@@ -1175,20 +1189,16 @@ def _simulate_vpn_tor_login(config, src_ip, user, shost):
         "suser": user,
         "deviceInboundInterface": "External", "deviceOutboundInterface": "Internal",
         "deviceDirection": "0",
-        "service_id": "https", "app": "SSL VPN",
-        "cs1": "VPN_Remote_Access", "cs1Label": "Rule Name",
-        "blade": "VPN",
-        "out": bytes_out, "in": bytes_in,
-        "cn1": duration, "cn1Label": "Elapsed Time in Seconds",
-        "reason": "TCP FIN",
+        "cs3": "user", "cs3Label": "User Type",
+        "cs5": "VPN", "cs5Label": "Authentication Method",
+        "blade": "Identity Awareness",
+        "dhost": "vpn-gateway.examplecorp.com",
         "ifname": "eth0",
-        "msg": (
-            f"Accept VPN for {user} from TOR exit node {tor_ip} — "
-            f"{bytes_out // 1024}KB out / {bytes_in // 1024}KB in"
-        ),
+        "msg": f"VPN login for {user} from TOR exit node {tor_ip}",
     }
     logs.append(_format_checkpoint_cef(config, auth_ext,
-                                        event_time=base_time + timedelta(seconds=2)))
+                                        event_time=base_time + timedelta(seconds=2),
+                                        device_product="Identity Awareness"))
 
     # Logs 3+: Post-auth internal activity from VPN pool IP
     post_auth_actions = [
@@ -1362,6 +1372,9 @@ def _simulate_smb_share_enumeration(config, src_ip, user, shost):
     return logs
 
 
+_beacon_target_map: dict = {}   # src_ip -> stable (resolver_ip, c2_domain) for recurring-rare-domain detection
+
+
 def _simulate_dns_c2_beacon(config, src_ip, user, shost):
     """Simulates a DNS-based C2 beacon: internal host makes repeated small UDP/53 queries
     to a suspicious external resolver that is not a legitimate DNS service.
@@ -1372,18 +1385,23 @@ def _simulate_dns_c2_beacon(config, src_ip, user, shost):
     Triggers XSIAM: DNS Tunnelling / C2 Beacon analytics detection.
     """
     print(f"    - Check Point Module simulating: DNS C2 Beacon from {src_ip}")
-    destination = random.choice(config.get('exfiltration_destinations', [{}]))
-    try:
-        dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range", "154.53.224.0/24"), strict=False))
-    except Exception:
-        dest_ip = _random_external_ip()
-
     c2_domains = [
         "updates.totallylegit.xyz",    "cdn.fastdelivery.top",
         "api.cloudservicehelper.info",  "telemetry.softupdater.biz",
         "beacon.homenetworktools.ru",
     ]
-    c2_domain = random.choice(c2_domains)
+    # Stable resolver IP + C2 domain per source so successive runs recur to the same
+    # rare destination (the "recurring rare domain/IP" detection signal), not noise.
+    target = _beacon_target_map.get(src_ip)
+    if not target:
+        destination = random.choice(config.get('exfiltration_destinations', [{}]))
+        try:
+            dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range", "154.53.224.0/24"), strict=False))
+        except Exception:
+            dest_ip = _random_external_ip()
+        target = (dest_ip, random.choice(c2_domains))
+        _beacon_target_map[src_ip] = target
+    dest_ip, c2_domain = target
 
     logs = []
     base_time = datetime.now(timezone.utc)
@@ -1464,51 +1482,53 @@ def _simulate_server_outbound_http(config):
 
 
 def _simulate_workstation_rdp(config, src_ip, user, shost):
-    """Simulates a workstation-to-workstation RDP connection — anomalous lateral movement.
+    """Workstation RDP to MULTIPLE internal hosts — anomalous lateral movement.
 
-    In normal operations, users connect via RDP to servers, not to peer workstations.
-    A workstation initiating RDP to another workstation is a red flag for lateral movement
-    via stolen credentials or a compromised endpoint being used as a pivot.
-
-    Triggers XSIAM: Workstation-to-workstation RDP / lateral movement analytics.
+    In normal operations a user RDPs to at most one or two known hosts. UEBA
+    lateral-movement detection keys on BREADTH — a single RDP is background noise, but
+    one workstation opening RDP (3389) to many internal hosts (mostly blocked, a few
+    succeeding) is the pivot signal. Generates 5-8 RDP connections to DISTINCT internal
+    destinations. Returns list of CEF log strings (multi-event).
     """
-    print(f"    - Check Point Module simulating: Workstation-to-Workstation RDP from {src_ip}")
-    try:
-        internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
-        net     = ip_network(internal_net, strict=False)
-        dest_ip = rand_ip_from_network(net)
-        if dest_ip == src_ip:
-            dest_ip = rand_ip_from_network(net)
-    except Exception:
-        dest_ip = "192.168.1.101"
+    print(f"    - Check Point Module simulating: Workstation RDP lateral (multi-host) from {src_ip}")
+    n_hosts  = random.randint(5, 8)
+    dest_ips = set()
+    internal_nets = config.get('internal_networks', ['192.168.1.0/24'])
+    while len(dest_ips) < n_hosts:
+        try:
+            host = rand_ip_from_network(ip_network(random.choice(internal_nets), strict=False))
+            if host != src_ip:
+                dest_ips.add(host)
+        except Exception:
+            dest_ips.add(f"192.168.1.{random.randint(101, 200)}")
 
-    dhost     = dest_ip
-    bytes_out = random.randint(10000, 200000)
-    bytes_in  = random.randint(50000, 2000000)
-    duration  = random.randint(120, 3600)
-    src_port  = random.randint(49152, 65535)
-
-    ext = {
-        "act": "Accept",
-        "src": src_ip, "dst": dest_ip,
-        "spt": src_port, "dpt": 3389,
-        "proto": "6",
-        "suser": user, "shost": shost, "dhost": dhost,
-        "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
-        "deviceDirection": "1",
-        "service_id": "rdp", "app": "RDP",
-        "cs1": "Allow_Internal_Traffic", "cs1Label": "Rule Name",
-        "out": bytes_out, "in": bytes_in,
-        "cn1": duration, "cn1Label": "Elapsed Time in Seconds",
-        "duration": str(duration),
-        "reason": "TCP FIN",
-        "ifname": "eth1",
-        "msg": (
-            f"Accept W2W RDP {src_ip} -> {dest_ip}:3389 (anomalous) — "
-            f"{bytes_out // 1024}KB out / {bytes_in // 1024}KB in, {duration}s"
-        ),
-    }
-    return _format_checkpoint_cef(config, ext)
+    logs = []
+    for dest_ip in list(dest_ips)[:n_hosts]:
+        # Most lateral RDP attempts are blocked; a few reachable hosts accept.
+        accepted  = random.random() < 0.4
+        src_port  = random.randint(49152, 65535)
+        duration  = random.randint(120, 3600) if accepted else 0
+        bytes_out = random.randint(10000, 200000) if accepted else 0
+        bytes_in  = random.randint(50000, 2000000) if accepted else 0
+        ext = {
+            "act": "Accept" if accepted else "Drop",
+            "src": src_ip, "dst": dest_ip,
+            "spt": src_port, "dpt": 3389,
+            "proto": "6",
+            "suser": user, "shost": shost, "dhost": dest_ip,
+            "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
+            "deviceDirection": "1",
+            "service_id": "rdp", "app": "RDP",
+            "cs1": "Allow_Internal_Traffic" if accepted else "Cleanup_Rule", "cs1Label": "Rule Name",
+            "out": bytes_out, "in": bytes_in,
+            "cn1": duration, "cn1Label": "Elapsed Time in Seconds",
+            "duration": str(duration),
+            "reason": "TCP FIN" if accepted else "Blocked by policy",
+            "ifname": "eth1",
+            "msg": f"{'Accept' if accepted else 'Drop'} W2W RDP {src_ip} -> {dest_ip}:3389 (lateral movement)",
+        }
+        logs.append(_format_checkpoint_cef(config, ext))
+    return logs
 
 
 def _simulate_rare_external_rdp(config, src_ip, user, shost):
@@ -1544,7 +1564,6 @@ def _simulate_rare_external_rdp(config, src_ip, user, shost):
             f"Accept outbound RDP from {src_ip} to external {dest_ip}:3389 — "
             f"{bytes_out // 1024}KB out / {bytes_in // 1024}KB in, {duration}s"
         ),
-        "cefDeviceEventClassId": "traffic",
     }
     logs.append(_format_checkpoint_cef(config, ext,
                                         event_time=base_time + timedelta(seconds=0.5)))
@@ -1604,7 +1623,6 @@ def _simulate_smtp_spray(config, src_ip, user, shost):
                 f"Accept direct SMTP from workstation {src_ip} to external "
                 f"{dst_ip}:{smtp_port} — {bytes_out}B out, {duration}s"
             ),
-            "cefDeviceEventClassId": "traffic",
         }
         logs.append(_format_checkpoint_cef(config, ext,
                                            event_time=base_time + timedelta(seconds=offset)))
@@ -1658,7 +1676,6 @@ def _simulate_smtp_large_exfil(config, src_ip, user, shost):
             f"Accept SMTP from workstation {src_ip} to {dest_ip}:{smtp_port} — "
             f"{bytes_out // (1024 * 1024)}MB outbound in {duration}s"
         ),
-        "cefDeviceEventClassId": "traffic",
     }
     logs.append(_format_checkpoint_cef(config, ext,
                                         event_time=base_time + timedelta(seconds=1)))
@@ -1700,7 +1717,6 @@ def _simulate_ftp_large_exfil(config, src_ip, user, shost):
             f"Accept outbound FTP from workstation {src_ip} to {dest_ip}:21 — "
             f"{bytes_out // (1024 * 1024)}MB outbound in {duration}s"
         ),
-        "cefDeviceEventClassId": "traffic",
     }
     logs.append(_format_checkpoint_cef(config, ext,
                                         event_time=base_time + timedelta(seconds=1)))
@@ -1767,7 +1783,6 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
         "dns_type": "A",
         "ifname": "eth0",
         "msg": f"Accept DNS query for DDNS hostname {ddns_hostname} from {src_ip}",
-        "cefDeviceEventClassId": "traffic",
     }
     logs.append(_format_checkpoint_cef(config, dns_ext, event_time=base_time))
 
@@ -1794,7 +1809,6 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
             f"Accept HTTPS from {src_ip} to DDNS host {ddns_hostname} "
             f"({resolved_ip}:443) — {bytes_out // 1024}KB out / {bytes_in // 1024}KB in"
         ),
-        "cefDeviceEventClassId": "traffic",
     }
     logs.append(_format_checkpoint_cef(config, https_ext,
                                        event_time=base_time + timedelta(seconds=1)))
@@ -1853,11 +1867,11 @@ def _simulate_smartdefense_event(config, src_ip, user, shost):
         "cs3": "IPS",                        "cs3Label": "Protection Type",
         "cs4": protection_name,              "cs4Label": "Protection Name",
         "flexString2": description,          "flexString2Label": "Attack Information",
+        "dhost": f"srv-{victim_ip.split('.')[-1]}.examplecorp.com",
         "blade": "IPS",
         "session_id": _generate_session_id(),
         "ifname": "eth0",
         "msg": f"SmartDefense drop: {protection_name} from {attacker_ip} to {victim_ip} — {description}",
-        "cefDeviceEventClassId": "smartdefense",
     }
     return _format_checkpoint_cef(config, extensions, device_product="SmartDefense")
 
@@ -1918,7 +1932,6 @@ def _simulate_app_control_block(config, src_ip, user, shost):
         "reason": "Application Policy Violation",
         "ifname": "eth0",
         "msg": f"App Control block: {app_name} ({app_category}) from {src_ip} — {block_reason}",
-        "cefDeviceEventClassId": "app_control",
     }
     return _format_checkpoint_cef(config, extensions, device_product="Application Control")
 
@@ -1926,6 +1939,226 @@ def _simulate_app_control_block(config, src_ip, user, shost):
 # ---------------------------------------------------------------------------
 # Main threat dispatcher
 # ---------------------------------------------------------------------------
+
+_dns_tunnel_target_map: dict = {}   # src_ip -> stable (resolver_ip, tunnel_domain) for DNS-tunnel recurrence
+
+
+def _cp_domain_controllers(config):
+    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses."""
+    dcs = config.get(CONFIG_KEY, {}).get('domain_controllers') or config.get('domain_controllers')
+    return dcs or ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+
+
+def _cp_b32_chunk(n):
+    """High-entropy base32-ish label of length n (DNS-tunnel encoded data)."""
+    return "".join(random.choice("abcdefghijklmnopqrstuvwxyz234567") for _ in range(n))
+
+
+def _simulate_large_download(config, src_ip, user, shost):
+    """DNS precursor + large INBOUND HTTPS transfer — 'Large Download' volume anomaly.
+    Flips the byte direction of large_upload (huge in / small out)."""
+    print(f"    - Check Point Module simulating: Large Download to {src_ip}")
+    destination = random.choice(config.get('exfiltration_destinations', [{}]))
+    try:
+        dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range", "154.53.224.0/24"), strict=False))
+    except (ValueError, Exception):
+        dest_ip = "154.53.224.10"
+    dhost = destination.get("domain", dest_ip)
+
+    base_time = datetime.now(timezone.utc)
+    logs = [_dns_precursor(config, src_ip, user, shost, dhost or dest_ip, event_time=base_time)]
+
+    duration = random.randint(300, 1800)
+    bytes_in = random.randint(524288000, 4294967296)   # 500 MB – 4 GB inbound
+    extensions = {
+        "act": "Accept",
+        "src": src_ip, "dst": dest_ip,
+        "spt": random.randint(49152, 65535), "dpt": 443,
+        "proto": "6",
+        "suser": user, "shost": shost, "dhost": dhost,
+        "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
+        "deviceDirection": "1",
+        "service_id": "https", "app": "SSL",
+        "cs1": "Allow_Outbound_Web", "cs1Label": "Rule Name",
+        "out": random.randint(20000, 200000),
+        "in":  bytes_in,
+        "cn1": duration, "cn1Label": "Elapsed Time in Seconds",
+        "reason": "TCP FIN",
+        "ifname": "eth0",
+        "msg": (f"Accept HTTPS from {src_ip} to {dest_ip} — "
+                f"{bytes_in // (1024 * 1024)}MB inbound in {duration}s"),
+    }
+    logs.append(_format_checkpoint_cef(config, extensions, event_time=base_time + timedelta(seconds=1)))
+    return logs
+
+
+def _simulate_dns_tunneling(config, src_ip, user, shost):
+    """High-volume DNS with long, high-entropy encoded labels to one resolver — DNS
+    tunneling / data-in-DNS exfil. Distinct from the beacon (recurrence-only): the
+    signal is qname LENGTH + entropy + query VOLUME. Stable resolver+domain per source."""
+    print(f"    - Check Point Module simulating: DNS tunneling from {src_ip}")
+    tunnel_domains = ["t.exfil-tunnel.net", "dns.data-pipe.io", "ns.tunl-c2.com"]
+    target = _dns_tunnel_target_map.get(src_ip)
+    if not target:
+        destination = random.choice(config.get('exfiltration_destinations', [{}]))
+        try:
+            dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range", "154.53.224.0/24"), strict=False))
+        except Exception:
+            dest_ip = _random_external_ip()
+        target = (dest_ip, random.choice(tunnel_domains))
+        _dns_tunnel_target_map[src_ip] = target
+    dest_ip, tunnel_domain = target
+
+    logs = []
+    base_time = datetime.now(timezone.utc)
+    offset = 0.0
+    for _ in range(random.randint(40, 90)):
+        offset += random.uniform(0.2, 2.0)   # rapid queries = tunnel throughput
+        qname = f"{_cp_b32_chunk(random.randint(32, 48))}.{_cp_b32_chunk(random.randint(16, 32))}.{tunnel_domain}"
+        ext = {
+            "act": "Accept",
+            "src": src_ip, "dst": dest_ip,
+            "spt": random.randint(49152, 65535), "dpt": 53,
+            "proto": "17",
+            "suser": user, "shost": shost, "dhost": tunnel_domain,
+            "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
+            "deviceDirection": "1",
+            "service_id": "domain-udp", "app": "DNS",
+            "cs1": "Allow_DNS", "cs1Label": "Rule Name",
+            "out": random.randint(180, 512),   # oversized encoded queries
+            "in":  random.randint(200, 4000),  # large TXT/NULL answers
+            "cn1": 0, "cn1Label": "Elapsed Time in Seconds",
+            "dns_query": qname,
+            "dns_type": random.choices(["TXT", "NULL", "A", "CNAME"], weights=[45, 25, 20, 10])[0],
+            "ifname": "eth0",
+            "msg": f"Accept DNS {src_ip} -> {dest_ip}:53 (encoded label under {tunnel_domain}: possible tunnel)",
+        }
+        logs.append(_format_checkpoint_cef(config, ext, event_time=base_time + timedelta(seconds=offset)))
+    return logs
+
+
+def _simulate_reverse_ssh_tunnel(config, src_ip, user, shost):
+    """Internal host -> EXTERNAL IP on SSH/22 — reverse SSH tunnel / C2 over SSH.
+    Long-lived, high bidirectional volume; a few sessions to the SAME external host."""
+    print(f"    - Check Point Module simulating: Reverse SSH tunnel from {src_ip}")
+    dest_ip = _random_external_ip()
+    base_time = datetime.now(timezone.utc)
+    logs = []
+    offset = 0.0
+    for _ in range(random.randint(2, 4)):
+        offset += random.uniform(1.0, 5.0)
+        duration = random.randint(1800, 14400)
+        extensions = {
+            "act": "Accept",
+            "src": src_ip, "dst": dest_ip,
+            "spt": random.randint(49152, 65535), "dpt": 22,
+            "proto": "6",
+            "suser": user, "shost": shost, "dhost": dest_ip,
+            "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
+            "deviceDirection": "1",
+            "service_id": "ssh", "app": "SSH",
+            "cs1": "Allow_Outbound_Web", "cs1Label": "Rule Name",
+            "out": random.randint(5, 80) * 1024 * 1024,
+            "in":  random.randint(5, 80) * 1024 * 1024,
+            "cn1": duration, "cn1Label": "Elapsed Time in Seconds",
+            "reason": "TCP FIN",
+            "ifname": "eth0",
+            "msg": f"Accept SSH from {src_ip} to external host {dest_ip} — long-lived tunnel ({duration}s)",
+        }
+        logs.append(_format_checkpoint_cef(config, extensions, event_time=base_time + timedelta(seconds=offset)))
+    return logs
+
+
+def _simulate_ldap_recon(config, src_ip, user, shost):
+    """One host querying MANY domain controllers on LDAP 389/636 — AD reconnaissance
+    (breadth + volume is the signal)."""
+    print(f"    - Check Point Module simulating: LDAP reconnaissance from {src_ip}")
+    logs = []
+    base_time = datetime.now(timezone.utc)
+    offset = 0.0
+    for dc in _cp_domain_controllers(config):
+        _, dhost = _get_user_and_host_info(config, dc)
+        for _ in range(random.randint(3, 6)):
+            offset += random.uniform(0.2, 1.5)
+            port = random.choice([389, 389, 636])
+            extensions = {
+                "act": "Accept",
+                "src": src_ip, "dst": dc,
+                "spt": random.randint(49152, 65535), "dpt": port,
+                "proto": "6",
+                "suser": user, "shost": shost, "dhost": dhost or dc,
+                "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
+                "deviceDirection": "1",
+                "service_id": "ldap" if port == 389 else "ldap-ssl", "app": "LDAP",
+                "cs1": "Allow_Internal_Traffic", "cs1Label": "Rule Name",
+                "out": random.randint(2000, 40000),    # large search requests
+                "in":  random.randint(20000, 400000),  # bulk directory results
+                "cn1": random.randint(0, 5), "cn1Label": "Elapsed Time in Seconds",
+                "reason": "TCP FIN",
+                "ifname": "eth0",
+                "msg": f"Accept LDAP {src_ip} -> {dc}:{port} (possible AD reconnaissance)",
+            }
+            logs.append(_format_checkpoint_cef(config, extensions, event_time=base_time + timedelta(seconds=offset)))
+    return logs
+
+
+def _simulate_external_port_scan(config):
+    """External attacker IP scanning many ports on ONE internal host — DROPPED at the
+    perimeter (complements the internal, accepted port_scan)."""
+    attacker_ip = _random_external_ip()
+    print(f"    - Check Point Module simulating: External port scan from {attacker_ip}")
+    dest_ip = random.choice(config.get('internal_servers', ['203.0.113.50']))
+    _, dhost = _get_user_and_host_info(config, dest_ip)
+    logs = []
+    base_time = datetime.now(timezone.utc)
+    offset = 0.0
+    for port in random.sample(range(1, 10000), k=random.randint(50, 100)):
+        offset += random.uniform(0.2, 1.0)
+        extensions = {
+            "act": "Drop",
+            "src": attacker_ip, "dst": dest_ip,
+            "spt": random.randint(1024, 65535), "dpt": port,
+            "proto": "6",
+            "dhost": dhost,
+            "deviceInboundInterface": "External", "deviceOutboundInterface": "Internal",
+            "deviceDirection": "0",
+            "cs1": "Drop_Inbound", "cs1Label": "Rule Name",
+            "out": 0, "in": 0,
+            "cn1": 0, "cn1Label": "Elapsed Time in Seconds",
+            "reason": "Dropped by policy",
+            "ifname": "eth0",
+            "msg": f"Drop TCP {attacker_ip} to {dest_ip}:{port} (inbound port scan)",
+        }
+        logs.append(_format_checkpoint_cef(config, extensions, event_time=base_time + timedelta(seconds=offset)))
+    return logs
+
+
+def _generate_ldap_kerberos_benign(config, src_ip, user, shost):
+    """Normal AD auth: workstation -> its DC on LDAP/Kerberos/SMB (baseline so LDAP
+    recon stands out). Returns a single CEF log string."""
+    dc = random.choice(_cp_domain_controllers(config))
+    _, dhost = _get_user_and_host_info(config, dc)
+    port = random.choice([389, 389, 636, 88, 88, 445])
+    svc  = {389: "ldap", 636: "ldap-ssl", 88: "kerberos", 445: "microsoft-ds"}[port]
+    app  = {389: "LDAP", 636: "LDAP", 88: "Kerberos", 445: "SMB"}[port]
+    extensions = {
+        "act": "Accept",
+        "src": src_ip, "dst": dc,
+        "spt": random.randint(49152, 65535), "dpt": port,
+        "proto": "6",
+        "suser": user, "shost": shost, "dhost": dhost or dc,
+        "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
+        "deviceDirection": "1",
+        "service_id": svc, "app": app,
+        "cs1": "Allow_Internal_Traffic", "cs1Label": "Rule Name",
+        "out": random.randint(500, 4000), "in": random.randint(1000, 20000),
+        "cn1": random.randint(0, 3), "cn1Label": "Elapsed Time in Seconds",
+        "reason": "TCP FIN",
+        "ifname": "eth0",
+        "msg": f"Accept {app} {src_ip} -> {dc}:{port} (AD auth)",
+    }
+    return _format_checkpoint_cef(config, extensions)
+
 
 def _generate_threat_log(config, session_context=None, forced_event=None):
     """Generates a random threat event (IPS, URL Filtering, Identity, or Analytics-based).
@@ -2011,6 +2244,16 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_simulate_ftp_large_exfil(config, src_ip, user, shost), display_name)
     if threat_type == 'ddns_connection':
         return (_simulate_ddns_connection(config, src_ip, user, shost), display_name)
+    if threat_type == 'large_download':
+        return (_simulate_large_download(config, src_ip, user, shost), display_name)
+    if threat_type == 'dns_tunneling':
+        return (_simulate_dns_tunneling(config, src_ip, user, shost), display_name)
+    if threat_type == 'reverse_ssh_tunnel':
+        return (_simulate_reverse_ssh_tunnel(config, src_ip, user, shost), display_name)
+    if threat_type == 'ldap_recon':
+        return (_simulate_ldap_recon(config, src_ip, user, shost), display_name)
+    if threat_type == 'external_port_scan':
+        return (_simulate_external_port_scan(config), display_name)
 
     # --- single-event generators: IPS, URL block, identity ---
     # Each builds its own complete extensions dict with correct src/dst/zones/blade.
@@ -2039,26 +2282,37 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         # Extract CVE reference from protection name if present
         _cve_match = re.search(r'CVE-\d{4}-\d+', protection_name)
         cve_ref = _cve_match.group(0) if _cve_match else "N/A"
+        # Genuine Check Point Threat Prevention action values are "Prevent" (blocked)
+        # and "Detect" (monitored / allowed but logged) — NOT the firewall-blade "Drop".
+        # XSIAM passes act straight through to xdm.network.observer.action, so analysts
+        # filtering action=Prevent must see the real value. Prevent dominates; Detect is
+        # the monitor-mode minority. confidence_level is a real TP field (Low/Medium/High);
+        # signature-based known-CVE protections are almost always High confidence.
+        ips_action = random.choices(["Prevent", "Detect"], weights=[85, 15])[0]
+        confidence = random.choices(["High", "Medium", "Low"], weights=[70, 25, 5])[0]
         extensions = {
-            "signatureId": protection_name,
+            "signatureId": sig_id,          # numeric protection ID (genuine event class)
             "name":        protection_name,
             "severity":    "8",
-            "act":         "Drop",
+            "act":         ips_action,
             "src": attacker_ip, "dst": victim_ip,
             "spt": random.randint(49152, 65535), "dpt": attack_dport,
             "proto": proto_num,
             "deviceInboundInterface": "External", "deviceOutboundInterface": "Internal",
             "deviceDirection": "0",
             "cs1": "IPS_Protection",    "cs1Label": "Threat Prevention Rule Name",
-            "flexNumber1": 4,           "flexNumber1Label": "Confidence",
+            "confidence_level": confidence,   # genuine Check Point TP field (Low/Medium/High)
             "cs3": "IPS",               "cs3Label": "Protection Type",
             "cs4": protection_name,     "cs4Label": "Protection Name",
+            "flexString2": (f"Signature-based IPS protection triggered: {protection_name}"
+                            + (f" ({cve_ref})" if cve_ref != "N/A" else "")),
+            "flexString2Label": "Attack Information",
+            "dhost": f"srv-{victim_ip.split('.')[-1]}.examplecorp.com",
             "blade": "IPS",
             "industry_reference": cve_ref if cve_ref != "N/A" else None,
             "protection_type": "Signature",
             "ifname": "eth0",
-            "msg": f"IPS block: {protection_name} from {attacker_ip} to {victim_ip}:{attack_dport}",
-            "cefDeviceEventClassId": "threat",
+            "msg": f"IPS {ips_action}: {protection_name} from {attacker_ip} to {victim_ip}:{attack_dport}",
         }
         return (_format_checkpoint_cef(config, extensions, device_product="SmartDefense"), display_name)
 
@@ -2079,6 +2333,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
             "suser": user, "shost": shost, "dhost": domain,
             "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
             "deviceDirection": "1",
+            "service_id": "https", "app": "HTTPS",
             "cs1": "Block_Malicious_Categories", "cs1Label": "Application Rule Name",
             "cs2": "Block_Malicious_Categories", "cs2Label": "Rule Name",
             "cs5": cat,                           "cs5Label": "Matched Category",
@@ -2089,7 +2344,6 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
             "reason": "URL Categorization",
             "ifname": "eth0",
             "msg": f"URL blocked: {domain} (category: {cat})",
-            "cefDeviceEventClassId": "url_filtering",
         }
         return (_format_checkpoint_cef(config, extensions, device_product="URL Filtering"), display_name)
 
@@ -2115,7 +2369,6 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         "dhost": "dc01.examplecorp.com",
         "ifname": "eth0",
         "msg": f"Authentication failed for {user} from {src_ip}",
-        "cefDeviceEventClassId": "identity",
     }
     return (_format_checkpoint_cef(config, extensions, device_product="Identity Awareness"), display_name)
 
@@ -2138,7 +2391,6 @@ def _generate_scenario_log(config, scenario):
         "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
         "deviceDirection": "1",
         "cs1": "Scenario_Rule", "cs1Label": "Rule Name",
-        "cefDeviceEventClassId": "traffic",
         "request": f"https://{scenario.get('dest_domain')}/",
         "suser": user,
         "shost": shost,
@@ -2201,7 +2453,6 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
                 "reason": "URL Categorization",
                 "ifname": "eth0",
                 "msg": f"URL blocked: {domain} (category: {cat})",
-                "cefDeviceEventClassId": "url_filtering",
             }
             result = _format_checkpoint_cef(config, extensions, device_product="URL Filtering")
             return (result, "THREAT_BLOCK")
