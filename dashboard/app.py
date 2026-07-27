@@ -1797,8 +1797,23 @@ def _register_v1_aliases():
         ("/api/v1/modules/<name>/fire",       "api_fire_threat",     ["POST"]),
         ("/api/v1/modules/start_all",         "api_start_all",       ["POST"]),
         ("/api/v1/modules/stop_all",          "api_stop_all",        ["POST"]),
+        # Fine-grained module control. Note reset_all sits under /modules/ here for
+        # symmetry with start_all/stop_all, though its legacy path is /api/reset_all.
+        ("/api/v1/modules/<name>/threats",    "api_get_threats",     ["GET"]),
+        ("/api/v1/modules/<name>/interval",   "api_set_interval",    ["PATCH"]),
+        ("/api/v1/modules/<name>/threat_level", "api_set_threat_level", ["PATCH"]),
+        ("/api/v1/modules/<name>/reset",      "api_reset_metrics",   ["POST"]),
+        ("/api/v1/modules/reset_all",         "api_reset_all",       ["POST"]),
+        # Targeted insider-threat simulation against one named user.
+        ("/api/v1/baduser/users",             "api_baduser_users",   ["GET"]),
+        ("/api/v1/baduser/start",             "api_baduser_start",   ["POST"]),
+        ("/api/v1/baduser/stop",              "api_baduser_stop",    ["POST"]),
+        ("/api/v1/baduser/status",            "api_baduser_status",  ["GET"]),
         ("/api/v1/health",                    "api_health",          ["GET"]),
+        ("/api/v1/health/alerts",             "api_health_alerts",   ["GET"]),
         ("/api/v1/metrics",                   "api_metrics",         ["GET"]),
+        ("/api/v1/threat_levels",             "api_threat_levels",   ["GET"]),
+        ("/api/v1/timeline",                  "api_timeline",        ["GET"]),
     ]
     view_funcs = app.view_functions
     for rule, endpoint_name, methods in aliases:

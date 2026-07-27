@@ -36,9 +36,36 @@ External integrations should use `/api/v1/*` (the UI-shaped legacy `/api/*` rout
 | `GET  /api/v1/modules` | List modules and their state |
 | `POST /api/v1/modules/{name}/start` | Start a module. Body: `{threat_level?, event_interval?}` |
 | `POST /api/v1/modules/{name}/stop` | Stop a module |
+| `GET  /api/v1/modules/{name}/threats` | Event names this module can fire (the valid `fire` values) |
 | `POST /api/v1/modules/{name}/fire` | Fire one event. Body: `{event}` |
-| `POST /api/v1/modules/start_all` / `stop_all` | Bulk start/stop |
+| `PATCH /api/v1/modules/{name}/interval` | Change event interval. Body: `{event_interval}`. Applies live |
+| `PATCH /api/v1/modules/{name}/threat_level` | Change threat level. Body: `{threat_level}`. Applies live |
+| `POST /api/v1/modules/{name}/reset` | Reset one module's counters |
+| `POST /api/v1/modules/start_all` / `stop_all` / `reset_all` | Bulk start / stop / reset counters |
+| `GET  /api/v1/baduser/users` | Simulated identities grouped by department |
+| `POST /api/v1/baduser/start` | Start a targeted insider-threat run. Body: `{username, duration_minutes?, threat_level?, event_interval?, selected_modules?}` |
+| `POST /api/v1/baduser/stop` | Stop the active Bad User run (idempotent) |
+| `GET  /api/v1/baduser/status` | Bad User progress: `remaining_seconds`, `per_module` tallies |
+| `GET  /api/v1/threat_levels` | Valid threat-level names |
 | `GET  /api/v1/health`, `GET /api/v1/metrics` | Status + throughput |
+| `GET  /api/v1/health/alerts` | Drain queued health alerts — **destructive read**, see below |
+| `GET  /api/v1/timeline` | 60×2s per-module sparkline buckets (sized for the UI chart) |
+
+Two notes on the paths:
+
+- **`/api/v1/modules/reset_all`** — the legacy route is `/api/reset_all` with no `/modules/`
+  segment; v1 moves it under `/modules/` for symmetry with `start_all`/`stop_all`.
+- **`GET /health/alerts` clears the queue it returns**, so each alert reaches exactly one
+  caller. An open dashboard UI polls it too — the two of you will split the stream. Don't rely
+  on it as a complete alert feed while someone has the UI open.
+
+### Bad User vs. scenarios
+
+A scenario is a one-shot sequence that ends on its own — `run_scenario` can wait for it and
+hand back an emission manifest. Bad User is a *sustained* run: it drives the selected modules
+as one named identity for 1–480 minutes, so `start` returns as soon as the run begins and
+there is no wait-for-completion. Poll `GET /baduser/status` for `remaining_seconds` and the
+per-module tallies. Only one Bad User run can be active at a time; a second `start` gets `409`.
 
 ### Run tracking
 
@@ -95,9 +122,17 @@ into https://editor.swagger.io).
 
 ## MCP server
 
-`mcp_server.py` exposes the API as MCP tools (`list_scenarios`, `run_scenario`,
-`get_run_status`, `list_runs`, `list_modules`, `start_module`, `stop_module`, `fire_event`,
-`get_status`) over stdio.
+`mcp_server.py` exposes the API as 20 MCP tools over stdio:
+
+- **Scenarios** — `list_scenarios`, `run_scenario`, `get_run_status`, `list_runs`
+- **Modules** — `list_modules`, `start_module`, `stop_module`, `list_module_threats`,
+  `fire_event`, `set_module_interval`, `set_module_threat_level`, `reset_module_metrics`,
+  `reset_all_metrics`
+- **Bad User** — `list_users`, `start_bad_user`, `stop_bad_user`, `get_bad_user_status`
+- **Status** — `list_threat_levels`, `get_status`, `get_health_alerts`
+
+`/api/v1/timeline` has no tool: its 60-bucket × per-module payload is chart data, too bulky to
+be useful in a tool result. Call it over HTTP if you need it.
 
 ```bash
 pip install -r integrations/requirements.txt
@@ -106,6 +141,32 @@ LOGSIM_API_URL=http://127.0.0.1:5000 LOGSIM_API_KEY=<token> python integrations/
 
 `run_scenario(scenario_id, wait=True)` blocks until the run finishes and returns the emission
 manifest — convenient for an agent that wants to generate traffic then act on the result.
+
+Agents should discover values rather than guess them: `list_modules` for module names,
+`list_module_threats` for a module's firable events, `list_threat_levels` for levels, and
+`list_users` for Bad User targets.
+
+### Tests
+
+Two suites, neither of which needs an XSIAM tenant and neither of which emits log traffic
+(`run_scenario`, `fire_event`, module start and `start_bad_user` are never called):
+
+```bash
+python tests/api_contract.py        # in-process, offline, ~seconds
+python tests/mcp_server_smoke.py    # spawns a dashboard + the MCP server over real stdio
+```
+
+`api_contract.py` is the drift guard. `_register_v1_aliases()` resolves view functions **by
+name** and only prints a warning when one is missing, so renaming a view would otherwise drop
+a `/api/v1` route silently. The test diffs the registered routes against `openapi.yaml` in
+both directions (paths *and* methods), confirms every declared alias registered, confirms each
+alias still has its legacy `/api/*` twin, and confirms every path `mcp_server.py` calls really
+exists. **Run it after touching the route table, the spec, or the MCP server.** If the
+inventory has drifted it stops there and names the cause rather than emitting a cascade of 404s.
+
+`mcp_server_smoke.py` covers the path an agent actually takes — separate dashboard process,
+auth-gated HTTP, MCP server as a stdio child — and skips with exit 0 if the optional MCP SDK
+isn't installed.
 
 ### Register with Claude Code
 

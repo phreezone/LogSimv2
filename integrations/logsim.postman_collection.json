@@ -246,6 +246,152 @@
           }
         },
         {
+          "name": "List a module's firable event names",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/modules/:name/threats",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules",
+                ":name",
+                "threats"
+              ],
+              "variable": [
+                {
+                  "key": "name",
+                  "value": "Cisco ASA"
+                }
+              ]
+            },
+            "description": "List a module's firable event names"
+          }
+        },
+        {
+          "name": "Change a module's event interval",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/modules/:name/interval",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules",
+                ":name",
+                "interval"
+              ],
+              "variable": [
+                {
+                  "key": "name",
+                  "value": "Cisco ASA"
+                }
+              ]
+            },
+            "description": "Change a module's event interval",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_interval\": 5\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Change a module's threat level",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/modules/:name/threat_level",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules",
+                ":name",
+                "threat_level"
+              ],
+              "variable": [
+                {
+                  "key": "name",
+                  "value": "Cisco ASA"
+                }
+              ]
+            },
+            "description": "Change a module's threat level",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"threat_level\": \"Elevated\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Reset one module's metrics",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/modules/:name/reset",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules",
+                ":name",
+                "reset"
+              ],
+              "variable": [
+                {
+                  "key": "name",
+                  "value": "Cisco ASA"
+                }
+              ]
+            },
+            "description": "Reset one module's metrics"
+          }
+        },
+        {
+          "name": "Reset every module's metrics and the session timer",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/modules/reset_all",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "modules",
+                "reset_all"
+              ]
+            },
+            "description": "Reset every module's metrics and the session timer"
+          }
+        },
+        {
           "name": "Start all modules",
           "request": {
             "method": "POST",
@@ -284,6 +430,97 @@
       ]
     },
     {
+      "name": "Bad User",
+      "item": [
+        {
+          "name": "List simulated users grouped by department",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/baduser/users",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "baduser",
+                "users"
+              ]
+            },
+            "description": "List simulated users grouped by department"
+          }
+        },
+        {
+          "name": "Start a targeted insider-threat run against one user",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/baduser/start",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "baduser",
+                "start"
+              ]
+            },
+            "description": "Start a targeted insider-threat run against one user",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"a.garcia\",\n  \"duration_minutes\": 15,\n  \"threat_level\": \"Extreme\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Stop the active Bad User run",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/baduser/stop",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "baduser",
+                "stop"
+              ]
+            },
+            "description": "Stop the active Bad User run"
+          }
+        },
+        {
+          "name": "Progress of the active Bad User run",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/baduser/status",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "baduser",
+                "status"
+              ]
+            },
+            "description": "Progress of the active Bad User run"
+          }
+        }
+      ]
+    },
+    {
       "name": "Status",
       "item": [
         {
@@ -304,6 +541,24 @@
           }
         },
         {
+          "name": "Drain pending health alerts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/alerts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health",
+                "alerts"
+              ]
+            },
+            "description": "Drain pending health alerts"
+          }
+        },
+        {
           "name": "Throughput metrics",
           "request": {
             "method": "GET",
@@ -318,6 +573,40 @@
               ]
             },
             "description": "Throughput metrics"
+          }
+        },
+        {
+          "name": "List valid threat-level names",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/threat_levels",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "threat_levels"
+              ]
+            },
+            "description": "List valid threat-level names"
+          }
+        },
+        {
+          "name": "Per-module event sparkline for the last 120 seconds",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/timeline",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "timeline"
+              ]
+            },
+            "description": "Per-module event sparkline for the last 120 seconds"
           }
         }
       ]
