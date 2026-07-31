@@ -70,10 +70,12 @@ from ipaddress import ip_network, AddressValueError
 
 try:
     from modules.session_utils import (get_random_user, find_user_by_ip, rand_ip_from_network,
-                                       stable_vpn_ip, stable_mail_servers, weighted_destination)
+                                       stable_vpn_ip, stable_mail_servers, weighted_destination,
+                                       novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 except ImportError:
     from session_utils import (get_random_user, find_user_by_ip, rand_ip_from_network,
-                               stable_vpn_ip, stable_mail_servers, weighted_destination)
+                               stable_vpn_ip, stable_mail_servers, weighted_destination,
+                                       novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -154,6 +156,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Suspicious reconnaissance using LDAP"},
     {"event": "vpn_abnormal_os",       "weight": 2,  "analytic": True,
      "xsiam_alert": "VPN access with an abnormal operating system"},
+    {"event": "vpn_new_country_login", "weight": 3,  "analytic": True,
+     "xsiam_alert": "First successful VPN access from a country in organization"},
     {"event": "external_port_scan",    "weight": 3,  "analytic": True,
      "xsiam_alert": "Port Scan"},
 ]
@@ -333,11 +337,19 @@ def _get_config(config):
 
 
 def _random_external_ip():
-    """Realistic public (non-RFC-1918) IP address."""
-    return (f"{random.choice(_FIRST_OCTETS)}."
-            f"{random.randint(1, 254)}."
-            f"{random.randint(1, 254)}."
-            f"{random.randint(1, 254)}")
+    """Public (non-RFC-1918) IP from the shared ambient external-traffic pool.
+
+    DO NOT "FIX" THIS BACK to `random.choice(first_octets)` + 3 random octets.
+    That construction picked a random host inside one of 14
+    different /8 blocks; a /8 spans dozens of countries, and across all modules it
+    was a primary driver of the 210 DISTINCT COUNTRIES seen in
+    xdm.source.location.country over 30 days.  That saturation permanently
+    silenced the XSIAM analytic "First successful VPN access from a country in
+    organization", which only fires on a country unseen org-wide for 30 days.
+    session_utils.random_external_ip() draws from 35 individually XSIAM-PROBED
+    /24s that are disjoint from config['vpn_novel_country_pool'].
+    """
+    return random_external_ip()
 
 
 def _dns_precursor(config, src_ip, user, shost, domain):
@@ -347,7 +359,7 @@ def _dns_precursor(config, src_ip, user, shost, domain):
     fields = {
         "src":              src_ip,
         "spt":              random.randint(49152, 65535),
-        "shost":            shost or src_ip,
+        "shost":            shost,
         "suser":            user,
         "dst":              forti_conf.get("dns_server", "8.8.8.8"),
         "dpt":              53,
@@ -519,11 +531,17 @@ def _base_traffic_fields(config, src_ip, shost, user, dst_ip, dhost, proto, dpt,
     return {
         "src":                      src_ip,
         "spt":                      random.randint(49152, 65535),
-        "shost":                    shost or src_ip,
+        "shost":                    shost,
         "suser":                    user,
         "dst":                      dst_ip,
         "dpt":                      dpt,
-        "dhost":                    dhost or dst_ip,
+        # dhost is a HOSTNAME field. Emit it only when a real name is known —
+        # do NOT fall back to the destination IP. Genuine FortiGate omits dhost
+        # for traffic with no resolved name; echoing the IP made XSIAM believe
+        # hosts literally named "10.0.10.50" exist. Measured:
+        # 86% of xdm.target.host.hostname values (2,996/3,458) were IP strings.
+        # The CEF builder drops None, so this cleanly omits the field.
+        "dhost":                    dhost,
         "proto":                    str(proto),
         "act":                      act,
         "out":                      sent_bytes,
@@ -685,11 +703,13 @@ def _generate_dns_query(config, src_ip, user, shost):
     fields = {
         "src":              src_ip,
         "spt":              random.randint(49152, 65535),
-        "shost":            shost or src_ip,
+        "shost":            shost,
         "suser":            user,
         "dst":              resolver,
         "dpt":              53,
-        "dhost":            "dns.google" if resolver.startswith("8.8") else resolver,
+        # Only a well-known resolver has a real name; otherwise omit dhost rather
+        # than echo the resolver IP into a hostname field.
+        "dhost":            "dns.google" if resolver.startswith("8.8") else None,
         "proto":            "17",
         "act":              "passthrough",
         "app":              "DNS",
@@ -975,7 +995,7 @@ def _generate_rdp_internal(config, src_ip, user, shost):
 
     fields = {
         "src": src_ip, "spt": random.randint(49152, 65535),
-        "shost": shost or src_ip, "suser": user,
+        "shost": shost, "suser": user,
         "dst": dst_ip, "dpt": 3389, "proto": "6",
         "act": "accept",
         "app": "RDP", "FTNTFGTapp": "RDP", "FTNTFGTappid": 16100,
@@ -1010,7 +1030,7 @@ def _generate_ftp_download(config, src_ip, user, shost):
 
     fields = {
         "src": src_ip, "spt": random.randint(49152, 65535),
-        "shost": shost or src_ip, "suser": user,
+        "shost": shost, "suser": user,
         "dst": dst_ip, "dpt": 21, "proto": "6",
         "act": "accept",
         "app": "FTP", "FTNTFGTapp": "FTP", "FTNTFGTappid": 15896,
@@ -1045,7 +1065,7 @@ def _generate_smb_internal(config, src_ip, user, shost):
 
     fields = {
         "src": src_ip, "spt": random.randint(49152, 65535),
-        "shost": shost or src_ip, "suser": user,
+        "shost": shost, "suser": user,
         "dst": dst_ip, "dpt": 445, "proto": "6",
         "act": "accept",
         "app": "SMB", "FTNTFGTapp": "SMB", "FTNTFGTappid": 16102,
@@ -1102,6 +1122,67 @@ def _generate_vpn_login_benign(config, session_context=None):
     return _format_fortinet_cef(config, "0101039426", "event", "vpn", "notice", fields)
 
 
+def _simulate_vpn_new_country_login(config, session_context=None):
+    """One SUCCESSFUL SSL-VPN tunnel-up from a country the org has never seen.
+
+    Drives the XSIAM analytic "First successful VPN access from a country in
+    organization" — FIRST-SEEN and ORG-SCOPED, so it fires only on a country not
+    observed anywhere in the org for 30 days.
+
+    WHY THIS EXISTS / DO NOT "FIX" IT AWAY:
+    The analytic had been silent because the
+    simulator was already emitting source IPs resolving to 210 distinct countries
+    over 30 days, so nothing could ever be novel.  Tightening the ambient baseline
+    is necessary but not sufficient; something must deliberately visit an unused
+    country, and this is it.
+
+    session_utils.novel_country_vpn_ip() draws from config['vpn_novel_country_pool']
+    (70 XSIAM-PROBED single-country /24s, disjoint from benign_ingress_sources,
+    external_traffic_sources and the Tor prefix allowlist) and rotates on the day
+    number => 70-day recurrence per country.  Day-keyed rather than random so ASA,
+    Check Point, FortiGate, Firepower and Zscaler all pick the SAME country on the
+    same day; the detector is org-scoped, so five sources picking five different
+    countries per day would exhaust the pool in 14 days.
+
+    NOTE ON FTNTFGTsrccountry: the benign tunnel-up generator labels events with a
+    RANDOM _ext_geo() country that has nothing to do with the source IP.  Here the
+    label is set to the pool entry's real country so the CEF field and the IP agree
+    — whichever of the two the FortiGate XIF maps to xdm.source.location.country,
+    it resolves to the intended country.
+    """
+    novel_ip, cc, country, isp = novel_country_vpn_ip(config)
+    if not novel_ip:
+        return None
+    print(f"    - Fortinet Module simulating: First VPN access from new country "
+          f"({country} / {isp} / {novel_ip})")
+
+    forti_conf = _get_config(config)
+    if session_context:
+        user_info = get_random_user(session_context, preferred_device_type="workstation")
+        user = user_info["username"] if user_info else "jsmith"
+    else:
+        umap = (forti_conf.get("user_ip_map") or config.get('shared_user_ip_map', {}))
+        user = random.choice(list(umap.keys())) if umap else "jsmith"
+
+    tunnel_ip = f"10.212.134.{hash(user) % 100 + 100}"
+    gw_ip     = forti_conf.get("vpn_gateway_ip", "203.0.113.20")
+    fields = {
+        "src": novel_ip, "dst": gw_ip, "dpt": 443, "proto": "6",
+        "suser": user, "FTNTFGTxauthuser": user,
+        "FTNTFGTxauthgroup": "VPN_Users",
+        "FTNTFGTtunnelid": random.randint(100000, 999999),
+        "FTNTFGTtunneltype": "ssl-vpn",
+        "FTNTFGTtunnelip": tunnel_ip, "FTNTFGTassignip": tunnel_ip,
+        "FTNTFGTremotegw": novel_ip, "FTNTFGTvpntunnel": "SSL-VPN-Tunnel",
+        "FTNTFGTsrccountry": country or "Unknown",
+        "FTNTFGTduration": 0, "externalId": _session_id(),
+        "act": "tunnel-up", "outcome": "success",
+        "FTNTFGTlogdesc": "SSL VPN tunnel up",
+        "msg": "SSL tunnel established",
+    }
+    return _format_fortinet_cef(config, "0101039426", "event", "vpn", "notice", fields)
+
+
 def _generate_vpn_failure_benign(config, session_context=None):
     """Benign SSL VPN login failure — wrong password or expired cert."""
     forti_conf = _get_config(config)
@@ -1148,7 +1229,7 @@ def _generate_email_event(config, src_ip, user, shost):
 
     fields = {
         "src": src_ip, "spt": random.randint(49152, 65535),
-        "shost": shost or src_ip, "suser": user,
+        "shost": shost, "suser": user,
         "dst": dst_ip, "dpt": smtp_port, "proto": "6",
         "act": "accept",
         "app": nwsvc, "FTNTFGTapp": nwsvc, "FTNTFGTappid": 16195,
@@ -1189,20 +1270,25 @@ def _generate_benign_log(config, session_context=None):
                    "ntp_sync", "antivirus_allow", "ipsec_vpn",
                    "rdp_internal", "ftp_download", "smb_internal",
                    "vpn_login_benign", "vpn_failure_benign", "email_event",
-                   "ad_auth"]
+                   "ad_auth", "vpn_new_country_login"]
         weights = [36,               18,              9,                7,
                    3,             3,            2,
                    4,           3,              2,
                    3,              2,              3,
                    3,                  1,                  2,
-                   5]
+                   # vpn_new_country_login must sit on the BENIGN path, not the threat
+                   # path: threats are interval-gated (~12/day at "Realistic") and then
+                   # weighted, giving ~0.3 firings/day, but the day-keyed country rotation
+                   # needs at least ONE emission every day or that day's country is skipped.
+                   5,        2]
 
     chosen = random.choices(events, weights=weights, k=1)[0]
 
     # Resolve user/IP for events that need an internal source
     user, src_ip, shost = "unknown", "192.168.1.100", None
     if chosen not in ("inbound_block", "admin_event", "vpn_event", "ipsec_vpn",
-                      "vpn_login_benign", "vpn_failure_benign"):
+                      "vpn_login_benign", "vpn_failure_benign",
+                      "vpn_new_country_login"):
         if session_context:
             user_info = get_random_user(session_context, preferred_device_type="workstation")
             if user_info:
@@ -1246,6 +1332,8 @@ def _generate_benign_log(config, session_context=None):
         return _generate_ldap_kerberos_benign(config, src_ip, user, shost)
     elif chosen == "vpn_login_benign":
         return _generate_vpn_login_benign(config, session_context)
+    elif chosen == "vpn_new_country_login":
+        return _simulate_vpn_new_country_login(config, session_context)
     elif chosen == "vpn_failure_benign":
         return _generate_vpn_failure_benign(config, session_context)
     elif chosen == "email_event":
@@ -1311,7 +1399,9 @@ def _simulate_ips_attack(config):
         "FTNTFGTsrccountry":        geo["country"],
         "FTNTFGTsrccity":           geo["city"],
         "FTNTFGTsrcregion":         geo["region"],
-        "dhost":                    dst_ip,
+        # No resolved hostname for an IPS target — omit rather than echo the IP
+        # (see the dhost note in _base_traffic_fields).
+        "dhost":                    None,
         "FTNTFGTdstcountry":        "Reserved",
         "FTNTFGTduration":          0,
         "FTNTFGTservice":           _port_to_service(target_port),
@@ -1477,7 +1567,7 @@ def _simulate_port_scan(config, src_ip, user, shost):
         fields = {
             "src":                      src_ip,
             "spt":                      random.randint(49152, 65535),
-            "shost":                    shost or src_ip,
+            "shost":                    shost,
             "suser":                    user,
             "dst":                      dst_ip,
             "dpt":                      port,
@@ -1513,7 +1603,7 @@ def _simulate_port_scan(config, src_ip, user, shost):
         success_fields = {
             "src":                      src_ip,
             "spt":                      random.randint(49152, 65535),
-            "shost":                    shost or src_ip,
+            "shost":                    shost,
             "suser":                    user,
             "dst":                      dst_ip,
             "dpt":                      port,
@@ -1571,7 +1661,9 @@ def _simulate_waf_attack(config, src_ip, user, shost):
         "src":                      ext_ip,
         "spt":                      random.randint(1024, 65535),
         "dst":                      dst_ip,
-        "dhost":                    dst_ip,
+        # No resolved hostname for an IPS target — omit rather than echo the IP
+        # (see the dhost note in _base_traffic_fields).
+        "dhost":                    None,
         "dpt":                      random.choice([80, 443, 8080, 8443]),
         "proto":                    "6",
         "act":                      "blocked",
@@ -1800,8 +1892,17 @@ def _simulate_vpn_tor_login(config, session_context=None):
     print("    - Fortinet Module simulating: VPN Login from TOR Exit Node (full conversation)")
     forti_conf = _get_config(config)
     gw_ip      = forti_conf.get("vpn_gateway_ip", "203.0.113.20")
-    tor_nodes  = config.get("tor_exit_nodes", [])
-    tor_ip     = random.choice(tor_nodes).get("ip", _random_external_ip()) if tor_nodes else _random_external_ip()
+    # DO NOT "FIX" THIS BACK to random.choice(config['tor_exit_nodes']).
+    # Probing the full live exit-node list through the tenant
+    # resolved them to 55 DISTINCT COUNTRIES with a rotating long tail
+    # (Seychelles, Belize, Nicaragua, Panama, Peru ...).  As the SOURCE IP of a
+    # successful VPN login that tail kept marking reserve countries "already
+    # seen", permanently silencing the analytic "First successful VPN access
+    # from a country in organization".  tor_vpn_ip() restricts the pool to the
+    # 182 probed /16 prefixes that resolve ONLY to the genuine Tor-heavy
+    # countries (US/DE/NL/FR/RO) — still 930 live nodes, so the HIGH-severity
+    # "A Successful VPN connection from TOR" analytic is unaffected.
+    tor_ip     = tor_vpn_ip(config, default=_random_external_ip())
 
     if session_context:
         user_info = get_random_user(session_context, preferred_device_type="workstation")
@@ -1917,7 +2018,7 @@ def _simulate_smb_new_host_lateral(config, src_ip, user, shost, session_context=
         fields = {
             "src":                     src_ip,
             "spt":                     random.randint(49152, 65535),
-            "shost":                   shost or src_ip,
+            "shost":                   shost,
             "suser":                   user,
             "dst":                     dst_ip,
             "dpt":                     445,
@@ -1969,7 +2070,7 @@ def _simulate_smb_rare_file_transfer(config, src_ip, user, shost):
     fields = {
         "src":                     src_ip,
         "spt":                     random.randint(49152, 65535),
-        "shost":                   shost or src_ip,
+        "shost":                   shost,
         "suser":                   user,
         "dst":                     dst_ip,
         "dpt":                     445,
@@ -2029,7 +2130,7 @@ def _simulate_smb_share_enumeration(config, src_ip, user, shost):
         fields = {
             "src":                     src_ip,
             "spt":                     random.randint(49152, 65535),
-            "shost":                   shost or src_ip,
+            "shost":                   shost,
             "suser":                   user,
             "dst":                     dst_ip,
             "dpt":                     445,
@@ -2079,7 +2180,7 @@ def _simulate_lateral_movement(config, src_ip, user, shost):
         fields = {
             "src":                      src_ip,
             "spt":                      random.randint(49152, 65535),
-            "shost":                    shost or src_ip,
+            "shost":                    shost,
             "suser":                    user,
             "dst":                      dst_ip,
             "dpt":                      lateral_port,
@@ -2183,7 +2284,7 @@ def _simulate_dns_c2_beacon(config, src_ip, user, shost):
         fields    = {
             "src":              src_ip,
             "spt":              random.randint(49152, 65535),
-            "shost":            shost or src_ip,
+            "shost":            shost,
             "suser":            user,
             "dst":              resolver,
             "dpt":              53,
@@ -2295,7 +2396,7 @@ def _simulate_rdp_lateral(config, src_ip, user, shost, session_context=None):
         fields = {
             "src":                      src_ip,
             "spt":                      random.randint(49152, 65535),
-            "shost":                    shost or src_ip,
+            "shost":                    shost,
             "suser":                    user,
             "dst":                      dst_ip,
             "dpt":                      3389,
@@ -2580,7 +2681,7 @@ def _simulate_smtp_spray(config, src_ip, user, shost):
         fields = {
             "src":                     src_ip,
             "spt":                     random.randint(49152, 65535),
-            "shost":                   shost or src_ip,
+            "shost":                   shost,
             "suser":                   user,
             "dst":                     dst_ip,
             "dpt":                     smtp_port,
@@ -2676,16 +2777,28 @@ def _simulate_ftp_large_exfil(config, src_ip, user, shost):
     return logs
 
 
+_ddns_beacon_map: dict = {}   # src_ip -> stable (ddns_hostname, resolved_ip) for DDNS recurrence
+
+
 def _simulate_ddns_connection(config, src_ip, user, shost):
-    """Two-log sequence: DNS query resolving a DDNS hostname, then HTTPS
-    session to the resolved IP.
+    """Recurring beacon to a dynamic-DNS domain: one DNS resolution followed by a
+    burst of HTTPS callbacks to the SAME DDNS host.
 
     Uses FortiGuard URL category 88 ("Dynamic DNS") for the webfilter event
-    and a traffic:forward accept for the subsequent connection.
+    and a traffic:forward accept for the subsequent connections.
+
+    The DDNS hostname and its resolved IP are STICKY PER SOURCE HOST (same idiom as
+    _dns_tunnel_target_map above). XSIAM's "Recurring rare domain access to dynamic
+    DNS domain" needs one endpoint returning to ONE rare domain repeatedly. Choosing
+    a fresh provider x subdomain per call (12 x 10 = 120 combinations) with a random
+    source produced scattered single hits — the opposite of recurrence. Verified
+    in-tenant: a concentrated replay (1 host -> 1 domain, 45-90 sessions)
+    produced the correct shape while the randomised generator never did.
+    DO NOT restore per-call randomisation.
 
     Returns list of CEF log strings.
     """
-    print(f"    - Fortinet Module simulating: DDNS connection from {src_ip}")
+    print(f"    - Fortinet Module simulating: DDNS beacon from {src_ip}")
     forti_conf = _get_config(config)
     ddns_providers = [
         "duckdns.org",     "no-ip.com",       "dynu.com",
@@ -2693,14 +2806,18 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
         "sytes.net",       "ddns.net",         "servebeer.com",
         "myftp.biz",       "myvnc.com",        "redirectme.net",
     ]
-    provider = random.choice(ddns_providers)
-    subdomain = random.choice([
+    subdomains = [
         "update-service", "cdn-relay", "mail-check", "vpn-gateway",
         "api-health", "sync-node", "cloud-backup", "office-proxy",
         "fw-mgmt", "dns-cache",
-    ])
-    ddns_hostname = f"{subdomain}.{provider}"
-    resolved_ip   = _random_external_ip()
+    ]
+    if src_ip not in _ddns_beacon_map:
+        _rnd = random.Random(hash(("ddns", src_ip)) & 0xFFFFFFFF)
+        _ddns_beacon_map[src_ip] = (
+            f"{_rnd.choice(subdomains)}.{_rnd.choice(ddns_providers)}",
+            _random_external_ip(),
+        )
+    ddns_hostname, resolved_ip = _ddns_beacon_map[src_ip]
     geo           = _ext_geo()
     logs          = []
 
@@ -2708,7 +2825,7 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
     dns_fields = {
         "src":              src_ip,
         "spt":              random.randint(49152, 65535),
-        "shost":            shost or src_ip,
+        "shost":            shost,
         "suser":            user,
         "dst":              forti_conf.get("dns_server", "8.8.8.8"),
         "dpt":              53,
@@ -2744,24 +2861,26 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
     }
     logs.append(_format_fortinet_cef(config, "1501054802", "dns", "dns-query", "warning", dns_fields))
 
-    # Log 2: HTTPS connection to the resolved IP
-    conn_fields = _base_traffic_fields(
-        config, src_ip, shost, user, resolved_ip, ddns_hostname, "6", 443, "accept",
-        duration_s=random.randint(30, 600),
-        dst_country=geo["country"], dst_city=geo["city"], dst_region=geo["region"]
-    )
-    conn_fields.update({
-        "app":   "HTTPS",
-        "cat":   "88",
-        "FTNTFGTcatdesc": "Dynamic DNS",
-        "msg":   f"HTTPS connection to DDNS host {ddns_hostname} ({resolved_ip})",
-    })
-    logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "warning", conn_fields))
+    # Logs 2..N: a BURST of HTTPS callbacks to the same resolved IP. One session is a
+    # visit; the detector wants recurrence, so emit 8-16 per invocation.
+    for _ in range(random.randint(8, 16)):
+        conn_fields = _base_traffic_fields(
+            config, src_ip, shost, user, resolved_ip, ddns_hostname, "6", 443, "accept",
+            duration_s=random.randint(30, 600),
+            dst_country=geo["country"], dst_city=geo["city"], dst_region=geo["region"]
+        )
+        conn_fields.update({
+            "app":   "HTTPS",
+            "cat":   "88",
+            "FTNTFGTcatdesc": "Dynamic DNS",
+            "msg":   f"HTTPS connection to DDNS host {ddns_hostname} ({resolved_ip})",
+        })
+        logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "warning", conn_fields))
     return logs
 
 
 # ---------------------------------------------------------------------------
-# XSIAM-firewall-analytics-aligned threat generators (2026-07 additions)
+# XSIAM-firewall-analytics-aligned threat generators
 # ---------------------------------------------------------------------------
 
 _dns_tunnel_target_map: dict = {}   # src_ip -> stable (resolver_ip, tunnel_domain) for DNS-tunnel recurrence
@@ -2841,7 +2960,7 @@ def _simulate_dns_tunneling(config, src_ip, user, shost):
         fields = {
             "src":              src_ip,
             "spt":              random.randint(49152, 65535),
-            "shost":            shost or src_ip,
+            "shost":            shost,
             "suser":            user,
             "dst":              resolver,
             "dpt":              53,
@@ -2887,7 +3006,7 @@ def _simulate_reverse_ssh_tunnel(config, src_ip, user, shost):
     logs   = []
     for _ in range(random.randint(2, 4)):
         fields = _base_traffic_fields(
-            config, src_ip, shost, user, ext_ip, ext_ip, "6", 22, "accept",
+            config, src_ip, shost, user, ext_ip, None, "6", 22, "accept",
             duration_s=random.randint(1800, 14400), dst_country=geo["country"],
             dst_city=geo["city"], dst_region=geo["region"]
         )
@@ -2921,7 +3040,7 @@ def _simulate_ldap_recon(config, src_ip, user, shost):
         for _ in range(random.randint(3, 6)):
             port = random.choice([389, 389, 636])
             fields = _base_traffic_fields(
-                config, src_ip, shost, user, dc, dc, "6", port, "accept",
+                config, src_ip, shost, user, dc, None, "6", port, "accept",
                 duration_s=random.randint(1, 30), src_country="Reserved", dst_country="Reserved"
             )
             fields.update({
@@ -2995,7 +3114,9 @@ def _simulate_external_port_scan(config):
             "src":                      ext_ip,
             "spt":                      random.randint(1024, 65535),
             "dst":                      dst_ip,
-            "dhost":                    dst_ip,
+            # No resolved hostname for an IPS target — omit rather than echo the IP
+        # (see the dhost note in _base_traffic_fields).
+        "dhost":                    None,
             "dpt":                      port,
             "proto":                    "6",
             "act":                      "deny",
@@ -3033,7 +3154,7 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost):
     port      = random.choice([389, 389, 636, 88, 88, 445])
     svc       = {389: "LDAP", 636: "LDAPS", 88: "Kerberos", 445: "SMB"}[port]
     fields = _base_traffic_fields(
-        config, src_ip, shost, user, dc, dc, "6", port, "accept",
+        config, src_ip, shost, user, dc, None, "6", port, "accept",
         duration_s=random.randint(1, 20), src_country="Reserved", dst_country="Reserved"
     )
     fields.update({
@@ -3098,6 +3219,8 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
 
     if chosen == "vpn_tor_login":
         return (_simulate_vpn_tor_login(config, session_context), display_name)
+    if chosen == "vpn_new_country_login":
+        return (_simulate_vpn_new_country_login(config, session_context), display_name)
 
     if chosen == "lateral_movement":
         user_info = get_random_user(session_context, preferred_device_type="workstation") if session_context else None

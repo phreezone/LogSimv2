@@ -72,9 +72,11 @@ _SAML_URLS = [
 import hashlib
 
 try:
-    from modules.session_utils import get_random_user, get_user_by_name, get_all_emails, get_random_anon_ip_ctx
+    from modules.session_utils import (get_random_user, get_user_by_name, get_all_emails,
+        get_random_anon_ip_ctx, novel_country_vpn_ip, random_external_ip)
 except ImportError:
-    from session_utils import get_random_user, get_user_by_name, get_all_emails, get_random_anon_ip_ctx
+    from session_utils import (get_random_user, get_user_by_name, get_all_emails,
+        get_random_anon_ip_ctx, novel_country_vpn_ip, random_external_ip)
 
 # Stable alphanumeric Okta user ID: 00u + 17 base-62 chars, deterministic per username.
 # SHA-1 of the username is used as the seed so the same user always gets the same ID,
@@ -1919,15 +1921,37 @@ _UNUSUAL_OS_LIST = ["ChromeOS", "FreeBSD", "Ubuntu", "Fedora", "Kali Linux", "Ta
 
 _SUSPICIOUS_COUNTRIES = ["RU", "CN", "KP", "IR", "SY", "BY", "CU", "MM"]
 
+# Each entry now carries a REAL, XSIAM-PROBED /24 inside the country it claims.
+#
+# DO NOT "FIX" THIS BACK to a fabricated "203.<random>.<random>.<random>" address.
+# The previous construction paired a country LABEL with a random
+# host in 203.0.0.0/8, which is an APNIC block — XSIAM geo-resolves the ACTUAL IP and
+# ignores the label, so those events landed in whatever APNIC country the address fell
+# in (Fiji, Papua New Guinea, Mongolia, Nepal, Sri Lanka, the Philippines ...).  Several
+# of those are countries reserved in config['vpn_novel_country_pool'] for the FIRST-SEEN,
+# ORG-SCOPED analytic "First successful VPN access from a country in organization"; every
+# stray hit marked one of them "already seen" and cost a firing.  okta_sso_raw is one of
+# the datasets that analytic scopes over, so this pool is now pinned to ranges drawn from
+# the ambient country set, which is disjoint from the reserve pool by construction.
+# (AR and PH were swapped for BR and TH for the same reason — both are reserve countries.)
 _NEW_COUNTRY_POOL = [
-    {"country": "JP", "city": "Tokyo",     "state": None, "asn": 2497, "isp": "IIJ",       "domain": "iij.net",    "is_proxy": False},
-    {"country": "AU", "city": "Sydney",    "state": "NSW","asn": 1221, "isp": "Telstra",   "domain": "telstra.com","is_proxy": False},
-    {"country": "DE", "city": "Berlin",    "state": None, "asn": 3320, "isp": "Telekom",   "domain": "telekom.de", "is_proxy": False},
-    {"country": "ZA", "city": "Cape Town", "state": None, "asn": 36937,"isp": "Liquid",    "domain": "liquid.tech","is_proxy": False},
-    {"country": "IN", "city": "Mumbai",    "state": None, "asn": 9498, "isp": "Airtel",    "domain": "airtel.in",  "is_proxy": False},
-    {"country": "AR", "city": "Buenos Aires","state": None,"asn": 10318,"isp": "Cablevision","domain": "cablevision.com.ar","is_proxy": False},
-    {"country": "PH", "city": "Manila",    "state": None, "asn": 9299, "isp": "PLDT",      "domain": "pldt.net",   "is_proxy": False},
+    {"country": "JP", "cidr": "210.150.20.0/24", "city": "Tokyo",     "state": None, "asn": 2497, "isp": "IIJ",       "domain": "iij.net",    "is_proxy": False},
+    {"country": "AU", "cidr": "1.126.44.0/24",   "city": "Sydney",    "state": "NSW","asn": 1221, "isp": "Telstra",   "domain": "telstra.com","is_proxy": False},
+    {"country": "DE", "cidr": "80.130.44.0/24",  "city": "Berlin",    "state": None, "asn": 3320, "isp": "Telekom",   "domain": "telekom.de", "is_proxy": False},
+    {"country": "ZA", "cidr": "41.134.20.0/24",  "city": "Cape Town", "state": None, "asn": 36937,"isp": "Liquid",    "domain": "liquid.tech","is_proxy": False},
+    {"country": "IN", "cidr": "49.36.20.0/24",   "city": "Mumbai",    "state": None, "asn": 9498, "isp": "Airtel",    "domain": "airtel.in",  "is_proxy": False},
+    {"country": "BR", "cidr": "187.10.20.0/24",  "city": "Sao Paulo", "state": None, "asn": 26599,"isp": "Vivo",      "domain": "vivo.com.br","is_proxy": False},
+    {"country": "TH", "cidr": "171.98.20.0/24",  "city": "Bangkok",   "state": None, "asn": 7470, "isp": "TrueOnline","domain": "trueonline.co.th","is_proxy": False},
 ]
+
+
+def _new_country_ip_ctx():
+    """ip_ctx for a "new country" SSO event, with the address inside the named country."""
+    entry = dict(random.choice(_NEW_COUNTRY_POOL))
+    cidr  = entry.pop("cidr")
+    octets = cidr.split("/")[0].split(".")
+    ip = ".".join(octets[:3] + [str(random.randint(1, 254))])
+    return _make_ip_ctx_from(entry, {"ip": ip})
 
 _RARE_SSO_APPS = [
     "Legacy HR Portal", "Old Payroll System", "Dev Environment SSO",
@@ -2226,8 +2250,7 @@ def _generate_sso_possible_impossible_travel(config, user_info, session_context=
         target=_make_sso_target(app),
     ))
 
-    ip_ctx2 = _make_ip_ctx_from(random.choice(_NEW_COUNTRY_POOL),
-                                {"ip": f"203.{random.randint(100,200)}.{random.randint(1,254)}.{random.randint(1,254)}"})
+    ip_ctx2 = _new_country_ip_ctx()
     client2 = _build_client(ip_ctx2, config, interactive_only=True)
     logs.append(_assemble(
         "user.authentication.sso", actor, client2,
@@ -2245,8 +2268,7 @@ def _generate_sso_possible_impossible_travel(config, user_info, session_context=
 
 def _generate_sso_new_country(config, user_info, session_context=None):
     """SSO from a country the user has never used — A user connected from a new country."""
-    ip_ctx = _make_ip_ctx_from(random.choice(_NEW_COUNTRY_POOL),
-                               {"ip": f"203.{random.randint(100,200)}.{random.randint(1,254)}.{random.randint(1,254)}"})
+    ip_ctx = _new_country_ip_ctx()
     actor  = _build_actor(user_info["username"], user_info["full_name"])
     client = _build_client(ip_ctx, config, interactive_only=True)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
@@ -2291,8 +2313,7 @@ def _generate_sso_suspicious_country(config, user_info, session_context=None):
 
 def _generate_sso_new_country_org(config, user_info, session_context=None):
     """SSO from a country no one in the org has ever used — First connection from country in org."""
-    ip_ctx = _make_ip_ctx_from(random.choice(_NEW_COUNTRY_POOL),
-                               {"ip": f"203.{random.randint(100,200)}.{random.randint(1,254)}.{random.randint(1,254)}"})
+    ip_ctx = _new_country_ip_ctx()
     actor  = _build_actor(user_info["username"], user_info["full_name"])
     client = _build_client(ip_ctx, config, interactive_only=True)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
@@ -3033,6 +3054,60 @@ def _gen_radius_auth_success(config, user_info, session_context=None):
         debug_context=_build_debug_context("PASSWORD"),
         target=[{"id": _app_instance_id(app), "type": "AppInstance",
                  "displayName": app, "alternateId": app, "detailEntry": {"signOnModeType": _app_sign_on_mode(app)}}],
+    )
+
+
+def _gen_radius_vpn_new_country(config, user_info, session_context=None):
+    """user.authentication.auth_via_radius SUCCESS to the VPN Gateway from a country
+    the org has never seen.
+
+    Okta's RADIUS agent is what fronts the corporate VPN, so an auth_via_radius
+    SUCCESS against the "VPN Gateway" app is the Okta-native equivalent of an
+    AnyConnect session start and is the only Okta event class that reads as a VPN
+    login.  This makes okta_sso_raw participate in the XSIAM analytic "First
+    successful VPN access from a country in organization".
+
+    WHY THIS EXISTS / DO NOT "FIX" IT AWAY:
+    That analytic is FIRST-SEEN and ORG-SCOPED. It had been silent because the
+    simulator had already emitted source IPs
+    resolving to 210 distinct countries across the VPN-capable datasets in 30 days,
+    so no country could ever be novel.
+
+    The IP comes from session_utils.novel_country_vpn_ip(), i.e.
+    config['vpn_novel_country_pool'] — 70 XSIAM-PROBED single-country /24s that are
+    disjoint from benign_ingress_sources, external_traffic_sources and the Tor
+    prefix allowlist — rotating on the day number for a 70-day recurrence.  It is
+    day-keyed, not random, so every VPN-capable module picks the SAME country on a
+    given day; an org-scoped detector fed five independent choices per day would
+    burn the pool five times faster.
+
+    NOTE: unlike _NEW_COUNTRY_POOL (which pairs a country LABEL with a fabricated
+    203.x.x.x address that geo-resolves somewhere else entirely), the IP here is a
+    real allocation in the country named in the geographical context, so the label
+    and the address agree whichever one Okta's XIF maps to
+    xdm.source.location.country.
+    """
+    novel_ip, cc, country, isp = novel_country_vpn_ip(config)
+    if not novel_ip:
+        return None
+    ip_ctx = _make_ip_ctx_from(
+        {"country": cc, "city": None, "state": None, "isp": isp,
+         "asn": None, "domain": None, "is_proxy": False},
+        {"ip": novel_ip})
+    actor  = _build_actor(user_info["username"], user_info["full_name"])
+    client = _build_client(ip_ctx, config, interactive_only=False)
+    app    = "VPN Gateway"
+    return _assemble(
+        "user.authentication.auth_via_radius", actor, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="WARN",
+        display_message=f"Authentication of user via RADIUS: {app}",
+        authentication_context=_build_authentication_context("PASSWORD"),
+        security_context=_build_security_context(ip_ctx),
+        debug_context=_build_debug_context("PASSWORD"),
+        target=[{"id": _app_instance_id(app), "type": "AppInstance",
+                 "displayName": app, "alternateId": app,
+                 "detailEntry": {"signOnModeType": _app_sign_on_mode(app)}}],
     )
 
 
@@ -5169,6 +5244,7 @@ def _generate_background_log(config, session_context=None):
         _gen_user_mfa_factor_update, _gen_user_mfa_okta_verify,
         # --- NEW: push / provisioning / radius ---
         _gen_push_send_verify, _gen_mfa_push_deny, _gen_radius_auth_success,
+        _gen_radius_vpn_new_country,
         _gen_policy_sign_on_eval, _gen_fastpass_session_start, _gen_webauthn_factor_enroll,
         _gen_auth_via_webauthn,
         _gen_app_push_password_success, _gen_app_push_profile_success,
@@ -5462,8 +5538,15 @@ def _generate_radius_brute_force(config, user_info, session_context=None):
     print("    - Okta Module generating RADIUS VPN brute force...")
     logs      = []
     # Use a random external IP for all attempts (same attacker source)
-    first_octets = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 212]
-    attacker_ip  = f"{random.choice(first_octets)}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+    # DO NOT "FIX" THIS BACK to `random.choice(first_octets)` + 3 random octets.
+    # A /8 spans dozens of countries; measured, that construction across the
+    # modules was a primary driver of 210 DISTINCT COUNTRIES in xdm.source.location.country
+    # over 30 days, which permanently silenced the FIRST-SEEN, ORG-SCOPED analytic
+    # "First successful VPN access from a country in organization".  okta_sso_raw is one of
+    # the datasets that analytic scopes over (auth_via_radius fronts the corporate VPN), so
+    # attacker IPs here must stay inside the curated ambient country pool, which is disjoint
+    # from config['vpn_novel_country_pool'].
+    attacker_ip  = random_external_ip(config)
     attacker_ctx = {"ip": attacker_ip, "city": None, "country": "RU",
                     "asn": 60729, "isp": "External Attacker", "domain": None, "is_proxy": False}
     actor   = _build_actor(user_info["username"], user_info["full_name"])
@@ -5701,8 +5784,15 @@ def _generate_registration_abuse(config, user_info, session_context=None):
     print("    - Okta Module generating self-registration abuse...")
     logs    = []
     # All registrations come from the same external attacker IP
-    first_octets = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 212]
-    attacker_ip  = f"{random.choice(first_octets)}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+    # DO NOT "FIX" THIS BACK to `random.choice(first_octets)` + 3 random octets.
+    # A /8 spans dozens of countries; measured, that construction across the
+    # modules was a primary driver of 210 DISTINCT COUNTRIES in xdm.source.location.country
+    # over 30 days, which permanently silenced the FIRST-SEEN, ORG-SCOPED analytic
+    # "First successful VPN access from a country in organization".  okta_sso_raw is one of
+    # the datasets that analytic scopes over (auth_via_radius fronts the corporate VPN), so
+    # attacker IPs here must stay inside the curated ambient country pool, which is disjoint
+    # from config['vpn_novel_country_pool'].
+    attacker_ip  = random_external_ip(config)
     attacker_ctx = {"ip": attacker_ip, "city": None, "country": "RU",
                     "asn": 60729, "isp": "External Attacker", "domain": None, "is_proxy": False}
     client  = _build_client(attacker_ctx, config, interactive_only=True)

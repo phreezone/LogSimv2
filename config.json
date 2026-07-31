@@ -1630,6 +1630,10 @@
         {
           "event": "ad_auth_benign",
           "weight": 5
+        },
+        {
+          "event": "vpn_new_country_login",
+          "weight": 3
         }
       ],
       "threat": [
@@ -1740,10 +1744,6 @@
         {
           "event": "torrent_client",
           "weight": 3
-        },
-        {
-          "event": "new_ftp_server",
-          "weight": 2
         },
         {
           "event": "dc_smb_outbound",
@@ -1992,16 +1992,6 @@
       "check-in.8fgc2q.org",
       "update-svc.z7t4m.com"
     ],
-    "tor_exit_nodes": [
-      "185.220.101.35",
-      "185.220.101.47",
-      "104.244.76.13",
-      "104.244.77.9",
-      "45.33.32.156",
-      "162.247.74.27",
-      "199.87.154.255",
-      "178.62.197.82"
-    ],
     "event_mix": {
       "benign": [
         {
@@ -2035,6 +2025,10 @@
         {
           "event": "ad_auth",
           "weight": 5
+        },
+        {
+          "event": "vpn_new_country_login",
+          "weight": 3
         }
       ],
       "threat": [
@@ -2292,108 +2286,7 @@
       "AUDIT_LOG"
     ]
   },
-  "tor_exit_nodes": [
-    {
-      "ip": "185.220.101.28",
-      "country": "NL"
-    },
-    {
-      "ip": "185.220.102.251",
-      "country": "US"
-    },
-    {
-      "ip": "193.11.81.189",
-      "country": "DE"
-    },
-    {
-      "ip": "94.130.99.199",
-      "country": "DE"
-    },
-    {
-      "ip": "176.9.1.229",
-      "country": "DE"
-    },
-    {
-      "ip": "45.145.226.50",
-      "country": "NL"
-    },
-    {
-      "ip": "198.54.130.200",
-      "country": "US"
-    },
-    {
-      "ip": "109.70.100.30",
-      "country": "CZ"
-    },
-    {
-      "ip": "5.188.108.7",
-      "country": "FI"
-    },
-    {
-      "ip": "89.163.242.170",
-      "country": "DE"
-    },
-    {
-      "ip": "194.132.122.100",
-      "country": "SE"
-    },
-    {
-      "ip": "154.35.175.225",
-      "country": "CH"
-    },
-    {
-      "ip": "82.165.172.115",
-      "country": "DE"
-    },
-    {
-      "ip": "185.100.86.107",
-      "country": "RO"
-    },
-    {
-      "ip": "217.79.179.190",
-      "country": "GB"
-    },
-    {
-      "ip": "195.154.246.168",
-      "country": "FR"
-    },
-    {
-      "ip": "91.121.21.115",
-      "country": "FR"
-    },
-    {
-      "ip": "144.76.113.197",
-      "country": "DE"
-    },
-    {
-      "ip": "163.172.136.25",
-      "country": "FR"
-    },
-    {
-      "ip": "62.102.148.67",
-      "country": "RU"
-    },
-    {
-      "ip": "85.214.241.168",
-      "country": "DE"
-    },
-    {
-      "ip": "188.165.201.173",
-      "country": "FR"
-    },
-    {
-      "ip": "37.187.114.162",
-      "country": "FR"
-    },
-    {
-      "ip": "95.217.163.48",
-      "country": "FI"
-    },
-    {
-      "ip": "178.62.203.114",
-      "country": "GB"
-    }
-  ],
+  "tor_exit_nodes": [],
   "vpn_providers": [
     {
       "isp": "Mullvad VPN",
@@ -3004,155 +2897,827 @@
   ],
   "benign_ingress_sources": [
     {
-      "name": "Comcast USA",
-      "ip_range": "68.0.0.0/11",
-      "country": "US",
-      "asn": 7922
-    },
-    {
-      "name": "BT UK",
-      "ip_range": "81.152.0.0/13",
-      "country": "GB",
-      "asn": 2856
-    },
-    {
-      "name": "AT&T USA",
-      "ip_range": "12.0.0.0/8",
-      "country": "US",
-      "asn": 7018
-    },
-    {
-      "name": "Verizon USA",
-      "ip_range": "71.0.0.0/8",
-      "country": "US",
-      "asn": 701
-    },
-    {
-      "name": "Deutsche Telekom DE",
-      "ip_range": "80.128.0.0/11",
-      "country": "DE",
-      "asn": 3320
-    },
-    {
-      "name": "Orange FR",
-      "ip_range": "80.8.0.0/12",
-      "country": "FR",
-      "asn": 3215
-    },
-    {
-      "name": "NTT JP",
-      "ip_range": "118.0.0.0/8",
-      "country": "JP",
-      "asn": 2914
-    },
-    {
-      "name": "Telstra AU",
-      "ip_range": "1.120.0.0/13",
+      "name": "Telstra Sydney",
+      "ip_range": "1.126.44.0/24",
       "country": "AU",
-      "asn": 1221
+      "resolved_country": "Australia"
     },
     {
-      "name": "Rogers CA",
-      "ip_range": "64.231.0.0/16",
+      "name": "Optus Melbourne",
+      "ip_range": "49.176.44.0/24",
+      "country": "AU",
+      "resolved_country": "Australia"
+    },
+    {
+      "name": "Rogers Toronto",
+      "ip_range": "64.231.44.0/24",
       "country": "CA",
-      "asn": 812
+      "resolved_country": "Canada"
     },
     {
-      "name": "Telefonica ES",
-      "ip_range": "80.24.0.0/13",
-      "country": "ES",
-      "asn": 3352
+      "name": "Bell Canada Montreal",
+      "ip_range": "70.24.140.0/24",
+      "country": "CA",
+      "resolved_country": "Canada"
     },
     {
-      "name": "China Telecom CN",
-      "ip_range": "110.160.0.0/11",
-      "country": "CN",
-      "asn": 4134
+      "name": "Vodafone Kabel Munich",
+      "ip_range": "92.208.44.0/24",
+      "country": "DE",
+      "resolved_country": "Germany"
     },
     {
-      "name": "Reliance Jio IN",
-      "ip_range": "106.192.0.0/10",
-      "country": "IN",
-      "asn": 55836
+      "name": "Deutsche Telekom Frankfurt",
+      "ip_range": "80.130.44.0/24",
+      "country": "DE",
+      "resolved_country": "Germany"
     },
     {
-      "name": "SK Telecom KR",
-      "ip_range": "1.208.0.0/12",
-      "country": "KR",
-      "asn": 9318
+      "name": "BT Broadband London",
+      "ip_range": "81.152.44.0/24",
+      "country": "GB",
+      "resolved_country": "United Kingdom"
     },
     {
-      "name": "TIM BR",
-      "ip_range": "177.0.0.0/10",
-      "country": "BR",
-      "asn": 26615
+      "name": "Sky Broadband Leeds",
+      "ip_range": "90.207.60.0/24",
+      "country": "GB",
+      "resolved_country": "United Kingdom"
     },
     {
-      "name": "Vodafone IT",
-      "ip_range": "77.32.0.0/11",
-      "country": "IT",
-      "asn": 30722
-    },
-    {
-      "name": "Google Corporate Network",
-      "ip_range": "130.211.0.0/16",
+      "name": "Cox Phoenix AZ",
+      "ip_range": "70.176.220.0/24",
       "country": "US",
-      "asn": 15169
+      "resolved_country": "United States"
     },
     {
-      "name": "Microsoft Corporate Network",
-      "ip_range": "131.107.0.0/16",
+      "name": "AT&T Dallas TX",
+      "ip_range": "99.36.12.0/24",
       "country": "US",
-      "asn": 8075
+      "resolved_country": "United States"
     },
     {
-      "name": "AWS Employee Network Range",
-      "ip_range": "54.239.0.0/17",
+      "name": "Comcast Cable Denver CO",
+      "ip_range": "68.86.113.0/24",
       "country": "US",
-      "asn": 16509
+      "resolved_country": "United States"
     },
     {
-      "name": "Salesforce Office IP",
-      "ip_range": "204.14.232.0/22",
+      "name": "Charter Spectrum St Louis MO",
+      "ip_range": "97.85.44.0/24",
       "country": "US",
-      "asn": 714
+      "resolved_country": "United States"
     },
     {
-      "name": "Palo Alto Networks Office IP",
-      "ip_range": "199.167.53.0/24",
+      "name": "Verizon FiOS Newark NJ",
+      "ip_range": "71.163.116.0/24",
       "country": "US",
-      "asn": 30048
-    },
-    {
-      "name": "Partner VPN Gateway IP",
-      "ip_range": "203.0.113.10/32",
-      "country": "US",
-      "asn": 65500
-    },
-    {
-      "name": "Branch Office Static IP",
-      "ip_range": "198.51.100.5/32",
-      "country": "US",
-      "asn": 65501
-    },
-    {
-      "name": "Remote Worker Dynamic Pool (Example)",
-      "ip_range": "72.163.4.0/24",
-      "country": "US",
-      "asn": 701
-    },
-    {
-      "name": "University Campus Network",
-      "ip_range": "128.112.0.0/16",
-      "country": "US",
-      "asn": 88
-    },
-    {
-      "name": "Healthcare Provider Network",
-      "ip_range": "167.142.0.0/16",
-      "country": "US",
-      "asn": 7018
+      "resolved_country": "United States"
     }
+  ],
+  "external_traffic_sources": [
+    {
+      "name": "A1 Telekom Austria",
+      "ip_range": "213.33.20.0/24",
+      "country": "AT",
+      "resolved_country": "Austria"
+    },
+    {
+      "name": "Vivo Sao Paulo",
+      "ip_range": "187.10.20.0/24",
+      "country": "BR",
+      "resolved_country": "Brazil"
+    },
+    {
+      "name": "Vivacom Sofia",
+      "ip_range": "95.42.20.0/24",
+      "country": "BG",
+      "resolved_country": "Bulgaria"
+    },
+    {
+      "name": "China Unicom Beijing",
+      "ip_range": "61.135.20.0/24",
+      "country": "CN",
+      "resolved_country": "China"
+    },
+    {
+      "name": "O2 Czech Prague",
+      "ip_range": "88.100.20.0/24",
+      "country": "CZ",
+      "resolved_country": "Czechia"
+    },
+    {
+      "name": "TDC Copenhagen",
+      "ip_range": "80.62.20.0/24",
+      "country": "DK",
+      "resolved_country": "Denmark"
+    },
+    {
+      "name": "Elisa Helsinki",
+      "ip_range": "91.153.20.0/24",
+      "country": "FI",
+      "resolved_country": "Finland"
+    },
+    {
+      "name": "Orange France Paris",
+      "ip_range": "90.10.20.0/24",
+      "country": "FR",
+      "resolved_country": "France"
+    },
+    {
+      "name": "OTE Athens",
+      "ip_range": "79.130.20.0/24",
+      "country": "GR",
+      "resolved_country": "Greece"
+    },
+    {
+      "name": "PCCW Hong Kong",
+      "ip_range": "219.76.20.0/24",
+      "country": "HK",
+      "resolved_country": "Hong Kong"
+    },
+    {
+      "name": "Magyar Telekom Budapest",
+      "ip_range": "81.182.20.0/24",
+      "country": "HU",
+      "resolved_country": "Hungary"
+    },
+    {
+      "name": "Reliance Jio Mumbai",
+      "ip_range": "49.36.20.0/24",
+      "country": "IN",
+      "resolved_country": "India"
+    },
+    {
+      "name": "Telkomsel Jakarta",
+      "ip_range": "114.5.20.0/24",
+      "country": "ID",
+      "resolved_country": "Indonesia"
+    },
+    {
+      "name": "Bezeq Tel Aviv",
+      "ip_range": "79.178.20.0/24",
+      "country": "IL",
+      "resolved_country": "Israel"
+    },
+    {
+      "name": "Telecom Italia Rome",
+      "ip_range": "79.20.20.0/24",
+      "country": "IT",
+      "resolved_country": "Italy"
+    },
+    {
+      "name": "NTT Tokyo",
+      "ip_range": "210.150.20.0/24",
+      "country": "JP",
+      "resolved_country": "Japan"
+    },
+    {
+      "name": "TM Kuala Lumpur",
+      "ip_range": "175.138.20.0/24",
+      "country": "MY",
+      "resolved_country": "Malaysia"
+    },
+    {
+      "name": "Telmex Mexico City",
+      "ip_range": "189.130.20.0/24",
+      "country": "MX",
+      "resolved_country": "Mexico"
+    },
+    {
+      "name": "Ziggo Amsterdam",
+      "ip_range": "84.26.20.0/24",
+      "country": "NL",
+      "resolved_country": "Netherlands"
+    },
+    {
+      "name": "Telenor Oslo",
+      "ip_range": "84.210.20.0/24",
+      "country": "NO",
+      "resolved_country": "Norway"
+    },
+    {
+      "name": "Orange Polska Warsaw",
+      "ip_range": "83.5.20.0/24",
+      "country": "PL",
+      "resolved_country": "Poland"
+    },
+    {
+      "name": "MEO Lisbon",
+      "ip_range": "85.242.20.0/24",
+      "country": "PT",
+      "resolved_country": "Portugal"
+    },
+    {
+      "name": "RCS RDS Bucharest",
+      "ip_range": "79.114.20.0/24",
+      "country": "RO",
+      "resolved_country": "Romania"
+    },
+    {
+      "name": "Singtel Singapore",
+      "ip_range": "116.87.20.0/24",
+      "country": "SG",
+      "resolved_country": "Singapore"
+    },
+    {
+      "name": "Telkom SA Johannesburg",
+      "ip_range": "41.134.20.0/24",
+      "country": "ZA",
+      "resolved_country": "South Africa"
+    },
+    {
+      "name": "KT Seoul",
+      "ip_range": "175.200.20.0/24",
+      "country": "KR",
+      "resolved_country": "South Korea"
+    },
+    {
+      "name": "Telefonica Madrid",
+      "ip_range": "88.2.20.0/24",
+      "country": "ES",
+      "resolved_country": "Spain"
+    },
+    {
+      "name": "Telia Stockholm",
+      "ip_range": "78.69.20.0/24",
+      "country": "SE",
+      "resolved_country": "Sweden"
+    },
+    {
+      "name": "Swisscom Zurich",
+      "ip_range": "85.2.20.0/24",
+      "country": "CH",
+      "resolved_country": "Switzerland"
+    },
+    {
+      "name": "HiNet Taipei",
+      "ip_range": "61.217.20.0/24",
+      "country": "TW",
+      "resolved_country": "Taiwan"
+    },
+    {
+      "name": "TrueOnline Bangkok",
+      "ip_range": "171.98.20.0/24",
+      "country": "TH",
+      "resolved_country": "Thailand"
+    },
+    {
+      "name": "Turk Telekom Istanbul",
+      "ip_range": "88.226.20.0/24",
+      "country": "TR",
+      "resolved_country": "T\ufffdrkiye"
+    },
+    {
+      "name": "Kyivstar Kyiv",
+      "ip_range": "46.211.20.0/24",
+      "country": "UA",
+      "resolved_country": "Ukraine"
+    },
+    {
+      "name": "Etisalat Dubai",
+      "ip_range": "94.200.20.0/24",
+      "country": "AE",
+      "resolved_country": "United Arab Emirates"
+    },
+    {
+      "name": "VNPT Hanoi",
+      "ip_range": "113.162.20.0/24",
+      "country": "VN",
+      "resolved_country": "Vietnam"
+    }
+  ],
+  "vpn_novel_country_pool": [
+    {
+      "name": "Albtelecom",
+      "ip_range": "79.106.20.0/24",
+      "country": "AL",
+      "resolved_country": "Albania"
+    },
+    {
+      "name": "Algerie Telecom Algiers",
+      "ip_range": "41.98.20.0/24",
+      "country": "DZ",
+      "resolved_country": "Algeria"
+    },
+    {
+      "name": "Andorra Telecom",
+      "ip_range": "194.158.72.0/24",
+      "country": "AD",
+      "resolved_country": "Andorra"
+    },
+    {
+      "name": "Telecom Argentina Buenos Aires",
+      "ip_range": "190.17.20.0/24",
+      "country": "AR",
+      "resolved_country": "Argentina"
+    },
+    {
+      "name": "Beeline Armenia Yerevan",
+      "ip_range": "46.71.20.0/24",
+      "country": "AM",
+      "resolved_country": "Armenia"
+    },
+    {
+      "name": "Delta Telecom Baku",
+      "ip_range": "85.132.20.0/24",
+      "country": "AZ",
+      "resolved_country": "Azerbaijan"
+    },
+    {
+      "name": "Beltelecom",
+      "ip_range": "178.124.130.0/24",
+      "country": "BY",
+      "resolved_country": "Belarus"
+    },
+    {
+      "name": "Proximus Brussels",
+      "ip_range": "81.240.20.0/24",
+      "country": "BE",
+      "resolved_country": "Belgium"
+    },
+    {
+      "name": "Entel Bolivia La Paz",
+      "ip_range": "190.129.20.0/24",
+      "country": "BO",
+      "resolved_country": "Bolivia"
+    },
+    {
+      "name": "BH Telecom Sarajevo",
+      "ip_range": "195.222.40.0/24",
+      "country": "BA",
+      "resolved_country": "Bosnia and Herzegovina"
+    },
+    {
+      "name": "BTC Gaborone",
+      "ip_range": "168.167.20.0/24",
+      "country": "BW",
+      "resolved_country": "Botswana"
+    },
+    {
+      "name": "Ezecom Phnom Penh",
+      "ip_range": "175.100.20.0/24",
+      "country": "KH",
+      "resolved_country": "Cambodia"
+    },
+    {
+      "name": "VTR Santiago",
+      "ip_range": "190.45.20.0/24",
+      "country": "CL",
+      "resolved_country": "Chile"
+    },
+    {
+      "name": "Claro Colombia Bogota",
+      "ip_range": "190.25.20.0/24",
+      "country": "CO",
+      "resolved_country": "Colombia"
+    },
+    {
+      "name": "ICE Costa Rica San Jose",
+      "ip_range": "201.197.20.0/24",
+      "country": "CR",
+      "resolved_country": "Costa Rica"
+    },
+    {
+      "name": "Hrvatski Telekom Zagreb",
+      "ip_range": "93.138.20.0/24",
+      "country": "HR",
+      "resolved_country": "Croatia"
+    },
+    {
+      "name": "Cyta Nicosia",
+      "ip_range": "195.14.130.0/24",
+      "country": "CY",
+      "resolved_country": "Cyprus"
+    },
+    {
+      "name": "TE Data Cairo",
+      "ip_range": "41.34.20.0/24",
+      "country": "EG",
+      "resolved_country": "Egypt"
+    },
+    {
+      "name": "Telia Eesti Tallinn",
+      "ip_range": "90.190.20.0/24",
+      "country": "EE",
+      "resolved_country": "Estonia"
+    },
+    {
+      "name": "Ethio Telecom Addis Ababa",
+      "ip_range": "196.188.20.0/24",
+      "country": "ET",
+      "resolved_country": "Ethiopia"
+    },
+    {
+      "name": "Telecom Fiji Suva",
+      "ip_range": "202.62.120.0/24",
+      "country": "FJ",
+      "resolved_country": "Fiji"
+    },
+    {
+      "name": "Magticom Tbilisi",
+      "ip_range": "31.146.20.0/24",
+      "country": "GE",
+      "resolved_country": "Georgia"
+    },
+    {
+      "name": "Vodafone Ghana Accra",
+      "ip_range": "154.160.20.0/24",
+      "country": "GH",
+      "resolved_country": "Ghana"
+    },
+    {
+      "name": "Siminn Reykjavik",
+      "ip_range": "157.157.20.0/24",
+      "country": "IS",
+      "resolved_country": "Iceland"
+    },
+    {
+      "name": "Eir Dublin",
+      "ip_range": "86.42.20.0/24",
+      "country": "IE",
+      "resolved_country": "Ireland"
+    },
+    {
+      "name": "Zain Jordan Amman",
+      "ip_range": "176.29.20.0/24",
+      "country": "JO",
+      "resolved_country": "Jordan"
+    },
+    {
+      "name": "Kazakhtelecom Almaty",
+      "ip_range": "92.46.20.0/24",
+      "country": "KZ",
+      "resolved_country": "Kazakhstan"
+    },
+    {
+      "name": "Safaricom Nairobi",
+      "ip_range": "197.232.20.0/24",
+      "country": "KE",
+      "resolved_country": "Kenya"
+    },
+    {
+      "name": "Gulfnet Kuwait",
+      "ip_range": "168.187.20.0/24",
+      "country": "KW",
+      "resolved_country": "Kuwait"
+    },
+    {
+      "name": "Kyrgyztelecom Bishkek",
+      "ip_range": "212.42.100.0/24",
+      "country": "KG",
+      "resolved_country": "Kyrgyzstan"
+    },
+    {
+      "name": "LMT Riga",
+      "ip_range": "46.109.20.0/24",
+      "country": "LV",
+      "resolved_country": "Latvia"
+    },
+    {
+      "name": "Ogero Beirut",
+      "ip_range": "178.135.20.0/24",
+      "country": "LB",
+      "resolved_country": "Lebanon"
+    },
+    {
+      "name": "Telia Lietuva Vilnius",
+      "ip_range": "78.58.20.0/24",
+      "country": "LT",
+      "resolved_country": "Lithuania"
+    },
+    {
+      "name": "POST Luxembourg",
+      "ip_range": "158.64.20.0/24",
+      "country": "LU",
+      "resolved_country": "Luxembourg"
+    },
+    {
+      "name": "GO Malta",
+      "ip_range": "195.158.70.0/24",
+      "country": "MT",
+      "resolved_country": "Malta"
+    },
+    {
+      "name": "Moldtelecom Chisinau",
+      "ip_range": "178.168.20.0/24",
+      "country": "MD",
+      "resolved_country": "Moldova"
+    },
+    {
+      "name": "Mobicom Ulaanbaatar",
+      "ip_range": "202.179.20.0/24",
+      "country": "MN",
+      "resolved_country": "Mongolia"
+    },
+    {
+      "name": "Crnogorski Telekom",
+      "ip_range": "89.188.40.0/24",
+      "country": "ME",
+      "resolved_country": "Montenegro"
+    },
+    {
+      "name": "Maroc Telecom Casablanca",
+      "ip_range": "41.250.20.0/24",
+      "country": "MA",
+      "resolved_country": "Morocco"
+    },
+    {
+      "name": "TDM Maputo",
+      "ip_range": "197.218.20.0/24",
+      "country": "MZ",
+      "resolved_country": "Mozambique"
+    },
+    {
+      "name": "Telecom Namibia Windhoek",
+      "ip_range": "41.182.20.0/24",
+      "country": "NA",
+      "resolved_country": "Namibia"
+    },
+    {
+      "name": "Nepal Telecom Kathmandu",
+      "ip_range": "202.79.40.0/24",
+      "country": "NP",
+      "resolved_country": "Nepal"
+    },
+    {
+      "name": "Spark Auckland",
+      "ip_range": "122.57.20.0/24",
+      "country": "NZ",
+      "resolved_country": "New Zealand"
+    },
+    {
+      "name": "MTN Nigeria Lagos",
+      "ip_range": "197.210.20.0/24",
+      "country": "NG",
+      "resolved_country": "Nigeria"
+    },
+    {
+      "name": "Omantel Muscat",
+      "ip_range": "5.37.20.0/24",
+      "country": "OM",
+      "resolved_country": "Oman"
+    },
+    {
+      "name": "PTCL Karachi",
+      "ip_range": "39.34.20.0/24",
+      "country": "PK",
+      "resolved_country": "Pakistan"
+    },
+    {
+      "name": "Cable Wireless Panama",
+      "ip_range": "190.34.150.0/24",
+      "country": "PA",
+      "resolved_country": "Panama"
+    },
+    {
+      "name": "Telikom PNG Port Moresby",
+      "ip_range": "202.165.200.0/24",
+      "country": "PG",
+      "resolved_country": "Papua New Guinea"
+    },
+    {
+      "name": "Telefonica Peru Lima",
+      "ip_range": "190.233.20.0/24",
+      "country": "PE",
+      "resolved_country": "Peru"
+    },
+    {
+      "name": "Globe Telecom Manila",
+      "ip_range": "112.198.20.0/24",
+      "country": "PH",
+      "resolved_country": "Philippines"
+    },
+    {
+      "name": "Ooredoo Doha",
+      "ip_range": "78.100.20.0/24",
+      "country": "QA",
+      "resolved_country": "Qatar"
+    },
+    {
+      "name": "MTN Rwanda Kigali",
+      "ip_range": "197.243.20.0/24",
+      "country": "RW",
+      "resolved_country": "Rwanda"
+    },
+    {
+      "name": "STC Riyadh",
+      "ip_range": "188.55.20.0/24",
+      "country": "SA",
+      "resolved_country": "Saudi Arabia"
+    },
+    {
+      "name": "Sonatel Dakar",
+      "ip_range": "41.82.20.0/24",
+      "country": "SN",
+      "resolved_country": "Senegal"
+    },
+    {
+      "name": "Telekom Srbija Belgrade",
+      "ip_range": "79.101.20.0/24",
+      "country": "RS",
+      "resolved_country": "Serbia"
+    },
+    {
+      "name": "Slovak Telekom Bratislava",
+      "ip_range": "78.99.20.0/24",
+      "country": "SK",
+      "resolved_country": "Slovakia"
+    },
+    {
+      "name": "Telekom Slovenije Ljubljana",
+      "ip_range": "93.103.20.0/24",
+      "country": "SI",
+      "resolved_country": "Slovenia"
+    },
+    {
+      "name": "SLT Colombo",
+      "ip_range": "175.157.20.0/24",
+      "country": "LK",
+      "resolved_country": "Sri Lanka"
+    },
+    {
+      "name": "TTCL Dar es Salaam",
+      "ip_range": "41.59.20.0/24",
+      "country": "TZ",
+      "resolved_country": "Tanzania"
+    },
+    {
+      "name": "Tunisie Telecom Tunis",
+      "ip_range": "41.226.20.0/24",
+      "country": "TN",
+      "resolved_country": "Tunisia"
+    },
+    {
+      "name": "MTN Uganda Kampala",
+      "ip_range": "41.210.150.0/24",
+      "country": "UG",
+      "resolved_country": "Uganda"
+    },
+    {
+      "name": "Antel Montevideo",
+      "ip_range": "179.26.20.0/24",
+      "country": "UY",
+      "resolved_country": "Uruguay"
+    },
+    {
+      "name": "Uztelecom Tashkent",
+      "ip_range": "213.230.80.0/24",
+      "country": "UZ",
+      "resolved_country": "Uzbekistan"
+    },
+    {
+      "name": "Cantv Caracas",
+      "ip_range": "190.73.20.0/24",
+      "country": "VE",
+      "resolved_country": "Venezuela"
+    },
+    {
+      "name": "Zamtel Lusaka",
+      "ip_range": "41.60.20.0/24",
+      "country": "ZM",
+      "resolved_country": "Zambia"
+    },
+    {
+      "name": "TelOne Harare",
+      "ip_range": "41.220.20.0/24",
+      "country": "ZW",
+      "resolved_country": "Zimbabwe"
+    },
+    {
+      "name": "Orange Cote d Ivoire Abidjan",
+      "ip_range": "41.66.20.0/24",
+      "country": "CI",
+      "resolved_country": "Ivory Coast"
+    },
+    {
+      "name": "Claro El Salvador San Salvador",
+      "ip_range": "190.57.20.0/24",
+      "country": "SV",
+      "resolved_country": "El Salvador"
+    },
+    {
+      "name": "Telma Antananarivo",
+      "ip_range": "197.149.20.0/24",
+      "country": "MG",
+      "resolved_country": "Madagascar"
+    },
+    {
+      "name": "Flow Trinidad Port of Spain",
+      "ip_range": "190.213.20.0/24",
+      "country": "TT",
+      "resolved_country": "Trinidad and Tobago"
+    },
+    {
+      "name": "ETECSA Havana",
+      "ip_range": "152.206.20.0/24",
+      "country": "CU",
+      "resolved_country": "Cuba"
+    },
+    {
+      "name": "Camtel Yaounde",
+      "ip_range": "154.72.130.0/24",
+      "country": "CM",
+      "resolved_country": "Cameroon"
+    },
+    {
+      "name": "Natcom Port-au-Prince",
+      "ip_range": "190.115.180.0/24",
+      "country": "HT",
+      "resolved_country": "Haiti"
+    },
+    {
+      "name": "EriTel Asmara",
+      "ip_range": "196.200.100.0/24",
+      "country": "ER",
+      "resolved_country": "Eritrea"
+    },
+    {
+      "name": "Solomon Telekom Honiara",
+      "ip_range": "202.1.164.0/24",
+      "country": "SB",
+      "resolved_country": "Solomon Islands"
+    },
+    {
+      "name": "PNCC Koror",
+      "ip_range": "202.124.228.0/24",
+      "country": "PW",
+      "resolved_country": "Palau"
+    },
+    {
+      "name": "Telecom Cook Islands Rarotonga",
+      "ip_range": "202.65.36.0/24",
+      "country": "CK",
+      "resolved_country": "Cook Islands"
+    },
+    {
+      "name": "Orange Niger Niamey",
+      "ip_range": "41.138.40.0/24",
+      "country": "NE",
+      "resolved_country": "Niger"
+    },
+    {
+      "name": "Gabon Telecom Libreville",
+      "ip_range": "41.158.20.0/24",
+      "country": "GA",
+      "resolved_country": "Gabon"
+    },
+    {
+      "name": "Mauritel Nouakchott",
+      "ip_range": "41.188.100.0/24",
+      "country": "MR",
+      "resolved_country": "Mauritania"
+    },
+    {
+      "name": "Orange Mali Bamako",
+      "ip_range": "41.221.180.0/24",
+      "country": "ML",
+      "resolved_country": "Mali"
+    },
+    {
+      "name": "Lonestar Cell Monrovia",
+      "ip_range": "41.86.20.0/24",
+      "country": "LR",
+      "resolved_country": "Liberia"
+    },
+    {
+      "name": "Tuvalu Telecom Funafuti",
+      "ip_range": "202.2.96.0/24",
+      "country": "TV",
+      "resolved_country": "Tuvalu"
+    },
+    {
+      "name": "GTA Teleguam Hagatna",
+      "ip_range": "202.128.20.0/24",
+      "country": "GU",
+      "resolved_country": "Guam"
+    }
+  ],
+  "tor_vpn_allowed_countries": ["United States", "Germany", "Netherlands", "France", "Romania"],
+  "tor_vpn_prefix_allowlist": [
+    "104.167", "104.192", "104.219", "107.172", "107.174", "107.175", "108.59", "108.61",
+    "109.69", "109.71", "121.127", "128.31", "136.244", "138.197", "141.239", "142.249",
+    "144.126", "146.59", "147.90", "149.202", "150.129", "154.53", "155.94", "159.195",
+    "161.129", "161.97", "162.19", "162.216", "162.251", "163.172", "165.227", "166.70",
+    "167.99", "172.81", "173.237", "173.255", "176.65", "178.162", "178.170", "178.18",
+    "178.20", "178.85", "185.100", "185.11", "185.117", "185.121", "185.130", "185.132",
+    "185.170", "185.183", "185.193", "185.198", "185.207", "185.220", "185.233", "185.235",
+    "185.244", "185.252", "185.34", "188.116", "188.239", "188.68", "192.108", "192.159",
+    "192.227", "192.236", "192.255", "192.3", "192.34", "192.42", "192.76", "193.32",
+    "193.36", "194.163", "198.46", "198.58", "198.98", "199.195", "2.56", "201.3",
+    "203.55", "204.137", "204.194", "204.8", "204.85", "205.185", "206.206", "209.127",
+    "209.141", "212.21", "212.95", "213.111", "213.202", "213.95", "23.128", "23.129",
+    "23.134", "23.137", "23.145", "23.151", "23.155", "23.191", "23.238", "23.94",
+    "23.95", "31.14", "31.25", "35.0", "37.114", "37.187", "37.48", "38.126",
+    "45.13", "45.133", "45.148", "45.33", "45.38", "45.61", "45.66", "45.81",
+    "45.83", "45.91", "45.92", "46.105", "46.165", "46.232", "47.254", "5.2",
+    "5.253", "5.255", "5.45", "5.79", "5.83", "51.15", "51.158", "51.195",
+    "51.81", "51.91", "54.36", "57.129", "62.133", "62.171", "62.84", "64.190",
+    "65.87", "66.146", "66.220", "66.63", "67.215", "69.163", "71.19", "72.211",
+    "74.82", "77.239", "77.81", "80.241", "80.251", "80.67", "80.82", "80.94",
+    "82.153", "82.39", "83.97", "84.16", "84.19", "84.239", "85.17", "86.54",
+    "87.118", "89.234", "89.58", "91.132", "91.208", "92.119", "92.246", "93.113",
+    "94.142", "94.16", "95.128", "95.135", "95.155", "95.211"
   ],
   "user_agents": [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
@@ -3492,6 +4057,7 @@
     }
   },
   "zscaler_config": {
+    "vpn_gateway_ip": "10.0.10.1",
     "source_translated_ips": [
       "198.51.100.10",
       "198.51.100.11",
