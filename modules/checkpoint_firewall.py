@@ -10,10 +10,12 @@ import uuid
 from ipaddress import ip_network
 try:
     from modules.session_utils import (get_random_user, get_user_by_name, rand_ip_from_network,
-        stable_vpn_ip, stable_mail_servers, weighted_destination)
+        stable_vpn_ip, stable_mail_servers, weighted_destination,
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name, rand_ip_from_network,
-        stable_vpn_ip, stable_mail_servers, weighted_destination)
+        stable_vpn_ip, stable_mail_servers, weighted_destination,
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 
 NAME = "Check Point Firewall"
 DESCRIPTION = "Simulates Check Point traffic, threat prevention, URL filtering, and identity logs in CEF format."
@@ -73,6 +75,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": None},
     {"event": "vpn_tor_login",         "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "vpn_new_country_login", "weight": 3,  "analytic": True,
+     "xsiam_alert": "First successful VPN access from a country in organization"},
     {"event": "smb_new_host_lateral",  "weight": 4,  "analytic": True,
      "xsiam_alert": "Rare SMB session to a remote host"},
     {"event": "smb_rare_file_transfer","weight": 3,  "analytic": True,
@@ -218,16 +222,32 @@ def _cef_escape(v):
 
 
 def _random_external_ip():
-    """Realistic public (non-RFC-1918) IP address for simulated external attackers."""
-    first_octets = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 194, 212, 213]
-    return (f"{random.choice(first_octets)}."
-            f"{random.randint(1, 254)}."
-            f"{random.randint(1, 254)}."
-            f"{random.randint(1, 254)}")
+    """Public (non-RFC-1918) IP from the shared ambient external-traffic pool.
+
+    DO NOT "FIX" THIS BACK to `random.choice(first_octets)` + 3 random octets.
+    That construction picked a random host inside one of 14
+    different /8 blocks; a /8 spans dozens of countries, and across all modules it
+    was a primary driver of the 210 DISTINCT COUNTRIES seen in
+    xdm.source.location.country over 30 days.  That saturation permanently
+    silenced the XSIAM analytic "First successful VPN access from a country in
+    organization", which only fires on a country unseen org-wide for 30 days.
+    session_utils.random_external_ip() draws from 35 individually XSIAM-PROBED
+    /24s that are disjoint from config['vpn_novel_country_pool'].
+    """
+    return random_external_ip()
 
 
 def _dns_precursor(config, src_ip, user, shost, domain, event_time=None):
-    """Generate a DNS resolution log preceding an outbound connection."""
+    """Generate a DNS resolution log preceding an outbound connection.
+
+    Returns None when there is no domain to resolve. A DNS query log only exists
+    because a NAME was looked up — for traffic addressed by IP there is no lookup
+    and a real firewall logs nothing. Callers must filter the None out.
+    Previously callers passed `dhost or dest_ip`, which fabricated a DNS query for
+    an IP literal and put that IP into dhost/xdm.target.host.hostname; measured ~12% of Check Point target hostnames.
+    """
+    if not domain:
+        return None
     ext = {
         "act": "Accept",
         "src": src_ip, "dst": "8.8.8.8",
@@ -397,11 +417,21 @@ def _generate_benign_log(config, session_context=None):
 
     log_type = random.choices(
         ['traffic', 'inbound_block', 'dns', 'icmp', 'smtp', 'ntp', 'smb_internal',
-         'rdp_internal', 'ftp_download', 'vpn_login', 'vpn_failure', 'ad_auth'],
+         'rdp_internal', 'ftp_download', 'vpn_login', 'vpn_failure', 'ad_auth',
+         'vpn_new_country_login'],
         weights=[40, 18, 8, 3, 4, 3, 3,
-                 3, 2, 3, 1, 5],
+                 3, 2, 3, 1, 5,
+                 # 2/93 of benign events. This has to live on the BENIGN path, not the
+                 # threat path: threats are interval-gated (~12/day at "Realistic") and
+                 # weighted, which works out to ~0.3 firings/day — the day-keyed country
+                 # rotation needs at least one emission EVERY day or a country is skipped
+                 # and the analytic goes quiet for that slot.
+                 2],
         k=1,
     )[0]
+
+    if log_type == 'vpn_new_country_login':
+        return _simulate_vpn_new_country_login(config, user)
 
     if log_type == 'ad_auth':
         return _generate_ldap_kerberos_benign(config, src_ip, user, shost)
@@ -682,7 +712,7 @@ def _simulate_large_upload(config, src_ip, user, shost):
     dhost = destination.get("domain", dest_ip)
 
     base_time = datetime.now(timezone.utc)
-    logs = [_dns_precursor(config, src_ip, user, shost, dhost or dest_ip, event_time=base_time)]
+    logs = [_l for _l in [_dns_precursor(config, src_ip, user, shost, dhost, event_time=base_time)] if _l]
 
     duration  = random.randint(300, 1200)
     bytes_out = random.randint(104857600, 524288000)  # 100 MB – 500 MB
@@ -783,7 +813,7 @@ def _simulate_rare_ssh(config, src_ip, user, shost):
     print(f"    - Check Point Module simulating: Rare External SSH from {src_ip}")
     dest_ip = _random_external_ip()
     base_time = datetime.now(timezone.utc)
-    logs = [_dns_precursor(config, src_ip, user, shost, dest_ip, event_time=base_time)]
+    logs = [_l for _l in [_dns_precursor(config, src_ip, user, shost, None, event_time=base_time)] if _l]
     extensions = {
         "act": "Accept",
         "src": src_ip, "dst": dest_ip,
@@ -823,7 +853,7 @@ def _simulate_tor_connection(config, src_ip, user, shost):
     bytes_in  = random.randint(50000, 500000)
 
     base_time = datetime.now(timezone.utc)
-    logs = [_dns_precursor(config, src_ip, user, shost, dest_ip, event_time=base_time)]
+    logs = [_l for _l in [_dns_precursor(config, src_ip, user, shost, None, event_time=base_time)] if _l]
 
     extensions = {
         "act": "Accept",
@@ -876,7 +906,10 @@ def _simulate_auth_brute_force(config, src_ip, user, shost):
     _ssh_targets = ["root", "admin", "ubuntu", "ec2-user", "deploy", "svc-backup"]
     if auth_port == 22:      # SSH → any internal server
         dest_ip     = random.choice(internal_servers)
-        dhost       = dest_ip
+        # Name the server rather than echoing its IP into dhost — the LDAP/VPN/
+        # RADIUS branches below already use real names, and an address in a
+        # hostname field makes XSIAM believe a host named "10.0.10.50" exists.
+        dhost       = "srv-%s.examplecorp.com" % dest_ip.split(".")[-1]
         auth_method = "SSH Public Key"
     elif auth_port in [389, 636]:  # LDAP/LDAPS → Domain Controller
         dest_ip     = random.choice(internal_servers)
@@ -1132,6 +1165,63 @@ def _simulate_vpn_impossible_travel(config, src_ip, user, shost):
     return logs
 
 
+def _simulate_vpn_new_country_login(config, user):
+    """One SUCCESSFUL Identity Awareness VPN log-in from a never-before-seen country.
+
+    Drives the XSIAM analytic "First successful VPN access from a country in
+    organization" — a FIRST-SEEN, ORG-SCOPED detector that only fires on a
+    country not observed anywhere in the org for 30 days.
+
+    WHY THIS EXISTS / DO NOT "FIX" IT AWAY:
+    The analytic had been silent because the
+    simulator had already emitted source IPs resolving to 210 distinct countries
+    in 30 days (check_point_vpn_1_firewall_1_raw alone accounted for 168), so no
+    country could ever be novel.  Tightening the ambient baseline is necessary but
+    not sufficient — something must deliberately visit an unused country, and this
+    is it.
+
+    session_utils.novel_country_vpn_ip() draws from config['vpn_novel_country_pool']
+    (70 XSIAM-PROBED single-country /24s, disjoint from benign_ingress_sources,
+    external_traffic_sources and the Tor prefix allowlist) and rotates on the day
+    number, giving a 70-day recurrence per country.  The rotation is day-keyed, not
+    random, so every VPN-capable module picks the SAME country on a given day — the
+    detector is org-scoped, so five sources each picking their own country would
+    consume the pool five times faster and break the 30-day novelty requirement.
+
+    Routes to check_point_identity_awareness_raw (device_product "Identity
+    Awareness") like the benign vpn_login event, so the login outcome models into
+    XDM as an authentication event rather than bare firewall traffic.
+    """
+    novel_ip, cc, country, isp = novel_country_vpn_ip(config)
+    if not novel_ip:
+        return None
+    print(f"    - Check Point Module simulating: First VPN access from new country "
+          f"({country} / {isp} / {novel_ip}) for {user}")
+
+    checkpoint_conf = config.get(CONFIG_KEY, {})
+    gateway_ip = checkpoint_conf.get('gateway_ip', '203.0.113.10')
+    extensions = {
+        "signatureId": "45678",
+        "name": "Identity Awareness",
+        "severity": "1",
+        "act": "Log In",
+        "auth_status": "Log In",
+        "src": novel_ip, "dst": gateway_ip,
+        "spt": random.randint(49152, 65535), "dpt": 443,
+        "proto": "6",
+        "suser": user,
+        "deviceInboundInterface": "External", "deviceOutboundInterface": "Internal",
+        "deviceDirection": "0",
+        "cs3": "user", "cs3Label": "User Type",
+        "cs5": "VPN", "cs5Label": "Authentication Method",
+        "blade": "Identity Awareness",
+        "dhost": "vpn-gateway.examplecorp.com",
+        "ifname": "eth0",
+        "msg": f"VPN login for {user} from {novel_ip}",
+    }
+    return _format_checkpoint_cef(config, extensions, device_product="Identity Awareness")
+
+
 def _simulate_vpn_tor_login(config, src_ip, user, shost):
     """Full conversation: TLS handshake + VPN auth + post-auth internal activity from Tor.
 
@@ -1140,8 +1230,17 @@ def _simulate_vpn_tor_login(config, src_ip, user, shost):
     print(f"    - Check Point Module simulating: VPN Login from TOR Exit Node for {user}")
     checkpoint_conf = config.get(CONFIG_KEY, {})
     gateway_ip      = checkpoint_conf.get('gateway_ip', '203.0.113.10')
-    tor_nodes       = config.get('tor_exit_nodes', [])
-    tor_ip          = random.choice(tor_nodes).get('ip', _random_external_ip()) if tor_nodes else _random_external_ip()
+    # DO NOT "FIX" THIS BACK to random.choice(config['tor_exit_nodes']).
+    # Probing the full live exit-node list through the tenant
+    # resolved them to 55 DISTINCT COUNTRIES with a rotating long tail
+    # (Seychelles, Belize, Nicaragua, Panama, Peru ...).  As the SOURCE IP of a
+    # successful VPN login that tail kept marking reserve countries "already
+    # seen", permanently silencing the analytic "First successful VPN access
+    # from a country in organization".  tor_vpn_ip() restricts the pool to the
+    # 182 probed /16 prefixes that resolve ONLY to the genuine Tor-heavy
+    # countries (US/DE/NL/FR/RO) — still 930 live nodes, so the HIGH-severity
+    # "A Successful VPN connection from TOR" analytic is unaffected.
+    tor_ip          = tor_vpn_ip(config, default=_random_external_ip())
 
     # Assign a VPN pool inside IP for post-auth traffic
     vpn_pool = checkpoint_conf.get('vpn_pool', '10.250.0.0/16')
@@ -1454,14 +1553,15 @@ def _simulate_server_outbound_http(config):
     src_port   = random.randint(49152, 65535)
 
     base_time = datetime.now(timezone.utc)
-    logs = [_dns_precursor(config, server_ip, None, server_ip, dhost or dest_ip, event_time=base_time)]
+    logs = [_l for _l in [_dns_precursor(config, server_ip, None, None, dhost, event_time=base_time)] if _l]
 
     ext = {
         "act": "Accept",
         "src": server_ip, "dst": dest_ip,
         "spt": src_port, "dpt": 80,
         "proto": "6",
-        "shost": server_ip, "dhost": dhost,
+        # shost is a NAME field — name the internal server instead of its address.
+        "shost": "srv-%s.examplecorp.com" % server_ip.split(".")[-1], "dhost": dhost,
         "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
         "deviceDirection": "1",
         "service_id": "http", "app": "HTTP",
@@ -1515,7 +1615,7 @@ def _simulate_workstation_rdp(config, src_ip, user, shost):
             "src": src_ip, "dst": dest_ip,
             "spt": src_port, "dpt": 3389,
             "proto": "6",
-            "suser": user, "shost": shost, "dhost": dest_ip,
+            "suser": user, "shost": shost, "dhost": None,
             "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
             "deviceDirection": "1",
             "service_id": "rdp", "app": "RDP",
@@ -1543,7 +1643,7 @@ def _simulate_rare_external_rdp(config, src_ip, user, shost):
     bytes_in  = random.randint(50000, 2000000)
 
     base_time = datetime.now(timezone.utc)
-    logs = [_dns_precursor(config, src_ip, user, shost, dest_ip, event_time=base_time)]
+    logs = [_l for _l in [_dns_precursor(config, src_ip, user, shost, None, event_time=base_time)] if _l]
 
     ext = {
         "act": "Accept",
@@ -1653,7 +1753,7 @@ def _simulate_smtp_large_exfil(config, src_ip, user, shost):
     bytes_in    = random.randint(500, 5000)
 
     base_time = datetime.now(timezone.utc)
-    logs = [_dns_precursor(config, src_ip, user, shost, dest_ip, event_time=base_time)]
+    logs = [_l for _l in [_dns_precursor(config, src_ip, user, shost, None, event_time=base_time)] if _l]
 
     ext = {
         "act": "Accept",
@@ -1695,7 +1795,7 @@ def _simulate_ftp_large_exfil(config, src_ip, user, shost):
     bytes_in    = random.randint(500, 10000)
 
     base_time = datetime.now(timezone.utc)
-    logs = [_dns_precursor(config, src_ip, user, shost, dest_ip, event_time=base_time)]
+    logs = [_l for _l in [_dns_precursor(config, src_ip, user, shost, None, event_time=base_time)] if _l]
 
     ext = {
         "act": "Accept",
@@ -1721,6 +1821,9 @@ def _simulate_ftp_large_exfil(config, src_ip, user, shost):
     logs.append(_format_checkpoint_cef(config, ext,
                                         event_time=base_time + timedelta(seconds=1)))
     return logs
+
+
+_ddns_beacon_map: dict = {}   # src_ip -> stable (ddns_hostname, resolved_ip) for DDNS recurrence
 
 
 def _simulate_ddns_connection(config, src_ip, user, shost):
@@ -1749,15 +1852,27 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
         "sytes.net",       "ddns.net",         "servebeer.com",
         "myftp.biz",       "myvnc.com",        "redirectme.net",
     ]
-    provider = random.choice(ddns_providers)
-    # Random subdomain mimicking attacker-chosen hostnames
-    subdomain = random.choice([
+    # Subdomains mimicking attacker-chosen hostnames.
+    subdomains = [
         "update-service", "cdn-relay", "mail-check", "vpn-gateway",
         "api-health", "sync-node", "cloud-backup", "office-proxy",
         "fw-mgmt", "dns-cache",
-    ])
-    ddns_hostname = f"{subdomain}.{provider}"
-    resolved_ip   = _random_external_ip()
+    ]
+    # STICKY PER SOURCE HOST — see _ddns_beacon_map. XSIAM's "Recurring rare domain
+    # access to dynamic DNS domain" needs one endpoint returning to ONE rare domain
+    # repeatedly. Picking a fresh provider x subdomain per call (12 x 10 = 120
+    # combinations) with a random source produced scattered single hits, the opposite
+    # of recurrence. Verified in-tenant: a concentrated replay
+    # (192.168.55.77 -> sync-node.duckdns.org, 90 sessions, 1 source) produced the
+    # correct shape while the randomised generator never did.
+    # DO NOT restore per-call randomisation.
+    if src_ip not in _ddns_beacon_map:
+        _rnd = random.Random(hash(("ddns", src_ip)) & 0xFFFFFFFF)
+        _ddns_beacon_map[src_ip] = (
+            f"{_rnd.choice(subdomains)}.{_rnd.choice(ddns_providers)}",
+            _random_external_ip(),
+        )
+    ddns_hostname, resolved_ip = _ddns_beacon_map[src_ip]
 
     checkpoint_conf = config.get(CONFIG_KEY, {})
     dns_server = "8.8.8.8"   # internal DNS forwarding query
@@ -1786,32 +1901,35 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
     }
     logs.append(_format_checkpoint_cef(config, dns_ext, event_time=base_time))
 
-    # Log 2: HTTPS session to the resolved DDNS IP
-    duration  = random.randint(30, 600)
-    bytes_out = random.randint(1000, 100000)
-    bytes_in  = random.randint(5000, 500000)
-    https_ext = {
-        "act": "Accept",
-        "src": src_ip, "dst": resolved_ip,
-        "spt": random.randint(49152, 65535), "dpt": 443,
-        "proto": "6",
-        "suser": user, "shost": shost, "dhost": ddns_hostname,
-        "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
-        "deviceDirection": "1",
-        "service_id": "https", "app": "SSL",
-        "cs1": "Allow_Outbound_Web", "cs1Label": "Rule Name",
-        "out": bytes_out, "in": bytes_in,
-        "cn1": duration, "cn1Label": "Elapsed Time in Seconds",
-        "duration": str(duration),
-        "reason": "TCP FIN",
-        "ifname": "eth0",
-        "msg": (
-            f"Accept HTTPS from {src_ip} to DDNS host {ddns_hostname} "
-            f"({resolved_ip}:443) — {bytes_out // 1024}KB out / {bytes_in // 1024}KB in"
-        ),
-    }
-    logs.append(_format_checkpoint_cef(config, https_ext,
-                                       event_time=base_time + timedelta(seconds=1)))
+    # Logs 2..N: a BURST of HTTPS callbacks to the same resolved IP. One session is a
+    # visit; the detector wants recurrence, so emit 8-16 per invocation, spaced out.
+    for _i in range(random.randint(8, 16)):
+        duration  = random.randint(30, 600)
+        bytes_out = random.randint(1000, 100000)
+        bytes_in  = random.randint(5000, 500000)
+        https_ext = {
+            "act": "Accept",
+            "src": src_ip, "dst": resolved_ip,
+            "spt": random.randint(49152, 65535), "dpt": 443,
+            "proto": "6",
+            "suser": user, "shost": shost, "dhost": ddns_hostname,
+            "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
+            "deviceDirection": "1",
+            "service_id": "https", "app": "SSL",
+            "cs1": "Allow_Outbound_Web", "cs1Label": "Rule Name",
+            "out": bytes_out, "in": bytes_in,
+            "cn1": duration, "cn1Label": "Elapsed Time in Seconds",
+            "duration": str(duration),
+            "reason": "TCP FIN",
+            "ifname": "eth0",
+            "msg": (
+                f"Accept HTTPS from {src_ip} to DDNS host {ddns_hostname} "
+                f"({resolved_ip}:443) — {bytes_out // 1024}KB out / {bytes_in // 1024}KB in"
+            ),
+        }
+        logs.append(_format_checkpoint_cef(
+            config, https_ext,
+            event_time=base_time + timedelta(seconds=1 + _i * random.randint(20, 90))))
     return logs
 
 
@@ -1966,7 +2084,7 @@ def _simulate_large_download(config, src_ip, user, shost):
     dhost = destination.get("domain", dest_ip)
 
     base_time = datetime.now(timezone.utc)
-    logs = [_dns_precursor(config, src_ip, user, shost, dhost or dest_ip, event_time=base_time)]
+    logs = [_l for _l in [_dns_precursor(config, src_ip, user, shost, dhost, event_time=base_time)] if _l]
 
     duration = random.randint(300, 1800)
     bytes_in = random.randint(524288000, 4294967296)   # 500 MB – 4 GB inbound
@@ -2053,7 +2171,7 @@ def _simulate_reverse_ssh_tunnel(config, src_ip, user, shost):
             "src": src_ip, "dst": dest_ip,
             "spt": random.randint(49152, 65535), "dpt": 22,
             "proto": "6",
-            "suser": user, "shost": shost, "dhost": dest_ip,
+            "suser": user, "shost": shost, "dhost": None,
             "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
             "deviceDirection": "1",
             "service_id": "ssh", "app": "SSH",
@@ -2086,7 +2204,7 @@ def _simulate_ldap_recon(config, src_ip, user, shost):
                 "src": src_ip, "dst": dc,
                 "spt": random.randint(49152, 65535), "dpt": port,
                 "proto": "6",
-                "suser": user, "shost": shost, "dhost": dhost or dc,
+                "suser": user, "shost": shost, "dhost": dhost,
                 "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
                 "deviceDirection": "1",
                 "service_id": "ldap" if port == 389 else "ldap-ssl", "app": "LDAP",
@@ -2146,7 +2264,7 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost):
         "src": src_ip, "dst": dc,
         "spt": random.randint(49152, 65535), "dpt": port,
         "proto": "6",
-        "suser": user, "shost": shost, "dhost": dhost or dc,
+        "suser": user, "shost": shost, "dhost": dhost,
         "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
         "deviceDirection": "1",
         "service_id": svc, "app": app,
@@ -2228,6 +2346,8 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_simulate_app_control_block(config, src_ip, user, shost), display_name)
     if threat_type == 'vpn_tor_login':
         return (_simulate_vpn_tor_login(config, src_ip, user, shost), display_name)
+    if threat_type == 'vpn_new_country_login':
+        return (_simulate_vpn_new_country_login(config, user), display_name)
     if threat_type == 'smb_new_host_lateral':
         return (_simulate_smb_new_host_lateral(config, src_ip, user, shost), display_name)
     if threat_type == 'smb_rare_file_transfer':

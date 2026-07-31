@@ -55,10 +55,12 @@ from ipaddress import ip_network, AddressValueError
 
 try:
     from modules.session_utils import (get_random_user, rand_ip_from_network,
-        stable_vpn_ip, stable_mail_servers, weighted_destination)
+        stable_vpn_ip, stable_mail_servers, weighted_destination,
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 except ImportError:
     from session_utils import (get_random_user, rand_ip_from_network,
-        stable_vpn_ip, stable_mail_servers, weighted_destination)
+        stable_vpn_ip, stable_mail_servers, weighted_destination,
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 
 NAME        = "Cisco Firepower"
 DESCRIPTION = "Simulates Cisco FTD/FMC CEF syslog events for the XSIAM cisco_firepower_raw dataset."
@@ -114,6 +116,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": None},
     {"event": "vpn_tor_login",         "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "vpn_new_country_login", "weight": 3,  "analytic": True,
+     "xsiam_alert": "First successful VPN access from a country in organization"},
     {"event": "rare_external_rdp",     "weight": 3,  "analytic": True,
      "xsiam_alert": "Rare RDP session to a remote host"},
     {"event": "rare_ssh",              "weight": 3,  "analytic": True,
@@ -243,12 +247,19 @@ def _cef_escape(v):
 
 
 def _random_external_ip():
-    """Realistic public (non-RFC-1918) IP for simulated external threats/attackers."""
-    first_octets = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 194, 212, 213]
-    return (f"{random.choice(first_octets)}."
-            f"{random.randint(1, 254)}."
-            f"{random.randint(1, 254)}."
-            f"{random.randint(1, 254)}")
+    """Public (non-RFC-1918) IP from the shared ambient external-traffic pool.
+
+    DO NOT "FIX" THIS BACK to `random.choice(first_octets)` + 3 random octets.
+    That construction picked a random host inside one of 14
+    different /8 blocks; a /8 spans dozens of countries, and across all modules it
+    was a primary driver of the 210 DISTINCT COUNTRIES seen in
+    xdm.source.location.country over 30 days.  That saturation permanently
+    silenced the XSIAM analytic "First successful VPN access from a country in
+    organization", which only fires on a country unseen org-wide for 30 days.
+    session_utils.random_external_ip() draws from 35 individually XSIAM-PROBED
+    /24s that are disjoint from config['vpn_novel_country_pool'].
+    """
+    return random_external_ip()
 
 
 def _get_user_and_ip(config, session_context=None):
@@ -260,14 +271,18 @@ def _get_user_and_ip(config, session_context=None):
     if session_context:
         user_info = get_random_user(session_context, preferred_device_type='workstation')
         if user_info:
-            return user_info['username'], user_info['ip'], user_info.get('hostname', user_info['ip'])
+            # Fall back to None, NOT the IP: shost is a NAME field and the CEF
+            # builder drops None. Returning the IP put addresses into
+            # xdm.source.host.hostname (~6%), which makes
+            # XSIAM believe hosts literally named 192.168.1.11 exist.
+            return user_info['username'], user_info['ip'], user_info.get('hostname')
 
     firepower_conf = _get_config(config)
     user_ip_map = (firepower_conf.get('user_ip_map')
                    or config.get('shared_user_ip_map', {}))
     if user_ip_map:
         user, ip = random.choice(list(user_ip_map.items()))
-        return user, ip, ip
+        return user, ip, None   # no hostname in the static map — omit, don't echo the IP
 
     return "unknown.user", f"192.168.1.{random.randint(100, 200)}", None
 
@@ -979,6 +994,68 @@ def _generate_benign_vpn_event(config, src_ip, user, shost=None):
     return fields, "CONNECTION STATISTICS"
 
 
+def _generate_vpn_new_country_login(config, src_ip, user, shost=None):
+    """One SUCCESSFUL RA-VPN session from a country the org has never seen.
+
+    Drives the XSIAM analytic "First successful VPN access from a country in
+    organization" — a FIRST-SEEN, ORG-SCOPED detector that fires only on a country
+    not observed anywhere in the org for the last 30 days.
+
+    WHY THIS EXISTS / DO NOT "FIX" IT AWAY:
+    The analytic had been silent because the
+    simulator was already emitting source IPs resolving to 210 distinct countries
+    over 30 days, so no country could ever be novel.  Two things were required to
+    revive it: tighten the ambient baseline to a handful of home countries, AND
+    deliberately visit a country the ambient baseline never touches.  This is the
+    second half.
+
+    session_utils.novel_country_vpn_ip() draws from config['vpn_novel_country_pool']
+    (70 XSIAM-PROBED single-country /24s, disjoint from benign_ingress_sources,
+    external_traffic_sources and the Tor prefix allowlist) and rotates on the day
+    number => 70-day recurrence per country, comfortably outside the 30-day window.
+    Day-keyed rather than random so ASA, Check Point, FortiGate, Firepower and
+    Zscaler all pick the SAME country on the same day; the detector is org-scoped,
+    so five sources each choosing independently would consume the pool five times
+    faster and the 30-day novelty requirement would never be met.
+
+    Otherwise identical to _generate_benign_vpn_event — a genuine successful SSL
+    VPN session, only the source IP differs.
+    """
+    novel_ip, cc, country, isp = novel_country_vpn_ip(config)
+    if not novel_ip:
+        return None, None
+    print(f"    - Firepower Module simulating: First VPN access from new country "
+          f"({country} / {isp} / {novel_ip})")
+
+    firepower_conf = _get_config(config)
+    gateway_ip     = firepower_conf.get('gateway_ip',
+                         random.choice(config.get('internal_servers', ['10.0.10.1'])))
+    duration_ms    = random.randint(1_800_000, 28_800_000)
+    start_ms, end_ms = _conn_timing(duration_ms)
+
+    fields = _base_fields(config, novel_ip, user)
+    fields['cs3']             = "Internet-Zone"
+    fields['cs4']             = "VPN-Zone"
+    fields['deviceDirection'] = 0
+    fields['deviceInboundInterface']  = firepower_conf.get('outbound_interface', 'outside')
+    fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
+    fields.update({
+        "_sig_id": SIG_IDS["CONNECTION"],
+        "act": "Allow", "app": "SSL VPN",
+        "dst": gateway_ip, "dpt": 443,
+        "cs1": _ac_policy(config),        "cs1Label": "fwPolicy",
+        "cs2": "VPN_Remote_Access",       "cs2Label": "fwRule",
+        "cs5": "VPN Authentication",      "cs5Label": "secIntelCategory",
+        "cefSeverity": "3",
+        "bytesOut": random.randint(100_000, 10_000_000),
+        "bytesIn":  random.randint(500_000, 50_000_000),
+        "outcome": "SUCCESS", "reason": "VPN Session Established",
+        "msg": f"VPN session for {user} from {novel_ip}",
+        "start": start_ms, "end": end_ms,
+    })
+    return fields, "CONNECTION STATISTICS"
+
+
 def _generate_benign_vpn_failure_event(config, src_ip, user, shost=None):
     """Benign VPN authentication failure — user mistyped password or expired cert.
 
@@ -1123,6 +1200,17 @@ def _generate_benign_log(config, session_context=None):
     elif roll < 0.92:  # 3% — RA-VPN successful login (UEBA baseline)
         fields, cef_name = _generate_benign_vpn_event(config, src_ip, user, shost)
         return _format_firepower_cef(config, fields, cef_name)
+
+    elif roll < 0.925:  # 0.5% — first successful VPN access from a new country.
+        # This lives on the BENIGN path deliberately.  The threat path is
+        # interval-gated (~12 firings/day at "Realistic") and then weighted, which
+        # works out to well under one emission per day — but the country rotation is
+        # keyed on the day number, so a day with zero emissions silently skips that
+        # day's country and the analytic stays quiet.  A benign slice guarantees
+        # several emissions every day; they all carry the SAME country, so this
+        # costs exactly one reserve country per day no matter how often it fires.
+        fields, cef_name = _generate_vpn_new_country_login(config, src_ip, user, shost)
+        return _format_firepower_cef(config, fields, cef_name) if fields else None
 
     elif roll < 0.94:  # 2% — RA-VPN auth failure (UEBA failure baseline)
         fields, cef_name = _generate_benign_vpn_failure_event(config, src_ip, user, shost)
@@ -1711,49 +1799,83 @@ def _generate_smb_share_enumeration(config, src_ip, user, shost=None):
     return logs
 
 
-def _generate_port_scan_event(config):
-    """External port scan — attacker probing sequential ports on an internal server.
+def _generate_port_scan_event(config, src_ip=None, user=None, shost=None,
+                              session_context=None):
+    """Internal host scanning many ports on an internal server (east-west recon).
 
-    Generates 20–50 blocked CONNECTION events from the same external IP to the same
-    internal server across different ports. The volume and sequential pattern is the
-    XSIAM detection signal, not any individual event.
+    Generates 100–200 blocked CONNECTION events from the same INTERNAL host to the same
+    internal server across a wide port range. Breadth of distinct destination ports is
+    the XSIAM detection signal, not any individual event.
 
-    Uses scan_target_ports from firepower_config if present (matches config.json key).
+    THE SCANNER MUST BE INTERNAL — DO NOT change this back to an external attacker IP.
+    "Suspicious port scan" is an ANALYTICS detector that profiles the SOURCE entity and
+    alerts on deviation from that entity's own baseline. A freshly-minted random public IP
+    has no baseline, so the detector stays silent no matter how many ports are probed.
+    Across all five network modules:
+        Check Point  internal -> internal   101-102 ports   FIRES
+        FortiGate    internal -> internal    97-162 ports   FIRES
+        Cisco ASA    internal -> internal   195-201 ports   FIRES
+        Firepower    EXTERNAL -> internal        18 ports   silent (this function)
+        Zscaler      EXTERNAL -> internal   175-188 ports   silent
+    Zscaler had the widest breadth of all five and still fired nothing; switching its
+    scanner to an internal host produced 6 XDR_ANALYTICS "Suspicious port scan" alerts
+    within ~2 minutes. Every firing alert carries an internal local_ip AND remote_ip,
+    and ASA fires with host_name set to a bare IP — so neither breadth nor a resolvable
+    hostname was ever the gate. This function is the same bug as Zscaler's was.
+
+    Two further defects fixed here at the same time:
+      * `random.randint(min(20, len(scan_ports)), min(50, len(scan_ports)))` over the
+        18-element default list collapses to randint(18, 18) — every scan probed exactly
+        18 ports, never the 20-50 the docstring claimed.
+      * Sample service ports (1-1023), never the ephemeral range: uniform sampling over
+        1-65535 puts ~75% of probes above 49152, which XSIAM reads as ordinary return
+        traffic rather than service enumeration.
+
     Returns a list of CEF log strings (multi-event threat generator).
-    Triggers XSIAM: Port Scan / Reconnaissance analytics detection.
     """
-    print("    - Firepower Module simulating: Port Scan (external -> internal)")
+    print("    - Firepower Module simulating: Port Scan (internal -> internal server)")
     firepower_conf   = _get_config(config)
-    attacker_ip      = _random_external_ip()
-    internal_servers = config.get('internal_servers', ['10.0.10.50'])
+    if not src_ip:
+        user, src_ip, shost = _get_user_and_ip(config, session_context)
+    scanner_ip       = src_ip
+    internal_servers = [s for s in config.get('internal_servers', ['10.0.10.50'])
+                        if s != scanner_ip] or ['10.0.10.50']
     victim_ip        = random.choice(internal_servers)
 
-    scan_ports = firepower_conf.get('scan_target_ports',
-                 [21, 22, 23, 25, 53, 80, 110, 135, 139, 443, 445, 1433, 1521, 3306, 3389, 5900, 8080, 8443])
-    n_ports       = random.randint(min(20, len(scan_ports)), min(50, len(scan_ports)))
-    ports_to_scan = sorted(random.sample(scan_ports, n_ports))  # sorted = sequential scan pattern
+    WELL_KNOWN_PORTS = firepower_conf.get(
+        'scan_target_ports',
+        [21, 22, 23, 25, 53, 80, 110, 135, 139, 443,
+         445, 1433, 1521, 3306, 3389, 5900, 8080, 8443])
+    n_ports     = random.randint(100, 200)
+    extra_ports = random.sample(
+        [p for p in range(1, 1024) if p not in WELL_KNOWN_PORTS],
+        max(0, n_ports - len(WELL_KNOWN_PORTS)))
+    ports_to_scan = sorted(set(list(WELL_KNOWN_PORTS) + extra_ports))
 
     logs = []
     for dpt in ports_to_scan:
         start_ms, end_ms = _conn_timing(random.randint(0, 100))
-        fields = _base_fields(config, attacker_ip, "EXTERNAL_ATTACKER")
-        fields['cs3']             = "Internet-Zone"
+        # East-west now: both endpoints are internal, so the zones and interfaces must
+        # describe LAN->LAN rather than Internet->Server, and shost carries the scanner's
+        # real hostname (a NAME field — never echo the IP into it).
+        fields = _base_fields(config, scanner_ip, user, shost)
+        fields['cs3']             = "Workstation-Zone"
         fields['cs4']             = "Server-Zone"
-        fields['deviceDirection'] = 0
-        fields['deviceInboundInterface']  = firepower_conf.get('outbound_interface', 'outside')
+        fields['deviceDirection'] = 1
+        fields['deviceInboundInterface']  = firepower_conf.get('inbound_interface',  'inside')
         fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
         fields.update({
             "_sig_id": SIG_IDS["CONNECTION"],
             "act": "Block", "app": "UNKNOWN",
             "dst": victim_ip, "dpt": dpt,
             "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
-            "cs2": "Block_Inbound_Default", "cs2Label": "fwRule",
+            "cs2": "Block_EastWest_Default", "cs2Label": "fwRule",
             "cs6": "Suspicious",            "cs6Label": "URLReputation",
             "cefSeverity": "7",  # Cisco: Block -> severity 7
-            "bytesOut": random.randint(40, 60),   # SYN probe bytes from attacker
+            "bytesOut": random.randint(40, 60),   # SYN probe bytes from the scanner
             "bytesIn":  random.randint(40, 60),   # RST/SYN-ACK before block
             "outcome": "FAILURE", "reason": "Access Control Rule",
-            "msg":   f"Port scan blocked: {attacker_ip} probing {victim_ip}:{dpt}",
+            "msg":   f"Port scan blocked: {scanner_ip} probing {victim_ip}:{dpt}",
             "start": start_ms, "end": end_ms,
         })
         logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
@@ -1762,25 +1884,25 @@ def _generate_port_scan_event(config):
     open_ports = random.sample([22, 80, 443, 445, 3389, 8080, 8443], k=random.randint(1, 2))
     for dpt in open_ports:
         start_ms, end_ms = _conn_timing(random.randint(5000, 30000))
-        fields = _base_fields(config, attacker_ip, "EXTERNAL_ATTACKER")
-        fields['cs3']             = "Internet-Zone"
+        fields = _base_fields(config, scanner_ip, user, shost)
+        fields['cs3']             = "Workstation-Zone"
         fields['cs4']             = "Server-Zone"
-        fields['deviceDirection'] = 0
-        fields['deviceInboundInterface']  = firepower_conf.get('outbound_interface', 'outside')
-        fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
+        fields['deviceDirection'] = 1
+        fields['deviceInboundInterface']  = firepower_conf.get('inbound_interface', 'inside')
+        fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface', 'inside')
         svc_map = {22: "SSH", 80: "HTTP", 443: "HTTPS", 445: "SMB", 3389: "RDP", 8080: "HTTP", 8443: "HTTPS"}
         fields.update({
             "_sig_id": SIG_IDS["CONNECTION"],
             "act": "Allow", "app": svc_map.get(dpt, "UNKNOWN"),
             "dst": victim_ip, "dpt": dpt,
             "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
-            "cs2": "Allow_Inbound_Services", "cs2Label": "fwRule",
+            "cs2": "Allow_Internal_Services", "cs2Label": "fwRule",
             "cs6": "Benign",                "cs6Label": "URLReputation",
             "cefSeverity": "3",
             "bytesOut": random.randint(500, 5000),
             "bytesIn":  random.randint(500, 5000),
             "outcome": "SUCCESS", "reason": "Traffic Allowed",
-            "msg":   f"Port scan: {attacker_ip} connected to {victim_ip}:{dpt} (service responded)",
+            "msg":   f"Port scan: {scanner_ip} connected to {victim_ip}:{dpt} (service responded)",
             "start": start_ms, "end": end_ms,
         })
         logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
@@ -2049,7 +2171,9 @@ def _generate_dns_c2_beacon(config, src_ip, user, shost=None):
             "_sig_id": SIG_IDS["CONNECTION"],
             "act": "Allow", "app": "DNS",
             "dst": c2_resolver, "dpt": 53,
-            "dhost": c2_resolver,
+            # resolver is addressed by IP and has no name; the beacon domain is the
+            # QUERY (destinationDnsDomain), not the destination host.
+            "dhost": None,
             "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
             "cs2": "Allow_Outbound_DNS", "cs2Label": "fwRule",
             "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
@@ -2204,9 +2328,17 @@ def _generate_vpn_tor_login(config, src_ip, user, shost=None):
     firepower_conf = _get_config(config)
     gateway_ip     = firepower_conf.get('gateway_ip',
                          random.choice(config.get('internal_servers', ['10.0.10.1'])))
-    tor_nodes      = config.get('tor_exit_nodes', [])
-    tor_ip         = (random.choice(tor_nodes).get('ip', _random_external_ip())
-                      if tor_nodes else _random_external_ip())
+    # DO NOT "FIX" THIS BACK to random.choice(config['tor_exit_nodes']).
+    # Probing the full live exit-node list through the tenant
+    # resolved them to 55 DISTINCT COUNTRIES with a rotating long tail
+    # (Seychelles, Belize, Nicaragua, Panama, Peru ...).  As the SOURCE IP of a
+    # successful VPN login that tail kept marking reserve countries "already
+    # seen", permanently silencing the analytic "First successful VPN access
+    # from a country in organization".  tor_vpn_ip() restricts the pool to the
+    # 182 probed /16 prefixes that resolve ONLY to the genuine Tor-heavy
+    # countries (US/DE/NL/FR/RO) — still 930 live nodes, so the HIGH-severity
+    # "A Successful VPN connection from TOR" analytic is unaffected.
+    tor_ip         = tor_vpn_ip(config, default=_random_external_ip())
     internal_iface = firepower_conf.get('inbound_interface', 'inside')
     outside_iface  = firepower_conf.get('outbound_interface', 'outside')
 
@@ -2888,7 +3020,10 @@ def _generate_dns_tunneling(config, src_ip, user, shost=None):
         fields['proto'] = "17"
         fields.update({
             "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow", "app": "DNS",
-            "dst": resolver, "dpt": 53, "dhost": resolver,
+            # dhost is a NAME field — the DNS resolver is addressed by IP and has no
+            # name here. The tunnel domain is the QUERY, carried in
+            # destinationDnsDomain below, not the destination host.
+            "dst": resolver, "dpt": 53, "dhost": None,
             "destinationDnsDomain": qname,   # genuine FTD DNS field (dnsQuery.data)
             "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
             "cs2": "Allow_Outbound_DNS", "cs2Label": "fwRule",
@@ -2916,7 +3051,7 @@ def _generate_reverse_ssh_tunnel(config, src_ip, user, shost=None):
         fields = _base_fields(config, src_ip, user, shost)
         fields.update({
             "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow", "app": "SSH",
-            "dst": ext_ip, "dpt": 22, "dhost": ext_ip,
+            "dst": ext_ip, "dpt": 22, "dhost": None,
             "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
             "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
             "cs5": "Remote Access",      "cs5Label": "secIntelCategory",
@@ -2948,7 +3083,7 @@ def _generate_ldap_recon(config, src_ip, user, shost=None):
             fields.update({
                 "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow",
                 "app": "LDAP" if port == 389 else "LDAPS",
-                "dst": dc, "dpt": port, "dhost": dc,
+                "dst": dc, "dpt": port, "dhost": None,
                 "cs1": _ac_policy(config),    "cs1Label": "fwPolicy",
                 "cs2": "Allow_Internal_LDAP", "cs2Label": "fwRule",
                 "cs5": "Reconnaissance",      "cs5Label": "secIntelCategory",
@@ -2977,7 +3112,7 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost=None):
     fields['cs4'] = "User-Zone"
     fields.update({
         "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow", "app": svc,
-        "dst": dc, "dpt": port, "dhost": dc,
+        "dst": dc, "dpt": port, "dhost": None,
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_Internal_AD",  "cs2Label": "fwRule",
         "cs5": "Authentication",     "cs5Label": "secIntelCategory",
@@ -3027,7 +3162,8 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
 
     # --- Multi-event generators -- return (list, event_name) ---
     if chosen == 'port_scan':
-        return (_generate_port_scan_event(config), chosen)
+        return (_generate_port_scan_event(config, src_ip, user, shost,
+                                         session_context), chosen)
     elif chosen == 'brute_force':
         return (_generate_brute_force_event(config), chosen)
     elif chosen == 'dns_c2_beacon':
@@ -3051,6 +3187,9 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_generate_server_outbound_http(config), chosen)
     elif chosen == 'vpn_tor_login':
         return (_generate_vpn_tor_login(config, src_ip, user, shost), chosen)
+    elif chosen == 'vpn_new_country_login':
+        _f, _n = _generate_vpn_new_country_login(config, src_ip, user, shost)
+        return (_format_firepower_cef(config, _f, _n) if _f else None, chosen)
     elif chosen == 'rare_external_rdp':
         return (_generate_rare_external_rdp(config, src_ip, user, shost), chosen)
     elif chosen == 'rare_ssh':
