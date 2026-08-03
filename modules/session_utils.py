@@ -315,29 +315,257 @@ def get_random_anon_ip_ctx(config):
 # UEBA behavioral helpers – shared across all firewall modules
 # ---------------------------------------------------------------------------
 
-# Realistic external IP first octets used by stable_vpn_ip
-_EXT_FIRST_OCTETS = [11, 23, 31, 45, 46, 52, 63, 72, 91, 104,
-                     108, 128, 142, 155, 168, 176, 184, 198, 203, 212]
+# ---------------------------------------------------------------------------
+# Geographic source-IP policy
+# ---------------------------------------------------------------------------
+# DO NOT "FIX" THIS BACK to a wide random first-octet pool.
+#
+# The XSIAM analytic "First successful VPN access from a country in organization"
+# is a FIRST-SEEN, ORG-SCOPED detector: it fires only when a successful VPN login
+# arrives from a country that has NOT been seen anywhere in the org for 30 days.
+#
+# Measured over a 30-day window:
+#   * xdm.source.location.country across cisco_asa_raw, check_point_vpn_1_firewall_1_raw,
+#     fortinet_fortigate_raw, cisco_firepower_raw, zscaler_nssfwlog_raw, okta_sso_raw
+#     = 210 DISTINCT COUNTRIES — essentially every country on Earth. Nothing could
+#     ever be novel, so the analytic was permanently silent (and stayed silent).
+#   * ASA AnyConnect session-start (113039) events alone = 70 distinct countries.
+#   * check_point_vpn_1_firewall_1_raw alone = 168 distinct countries.
+#
+# The old stable_vpn_ip() below picked `random host inside one of 20 different /8
+# blocks` (11, 23, 31, 45, 46, 52, 63, 72, 91, 104, 108, 128, 142, 155, 168, 176,
+# 184, 198, 203, 212).  A /8 spans dozens of countries, so this ONE function —
+# which is the benign VPN-login source IP for Check Point, FortiGate, Firepower
+# and Zscaler — was on its own scattering VPN logins across most of the planet.
+#
+# XSIAM geo-resolves the ACTUAL IP and IGNORES any "country" label we attach, so
+# the only safe construction is precise, individually PROBED CIDRs. Every range
+# referenced here was emitted to the tenant as an ASA 113039 event and its
+# xdm.source.location.country read back before being committed to config.json.
+#
+# The policy is SCARCITY + ROTATION, with three mutually exclusive country sets:
+#   config['benign_ingress_sources']   5 countries (US/GB/DE/CA/AU) — ambient VPN
+#   config['external_traffic_sources'] 35 countries — non-VPN attacker/internet noise
+#   config['vpn_novel_country_pool']   70 countries — RESERVE, touched ONLY by the
+#                                      deliberate "first access from a new country"
+#                                      event, one per day => 70-day recurrence,
+#                                      comfortably past the detector's 30-day window.
+# ---------------------------------------------------------------------------
+
+# Fallback home ranges, used when no config is threaded through to the caller.
+# These are the XSIAM-verified /24s that also populate config['benign_ingress_sources'].
+_VPN_HOME_RANGES = [
+    "68.86.113.0/24",    # Comcast, United States
+    "71.163.116.0/24",   # Verizon FiOS, United States
+    "99.36.12.0/24",     # AT&T, United States
+    "97.85.44.0/24",     # Charter Spectrum, United States
+    "70.176.220.0/24",   # Cox, United States
+    "81.152.44.0/24",    # BT, United Kingdom
+    "90.207.60.0/24",    # Sky Broadband, United Kingdom
+    "80.130.44.0/24",    # Deutsche Telekom, Germany
+    "92.208.44.0/24",    # Vodafone Kabel, Germany
+    "64.231.44.0/24",    # Rogers, Canada
+    "70.24.140.0/24",    # Bell Canada, Canada
+    "1.126.44.0/24",     # Telstra, Australia
+    "49.176.44.0/24",    # Optus, Australia
+]
 
 _USER_HOME_IPS = {}
 
-def stable_vpn_ip(user):
+
+def _home_ranges(config=None):
+    """Home-country CIDRs for ambient VPN logins (config first, constant fallback)."""
+    if config:
+        ranges = [s.get("ip_range") for s in config.get("benign_ingress_sources", [])
+                  if s.get("ip_range")]
+        if ranges:
+            return ranges
+    return _VPN_HOME_RANGES
+
+
+def stable_vpn_ip(user, config=None):
     """Return a deterministic 'home' external IP for a given user.
 
-    Each user gets a primary (80%) and secondary (20%) home IP derived from
-    a SHA-256 hash of their username. This lets UEBA platforms build a stable
-    baseline of where each user typically logs in from, so that logins from
-    novel locations (like Tor) stand out.
+    Each user gets a primary (80%) and secondary (20%) home IP derived from a
+    SHA-256 hash of their username, so UEBA sees a stable per-user baseline.
+
+    Both IPs are drawn from the SMALL, PROBED home-country pool (US/GB/DE/CA/AU)
+    — see the geographic source-IP policy note above.  Selecting a wider pool
+    here re-saturates the org-wide country baseline and silences the
+    "First successful VPN access from a country in organization" analytic.
     """
     if user not in _USER_HOME_IPS:
         digest = hashlib.sha256(user.encode()).digest()
-        o1 = _EXT_FIRST_OCTETS[digest[0] % len(_EXT_FIRST_OCTETS)]
-        primary = f"{o1}.{digest[1] % 254 + 1}.{digest[2] % 254 + 1}.{digest[3] % 254 + 1}"
-        o1b = _EXT_FIRST_OCTETS[digest[4] % len(_EXT_FIRST_OCTETS)]
-        secondary = f"{o1b}.{digest[5] % 254 + 1}.{digest[6] % 254 + 1}.{digest[7] % 254 + 1}"
-        _USER_HOME_IPS[user] = [primary, secondary]
+        ranges = _home_ranges(config)
+        def _pick(a, b, c):
+            net = ip_network(ranges[digest[a] % len(ranges)], strict=False)
+            base = int(net.network_address)
+            size = net.num_addresses
+            # keep off .0 / broadcast
+            off = (digest[b] * 256 + digest[c]) % max(size - 2, 1) + 1
+            return str(ip_address(base + off))
+        _USER_HOME_IPS[user] = [_pick(0, 1, 2), _pick(4, 5, 6)]
     ips = _USER_HOME_IPS[user]
     return ips[0] if random.random() < 0.80 else ips[1]
+
+
+# ---------------------------------------------------------------------------
+# Reserve-country VPN source IPs — drives the "First successful VPN access from
+# a country in organization" analytic.
+# ---------------------------------------------------------------------------
+
+def _novel_pool(config):
+    return [e for e in (config or {}).get("vpn_novel_country_pool", []) if e.get("ip_range")]
+
+
+def novel_country_vpn_ip(config, offset=0):
+    """Return (ip, country_code, country_name, isp_name) from the RESERVE country pool.
+
+    country_name is the country as XSIAM ACTUALLY RESOLVED IT when the range was
+    probed (config key "resolved_country").  Vendor formats that carry a country
+    STRING in the log line (FortiGate FTNTFGTsrccountry, Zscaler geo field) must be
+    labelled with it, so the text field and the IP geo-lookup agree no matter which
+    of the two the vendor's XIF maps to xdm.source.location.country.
+
+    Rotation is keyed on the day number so that every VPN-capable module picks
+    the SAME country on the same day.  That is deliberate: the analytic is
+    org-scoped, so if ASA, Check Point, FortiGate, Firepower and Zscaler each
+    picked a different country on the same day they would burn five reserve
+    countries per day (a 14-day cycle) instead of one (a 70-day cycle), and the
+    30-day novelty window would never be satisfied.  One country per day, all
+    sources agreeing, gives a 70-day recurrence per country.
+
+    `offset` shifts the rotation; the caller passes a non-zero value only when it
+    deliberately wants a second, different country (e.g. impossible travel).
+
+    Returns (None, None, None, None) when the pool is missing from config.
+    """
+    pool = _novel_pool(config)
+    if not pool:
+        return None, None, None, None
+    import time as _time
+    day = int(_time.time() // 86400)
+    entry = pool[(day + offset) % len(pool)]
+    try:
+        ip = rand_ip_from_network(ip_network(entry["ip_range"], strict=False))
+    except Exception:
+        ip = entry["ip_range"].split("/")[0]
+    return ip, entry.get("country"), entry.get("resolved_country"), entry.get("name")
+
+
+# ---------------------------------------------------------------------------
+# Tor exit nodes for VPN logins — country-filtered.
+# ---------------------------------------------------------------------------
+
+def tor_vpn_ips(config):
+    """Live Tor exit-node IPs restricted to the genuine Tor-heavy countries.
+
+    DO NOT "FIX" THIS BACK to `config['tor_exit_nodes']` unfiltered.
+    Probing the full live exit-node list through the tenant
+    resolved them to 55 DISTINCT COUNTRIES, with a long random tail (Seychelles,
+    Belize, Nicaragua, Panama, Peru …) that rotates daily as nodes churn.  Left
+    unfiltered, vpn_tor_login alone keeps burning reserve countries and silences
+    the "First successful VPN access from a country" analytic.
+
+    Real Tor exit capacity is heavily concentrated: the same probe put 75% of all
+    exit nodes in just United States / Germany / Netherlands / France / Romania.
+    config['tor_vpn_prefix_allowlist'] holds the 182 /16 prefixes that resolved
+    EXCLUSIVELY to those five countries — 930 of the 1,380 live nodes (67%), so
+    the pool stays large and every IP is still a genuine, currently-live exit node.
+    That keeps the HIGH-severity "A Successful VPN connection from TOR" analytic
+    firing while capping Tor's geographic footprint at five countries, none of
+    which appear in vpn_novel_country_pool.
+
+    Falls back to the unfiltered list if the allowlist matches nothing — breaking
+    the Tor analytic is worse than briefly widening the country set.
+    """
+    nodes = config.get("tor_exit_nodes", []) or []
+    ips = [n.get("ip") if isinstance(n, dict) else str(n) for n in nodes]
+    ips = [i for i in ips if i]
+    allow = set(config.get("tor_vpn_prefix_allowlist", []) or [])
+    if not allow:
+        return ips
+    filtered = [i for i in ips if ".".join(i.split(".")[:2]) in allow]
+    return filtered or ips
+
+
+def tor_vpn_ip(config, default=None):
+    """Single country-filtered Tor exit node IP (see tor_vpn_ips)."""
+    ips = tor_vpn_ips(config)
+    return random.choice(ips) if ips else default
+
+
+# ---------------------------------------------------------------------------
+# Ambient external ("rest of the internet") source IPs
+# ---------------------------------------------------------------------------
+# DO NOT "FIX" THIS BACK to `random.choice(first_octets) + 3 random octets`.
+#
+# Every module used to carry its own _random_external_ip() picking a random host
+# inside one of 14 /8 blocks (45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193,
+# 194, 212, 213).  A /8 spans dozens of countries, so scanners, C2 callbacks and
+# generic inbound noise alone reached several hundred countries and were a
+# primary driver of the 210-country org baseline.
+#
+# These 35 PROBED /24s keep external traffic looking like it comes from all over
+# the world (35 countries, all six populated continents) while guaranteeing it
+# can never touch a country in config['vpn_novel_country_pool'].  The three sets
+# are disjoint by construction — that disjointness is the whole mechanism.
+_EXTERNAL_TRAFFIC_RANGES = [
+    "213.33.20.0/24",        # A1 Telekom Austria, Austria
+    "187.10.20.0/24",        # Vivo Sao Paulo, Brazil
+    "95.42.20.0/24",         # Vivacom Sofia, Bulgaria
+    "61.135.20.0/24",        # China Unicom Beijing, China
+    "88.100.20.0/24",        # O2 Czech Prague, Czechia
+    "80.62.20.0/24",         # TDC Copenhagen, Denmark
+    "91.153.20.0/24",        # Elisa Helsinki, Finland
+    "90.10.20.0/24",         # Orange France Paris, France
+    "79.130.20.0/24",        # OTE Athens, Greece
+    "219.76.20.0/24",        # PCCW Hong Kong, Hong Kong
+    "81.182.20.0/24",        # Magyar Telekom Budapest, Hungary
+    "49.36.20.0/24",         # Reliance Jio Mumbai, India
+    "114.5.20.0/24",         # Telkomsel Jakarta, Indonesia
+    "79.178.20.0/24",        # Bezeq Tel Aviv, Israel
+    "79.20.20.0/24",         # Telecom Italia Rome, Italy
+    "210.150.20.0/24",       # NTT Tokyo, Japan
+    "175.138.20.0/24",       # TM Kuala Lumpur, Malaysia
+    "189.130.20.0/24",       # Telmex Mexico City, Mexico
+    "84.26.20.0/24",         # Ziggo Amsterdam, Netherlands
+    "84.210.20.0/24",        # Telenor Oslo, Norway
+    "83.5.20.0/24",          # Orange Polska Warsaw, Poland
+    "85.242.20.0/24",        # MEO Lisbon, Portugal
+    "79.114.20.0/24",        # RCS RDS Bucharest, Romania
+    "116.87.20.0/24",        # Singtel Singapore, Singapore
+    "41.134.20.0/24",        # Telkom SA Johannesburg, South Africa
+    "175.200.20.0/24",       # KT Seoul, South Korea
+    "88.2.20.0/24",          # Telefonica Madrid, Spain
+    "78.69.20.0/24",         # Telia Stockholm, Sweden
+    "85.2.20.0/24",          # Swisscom Zurich, Switzerland
+    "61.217.20.0/24",        # HiNet Taipei, Taiwan
+    "171.98.20.0/24",        # TrueOnline Bangkok, Thailand
+    "88.226.20.0/24",        # Turk Telekom Istanbul, Turkiye
+    "46.211.20.0/24",        # Kyivstar Kyiv, Ukraine
+    "94.200.20.0/24",        # Etisalat Dubai, United Arab Emirates
+    "113.162.20.0/24",       # VNPT Hanoi, Vietnam
+]
+
+
+def random_external_ip(config=None):
+    """A public, non-RFC-1918 IP from the ambient external-traffic country pool.
+
+    Shared replacement for every module's private _random_external_ip().
+    See _EXTERNAL_TRAFFIC_RANGES above for why this is a curated list and not a
+    random host inside a /8.
+    """
+    ranges = None
+    if config:
+        ranges = [s.get("ip_range") for s in config.get("external_traffic_sources", [])
+                  if s.get("ip_range")]
+    if not ranges:
+        ranges = _EXTERNAL_TRAFFIC_RANGES
+    try:
+        return rand_ip_from_network(ip_network(random.choice(ranges), strict=False))
+    except Exception:
+        return "203.0.113.%d" % random.randint(1, 254)
 
 
 # Corporate mail relay IPs — small fixed pool that every module's benign email

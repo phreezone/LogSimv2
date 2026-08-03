@@ -46,6 +46,49 @@ components:
             total_events: { type: integer }
             by_module:    { type: object, additionalProperties: { type: integer } }
             by_event:     { type: object, additionalProperties: { type: integer } }
+    ModuleState:
+      type: object
+      description: Runtime state and metrics for one log-generation module.
+      properties:
+        name:           { type: string }
+        description:    { type: string }
+        status:         { type: string, enum: [running, stopped] }
+        threat_level:   { type: string }
+        event_interval: { type: number }
+        total_logs:     { type: integer }
+        total_threats:  { type: integer }
+    User:
+      type: object
+      description: A simulated employee identity from the session context.
+      properties:
+        username:     { type: string, example: "a.garcia" }
+        display_name: { type: string, example: "Alexander Garcia" }
+        department:   { type: string, example: "CustomerSuccess" }
+        has_aws:      { type: boolean }
+        primary_os:   { type: string, example: "macOS" }
+    BadUserStatus:
+      type: object
+      description: >
+        State of the Bad User run. When inactive the payload is just {"active": false}.
+      properties:
+        active:            { type: boolean }
+        username:          { type: string }
+        display_name:      { type: string }
+        department:        { type: string }
+        threat_level:      { type: string }
+        event_interval:    { type: number }
+        started_at:        { type: number }
+        duration_seconds:  { type: number }
+        elapsed_seconds:   { type: integer }
+        remaining_seconds: { type: integer }
+        total_logs:        { type: integer }
+        total_threats:     { type: integer }
+        selected_modules:  { type: array, items: { type: string } }
+        per_module:
+          type: object
+          additionalProperties:
+            type: object
+            properties: { logs: { type: integer }, threats: { type: integer } }
     Error:
       type: object
       properties: { error: { type: string } }
@@ -124,11 +167,218 @@ paths:
             schema: { type: object, required: [event], properties: { event: { type: string, example: "TOR_LOGIN" } } }
             example: { event: "TOR_LOGIN" }
       responses: { "200": { description: OK }, "400": { description: Missing event }, "404": { description: Not found } }
+  /modules/{name}/threats:
+    get:
+      summary: List a module's firable event names
+      description: >
+        The event names accepted by POST /modules/{name}/fire. Empty array for modules
+        that expose no named one-shot events.
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  module:  { type: string }
+                  threats: { type: array, items: { type: string } }
+        "404":
+          description: Not found
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /modules/{name}/interval:
+    patch:
+      summary: Change a module's event interval
+      description: Takes effect on the next generate_log iteration — no restart needed.
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_interval]
+              properties:
+                event_interval: { type: number, minimum: 0.01, example: 5 }
+            example: { event_interval: 5 }
+      responses:
+        "200":
+          description: Updated module state
+          content: { application/json: { schema: { $ref: "#/components/schemas/ModuleState" } } }
+        "400": { description: event_interval must be a number >= 0.01 }
+        "404": { description: Not found }
+  /modules/{name}/threat_level:
+    patch:
+      summary: Change a module's threat level
+      description: >
+        Works on a running or stopped module and takes effect on the next generate_log
+        iteration — no restart needed. Valid values come from GET /threat_levels.
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [threat_level]
+              properties:
+                threat_level: { type: string, example: "Elevated" }
+            example: { threat_level: "Elevated" }
+      responses:
+        "200":
+          description: Updated module state
+          content: { application/json: { schema: { $ref: "#/components/schemas/ModuleState" } } }
+        "400": { description: Unknown threat level }
+        "404": { description: Not found }
+  /modules/{name}/reset:
+    post:
+      summary: Reset one module's metrics
+      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+      responses:
+        "200":
+          description: Reset module state
+          content: { application/json: { schema: { $ref: "#/components/schemas/ModuleState" } } }
+        "404": { description: Not found }
+  /modules/reset_all:
+    post:
+      summary: Reset every module's metrics and the session timer
+      description: Legacy path for this route is /api/reset_all (no /modules/ segment).
+      responses:
+        "200":
+          description: All module states after reset
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ModuleState" } }
   /modules/start_all:
     post: { summary: Start all modules, responses: { "200": { description: OK } } }
   /modules/stop_all:
     post: { summary: Stop all modules, responses: { "200": { description: OK } } }
+  /baduser/users:
+    get:
+      summary: List simulated users grouped by department
+      description: Source of valid `username` values for POST /baduser/start.
+      responses:
+        "200":
+          description: Department name -> users
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: array
+                  items: { $ref: "#/components/schemas/User" }
+  /baduser/start:
+    post:
+      summary: Start a targeted insider-threat run against one user
+      description: >
+        Drives every selected module as a single named identity for a fixed duration.
+        Only one Bad User run at a time — a second start returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username:         { type: string, example: "a.garcia" }
+                duration_minutes: { type: number, minimum: 1, maximum: 480, default: 15 }
+                threat_level:     { type: string, default: Extreme }
+                event_interval:   { type: number, minimum: 0.01, default: 0.5 }
+                selected_modules:
+                  type: array
+                  nullable: true
+                  description: Module names to drive; omit or null for all modules.
+                  items: { type: string }
+            example: { username: "a.garcia", duration_minutes: 15, threat_level: "Extreme" }
+      responses:
+        "200":
+          description: Started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { started: { type: boolean }, username: { type: string } }
+        "400":
+          description: Missing username, or duration/threat_level/event_interval out of range
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: A Bad User run is already active
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /baduser/stop:
+    post:
+      summary: Stop the active Bad User run
+      description: >
+        Idempotent — returns {"stopped": true} even when nothing was running.
+      responses:
+        "200":
+          description: Stopped
+          content:
+            application/json:
+              schema: { type: object, properties: { stopped: { type: boolean } } }
+  /baduser/status:
+    get:
+      summary: Progress of the active Bad User run
+      description: >
+        Poll this to track a run: remaining_seconds counts down and per_module tallies
+        logs/threats per module. Returns {"active": false} when no run is in flight.
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { $ref: "#/components/schemas/BadUserStatus" } } }
   /health:
     get: { summary: Health snapshot, responses: { "200": { description: OK } } }
+  /health/alerts:
+    get:
+      summary: Drain pending health alerts
+      description: >
+        DESTRUCTIVE READ — returns the queued alerts and clears them server-side, so each
+        alert is delivered to exactly one caller. Two pollers will split the stream between
+        them; don't run this alongside an open dashboard UI if you need every alert.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { alerts: { type: array, items: { type: object } } }
   /metrics:
     get: { summary: Throughput metrics, responses: { "200": { description: OK } } }
+  /threat_levels:
+    get:
+      summary: List valid threat-level names
+      description: The accepted values for threat_level on module start and PATCH.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+                example: ["Benign Traffic Only", "Realistic", "Elevated", "High", "Extreme", "Insane"]
+  /timeline:
+    get:
+      summary: Per-module event sparkline for the last 120 seconds
+      description: >
+        60 buckets of 2 seconds each, per module. `labels` is sparsely populated for chart
+        rendering (every 10th bucket). Sized for the dashboard chart, not for agents.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  labels: { type: array, items: { type: string } }
+                  modules:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        benign:       { type: array, items: { type: integer } }
+                        threats:      { type: array, items: { type: integer } }
+                        threat_names: { type: array, items: { type: array, items: { type: string } } }

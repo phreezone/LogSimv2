@@ -55,10 +55,12 @@ from ipaddress import ip_network, AddressValueError
 
 try:
     from modules.session_utils import (get_random_user, rand_ip_from_network,
-        stable_vpn_ip, stable_mail_servers, weighted_destination)
+        stable_vpn_ip, stable_mail_servers, weighted_destination,
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 except ImportError:
     from session_utils import (get_random_user, rand_ip_from_network,
-        stable_vpn_ip, stable_mail_servers, weighted_destination)
+        stable_vpn_ip, stable_mail_servers, weighted_destination,
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 
 NAME        = "Cisco Firepower"
 DESCRIPTION = "Simulates Cisco FTD/FMC CEF syslog events for the XSIAM cisco_firepower_raw dataset."
@@ -94,12 +96,18 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Failed Connections"},
     {"event": "rdp_lateral",           "weight": 3,  "analytic": True,
      "xsiam_alert": "Failed Connections"},
+    {"event": "new_admin_behavior",    "weight": 4,  "analytic": True,
+     "xsiam_alert": "New Administrative Behavior"},
+    {"event": "abnormal_rdp_rare_host","weight": 4,  "analytic": True,
+     "xsiam_alert": "Abnormal RDP session to a remote host from a rarely seen host"},
     {"event": "tor",                   "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring access to rare IP"},
     {"event": "dns_c2_beacon",         "weight": 3,  "analytic": True,
      "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
+    # Outbound HTTP from a server to an external IP — not an administrative pattern.
+    # The dedicated new_admin_behavior generator models the admin-port detector.
     {"event": "server_outbound_http",  "weight": 2,  "analytic": True,
-     "xsiam_alert": "New Administrative Behavior"},
+     "xsiam_alert": "Abnormal Communication to a Rare IP"},
     {"event": "internal_smb",          "weight": 1,  "analytic": False,
      "xsiam_alert": None},
     {"event": "smb_new_host_lateral",  "weight": 4,  "analytic": True,
@@ -114,6 +122,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": None},
     {"event": "vpn_tor_login",         "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "vpn_new_country_login", "weight": 3,  "analytic": True,
+     "xsiam_alert": "First successful VPN access from a country in organization"},
     {"event": "rare_external_rdp",     "weight": 3,  "analytic": True,
      "xsiam_alert": "Rare RDP session to a remote host"},
     {"event": "rare_ssh",              "weight": 3,  "analytic": True,
@@ -126,6 +136,14 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "New FTP Server"},
     {"event": "ddns_connection",       "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
+    {"event": "large_download",        "weight": 3,  "analytic": True,
+     "xsiam_alert": "Large Download"},
+    {"event": "dns_tunneling",         "weight": 3,  "analytic": True,
+     "xsiam_alert": "DNS Tunneling"},
+    {"event": "reverse_ssh_tunnel",    "weight": 2,  "analytic": True,
+     "xsiam_alert": "Uncommon reverse SSH tunnel to external domain/ip"},
+    {"event": "ldap_recon",            "weight": 3,  "analytic": True,
+     "xsiam_alert": "Suspicious reconnaissance using LDAP"},
     {"event": "app_control",           "weight": 4,  "analytic": False,
      "xsiam_alert": None},
     {"event": "network_anomaly",       "weight": 4,  "analytic": False,
@@ -235,12 +253,19 @@ def _cef_escape(v):
 
 
 def _random_external_ip():
-    """Realistic public (non-RFC-1918) IP for simulated external threats/attackers."""
-    first_octets = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 194, 212, 213]
-    return (f"{random.choice(first_octets)}."
-            f"{random.randint(1, 254)}."
-            f"{random.randint(1, 254)}."
-            f"{random.randint(1, 254)}")
+    """Public (non-RFC-1918) IP from the shared ambient external-traffic pool.
+
+    DO NOT "FIX" THIS BACK to `random.choice(first_octets)` + 3 random octets.
+    That construction picked a random host inside one of 14
+    different /8 blocks; a /8 spans dozens of countries, and across all modules it
+    was a primary driver of the 210 DISTINCT COUNTRIES seen in
+    xdm.source.location.country over 30 days.  That saturation permanently
+    silenced the XSIAM analytic "First successful VPN access from a country in
+    organization", which only fires on a country unseen org-wide for 30 days.
+    session_utils.random_external_ip() draws from 35 individually XSIAM-PROBED
+    /24s that are disjoint from config['vpn_novel_country_pool'].
+    """
+    return random_external_ip()
 
 
 def _get_user_and_ip(config, session_context=None):
@@ -252,14 +277,18 @@ def _get_user_and_ip(config, session_context=None):
     if session_context:
         user_info = get_random_user(session_context, preferred_device_type='workstation')
         if user_info:
-            return user_info['username'], user_info['ip'], user_info.get('hostname', user_info['ip'])
+            # Fall back to None, NOT the IP: shost is a NAME field and the CEF
+            # builder drops None. Returning the IP put addresses into
+            # xdm.source.host.hostname (~6%), which makes
+            # XSIAM believe hosts literally named 192.168.1.11 exist.
+            return user_info['username'], user_info['ip'], user_info.get('hostname')
 
     firepower_conf = _get_config(config)
     user_ip_map = (firepower_conf.get('user_ip_map')
                    or config.get('shared_user_ip_map', {}))
     if user_ip_map:
         user, ip = random.choice(list(user_ip_map.items()))
-        return user, ip, ip
+        return user, ip, None   # no hostname in the static map — omit, don't echo the IP
 
     return "unknown.user", f"192.168.1.{random.randint(100, 200)}", None
 
@@ -281,6 +310,45 @@ def _conn_timing(duration_ms=None):
     return start_ms, start_ms + duration_ms
 
 
+# Realistic domains for the configured egress destinations. Real FTD logs the URL
+# (eStreamer clientUrl -> CEF `request` -> xdm.network.http.url) on web traffic and
+# the queried domain (dnsQuery -> CEF `destinationDnsDomain`) on DNS traffic.
+_DEST_DOMAINS = {
+    "Google DNS": "dns.google",                     "Cloudflare DNS": "one.one.one.one",
+    "Microsoft Office 365": "outlook.office365.com", "AWS S3 us-east-1": "s3.us-east-1.amazonaws.com",
+    "GitHub.com": "github.com",                     "Salesforce": "login.salesforce.com",
+    "Zoom": "zoom.us",                              "Slack": "app.slack.com",
+    "Palo Alto Networks Updates": "updates.paloaltonetworks.com",
+    "Windows Update": "download.windowsupdate.com", "Apple Updates": "swscan.apple.com",
+    "Google APIs": "www.googleapis.com",            "Okta": "examplecorp.okta.com",
+    "ServiceNow": "examplecorp.service-now.com",    "Zendesk": "examplecorp.zendesk.com",
+    "Atlassian (Jira/Confluence)": "examplecorp.atlassian.net",
+    "DocuSign": "account.docusign.com",             "Workday": "examplecorp.myworkday.com",
+    "Twilio": "api.twilio.com",                     "Stripe": "api.stripe.com",
+    "FedEx API": "apis.fedex.com",                  "UPS API": "onlinetools.ups.com",
+    "NTP Pool Servers": "pool.ntp.org",             "Ubuntu Package Repos": "archive.ubuntu.com",
+    "Red Hat CDN": "cdn.redhat.com",
+}
+
+# Genuine Firepower client-application names (CEF `requestClientApplication` =
+# eStreamer clientApplicationId) — the DETECTED client app, not the raw user-agent.
+_CLIENT_APPS = ["Chrome", "Firefox", "Microsoft Edge", "Safari", "Internet Explorer", "SSL client"]
+
+_URL_PATHS = ["/", "/index.html", "/login", "/dashboard", "/api/v2/status",
+              "/static/app.js", "/account/settings", "/search?q=status"]
+
+
+def _dest_domain(name):
+    """Realistic domain for a configured destination name (fallback: slugified name)."""
+    if not name:
+        return None
+    domain = _DEST_DOMAINS.get(name)
+    if domain:
+        return domain
+    slug = "".join(c for c in name.lower() if c.isalnum())
+    return f"{slug}.com" if slug else None
+
+
 def _dns_precursor_log(config, src_ip, user, dest_hostname, shost=None):
     """Generate a DNS resolution CONNECTION STATISTICS event that precedes a connection.
 
@@ -298,7 +366,7 @@ def _dns_precursor_log(config, src_ip, user, dest_hostname, shost=None):
         "act": "Allow", "app": "DNS",
         "dst": random.choice(["8.8.8.8", "8.8.4.4", "1.1.1.1"]),
         "dpt": 53,
-        "dhost": dest_hostname,
+        "destinationDnsDomain": dest_hostname,   # genuine FTD DNS field (dnsQuery.data)
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_DNS", "cs2Label": "fwRule",
         "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
@@ -345,6 +413,14 @@ def _format_firepower_cef(config, fields, cef_name):
     sig_id  = fields.pop('_sig_id', 'RNA:1003:1')
     cef_sev = str(fields.get('cefSeverity', '3'))
 
+    # Event time: real FTD CEF carries rt (deviceReceiptTime, ms epoch) and XSIAM keys
+    # _time off it. The modeling rule does NOT map start/end to _time, so without rt
+    # every event's _time defaults to ingestion time — which silently collapses the
+    # 5-10 min gap in time-spread detections (e.g. VPN impossible travel). Default rt
+    # to the connection start so back-dated events land at the correct _time.
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    fields.setdefault('rt', fields.get('start') or now_ms)
+
     # AD domain-qualify bare usernames so XSIAM Identity can stitch
     # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com)
     for _ufield in ("suser", "duser"):
@@ -352,7 +428,7 @@ def _format_firepower_cef(config, fields, cef_name):
         if _uval and "\\" not in _uval and "@" not in _uval:
             fields[_ufield] = f"EXAMPLECORP\\{_uval}"
 
-    timestamp  = datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')
+    timestamp  = datetime.fromtimestamp(fields['rt'] / 1000, timezone.utc).strftime('%b %d %H:%M:%S')
     cef_header = f"CEF:0|Cisco|Firepower|6.0|{sig_id}|{cef_name}|{cef_sev}|"
     extension  = " ".join(f"{k}={_cef_escape(v)}" for k, v in fields.items() if v is not None)
 
@@ -414,6 +490,7 @@ def _generate_connection_event(config, src_ip, user, shost=None):
         dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range", "8.8.8.0/24"), strict=False))
     except (AddressValueError, ValueError, IndexError):
         dest_ip = "8.8.8.8"
+    domain = _dest_domain(destination.get("name"))
 
     start_ms, end_ms = _conn_timing(random.randint(100, 8_000))
 
@@ -430,7 +507,11 @@ def _generate_connection_event(config, src_ip, user, shost=None):
         url_rep    = random.choice(_URL_REP_BENIGN)
         msg        = f"Connection allowed by access control rule '{rule}'"
         req_method = "GET"
-        user_agent = random.choice(config.get('user_agents', ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)"]))
+        client_app = random.choice(_CLIENT_APPS)
+        # Real FTD logs the URL (clientUrl -> request -> xdm.network.http.url) for
+        # inspected web traffic (HTTP, or HTTPS when SSL decryption is enabled).
+        scheme     = "https" if dest_port == 443 else "http"
+        req_url    = f"{scheme}://{domain}{random.choice(_URL_PATHS)}" if domain else None
     else:  # 15% — non-standard port blocked
         dest_port  = random.choice([23, 137, 138, 666, 4444, 31337])
         app        = "UNKNOWN"
@@ -444,7 +525,8 @@ def _generate_connection_event(config, src_ip, user, shost=None):
         url_rep    = random.choice(_URL_REP_SUSPECT)
         msg        = f"Connection blocked by access control rule '{rule}'"
         req_method = None
-        user_agent = None
+        client_app = None
+        req_url    = None
 
     fields.update({
         "_sig_id": SIG_IDS["CONNECTION"],
@@ -460,7 +542,9 @@ def _generate_connection_event(config, src_ip, user, shost=None):
     })
     if req_method:
         fields["requestMethod"]          = req_method
-        fields["requestClientApplication"] = user_agent
+        fields["requestClientApplication"] = client_app
+    if req_url:
+        fields["request"] = req_url
     return fields, "CONNECTION STATISTICS"
 
 
@@ -655,6 +739,8 @@ def _generate_dns_benign_event(config, src_ip, user, shost=None):
         "bytesOut": random.randint(40, 100),
         "bytesIn":  random.randint(80, 400),
         "outcome": "SUCCESS", "reason": "Traffic Allowed",
+        # Genuine FTD DNS field (eStreamer dnsQuery.data): the resolved FQDN.
+        "destinationDnsDomain": random.choice(list(_DEST_DOMAINS.values())),
         "msg":   f"DNS query to resolver {resolver}",
         "start": start_ms, "end": end_ms,
     })
@@ -914,6 +1000,68 @@ def _generate_benign_vpn_event(config, src_ip, user, shost=None):
     return fields, "CONNECTION STATISTICS"
 
 
+def _generate_vpn_new_country_login(config, src_ip, user, shost=None):
+    """One SUCCESSFUL RA-VPN session from a country the org has never seen.
+
+    Drives the XSIAM analytic "First successful VPN access from a country in
+    organization" — a FIRST-SEEN, ORG-SCOPED detector that fires only on a country
+    not observed anywhere in the org for the last 30 days.
+
+    WHY THIS EXISTS / DO NOT "FIX" IT AWAY:
+    The analytic had been silent because the
+    simulator was already emitting source IPs resolving to 210 distinct countries
+    over 30 days, so no country could ever be novel.  Two things were required to
+    revive it: tighten the ambient baseline to a handful of home countries, AND
+    deliberately visit a country the ambient baseline never touches.  This is the
+    second half.
+
+    session_utils.novel_country_vpn_ip() draws from config['vpn_novel_country_pool']
+    (70 XSIAM-PROBED single-country /24s, disjoint from benign_ingress_sources,
+    external_traffic_sources and the Tor prefix allowlist) and rotates on the day
+    number => 70-day recurrence per country, comfortably outside the 30-day window.
+    Day-keyed rather than random so ASA, Check Point, FortiGate, Firepower and
+    Zscaler all pick the SAME country on the same day; the detector is org-scoped,
+    so five sources each choosing independently would consume the pool five times
+    faster and the 30-day novelty requirement would never be met.
+
+    Otherwise identical to _generate_benign_vpn_event — a genuine successful SSL
+    VPN session, only the source IP differs.
+    """
+    novel_ip, cc, country, isp = novel_country_vpn_ip(config)
+    if not novel_ip:
+        return None, None
+    print(f"    - Firepower Module simulating: First VPN access from new country "
+          f"({country} / {isp} / {novel_ip})")
+
+    firepower_conf = _get_config(config)
+    gateway_ip     = firepower_conf.get('gateway_ip',
+                         random.choice(config.get('internal_servers', ['10.0.10.1'])))
+    duration_ms    = random.randint(1_800_000, 28_800_000)
+    start_ms, end_ms = _conn_timing(duration_ms)
+
+    fields = _base_fields(config, novel_ip, user)
+    fields['cs3']             = "Internet-Zone"
+    fields['cs4']             = "VPN-Zone"
+    fields['deviceDirection'] = 0
+    fields['deviceInboundInterface']  = firepower_conf.get('outbound_interface', 'outside')
+    fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
+    fields.update({
+        "_sig_id": SIG_IDS["CONNECTION"],
+        "act": "Allow", "app": "SSL VPN",
+        "dst": gateway_ip, "dpt": 443,
+        "cs1": _ac_policy(config),        "cs1Label": "fwPolicy",
+        "cs2": "VPN_Remote_Access",       "cs2Label": "fwRule",
+        "cs5": "VPN Authentication",      "cs5Label": "secIntelCategory",
+        "cefSeverity": "3",
+        "bytesOut": random.randint(100_000, 10_000_000),
+        "bytesIn":  random.randint(500_000, 50_000_000),
+        "outcome": "SUCCESS", "reason": "VPN Session Established",
+        "msg": f"VPN session for {user} from {novel_ip}",
+        "start": start_ms, "end": end_ms,
+    })
+    return fields, "CONNECTION STATISTICS"
+
+
 def _generate_benign_vpn_failure_event(config, src_ip, user, shost=None):
     """Benign VPN authentication failure — user mistyped password or expired cert.
 
@@ -1059,6 +1207,17 @@ def _generate_benign_log(config, session_context=None):
         fields, cef_name = _generate_benign_vpn_event(config, src_ip, user, shost)
         return _format_firepower_cef(config, fields, cef_name)
 
+    elif roll < 0.925:  # 0.5% — first successful VPN access from a new country.
+        # This lives on the BENIGN path deliberately.  The threat path is
+        # interval-gated (~12 firings/day at "Realistic") and then weighted, which
+        # works out to well under one emission per day — but the country rotation is
+        # keyed on the day number, so a day with zero emissions silently skips that
+        # day's country and the analytic stays quiet.  A benign slice guarantees
+        # several emissions every day; they all carry the SAME country, so this
+        # costs exactly one reserve country per day no matter how often it fires.
+        fields, cef_name = _generate_vpn_new_country_login(config, src_ip, user, shost)
+        return _format_firepower_cef(config, fields, cef_name) if fields else None
+
     elif roll < 0.94:  # 2% — RA-VPN auth failure (UEBA failure baseline)
         fields, cef_name = _generate_benign_vpn_failure_event(config, src_ip, user, shost)
         return _format_firepower_cef(config, fields, cef_name)
@@ -1071,8 +1230,12 @@ def _generate_benign_log(config, session_context=None):
         fields, cef_name = _generate_software_update_event(config, src_ip, user, shost)
         return _format_firepower_cef(config, fields, cef_name)
 
-    else:  # 2% — scheduled FTP transfer (UEBA baseline)
+    elif roll < 0.99:  # 1% — scheduled FTP transfer (UEBA baseline)
         fields, cef_name = _generate_benign_ftp_event(config, src_ip, user, shost)
+        return _format_firepower_cef(config, fields, cef_name)
+
+    else:  # 1% — AD auth (LDAP/Kerberos to DC) baseline for LDAP-recon detection
+        fields, cef_name = _generate_ldap_kerberos_benign(config, src_ip, user, shost)
         return _format_firepower_cef(config, fields, cef_name)
 
 
@@ -1642,49 +1805,83 @@ def _generate_smb_share_enumeration(config, src_ip, user, shost=None):
     return logs
 
 
-def _generate_port_scan_event(config):
-    """External port scan — attacker probing sequential ports on an internal server.
+def _generate_port_scan_event(config, src_ip=None, user=None, shost=None,
+                              session_context=None):
+    """Internal host scanning many ports on an internal server (east-west recon).
 
-    Generates 20–50 blocked CONNECTION events from the same external IP to the same
-    internal server across different ports. The volume and sequential pattern is the
-    XSIAM detection signal, not any individual event.
+    Generates 100–200 blocked CONNECTION events from the same INTERNAL host to the same
+    internal server across a wide port range. Breadth of distinct destination ports is
+    the XSIAM detection signal, not any individual event.
 
-    Uses scan_target_ports from firepower_config if present (matches config.json key).
+    THE SCANNER MUST BE INTERNAL — DO NOT change this back to an external attacker IP.
+    "Suspicious port scan" is an ANALYTICS detector that profiles the SOURCE entity and
+    alerts on deviation from that entity's own baseline. A freshly-minted random public IP
+    has no baseline, so the detector stays silent no matter how many ports are probed.
+    Across all five network modules:
+        Check Point  internal -> internal   101-102 ports   FIRES
+        FortiGate    internal -> internal    97-162 ports   FIRES
+        Cisco ASA    internal -> internal   195-201 ports   FIRES
+        Firepower    EXTERNAL -> internal        18 ports   silent (this function)
+        Zscaler      EXTERNAL -> internal   175-188 ports   silent
+    Zscaler had the widest breadth of all five and still fired nothing; switching its
+    scanner to an internal host produced 6 XDR_ANALYTICS "Suspicious port scan" alerts
+    within ~2 minutes. Every firing alert carries an internal local_ip AND remote_ip,
+    and ASA fires with host_name set to a bare IP — so neither breadth nor a resolvable
+    hostname was ever the gate. This function is the same bug as Zscaler's was.
+
+    Two further defects fixed here at the same time:
+      * `random.randint(min(20, len(scan_ports)), min(50, len(scan_ports)))` over the
+        18-element default list collapses to randint(18, 18) — every scan probed exactly
+        18 ports, never the 20-50 the docstring claimed.
+      * Sample service ports (1-1023), never the ephemeral range: uniform sampling over
+        1-65535 puts ~75% of probes above 49152, which XSIAM reads as ordinary return
+        traffic rather than service enumeration.
+
     Returns a list of CEF log strings (multi-event threat generator).
-    Triggers XSIAM: Port Scan / Reconnaissance analytics detection.
     """
-    print("    - Firepower Module simulating: Port Scan (external -> internal)")
+    print("    - Firepower Module simulating: Port Scan (internal -> internal server)")
     firepower_conf   = _get_config(config)
-    attacker_ip      = _random_external_ip()
-    internal_servers = config.get('internal_servers', ['10.0.10.50'])
+    if not src_ip:
+        user, src_ip, shost = _get_user_and_ip(config, session_context)
+    scanner_ip       = src_ip
+    internal_servers = [s for s in config.get('internal_servers', ['10.0.10.50'])
+                        if s != scanner_ip] or ['10.0.10.50']
     victim_ip        = random.choice(internal_servers)
 
-    scan_ports = firepower_conf.get('scan_target_ports',
-                 [21, 22, 23, 25, 53, 80, 110, 135, 139, 443, 445, 1433, 1521, 3306, 3389, 5900, 8080, 8443])
-    n_ports       = random.randint(min(20, len(scan_ports)), min(50, len(scan_ports)))
-    ports_to_scan = sorted(random.sample(scan_ports, n_ports))  # sorted = sequential scan pattern
+    WELL_KNOWN_PORTS = firepower_conf.get(
+        'scan_target_ports',
+        [21, 22, 23, 25, 53, 80, 110, 135, 139, 443,
+         445, 1433, 1521, 3306, 3389, 5900, 8080, 8443])
+    n_ports     = random.randint(100, 200)
+    extra_ports = random.sample(
+        [p for p in range(1, 1024) if p not in WELL_KNOWN_PORTS],
+        max(0, n_ports - len(WELL_KNOWN_PORTS)))
+    ports_to_scan = sorted(set(list(WELL_KNOWN_PORTS) + extra_ports))
 
     logs = []
     for dpt in ports_to_scan:
         start_ms, end_ms = _conn_timing(random.randint(0, 100))
-        fields = _base_fields(config, attacker_ip, "EXTERNAL_ATTACKER")
-        fields['cs3']             = "Internet-Zone"
+        # East-west now: both endpoints are internal, so the zones and interfaces must
+        # describe LAN->LAN rather than Internet->Server, and shost carries the scanner's
+        # real hostname (a NAME field — never echo the IP into it).
+        fields = _base_fields(config, scanner_ip, user, shost)
+        fields['cs3']             = "Workstation-Zone"
         fields['cs4']             = "Server-Zone"
-        fields['deviceDirection'] = 0
-        fields['deviceInboundInterface']  = firepower_conf.get('outbound_interface', 'outside')
+        fields['deviceDirection'] = 1
+        fields['deviceInboundInterface']  = firepower_conf.get('inbound_interface',  'inside')
         fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
         fields.update({
             "_sig_id": SIG_IDS["CONNECTION"],
             "act": "Block", "app": "UNKNOWN",
             "dst": victim_ip, "dpt": dpt,
             "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
-            "cs2": "Block_Inbound_Default", "cs2Label": "fwRule",
+            "cs2": "Block_EastWest_Default", "cs2Label": "fwRule",
             "cs6": "Suspicious",            "cs6Label": "URLReputation",
             "cefSeverity": "7",  # Cisco: Block -> severity 7
-            "bytesOut": random.randint(40, 60),   # SYN probe bytes from attacker
+            "bytesOut": random.randint(40, 60),   # SYN probe bytes from the scanner
             "bytesIn":  random.randint(40, 60),   # RST/SYN-ACK before block
             "outcome": "FAILURE", "reason": "Access Control Rule",
-            "msg":   f"Port scan blocked: {attacker_ip} probing {victim_ip}:{dpt}",
+            "msg":   f"Port scan blocked: {scanner_ip} probing {victim_ip}:{dpt}",
             "start": start_ms, "end": end_ms,
         })
         logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
@@ -1693,25 +1890,25 @@ def _generate_port_scan_event(config):
     open_ports = random.sample([22, 80, 443, 445, 3389, 8080, 8443], k=random.randint(1, 2))
     for dpt in open_ports:
         start_ms, end_ms = _conn_timing(random.randint(5000, 30000))
-        fields = _base_fields(config, attacker_ip, "EXTERNAL_ATTACKER")
-        fields['cs3']             = "Internet-Zone"
+        fields = _base_fields(config, scanner_ip, user, shost)
+        fields['cs3']             = "Workstation-Zone"
         fields['cs4']             = "Server-Zone"
-        fields['deviceDirection'] = 0
-        fields['deviceInboundInterface']  = firepower_conf.get('outbound_interface', 'outside')
-        fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
+        fields['deviceDirection'] = 1
+        fields['deviceInboundInterface']  = firepower_conf.get('inbound_interface', 'inside')
+        fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface', 'inside')
         svc_map = {22: "SSH", 80: "HTTP", 443: "HTTPS", 445: "SMB", 3389: "RDP", 8080: "HTTP", 8443: "HTTPS"}
         fields.update({
             "_sig_id": SIG_IDS["CONNECTION"],
             "act": "Allow", "app": svc_map.get(dpt, "UNKNOWN"),
             "dst": victim_ip, "dpt": dpt,
             "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
-            "cs2": "Allow_Inbound_Services", "cs2Label": "fwRule",
+            "cs2": "Allow_Internal_Services", "cs2Label": "fwRule",
             "cs6": "Benign",                "cs6Label": "URLReputation",
             "cefSeverity": "3",
             "bytesOut": random.randint(500, 5000),
             "bytesIn":  random.randint(500, 5000),
             "outcome": "SUCCESS", "reason": "Traffic Allowed",
-            "msg":   f"Port scan: {attacker_ip} connected to {victim_ip}:{dpt} (service responded)",
+            "msg":   f"Port scan: {scanner_ip} connected to {victim_ip}:{dpt} (service responded)",
             "start": start_ms, "end": end_ms,
         })
         logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
@@ -1946,6 +2143,168 @@ def _generate_rdp_lateral_event(config, src_ip, user, session_context=None, shos
     return logs
 
 
+# Remote-administration service ports, mapped to the application FTD reports for each.
+# "New Administrative Behavior" counts NOVEL (destination, admin-port) pairs per source
+# host over a 12-hour window, so breadth across BOTH axes is the signal — not volume.
+# Ports with no FTD application classifier are reported as UNKNOWN, which is what real
+# FTD emits for unclassified TCP and what keeps a no-application entry in the alert's
+# app_id, matching the reference alert's mixed application/no-application evidence.
+_ADMIN_PORTS = {
+    22:  "SSH",       # secure shell
+    23:  "Telnet",    # telnet
+    69:  "UNKNOWN",   # TFTP — device config push/pull
+    161: "UNKNOWN",   # SNMP
+    512: "UNKNOWN",   # exec / rexec
+    513: "UNKNOWN",   # login / rlogin
+    514: "UNKNOWN",   # shell / rsh
+    623: "UNKNOWN",   # IPMI / out-of-band management
+    992: "Telnet",    # telnets (Telnet over TLS)
+}
+
+
+def _rare_internal_host(config, exclude=()):
+    """Internal address drawn from the wide internal space, avoiding the hot server pool.
+
+    Rarity detectors score a destination by how often it has RECEIVED that protocol from
+    other hosts. config['internal_servers'] is a 25-address list, so every generator that
+    picks its destination from it concentrates all traffic onto the same few hosts and no
+    destination is ever a rare receiver. internal_networks spans /16s, so a destination
+    drawn from it is a first-time receiver and the rarity condition can actually hold.
+    """
+    servers = set(config.get('internal_servers', []))
+    nets    = config.get('internal_networks', ['10.1.0.0/16'])
+    for _ in range(40):
+        try:
+            candidate = rand_ip_from_network(ip_network(random.choice(nets), strict=False))
+        except (ValueError, AddressValueError, IndexError):
+            continue
+        if candidate not in servers and candidate not in exclude:
+            return candidate
+    return f"10.1.{random.randint(20, 250)}.{random.randint(2, 250)}"
+
+
+def _generate_new_admin_behavior(config, src_ip, user, shost=None, session_context=None):
+    """One internal host performing many FIRST-TIME administrative actions.
+
+    Opens 8-11 DISTINCT (internal destination, admin port) pairs from a single source.
+    Each pair is novel for that source, which is what the detector counts; a burst of
+    repeat connections to one destination scores as a single action and never fires.
+
+    The source must be an internal host that already carries ambient traffic — the
+    detector compares against that host's own administrative baseline, so a freshly
+    minted address has nothing to deviate from.
+
+    Destinations come from _rare_internal_host so the pairs stay novel across runs
+    instead of recycling the same 25 servers.
+
+    Returns a list of CEF log strings (multi-event threat generator).
+    Triggers XSIAM: "New Administrative Behavior".
+    """
+    print(f"    - Firepower Module simulating: New Administrative Behavior from {src_ip}")
+    firepower_conf = _get_config(config)
+    internal_iface = firepower_conf.get('inbound_interface', 'inside')
+
+    n_actions = random.randint(8, 11)
+    ports     = random.sample(list(_ADMIN_PORTS), min(n_actions, len(_ADMIN_PORTS)))
+
+    pairs, used_dests = [], {src_ip}
+    for i in range(n_actions):
+        # Reuse a destination across two different admin ports sometimes — the reference
+        # pattern is 7 actions over 5 destinations and 4 ports, not 7 separate hosts.
+        if pairs and random.random() < 0.3:
+            dest_ip = random.choice(pairs)[0]
+        else:
+            dest_ip = _rare_internal_host(config, exclude=used_dests)
+            used_dests.add(dest_ip)
+        pairs.append((dest_ip, ports[i % len(ports)]))
+
+    # Spread the actions over the past 30-75 minutes. A burst on a single timestamp reads
+    # as one automated action rather than a pattern of administrative behaviour.
+    now_ms    = int(time.time() * 1000)
+    window_ms = random.randint(30, 75) * 60_000
+    offsets   = sorted(random.randint(0, window_ms) for _ in pairs)
+
+    logs = []
+    for (dest_ip, dport), back_ms in zip(pairs, offsets):
+        start_ms = now_ms - back_ms
+        end_ms   = start_ms + random.randint(2_000, 90_000)
+        app      = _ADMIN_PORTS[dport]
+        fields   = _base_fields(config, src_ip, user, shost)
+        fields['deviceInboundInterface']  = internal_iface
+        fields['deviceOutboundInterface'] = internal_iface
+        fields['cs3'] = "User-Zone"
+        fields['cs4'] = "Server-Zone"
+        fields.update({
+            "_sig_id": SIG_IDS["CONNECTION"],
+            "act": "Allow", "app": app,
+            "dst": dest_ip, "dpt": dport,
+            "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
+            "cs2": "Allow_Internal_Admin", "cs2Label": "fwRule",
+            "cs5": "Lateral Movement",     "cs5Label": "secIntelCategory",
+            "cefSeverity": "5",
+            "bytesOut": random.randint(1_000, 40_000),
+            "bytesIn":  random.randint(1_000, 60_000),
+            "outcome": "SUCCESS", "reason": "Traffic Allowed",
+            "msg": (f"Administrative session: {src_ip} -> {dest_ip}:{dport} ({app}) "
+                    f"- first observed for this host"),
+            # rt drives XSIAM _time; without it every event collapses onto ingest time.
+            "rt":    start_ms,
+            "start": start_ms, "end": end_ms,
+        })
+        logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
+
+    return logs
+
+
+def _generate_abnormal_rdp_rare_host(config, src_ip, user, shost=None, session_context=None):
+    """A single RDP session from a seldom-seen internal host to a seldom-targeted one.
+
+    The detector needs three rarity conditions to hold at once: the source is rarely
+    observed, the RDP pattern is abnormal for the segment, and the destination has
+    rarely RECEIVED RDP from other hosts. That last condition is why this does NOT reuse
+    config['internal_servers'] — funnelling RDP into that small pool makes every
+    destination a frequent receiver.
+
+    Deliberately ONE allowed session, not a burst: repeated attempts to the same host
+    describe brute force or lateral sweep, which are different detections.
+
+    Returns a list of CEF log strings (multi-event threat generator).
+    Triggers XSIAM: "Abnormal RDP session to a remote host from a rarely seen host".
+    """
+    firepower_conf = _get_config(config)
+    internal_iface = firepower_conf.get('inbound_interface', 'inside')
+    dest_ip        = _rare_internal_host(config, exclude={src_ip})
+    print(f"    - Firepower Module simulating: Abnormal RDP to rare host "
+          f"{src_ip} -> {dest_ip}")
+
+    start_ms, end_ms = _conn_timing(random.randint(120_000, 2_400_000))
+    fields = _base_fields(config, src_ip, user, shost)
+    fields['deviceInboundInterface']  = internal_iface
+    fields['deviceOutboundInterface'] = internal_iface
+    fields['cs3'] = "User-Zone"
+    fields['cs4'] = "User-Zone"
+    fields.update({
+        "_sig_id": SIG_IDS["CONNECTION"],
+        "act": "Allow", "app": "RDP",
+        "dst": dest_ip, "dpt": 3389,
+        "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
+        "cs2": "Allow_Internal_Admin", "cs2Label": "fwRule",
+        "cs5": "Lateral Movement",     "cs5Label": "secIntelCategory",
+        "cefSeverity": "5",
+        "bytesOut": random.randint(20_000, 400_000),
+        "bytesIn":  random.randint(50_000, 3_000_000),
+        "outcome": "SUCCESS", "reason": "Traffic Allowed",
+        "msg": f"RDP session: {src_ip} -> {dest_ip}:3389 - rare source and rare destination",
+        "rt":    start_ms,
+        "start": start_ms, "end": end_ms,
+    })
+    return [_format_firepower_cef(config, fields, "CONNECTION STATISTICS")]
+
+
+_beacon_target_map: dict = {}   # src_ip -> stable C2 resolver, so repeat beacon runs
+                                # form a recurring-rare-IP pattern (not random noise)
+
+
 def _generate_dns_c2_beacon(config, src_ip, user, shost=None):
     """DNS-based C2 beaconing — compromised host making many DNS queries to suspicious resolver.
 
@@ -1958,7 +2317,11 @@ def _generate_dns_c2_beacon(config, src_ip, user, shost=None):
     Triggers XSIAM: DNS C2 Beaconing / High-Volume DNS analytics detection.
     """
     print("    - Firepower Module simulating: DNS C2 Beacon (volume pattern)")
-    c2_resolver = _random_external_ip()   # suspicious external resolver (not on block list)
+    # Stable resolver per source so successive runs recur to the same rare IP.
+    c2_resolver = _beacon_target_map.get(src_ip)
+    if not c2_resolver:
+        c2_resolver = _random_external_ip()   # suspicious external resolver (not on block list)
+        _beacon_target_map[src_ip] = c2_resolver
     n_queries   = random.randint(15, 40)
     base_ms     = int(time.time() * 1000)
 
@@ -1972,7 +2335,9 @@ def _generate_dns_c2_beacon(config, src_ip, user, shost=None):
             "_sig_id": SIG_IDS["CONNECTION"],
             "act": "Allow", "app": "DNS",
             "dst": c2_resolver, "dpt": 53,
-            "dhost": c2_resolver,
+            # resolver is addressed by IP and has no name; the beacon domain is the
+            # QUERY (destinationDnsDomain), not the destination host.
+            "dhost": None,
             "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
             "cs2": "Allow_Outbound_DNS", "cs2Label": "fwRule",
             "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
@@ -2036,16 +2401,19 @@ def _generate_vpn_brute_force(config, src_ip, user, shost=None):
 
 
 def _generate_vpn_impossible_travel(config, src_ip, user, shost=None):
-    """Impossible travel: same user VPN sessions from geographically distant IPs.
+    """Impossible travel: FAILED logins then a SUCCESS from two distant geos, same user.
 
-    Generates two allowed VPN connection events from the same user -- the legitimate
-    session is back-dated 5-10 minutes. XSIAM detects two authentications from
-    different geolocations within a time window that makes physical travel impossible.
+    The XSIAM UEBA impossible-travel detector fires on a failed-then-succeeded auth
+    pattern (compromised-credential signal) in each location — not on bare successful
+    logins. So each location emits several failed VPN auth connection events
+    (outcome=FAILURE) followed by a successful one (outcome=SUCCESS). The legitimate
+    location is back-dated 5-10 min; rt (from start) carries the gap so XSIAM sees two
+    fail→success sequences in an impossible time window.
 
     Triggers XSIAM: Impossible Travel / Anomalous VPN Location analytics detection.
     Returns list of CEF log strings (multi-event).
     """
-    print(f"    - Firepower Module simulating: VPN Impossible Travel for {user}")
+    print(f"    - Firepower Module simulating: VPN Impossible Travel (door-knock + success x2 geos) for {user}")
     firepower_conf = _get_config(config)
     gateway_ip     = firepower_conf.get('gateway_ip',
                          random.choice(config.get('internal_servers', ['10.0.10.1'])))
@@ -2055,42 +2423,53 @@ def _generate_vpn_impossible_travel(config, src_ip, user, shost=None):
     benign_ip      = benign_loc.get('ip',    '68.185.12.14')
     suspicious_ip  = suspicious_loc.get('ip', '175.45.176.10')
 
-    gap_minutes    = random.randint(5, 10)
-    gap_ms         = gap_minutes * 60 * 1000
+    gap_ms = random.randint(5, 10) * 60 * 1000
+    now_ms = int(time.time() * 1000)
+    out_if = firepower_conf.get('outbound_interface', 'outside')
+    in_if  = firepower_conf.get('inbound_interface',  'inside')
 
-    logs = []
-    for vpn_src_ip, label, time_offset in [
-        (benign_ip,     'home-office',        -gap_ms),
-        (suspicious_ip, 'suspicious-foreign',  0),
-    ]:
-        duration_ms = random.randint(60_000, 300_000)
-        start_ms    = int(time.time() * 1000) + time_offset
-        end_ms      = start_ms + duration_ms
-        bytes_out   = random.randint(50_000, 500_000)
-        bytes_in    = random.randint(100_000, 2_000_000)
-
+    def _auth_event(vpn_src_ip, label, start_ms, success):
         fields = _base_fields(config, vpn_src_ip, user, shost if label == 'home-office' else None)
-        fields['cs3']             = "Internet-Zone"
-        fields['cs4']             = "VPN-Zone"
+        fields['cs3'] = "Internet-Zone"
+        fields['cs4'] = "VPN-Zone"
         fields['deviceDirection'] = 0
-        fields['deviceInboundInterface']  = firepower_conf.get('outbound_interface', 'outside')
-        fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
+        fields['deviceInboundInterface']  = out_if
+        fields['deviceOutboundInterface'] = in_if
+        if success:
+            bytes_out, bytes_in = random.randint(50_000, 500_000), random.randint(100_000, 2_000_000)
+            dur = random.randint(60_000, 300_000)
+            outcome, reason, sev = "SUCCESS", "VPN Session Established", "3"
+            msg = f"VPN session ESTABLISHED for {user} from {vpn_src_ip} ({label})"
+        else:
+            bytes_out, bytes_in = random.randint(500, 3_000), random.randint(500, 2_000)
+            dur = random.randint(500, 2_000)
+            outcome, reason, sev = "FAILURE", "Authentication Failed", "5"
+            msg = f"VPN authentication FAILED for {user} from {vpn_src_ip} ({label})"
         fields.update({
             "_sig_id": SIG_IDS["CONNECTION"],
             "act": "Allow", "app": "SSL VPN",
             "dst": gateway_ip, "dpt": 443,
-            "cs1": _ac_policy(config),        "cs1Label": "fwPolicy",
-            "cs2": "VPN_Remote_Access",       "cs2Label": "fwRule",
-            "cs5": "VPN Authentication",      "cs5Label": "secIntelCategory",
-            "cefSeverity": "3",
-            "bytesOut": bytes_out,
-            "bytesIn":  bytes_in,
-            "outcome": "SUCCESS", "reason": "VPN Session Established",
-            "msg": (f"VPN session for {user} from {vpn_src_ip} ({label}) - "
-                    f"{bytes_out // 1024}KB out / {bytes_in // 1024}KB in"),
-            "start": start_ms, "end": end_ms,
+            "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
+            "cs2": "VPN_Remote_Access",  "cs2Label": "fwRule",
+            "cs5": "VPN Authentication", "cs5Label": "secIntelCategory",
+            "cefSeverity": sev,
+            "bytesOut": bytes_out, "bytesIn": bytes_in,
+            "outcome": outcome, "reason": reason,
+            "msg": msg,
+            "start": start_ms, "end": start_ms + dur,
         })
-        logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
+        return _format_firepower_cef(config, fields, "CONNECTION STATISTICS")
+
+    logs = []
+    for vpn_src_ip, label, loc_offset in [
+        (benign_ip,     'home-office',        -gap_ms),
+        (suspicious_ip, 'suspicious-foreign',  0),
+    ]:
+        n_fails = random.randint(3, 5)
+        for i in range(n_fails):     # door-knocking: failed logins
+            logs.append(_auth_event(vpn_src_ip, label, now_ms + loc_offset + i * 3_000, success=False))
+        # successful login after the failures — the pattern the detector fires on
+        logs.append(_auth_event(vpn_src_ip, label, now_ms + loc_offset + n_fails * 3_000, success=True))
     return logs
 
 
@@ -2113,9 +2492,17 @@ def _generate_vpn_tor_login(config, src_ip, user, shost=None):
     firepower_conf = _get_config(config)
     gateway_ip     = firepower_conf.get('gateway_ip',
                          random.choice(config.get('internal_servers', ['10.0.10.1'])))
-    tor_nodes      = config.get('tor_exit_nodes', [])
-    tor_ip         = (random.choice(tor_nodes).get('ip', _random_external_ip())
-                      if tor_nodes else _random_external_ip())
+    # DO NOT "FIX" THIS BACK to random.choice(config['tor_exit_nodes']).
+    # Probing the full live exit-node list through the tenant
+    # resolved them to 55 DISTINCT COUNTRIES with a rotating long tail
+    # (Seychelles, Belize, Nicaragua, Panama, Peru ...).  As the SOURCE IP of a
+    # successful VPN login that tail kept marking reserve countries "already
+    # seen", permanently silencing the analytic "First successful VPN access
+    # from a country in organization".  tor_vpn_ip() restricts the pool to the
+    # 182 probed /16 prefixes that resolve ONLY to the genuine Tor-heavy
+    # countries (US/DE/NL/FR/RO) — still 930 live nodes, so the HIGH-severity
+    # "A Successful VPN connection from TOR" analytic is unaffected.
+    tor_ip         = tor_vpn_ip(config, default=_random_external_ip())
     internal_iface = firepower_conf.get('inbound_interface', 'inside')
     outside_iface  = firepower_conf.get('outbound_interface', 'outside')
 
@@ -2720,6 +3107,189 @@ def _generate_scenario_log(config, scenario, session_context=None):
 # Threat dispatcher
 # ---------------------------------------------------------------------------
 
+_dns_tunnel_target_map: dict = {}   # src_ip -> stable (resolver, tunnel_domain) for DNS-tunnel recurrence
+
+
+def _fp_domain_controllers(config):
+    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses."""
+    dcs = _get_config(config).get('domain_controllers') or config.get('domain_controllers')
+    return dcs or ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+
+
+def _b32_chunk(n):
+    """High-entropy base32-ish label of length n (DNS-tunnel encoded data)."""
+    return "".join(random.choice("abcdefghijklmnopqrstuvwxyz234567") for _ in range(n))
+
+
+def _generate_large_download(config, src_ip, user, shost=None):
+    """DNS precursor + large INBOUND transfer — 'Large Download' volume anomaly.
+    Flips the byte direction of large_file_upload (huge bytesIn / small bytesOut).
+    Returns list of CEF log strings (multi-event)."""
+    print("    - Firepower Module simulating: Large download (inbound volume anomaly)")
+    firepower_conf = _get_config(config)
+    domains        = firepower_conf.get('file_sharing_domains', ['mega.nz', 'wetransfer.com', 'dropbox.com'])
+    dest_domain    = random.choice(domains)
+    dl_host        = f"cdn.{dest_domain}"
+    dest_ip        = _random_external_ip()
+    bytes_in       = random.randint(524_288_000, 4_294_967_296)  # 500 MB - 4 GB
+    mb_str         = f"{bytes_in // 1_048_576} MB"
+    start_ms, end_ms = _conn_timing(random.randint(60_000, 900_000))
+
+    logs = [_dns_precursor_log(config, src_ip, user, dl_host, shost)]
+    fields = _base_fields(config, src_ip, user, shost)
+    fields.update({
+        "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow", "app": "SSL",
+        "dst": dest_ip, "dpt": 443, "dhost": dl_host,
+        "request": f"https://{dl_host}/download/{random.randint(100_000, 999_999)}",
+        "requestMethod": "GET",
+        "requestClientApplication": random.choice(
+            config.get('user_agents', ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)"])),
+        "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
+        "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
+        "cs5": "File Sharing",       "cs5Label": "secIntelCategory",
+        "cefSeverity": "3",
+        "bytesOut": random.randint(2_000, 40_000),
+        "bytesIn":  bytes_in,
+        "outcome": "SUCCESS", "reason": "Traffic Allowed",
+        "msg":   f"Large file download from {dest_domain}: {mb_str} transferred",
+        "start": start_ms, "end": end_ms,
+    })
+    logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
+    return logs
+
+
+def _generate_dns_tunneling(config, src_ip, user, shost=None):
+    """High-volume DNS with long, high-entropy encoded labels to one resolver — DNS
+    tunneling / data-in-DNS exfil. Distinct from the beacon (recurrence-only): the
+    signal is qname LENGTH + entropy + query VOLUME. Stable resolver+domain per source.
+    Returns list of CEF log strings (multi-event)."""
+    print("    - Firepower Module simulating: DNS tunneling (encoded-label exfil)")
+    firepower_conf = _get_config(config)
+    tunnel_domains = firepower_conf.get('dns_tunnel_domains',
+                                        ['t.exfil-tunnel.net', 'dns.data-pipe.io', 'ns.tunl-c2.com'])
+    target = _dns_tunnel_target_map.get(src_ip)
+    if not target:
+        target = (_random_external_ip(), random.choice(tunnel_domains))
+        _dns_tunnel_target_map[src_ip] = target
+    resolver, tunnel_domain = target
+    n_queries = random.randint(40, 90)
+    base_ms   = int(time.time() * 1000)
+
+    logs = []
+    for i in range(n_queries):
+        q_start = base_ms + i * random.randint(500, 4_000)
+        q_end   = q_start + random.randint(30, 150)
+        qname   = f"{_b32_chunk(random.randint(32, 48))}.{_b32_chunk(random.randint(16, 32))}.{tunnel_domain}"
+        fields  = _base_fields(config, src_ip, user, shost)
+        fields['proto'] = "17"
+        fields.update({
+            "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow", "app": "DNS",
+            # dhost is a NAME field — the DNS resolver is addressed by IP and has no
+            # name here. The tunnel domain is the QUERY, carried in
+            # destinationDnsDomain below, not the destination host.
+            "dst": resolver, "dpt": 53, "dhost": None,
+            "destinationDnsDomain": qname,   # genuine FTD DNS field (dnsQuery.data)
+            "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
+            "cs2": "Allow_Outbound_DNS", "cs2Label": "fwRule",
+            "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
+            "cefSeverity": "3",
+            "bytesOut": random.randint(180, 512),   # oversized encoded queries
+            "bytesIn":  random.randint(200, 4_000), # large TXT/NULL answers
+            "outcome": "SUCCESS", "reason": "Traffic Allowed",
+            "msg":   f"DNS query for encoded label under {tunnel_domain}: possible DNS tunnel",
+            "start": q_start, "end": q_end,
+        })
+        logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
+    return logs
+
+
+def _generate_reverse_ssh_tunnel(config, src_ip, user, shost=None):
+    """Internal host -> EXTERNAL IP on SSH/22 — reverse SSH tunnel / C2 over SSH.
+    Long-lived, high bidirectional volume; a few sessions to the SAME external host.
+    Returns list of CEF log strings (multi-event)."""
+    print("    - Firepower Module simulating: Reverse SSH tunnel to external host")
+    ext_ip = _random_external_ip()
+    logs = []
+    for _ in range(random.randint(2, 4)):
+        start_ms, end_ms = _conn_timing(random.randint(1_800_000, 14_400_000))
+        fields = _base_fields(config, src_ip, user, shost)
+        fields.update({
+            "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow", "app": "SSH",
+            "dst": ext_ip, "dpt": 22, "dhost": None,
+            "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
+            "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
+            "cs5": "Remote Access",      "cs5Label": "secIntelCategory",
+            "cefSeverity": "3",
+            "bytesOut": random.randint(5, 80) * 1_048_576,
+            "bytesIn":  random.randint(5, 80) * 1_048_576,
+            "outcome": "SUCCESS", "reason": "Traffic Allowed",
+            "msg":   f"Outbound SSH session to external host {ext_ip}: possible reverse tunnel",
+            "start": start_ms, "end": end_ms,
+        })
+        logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
+    return logs
+
+
+def _generate_ldap_recon(config, src_ip, user, shost=None):
+    """One host querying MANY domain controllers on LDAP 389/636 — AD reconnaissance
+    (breadth + volume is the signal). Returns list of CEF log strings (multi-event)."""
+    print("    - Firepower Module simulating: LDAP reconnaissance across DCs")
+    firepower_conf = _get_config(config)
+    internal_iface = firepower_conf.get('inbound_interface', 'inside')
+    logs = []
+    for dc in _fp_domain_controllers(config):
+        for _ in range(random.randint(3, 6)):
+            port = random.choice([389, 389, 636])
+            start_ms, end_ms = _conn_timing(random.randint(100, 8_000))
+            fields = _base_fields(config, src_ip, user, shost)
+            fields['deviceOutboundInterface'] = internal_iface
+            fields['cs4'] = "User-Zone"
+            fields.update({
+                "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow",
+                "app": "LDAP" if port == 389 else "LDAPS",
+                "dst": dc, "dpt": port, "dhost": None,
+                "cs1": _ac_policy(config),    "cs1Label": "fwPolicy",
+                "cs2": "Allow_Internal_LDAP", "cs2Label": "fwRule",
+                "cs5": "Reconnaissance",      "cs5Label": "secIntelCategory",
+                "cefSeverity": "3",
+                "bytesOut": random.randint(2_000, 40_000),    # large search requests
+                "bytesIn":  random.randint(20_000, 400_000),  # bulk directory results
+                "outcome": "SUCCESS", "reason": "Access Control Rule",
+                "msg":   f"LDAP query to domain controller {dc}: possible AD reconnaissance",
+                "start": start_ms, "end": end_ms,
+            })
+            logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
+    return logs
+
+
+def _generate_ldap_kerberos_benign(config, src_ip, user, shost=None):
+    """Normal AD auth: workstation -> its DC on LDAP/Kerberos/SMB (baseline so LDAP
+    recon stands out). Returns (fields, cef_name) tuple (single-event)."""
+    firepower_conf = _get_config(config)
+    internal_iface = firepower_conf.get('inbound_interface', 'inside')
+    dc   = random.choice(_fp_domain_controllers(config))
+    port = random.choice([389, 389, 636, 88, 88, 445])
+    svc  = {389: "LDAP", 636: "LDAPS", 88: "Kerberos", 445: "SMB"}[port]
+    start_ms, end_ms = _conn_timing(random.randint(50, 3_000))
+    fields = _base_fields(config, src_ip, user, shost)
+    fields['deviceOutboundInterface'] = internal_iface
+    fields['cs4'] = "User-Zone"
+    fields.update({
+        "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow", "app": svc,
+        "dst": dc, "dpt": port, "dhost": None,
+        "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
+        "cs2": "Allow_Internal_AD",  "cs2Label": "fwRule",
+        "cs5": "Authentication",     "cs5Label": "secIntelCategory",
+        "cefSeverity": "3",
+        "bytesOut": random.randint(500, 4_000),
+        "bytesIn":  random.randint(1_000, 20_000),
+        "outcome": "SUCCESS", "reason": "Access Control Rule",
+        "msg":   f"{svc} to domain controller {dc}",
+        "start": start_ms, "end": end_ms,
+    })
+    return fields, "CONNECTION STATISTICS"
+
+
 def _generate_threat_log(config, session_context=None, forced_event=None):
     """Picks and generates a random threat event from the configured or fallback mix.
 
@@ -2756,7 +3326,8 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
 
     # --- Multi-event generators -- return (list, event_name) ---
     if chosen == 'port_scan':
-        return (_generate_port_scan_event(config), chosen)
+        return (_generate_port_scan_event(config, src_ip, user, shost,
+                                         session_context), chosen)
     elif chosen == 'brute_force':
         return (_generate_brute_force_event(config), chosen)
     elif chosen == 'dns_c2_beacon':
@@ -2780,6 +3351,9 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_generate_server_outbound_http(config), chosen)
     elif chosen == 'vpn_tor_login':
         return (_generate_vpn_tor_login(config, src_ip, user, shost), chosen)
+    elif chosen == 'vpn_new_country_login':
+        _f, _n = _generate_vpn_new_country_login(config, src_ip, user, shost)
+        return (_format_firepower_cef(config, _f, _n) if _f else None, chosen)
     elif chosen == 'rare_external_rdp':
         return (_generate_rare_external_rdp(config, src_ip, user, shost), chosen)
     elif chosen == 'rare_ssh':
@@ -2794,6 +3368,20 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_generate_smtp_large_exfil(config, src_ip, user, shost), chosen)
     elif chosen == 'ftp_large_exfil':
         return (_generate_ftp_large_exfil(config, src_ip, user, shost), chosen)
+    elif chosen == 'large_download':
+        return (_generate_large_download(config, src_ip, user, shost), chosen)
+    elif chosen == 'dns_tunneling':
+        return (_generate_dns_tunneling(config, src_ip, user, shost), chosen)
+    elif chosen == 'reverse_ssh_tunnel':
+        return (_generate_reverse_ssh_tunnel(config, src_ip, user, shost), chosen)
+    elif chosen == 'ldap_recon':
+        return (_generate_ldap_recon(config, src_ip, user, shost), chosen)
+    elif chosen == 'new_admin_behavior':
+        return (_generate_new_admin_behavior(config, src_ip, user, shost,
+                                             session_context), chosen)
+    elif chosen == 'abnormal_rdp_rare_host':
+        return (_generate_abnormal_rdp_rare_host(config, src_ip, user, shost,
+                                                 session_context), chosen)
 
     # --- Single-event generators -- return via (fields, cef_name) path ---
     elif chosen == 'ips':
@@ -2856,6 +3444,8 @@ def generate_log(config, scenario=None, threat_level="Realistic",
       ssh_over_https     5  - SSH app on port 443 (protocol anomaly, allowed)
       workstation_smb    4  - w/w SMB lateral movement (Block)
       rdp_lateral        3  - internal RDP blocked (w/w or w/s lateral movement)
+      new_admin_behavior 4  - 8-11 novel (dest, admin-port) pairs from one host (multi-event)
+      abnormal_rdp_rare_host 4 - one RDP session, rare source to rare destination
       tor                3  - outbound Tor exit node connection (Allow)
       dns_c2_beacon      3  - many DNS queries to suspicious resolver (multi-event, Allow)
       server_outbound_http 2 - internal server -> external HTTP (anomalous, Allow)

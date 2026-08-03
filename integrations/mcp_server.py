@@ -146,19 +146,124 @@ def stop_module(name: str) -> dict:
 
 
 @mcp.tool()
+def list_module_threats(name: str) -> dict:
+    """List the event names a module can fire one-shot.
+
+    These are the only valid `event` values for fire_event on that module. Returns an empty
+    list for modules that expose no named events.
+    """
+    return _req("GET", f"/modules/{quote(name)}/threats")
+
+
+@mcp.tool()
 def fire_event(name: str, event: str) -> dict:
     """Fire a single named threat/event from a module immediately (one-shot).
 
-    `event` is the module's scenario_event name. Use list_modules to discover a module's name.
+    Use list_modules to discover module names and list_module_threats to discover the
+    valid `event` values for that module — do not guess event names.
     """
     return _req("POST", f"/modules/{quote(name)}/fire", body={"event": event})
 
 
+@mcp.tool()
+def set_module_interval(name: str, event_interval: float) -> dict:
+    """Change a module's seconds-between-events. Applies live; no restart needed.
+
+    Must be >= 0.01. Returns the updated module state.
+    """
+    return _req("PATCH", f"/modules/{quote(name)}/interval",
+                body={"event_interval": event_interval})
+
+
+@mcp.tool()
+def set_module_threat_level(name: str, threat_level: str) -> dict:
+    """Change a module's threat level. Works running or stopped; applies live.
+
+    Use list_threat_levels for the valid values. Returns the updated module state.
+    """
+    return _req("PATCH", f"/modules/{quote(name)}/threat_level",
+                body={"threat_level": threat_level})
+
+
+@mcp.tool()
+def reset_module_metrics(name: str) -> dict:
+    """Reset one module's log/threat counters. Does not stop the module."""
+    return _req("POST", f"/modules/{quote(name)}/reset")
+
+
+@mcp.tool()
+def reset_all_metrics() -> list:
+    """Reset every module's counters and the session timer. Does not stop anything."""
+    return _req("POST", "/modules/reset_all")
+
+
+# ── Bad User (targeted insider-threat simulation) ─────────────────────────────
+@mcp.tool()
+def list_users() -> dict:
+    """List simulated employee identities grouped by department.
+
+    Source of valid `username` values for start_bad_user.
+    """
+    return _req("GET", "/baduser/users")
+
+
+@mcp.tool()
+def start_bad_user(username: str, duration_minutes: float = 15,
+                   threat_level: str = "Extreme", event_interval: float = 0.5,
+                   selected_modules: Optional[list] = None) -> dict:
+    """Drive every selected module as one named malicious identity for a fixed duration.
+
+    Unlike a scenario, this is a sustained run (duration_minutes 1-480) rather than a
+    one-shot sequence, so it returns as soon as the run starts. Poll get_bad_user_status
+    for progress. Only one Bad User run can be active — starting a second fails.
+
+    username: from list_users. selected_modules: module names to drive, or omit for all.
+    """
+    body: dict = {"username": username, "duration_minutes": duration_minutes,
+                  "threat_level": threat_level, "event_interval": event_interval}
+    if selected_modules is not None:
+        body["selected_modules"] = selected_modules
+    return _req("POST", "/baduser/start", body=body)
+
+
+@mcp.tool()
+def stop_bad_user() -> dict:
+    """Stop the active Bad User run. Safe to call when nothing is running."""
+    return _req("POST", "/baduser/stop")
+
+
+@mcp.tool()
+def get_bad_user_status() -> dict:
+    """Progress of the active Bad User run.
+
+    Returns {"active": false} when idle; otherwise the user, remaining_seconds, and
+    per-module log/threat tallies.
+    """
+    return _req("GET", "/baduser/status")
+
+
 # ── Status ────────────────────────────────────────────────────────────────────
+@mcp.tool()
+def list_threat_levels() -> list:
+    """List valid threat-level names, for start_module and set_module_threat_level."""
+    return _req("GET", "/threat_levels")
+
+
 @mcp.tool()
 def get_status() -> dict:
     """Return a health + throughput-metrics snapshot of the running simulator."""
     return {"health": _req("GET", "/health"), "metrics": _req("GET", "/metrics")}
+
+
+@mcp.tool()
+def get_health_alerts() -> dict:
+    """Drain queued health alerts (transport failures, stalled modules).
+
+    DESTRUCTIVE READ: the server clears its alert queue on each call, so an alert goes to
+    exactly one caller. If a dashboard UI is open it is polling this too and you will each
+    see only part of the stream.
+    """
+    return _req("GET", "/health/alerts")
 
 
 if __name__ == "__main__":

@@ -54,3 +54,9 @@ instance/
 
 # Local training-mode revert/backup artifacts (not repo content)
 .training-mode-checkpoint/
+
+# Training Mode canonical cache (regenerated on demand)
+training_cache/
+
+# Detector-loop ledger (test output, regenerated per run)
+tests/detector_ledger.json

@@ -48,6 +48,57 @@ last_threat_event_time = 0
 
 
 # --- Helper Functions ---
+def _build_identity_arn(account_id, arn_suffix):
+    """Build a userIdentity ARN, picking the right service for the suffix.
+
+    Temporary-credential identities live under STS, not IAM: an assumed role is
+    arn:aws:sts::<acct>:assumed-role/<Role>/<session>. Emitting the iam:: form
+    is a tell, and XSIAM's AWS parser will not resolve the identity from it.
+    """
+    service = "sts" if arn_suffix.startswith(("assumed-role/", "federated-user/")) else "iam"
+    return f"arn:aws:{service}::{account_id}:{arn_suffix}"
+
+
+def _role_session_name(role_name):
+    """Plausible role-session name for an assumed-role identity, matching how the
+    role is actually used (EC2/EKS roles present the instance id, Lambda the
+    function session, everything else a CLI/SDK session)."""
+    if any(k in role_name for k in ("EC2", "EKS", "Worker", "Instance")):
+        return f"i-{''.join(random.choices('0123456789abcdef', k=17))}"
+    if "Lambda" in role_name:
+        return f"{role_name}-{''.join(random.choices('0123456789abcdef', k=8))}"
+    return random.choice([
+        f"botocore-session-{random.randint(1700000000, 1799999999)}",
+        f"{role_name}-session",
+        "AWSCLI-Session",
+    ])
+
+
+def _normalize_role_identity(identity, account_id):
+    """Turn a bare `type: "Role"` pool entry into a real AssumedRole identity.
+
+    CloudTrail never emits "Role" as a top-level userIdentity.type — a role that
+    makes an API call appears as AssumedRole with an sts assumed-role ARN, and
+    "Role" appears only nested in sessionContext.sessionIssuer.type. Left as-is,
+    XSIAM's parser cannot resolve the identity: identity_name / identity_type /
+    identity_sub_type all come back null in cloud_audit_logs, which silently
+    excludes the event from every identity-based cloud analytic.
+
+    Rewrites in place to the same shape the pool's existing AssumedRole entries
+    use, i.e. name "<Role>/<session>", so downstream sessionIssuer construction
+    (which splits on "/") keeps working unchanged.
+    """
+    if identity.get('type') != 'Role':
+        return identity
+    role_name = (identity.get('name') or 'DefaultRole').split('/')[0]
+    session = _role_session_name(role_name)
+    identity['type'] = 'AssumedRole'
+    identity['name'] = f"{role_name}/{session}"
+    identity['arn_suffix'] = f"assumed-role/{role_name}/{session}"
+    identity['arn'] = _build_identity_arn(account_id, identity['arn_suffix'])
+    return identity
+
+
 def _get_threat_interval(threat_level, config):
     """Gets the threat interval based on the selected level."""
     if threat_level == "Benign Traffic Only":
@@ -82,9 +133,13 @@ def _get_random_user(config, allow_root=False):
     final_identity = chosen_identity_template.copy() # Avoid modifying the original config entry
     final_identity['accountId'] = account_id # Ensure accountId is set
 
+    # A bare "Role" entry is not a valid CloudTrail identity — promote it to a
+    # real AssumedRole session before anything downstream reads type/arn.
+    _normalize_role_identity(final_identity, account_id)
+
     # Build ARN if not present
     if 'arn' not in final_identity and 'arn_suffix' in final_identity:
-        final_identity['arn'] = f"arn:aws:iam::{account_id}:{final_identity['arn_suffix']}"
+        final_identity['arn'] = _build_identity_arn(account_id, final_identity['arn_suffix'])
 
     # Build PrincipalId if not present
     if 'principalId' not in final_identity:
@@ -210,9 +265,13 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
 
     # Check if ARN and PrincipalId are *already provided* (e.g., from an assumed role object).
     # If not, build them from arn_suffix.
+    # Identities handed in by scenario context may not have gone through
+    # _get_random_user, so normalise here too before deriving the ARN.
+    _normalize_role_identity(user_identity, account_id)
+
     user_arn = user_identity.get('arn')
     if not user_arn:
-        user_arn = f"arn:aws:iam::{account_id}:{user_identity.get('arn_suffix', 'user/DefaultFallbackArn')}"
+        user_arn = _build_identity_arn(account_id, user_identity.get('arn_suffix', 'user/DefaultFallbackArn'))
 
     principal_id = user_identity.get('principalId')
     if not principal_id:
@@ -3896,9 +3955,22 @@ def _generate_k8s_sa_outside_cluster(config, context=None):
     role_arn = f"arn:aws:iam::{account_id}:role/{eks_role_name}"
     role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
 
+    # CloudTrail does NOT record AssumeRoleWithWebIdentity anonymously: it emits a
+    # WebIdentityUser identity naming the OIDC subject and the EKS provider. A null
+    # userIdentity leaves XSIAM unable to resolve the actor, which excludes the event
+    # from identity-based cloud analytics (same failure mode as the "Role" type bug).
+    _oidc_provider = (f"arn:aws:iam::{account_id}:oidc-provider/oidc.eks.{region}."
+                      f"amazonaws.com/id/{''.join(random.choices('0123456789ABCDEF', k=32))}")
+    _oidc_subject = f"system:serviceaccount:{k8s_namespace}:{k8s_sa_name}"
+
     event1 = {
         "eventVersion": "1.11",
-        "userIdentity": None, # STS WebIdentity calls are initially anonymous
+        "userIdentity": {
+            "type": "WebIdentityUser",
+            "principalId": f"{_oidc_provider.split('oidc-provider/')[-1]}:sub:{_oidc_subject}",
+            "userName": _oidc_subject,
+            "identityProvider": _oidc_provider,
+        },
         "eventTime": now.strftime('%Y-%m-%dT%H:%M:%SZ'),
         "eventSource": "sts.amazonaws.com",
         "eventName": "AssumeRoleWithWebIdentity",
@@ -3948,7 +4020,8 @@ def _generate_k8s_sa_outside_cluster(config, context=None):
         "principalId": event1["responseElements"]["assumedRoleUser"]["assumedRoleId"],
         "arn": event1["responseElements"]["assumedRoleUser"]["arn"],
         "accountId": account_id,
-        "userName": f"{eks_role_name}/{pod_session_name}", # Add userName for base_event
+        # No top-level userName — AssumedRole carries the role name only in
+        # sessionContext.sessionIssuer.userName.
         "sessionContext": {
             "sessionIssuer": {
                 "type": "Role",
@@ -4261,7 +4334,8 @@ def _generate_api_call_from_tor(config, context=None):
         # Generate matching principalId
         role_principal_id_base = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
         user_identity['principalId'] = f"{role_principal_id_base}:{session_name}"
-        user_identity['userName'] = role_base_name # Base role name for userName field
+        # No top-level userName: real CloudTrail omits it for AssumedRole — the
+        # role name lives only in sessionContext.sessionIssuer.userName below.
         # Add sessionContext
         user_identity['sessionContext'] = {
             "sessionIssuer": { 
@@ -4372,47 +4446,13 @@ def _generate_iam_remove_billing_admin(config, context=None):
     })
     return [event]
 
-def _generate_s3_make_public(config, context=None):
-    """(Threat) Simulates making an S3 bucket public via PutBucketPolicy."""
-    user_identity = None
-    ip_address = None
-    if context:
-        user_identity = context.get('user_identity')
-        ip_address = context.get('ip_address')
-    
-    if not user_identity: user_identity = _get_random_user(config)
-    if not ip_address: ip_address = _get_random_ip(config)
+# _generate_s3_make_public (PutBucketPolicy + Principal:"*") was removed on
+# 2026-08-02. It normalised identically to the ACL variant in cloud_audit_logs
+# but never fired the built-in BIOC "AWS S3 bucket was exposed to public
+# access" — 0 alerts in 180 days, and silent for 20min in a direct A/B where
+# the ACL form alerted in 65s. Bucket exposure is now simulated exclusively by
+# _generate_s3_make_public_acl.
 
-    aws_conf = config.get(CONFIG_KEY, {})
-    account_id = user_identity.get('accountId', aws_conf.get('aws_account_id', '123456789012'))
-    region = aws_conf.get('aws_region', 'us-east-1')
-    
-    s3_buckets = aws_conf.get("s3_buckets", ["default-sim-bucket-1"])
-    target_bucket = random.choice(s3_buckets)
-    bucket_arn = f"arn:aws:s3:::{target_bucket}"
-    
-    public_policy = {
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Sid": "PublicReadGetObject",
-            "Effect": "Allow",
-            "Principal": "*",
-            "Action": ["s3:GetObject"],
-            "Resource": f"arn:aws:s3:::{target_bucket}/*"
-        }]
-    }
-
-    event = _get_base_event(config, user_identity, ip_address, region, "PutBucketPolicy", "s3.amazonaws.com", api_version="2006-03-01", read_only=False)
-    event.update({
-        "requestParameters": {
-            "bucketName": target_bucket,
-            "Host": f"{target_bucket}.s3.{region}.amazonaws.com",
-            "policy": json.dumps(public_policy, separators=(',', ':')) # Compact JSON string
-        },
-        "responseElements": None,
-        "resources": [{"type": "AWS::S3::Bucket", "ARN": bucket_arn, "accountId": account_id}]
-    })
-    return [event]
 
 def _generate_iam_delete_mfa_device(config, context=None):
     """(Threat) Simulates deleting a virtual MFA device for a user."""
@@ -6955,7 +6995,16 @@ SCENARIO_FUNCTIONS = {
     "PENTEST_LAUNCH": _generate_pentest_instance_launch,
     "DISABLE_GUARDDUTY": _generate_guardduty_detector_deleted,
     "STOP_CLOUDTRAIL": _generate_cloudtrail_stop_logging,
-    "MAKE_S3_PUBLIC": _generate_s3_make_public,
+    # The built-in BIOC "AWS S3 bucket was exposed to public access" only
+    # recognises the ACL form (PutBucketAcl + the AllUsers grant URI). A
+    # PutBucketPolicy carrying Principal:"*" normalises identically in
+    # cloud_audit_logs but never fires it — verified 2026-08-02 by firing both
+    # against fresh bucket names: ACL alerted in 65s, policy was silent for
+    # 20min (and has 0 alerts in 180 days). Keep the named threat on the ACL
+    # variant so scenarios hit the native detector; the policy variant stays in
+    # THREAT_SCENARIOS for ambient realism. Correlation rule 01_step6 matches
+    # either form, so it keeps firing.
+    "MAKE_S3_PUBLIC": _generate_s3_make_public_acl,
     "DISABLE_S3_LOGGING": _generate_s3_disable_bucket_logging,
     "ATTACH_ADMIN_POLICY": _generate_iam_policy_change,
     "CREATE_SUSPICIOUS_USER": _generate_suspicious_iam_creation,
@@ -7124,11 +7173,13 @@ THREAT_SCENARIOS = {
     _generate_s3_disable_bucket_logging: 2,
     _generate_api_call_from_tor: 1, # Lower weight than console login from tor
     _generate_cloudwatch_delete_log_stream: 1,
-    _generate_s3_make_public: 2,
     _generate_iam_delete_mfa_device: 2,
     _generate_ec2_create_and_share_snapshot: 1, # Multiple events
     _generate_iam_update_login_profile: 2,
-    _generate_s3_make_public_acl: 2,
+    # Weight 4 = the ACL variant's old 2 plus the removed PutBucketPolicy
+    # variant's 2, so the ambient rate of "bucket made public" is unchanged —
+    # but every one of them now reaches the built-in detector.
+    _generate_s3_make_public_acl: 4,
     # XSIAM built-in detector scenarios
     _generate_ssm_start_session: 2,
     _generate_ssm_send_command: 2,

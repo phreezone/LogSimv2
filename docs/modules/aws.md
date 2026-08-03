@@ -140,8 +140,7 @@ Context-dependent events that are common in legitimate admin workflows but also 
 
 ### Data Exfiltration — Storage
 
-* **`MAKE_S3_PUBLIC`** — `PutBucketPolicy` setting a bucket policy that grants `s3:GetObject` to `*` (anonymous read).
-* **`MAKE_S3_PUBLIC_ACL`** — `PutBucketAcl` or `PutObjectAcl` setting `public-read` or `public-read-write` via legacy ACL.
+* **`MAKE_S3_PUBLIC`** — `PutBucketAcl` granting the `AllUsers` group READ via legacy ACL. *This is the only form the built-in BIOC "AWS S3 bucket was exposed to public access" recognises.* The former `PutBucketPolicy` (`Principal:"*"`) variant was removed on 2026-08-02: it normalised identically in `cloud_audit_logs` but never fired the detector (0 alerts in 180 days; silent for 20min in a direct A/B where the ACL form alerted in 65s).
 * **`S3_COPY_TO_FOREIGN_ACCOUNT`** — `CopyObject` with a destination bucket in a different AWS account ID.
 * **`S3_SUSPICIOUS_ENCRYPTION`** — Overwrites S3 objects using a customer-managed KMS key from an external/attacker account — data becomes unreadable to the bucket owner (pseudo-ransomware).
 * **`EC2_CREATE_SHARE_SNAPSHOT`** — Creates an EC2 EBS snapshot then modifies its attribute to share it with a foreign account ID — data exfiltration via snapshot copy.
@@ -200,7 +199,7 @@ The following scenario keys can be passed as `scenario_event` in coordinated sim
 | `PENTEST_LAUNCH` | RunInstances with pentest AMI | Compute abuse |
 | `DISABLE_GUARDDUTY` | DeleteDetector | Defense evasion |
 | `STOP_CLOUDTRAIL` | StopLogging | Defense evasion |
-| `MAKE_S3_PUBLIC` | PutBucketPolicy (public) | Data exposure |
+| `MAKE_S3_PUBLIC` | PutBucketAcl (AllUsers grant) | Data exposure |
 | `DISABLE_S3_LOGGING` | PutBucketLogging (disabled) | Defense evasion |
 | `ATTACH_ADMIN_POLICY` | AttachUserPolicy/AttachRolePolicy | Privilege escalation |
 | `CREATE_SUSPICIOUS_USER` | CreateUser + AddUserToGroup + CreateAccessKey | Persistence |
