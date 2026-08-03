@@ -575,3 +575,394 @@ def verify_parity(pack, all_modules, config):
 
     nb, ns = norm(bulk), norm(stream)
     return (nb == ns), bulk, stream
+
+
+# ── Per-student entity isolation (capture-replay) ─────────────────────────────
+# The canonical story is generated once with the normal (shared) entity population.
+# For each student we build a substitution map that collapses EVERY internal identity
+# to `student{n}` and remaps all IPs/hosts/SIDs/emails and external attacker IPs into a
+# per-student namespace, so a rule keyed on student{n} matches only that student's events
+# and one student's mistake can't touch another's. A leak-check verifies completeness.
+
+import re as _re
+from ipaddress import ip_address as _ip_address, ip_network as _ip_network
+
+_IP_RE = _re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
+
+
+def _payload_text(payload):
+    """Decode a payload (str or gzipped/plain bytes) to text for scanning."""
+    if isinstance(payload, (bytes, bytearray)):
+        b = bytes(payload)
+        if len(b) >= 2 and b[0] == 0x1f and b[1] == 0x8b:
+            import gzip
+            try:
+                b = gzip.decompress(b)
+            except Exception:
+                pass
+        return b.decode('utf-8', 'replace')
+    return payload if isinstance(payload, str) else str(payload)
+
+
+def _ip_is_internal(ip, nets):
+    try:
+        a = _ip_address(ip)
+    except ValueError:
+        return False
+    for n in nets:
+        try:
+            if a in _ip_network(n, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def build_inventory(session_context, config, payloads):
+    """Collect the canonical entities that actually appear, so the per-student rewrite is
+    bounded. Returns dict of sets/maps: users, emails, internal_ips, external_ips,
+    hostnames, sids."""
+    corpus = "\n".join(_payload_text(p) for (_o, _m, _e, p) in payloads)
+
+    inv = {"users": set(), "emails": set(), "internal_ips": set(),
+           "external_ips": set(), "hostnames": set(), "sids": set()}
+
+    # From the session context (the identity map used to generate the story).
+    for uname, prof in (session_context or {}).items():
+        inv["users"].add(uname)
+        if prof.get("email"):
+            inv["emails"].add(prof["email"])
+        for ipkey in ("primary_ip",):
+            if prof.get(ipkey):
+                inv["internal_ips"].add(prof[ipkey])
+        if prof.get("primary_hostname"):
+            inv["hostnames"].add(prof["primary_hostname"])
+        for dev in (prof.get("active_devices") or {}).values():
+            if dev.get("ip"):
+                inv["internal_ips"].add(dev["ip"])
+            if dev.get("hostname"):
+                inv["hostnames"].add(dev["hostname"])
+
+    # SIDs materialized by the Windows module during generation.
+    try:
+        from modules import windows_events
+        inv["sids"].update(str(v) for v in windows_events._USER_SIDS.values())
+    except Exception:
+        pass
+
+    # Static infra hostnames from config.
+    wc = config.get("windows_events_config", {})
+    for k in ("domain_controller_hostname", "dc_hostname"):
+        if wc.get(k):
+            inv["hostnames"].add(wc[k])
+
+    # Classify every IP that appears in the corpus (catches generated external attacker
+    # IPs that aren't enumerable from config).
+    nets = config.get("internal_networks", [])
+    for ip in set(_IP_RE.findall(corpus)):
+        if ip in inv["internal_ips"]:
+            continue
+        (inv["internal_ips"] if _ip_is_internal(ip, nets) else inv["external_ips"]).add(ip)
+
+    # Keep only entities that actually appear (bounds the rewrite table for performance).
+    inv["users"] = {u for u in inv["users"] if u and u in corpus}
+    inv["emails"] = {e for e in inv["emails"] if e and e in corpus}
+    inv["hostnames"] = {h for h in inv["hostnames"] if h and h in corpus}
+    inv["sids"] = {s for s in inv["sids"] if s and s in corpus}
+    inv["internal_ips"] = {ip for ip in inv["internal_ips"] if ip in corpus}
+    return inv
+
+
+def _profile_for(config, n):
+    sp = (config.get("training_config") or {}).get("student_profiles", {})
+    tmpl = sp.get("template", {})
+    return {
+        "domain": tmpl.get("domain", "EXAMPLECORP"),
+        "username": tmpl.get("username_pattern", "student{n}").format(n=n),
+        "ip_block": tmpl.get("ip_block", "10.{n}.0.0/16").format(n=n),
+        "hostname_prefix": tmpl.get("hostname_prefix", "STU{n}-").format(n=n),
+        "sid_rid_base": int(tmpl.get("sid_rid_base", 5000)),
+        "external_ip_block": tmpl.get("external_ip_block", "185.{n}.0.0/16").format(n=n),
+    }
+
+
+def _alloc_ips(block, count):
+    """Deterministically hand out `count` distinct host addresses from a CIDR block."""
+    net = _ip_network(block, strict=False)
+    hosts = net.network_address
+    out = []
+    for i in range(count):
+        out.append(str(_ip_address(int(hosts) + 10 + i)))
+    return out
+
+
+def build_student_map(inventory, config, n):
+    """Build the ordered (longest-first) substitution list for student *n*: every canonical
+    entity → its single-identity, per-student-namespaced replacement."""
+    p = _profile_for(config, n)
+    user, dom = p["username"], p["domain"]
+    subs = {}  # canonical string -> replacement
+
+    # Users: collapse ALL internal users to student{n}, in every form.
+    for u in inventory["users"]:
+        subs[f"{dom}\\{u}"] = f"{dom}\\{user}"
+        subs[u] = user
+    for e in inventory["emails"]:
+        subs[e] = f"{user}@{dom.lower()}.com"
+
+    # Internal IPs → student's block; external attacker IPs → student's external block.
+    int_ips = sorted(inventory["internal_ips"])
+    for canon, repl in zip(int_ips, _alloc_ips(p["ip_block"], len(int_ips))):
+        subs[canon] = repl
+    ext_ips = sorted(inventory["external_ips"])
+    for canon, repl in zip(ext_ips, _alloc_ips(p["external_ip_block"], len(ext_ips))):
+        subs[canon] = repl
+
+    # Hostnames → STU{n}-<idx>.
+    for i, h in enumerate(sorted(inventory["hostnames"])):
+        subs[h] = f"{p['hostname_prefix']}{i:03d}"
+
+    # SIDs → per-student RID namespace (keep domain SID prefix, swap the trailing RID).
+    for i, s in enumerate(sorted(inventory["sids"])):
+        subs[s] = _re.sub(r'\d+$', str(p["sid_rid_base"] + i), s)
+
+    # Longest-first so DOMAIN\user / emails / longer hostnames win over their substrings,
+    # and IPs match on word boundaries (avoid 10.0.1.5 hitting inside 10.0.1.50).
+    keys = sorted(subs, key=len, reverse=True)
+    pattern = _re.compile("|".join(r'\b' + _re.escape(k) + r'\b' if _IP_RE.fullmatch(k)
+                                   else _re.escape(k) for k in keys))
+    return {"subs": subs, "pattern": pattern, "profile": p}
+
+
+def rewrite_payload(payload, student_map):
+    """Apply a student's substitution map to a payload (str or gzipped/plain bytes)."""
+    subs, pattern = student_map["subs"], student_map["pattern"]
+    was_bytes = isinstance(payload, (bytes, bytearray))
+    gz = False
+    if was_bytes:
+        import gzip
+        b = bytes(payload)
+        if len(b) >= 2 and b[0] == 0x1f and b[1] == 0x8b:
+            try:
+                b = gzip.decompress(b); gz = True
+            except Exception:
+                return payload
+        try:
+            s = b.decode('utf-8')
+        except Exception:
+            return payload
+    elif isinstance(payload, str):
+        s = payload
+    else:
+        return payload
+
+    s = pattern.sub(lambda m: subs[m.group(0)], s)
+
+    if was_bytes:
+        import gzip
+        out = s.encode('utf-8')
+        return gzip.compress(out) if gz else out
+    return s
+
+
+def leak_check(inventory, rewritten_payloads):
+    """Return the set of canonical entities that survived into a student's output (should be
+    empty). Guards rewrite completeness."""
+    corpus = "\n".join(_payload_text(p) for p in rewritten_payloads)
+    canon = set()
+    canon |= inventory["users"] | inventory["emails"] | inventory["hostnames"]
+    canon |= inventory["internal_ips"] | inventory["external_ips"] | inventory["sids"]
+    return {c for c in canon if c and c in corpus}
+
+
+# ── Canonical capture (once, under a fixed anchor clock) ──────────────────────
+
+def _anchor_dt(config):
+    iso = (config.get("training_config") or {}).get("anchor_epoch", "2020-01-01T00:00:00Z")
+    return datetime.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+def capture_canonical(pack, all_modules, config, eps):
+    """Generate the pack's story ONCE, under a fixed synthetic anchor clock, and capture the
+    ordered payloads. Deterministic from (seed, eps) and day-independent (anchor is constant),
+    so re-running any day yields the identical canonical. Returns (captured, inventory,
+    session_context) where captured = [(offset, module_name, event_name, payload), ...]."""
+    import log_simulator as ls
+
+    seed = pack.get("seed", pack.get("id"))
+    level = pack.get("benign_threat_level", "Benign Traffic Only")
+    duration = float(pack.get("duration_seconds", DEFAULT_DURATION_SECONDS))
+    anchor = _anchor_dt(config)
+    anchor_epoch = anchor.timestamp()
+    # EPS comes from the tier, not the pack.
+    pack = dict(pack, benign_events_per_second_per_module=eps)
+
+    from freezegun import freeze_time
+    captured = []
+    session_context = {}
+    prev_collector = ls._bulk_collector
+    with deterministic_env(seed, config):
+        reset_module_state(all_modules)
+        from modules.session_utils import build_session_context
+        session_context = build_session_context(config)
+        emit_benign = _emit_benign_factory(config, session_context, level)  # inline → collects
+        actions = _build_actions(pack, all_modules, config, session_context, duration)
+        try:
+            with freeze_time(anchor) as frozen:
+                for (offset, kind, ref) in actions:
+                    frozen.move_to(datetime.datetime.fromtimestamp(anchor_epoch + offset, _UTC))
+                    chunk = []
+                    ls._bulk_collector = chunk
+                    if kind == "benign":
+                        emit_benign(ref)
+                    else:
+                        _run_injected_bulk(ref, frozen, anchor_epoch + offset)
+                    ls._bulk_collector = prev_collector
+                    for (module, payload, ename) in chunk:
+                        captured.append((offset, getattr(module, "NAME", "?"), ename, payload))
+        finally:
+            ls._bulk_collector = prev_collector
+
+    inventory = build_inventory(session_context, config, captured)
+    return captured, inventory, session_context
+
+
+# ── Canonical disk cache (so Mon == Thu and repeat runs are instant) ──────────
+
+def _cache_dir():
+    import os
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    d = os.path.join(here, "training_cache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _cache_key(pack, eps):
+    return f"{pack.get('id', 'pack')}__{stable_seed(pack.get('seed', pack.get('id')))}__{eps}"
+
+
+def get_canonical(pack, all_modules, config, eps, force=False):
+    """Return (captured, inventory) for (pack, seed, eps), from disk cache if present, else
+    generate once under the fixed anchor and cache it. Day-independent by construction."""
+    import os, gzip, json, base64
+    key = _cache_key(pack, eps)
+    data_path = os.path.join(_cache_dir(), key + ".jsonl.gz")
+    inv_path = os.path.join(_cache_dir(), key + ".inv.json")
+
+    if not force and os.path.exists(data_path) and os.path.exists(inv_path):
+        captured = []
+        with gzip.open(data_path, "rt", encoding="utf-8") as f:
+            for line in f:
+                r = json.loads(line)
+                payload = base64.b64decode(r["p"]) if r["b"] else r["p"]
+                captured.append((r["o"], r["m"], r["e"], payload))
+        with open(inv_path, encoding="utf-8") as f:
+            inv = {k: set(v) for k, v in json.load(f).items()}
+        return captured, inv
+
+    captured, inv, _sess = capture_canonical(pack, all_modules, config, eps)
+    with gzip.open(data_path, "wt", encoding="utf-8") as f:
+        for (offset, mod_name, ename, payload) in captured:
+            is_bytes = isinstance(payload, (bytes, bytearray))
+            p = base64.b64encode(bytes(payload)).decode("ascii") if is_bytes else payload
+            f.write(json.dumps({"o": offset, "m": mod_name, "e": ename, "p": p, "b": is_bytes}) + "\n")
+    with open(inv_path, "w", encoding="utf-8") as f:
+        json.dump({k: sorted(v) for k, v in inv.items()}, f)
+    return captured, inv
+
+
+# ── Multi-student replay (per student × mode) ─────────────────────────────────
+
+def resolve_eps(config, num_students):
+    """Auto-tier EPS/source from class size (config-driven breakpoints, overridable)."""
+    for t in (config.get("training_config") or {}).get("eps_tiers", []):
+        if "max_students" not in t or num_students <= t["max_students"]:
+            return float(t["eps"])
+    return DEFAULT_BENIGN_INTERVAL and 0.5
+
+
+def run_multi_student(pack, all_modules, config, mode="bulk", num_students=1,
+                      seed=None, eps=None, stop_event=None, progress=None):
+    """Replay the canonical story for each student, re-keyed to their identity and
+    time-shifted. Bulk backfills all students into `now-4h..now`; stream paces every
+    student's events live over the window, interleaved by offset."""
+    import log_simulator as ls
+
+    if seed:
+        pack = dict(pack, seed=seed)
+    if eps is None:
+        eps = resolve_eps(config, num_students)
+    duration = float(pack.get("duration_seconds", DEFAULT_DURATION_SECONDS))
+
+    captured, inventory = get_canonical(pack, all_modules, config, eps)
+    anchor_epoch = _anchor_dt(config).timestamp()
+    now = time.time()
+    window_start = (now - duration) if mode == "bulk" else now
+    delta = window_start - anchor_epoch          # constant shift anchor → target window
+
+    student_maps = {n: build_student_map(inventory, config, n) for n in range(1, num_students + 1)}
+    total = num_students * len(captured)
+    sent = [0]
+
+    def _report(label):
+        if progress is not None:
+            try:
+                progress({"mode": mode, "pack": pack.get("id"), "index": sent[0],
+                          "total": total, "num_students": num_students, "eps": eps,
+                          "label": label})
+            except Exception:
+                pass
+
+    def _emit(module, payload, ename):
+        out = rewrite_payload(payload, student_maps[_emit.n])
+        out = ls.shift_timestamps(out, delta, anchor_epoch)
+        sender.send(module, out, ename)
+        sent[0] += 1
+
+    sender = _ParallelSender(ls, config, BULK_SEND_WORKERS if mode == "bulk" else STREAM_SEND_WORKERS)
+    prev_quiet = ls._quiet_sends
+    ls._quiet_sends = True
+    try:
+        if mode == "bulk":
+            # Order irrelevant (timestamps baked in) — send all students as fast as possible.
+            for n in range(1, num_students + 1):
+                if stop_event is not None and stop_event.is_set():
+                    break
+                _emit.n = n
+                for (offset, mod_name, ename, payload) in captured:
+                    module = all_modules.get(mod_name)
+                    if module is not None:
+                        _emit(module, payload, ename)
+                    if sent[0] % 500 == 0:
+                        _report(f"student {n}/{num_students}")
+                _report(f"student {n}/{num_students}")
+        else:
+            # Interleave all students by offset; pace live to wall_start + offset.
+            timeline = sorted(((offset, n, mod_name, ename, payload)
+                               for n in range(1, num_students + 1)
+                               for (offset, mod_name, ename, payload) in captured),
+                              key=lambda x: x[0])
+            for (offset, n, mod_name, ename, payload) in timeline:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                if _sleep_until(window_start + offset, stop_event):
+                    break
+                module = all_modules.get(mod_name)
+                if module is not None:
+                    _emit.n = n
+                    _emit(module, payload, ename)
+                if sent[0] % 100 == 0:
+                    _report(f"streaming {num_students} students")
+                    _flush(config, ls)
+        sender.close()
+        _report("finalizing")
+        _flush(config, ls)
+    finally:
+        ls._quiet_sends = prev_quiet
+        try:
+            sender.close()
+        except Exception:
+            pass
+
+    return {"mode": mode, "pack": pack.get("id"), "num_students": num_students,
+            "eps": eps, "events_per_student": len(captured), "total_events": total}

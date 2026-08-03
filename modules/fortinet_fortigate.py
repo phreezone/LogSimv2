@@ -160,6 +160,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "First successful VPN access from a country in organization"},
     {"event": "external_port_scan",    "weight": 3,  "analytic": True,
      "xsiam_alert": "Port Scan"},
+    {"event": "new_admin_behavior",    "weight": 3,  "analytic": True,
+     "xsiam_alert": "New Administrative Behavior"},
 ]
 
 # --- Display-name mapping (same pattern as checkpoint_firewall.py) ---
@@ -309,6 +311,74 @@ _BENIGN_APPS = [
     ("Slack",         43156, "Collaboration",  "low"),
     ("Dropbox",       18311, "Cloud.Storage",  "medium"),
 ]
+
+# Ports XSIAM's NDR lateral-movement analytics treats as an "administrative
+# action": remote shell, remote file transfer and remote console services.
+# Mapped to (service, app, appid, appcat, apprisk) so every app field the CEF
+# builder seeds with a random benign value is overwritten with the real service.
+_ADMIN_SERVICE_PORTS = {
+    22:  ("SSH",     "SSH",    15895, "Network.Service", "medium"),
+    69:  ("TFTP",    "TFTP",   16072, "Network.Service", "medium"),
+    512: ("EXEC",    "REXEC",  16221, "Remote.Access",   "high"),
+    992: ("TELNETS", "Telnet", 15894, "Remote.Access",   "high"),
+}
+
+# Ports the analytics profile is confirmed to count toward the new-administrative-
+# action total on this data source. Remote-shell sessions are ingested but not
+# counted, so the burst is filled only from these: the countable session count then
+# clears the detection threshold on every invocation rather than depending on how
+# the random port mix happens to fall.
+_ADMIN_PORT_FILL = (22, 69)
+
+# Dedicated internal management segment for administrative-behaviour sessions.
+# It sits inside config['internal_networks'] (172.18.0.0/16) so destinations are
+# genuinely internal, but is disjoint from config['internal_servers'] — which are
+# the only addresses any other generator reaches on an administrative port.
+_ADMIN_SEGMENT_PREFIX = "172.18"
+_ADMIN_SEGMENT_BASE3  = 128          # third octet 128-255, i.e. a /17
+_ADMIN_SEGMENT_SPAN   = 128 * 256    # addresses available in the segment
+_ADMIN_BLOCK_SIZE     = 16           # addresses reserved per invocation
+
+# In-memory only, by design: single-session operation, no disk persistence.
+_admin_block_cursor = None
+
+
+def _next_admin_targets(count):
+    """Reserve `count` internal destinations not yet used on an administrative port.
+
+    The detector counts FIRST-SEEN (destination, administrative port) pairs per
+    source host, so a generator that reuses destinations exhausts itself after one
+    run. The cursor is seeded from the wall clock and only ever moves forward, so a
+    process restart cannot rewind onto addresses an earlier run already spent.
+    """
+    global _admin_block_cursor
+    hour_slot = int(time.time() // 3600)
+    if _admin_block_cursor is None or _admin_block_cursor < hour_slot:
+        _admin_block_cursor = hour_slot
+    block = _admin_block_cursor
+    _admin_block_cursor += 1
+
+    targets = []
+    for i in range(count):
+        idx = (block * _ADMIN_BLOCK_SIZE + i) % _ADMIN_SEGMENT_SPAN
+        targets.append("%s.%d.%d" % (_ADMIN_SEGMENT_PREFIX,
+                                     _ADMIN_SEGMENT_BASE3 + (idx // 256), idx % 256))
+    return targets
+
+
+def _admin_port_sequence(count):
+    """Port list of length `count` in which every administrative port appears.
+
+    Only the fill ports are known to be counted as administrative actions by the
+    analytics profile; sessions on the remaining ports are ingested but may be
+    ignored. Every port still appears once so the traffic looks like a real
+    maintenance sweep, but the countable sessions carry the detection on their own.
+    """
+    seq = list(_ADMIN_SERVICE_PORTS)
+    while len(seq) < count:
+        seq.append(random.choice(_ADMIN_PORT_FILL))
+    random.shuffle(seq)
+    return seq[:count]
 
 
 # ---------------------------------------------------------------------------
@@ -2219,6 +2289,83 @@ def _simulate_lateral_movement(config, src_ip, user, shost):
     return logs
 
 
+def _simulate_new_admin_behavior(config, src_ip, user, shost, session_context=None):
+    """One workstation opens administrative sessions to many NEW internal destinations.
+
+    XSIAM's NDR lateral-movement analytics profiles, per source host, the set of
+    (destination, administrative port) pairs that host has used before, and alerts
+    when the number of previously unseen pairs inside a 12-hour window is
+    uncharacteristically high for that host. Breadth over new destinations is the
+    signal — repeating destinations the host already reached counts for nothing.
+
+    Emits 13-15 accepted sessions over SSH/TFTP/rexec/telnets, each to a destination
+    from the dedicated management segment that no host has reached on an
+    administrative port, spread over 1-2 hours so the burst never lands on a single
+    timestamp. The source is a real internal workstation with its own traffic
+    baseline — a freshly minted address has no profile to deviate from.
+
+    Triggers XSIAM: "New Administrative Behavior".
+    """
+    if not shost:
+        _u, shost = _get_user_and_host_info(config, src_ip, session_context)
+        user = user if user and user != "unknown" else _u
+    print(f"    - Fortinet Module simulating: New Administrative Behavior from {shost or src_ip}")
+
+    forti_conf = _get_config(config)
+    lan_iface  = forti_conf.get("interface_lan", "port10")
+
+    n_sessions = random.randint(13, 15)
+    targets    = _next_admin_targets(n_sessions)
+    ports      = _admin_port_sequence(n_sessions)
+
+    # A second operator account on part of the run: administrative sweeps are
+    # usually run under a shared/secondary credential rather than one identity.
+    alt_user = None
+    if session_context:
+        alt_info = get_random_user(session_context, preferred_device_type="workstation")
+        if alt_info and alt_info["username"] != user:
+            alt_user = alt_info["username"]
+
+    span_seconds = random.randint(70, 140) * 60
+    base_epoch   = time.time() - span_seconds
+    step         = (span_seconds - 120) / max(n_sessions - 1, 1)
+
+    logs = []
+    for i, (dest_ip, port) in enumerate(zip(targets, ports)):
+        service, app, appid, appcat, apprisk = _ADMIN_SERVICE_PORTS[port]
+        duration = random.randint(20, 900)
+        ev_user  = alt_user if (alt_user and random.random() < 0.3) else user
+
+        # dhost stays unset: these destinations have no resolved name and an address
+        # in a hostname field makes XSIAM invent a host by that name.
+        fields = _base_traffic_fields(
+            config, src_ip, shost, ev_user, dest_ip, None, "6", port, "accept",
+            duration_s=duration, src_country="Reserved", dst_country="Reserved",
+        )
+        # The parse rule derives _time as eventtime - duration, so the session start
+        # lands where intended only if the duration is added back here.
+        event_epoch = base_epoch + step * i + random.uniform(0, 45)
+        fields.update({
+            "FTNTFGTeventtime":         int((event_epoch + duration) * 1_000_000_000),
+            "app":                      app,
+            "FTNTFGTapp":               app,
+            "FTNTFGTappid":             appid,
+            "FTNTFGTappcat":            appcat,
+            "FTNTFGTapprisk":           apprisk,
+            "FTNTFGTservice":           service,
+            "deviceOutboundInterface":  lan_iface,
+            "FTNTFGTsrcintfrole":       "lan",
+            "FTNTFGTdstintfrole":       "lan",
+            "out":                      random.randint(2000, 90000),
+            "in":                       random.randint(2000, 250000),
+            "externalId":               _session_id(),
+            "msg":                      f"Administrative session {app} {src_ip} -> {dest_ip}:{port}",
+        })
+        logs.append(_format_fortinet_cef(
+            config, "0000000013", "traffic", "forward", "notice", fields))
+    return logs
+
+
 def _simulate_tor_connection(config, src_ip, user, shost):
     """DNS precursor + Tor connection — returns list."""
     print(f"    - Fortinet Module simulating: Tor connection from {src_ip}")
@@ -3281,6 +3428,13 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
 
     if chosen == "external_port_scan":
         return (_simulate_external_port_scan(config), display_name)
+
+    if chosen == "new_admin_behavior":
+        user_info = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
+        if user_info:
+            return (_simulate_new_admin_behavior(config, user_info["ip"], user_info["username"],
+                                                 user_info.get("hostname"), session_context), display_name)
+        return (_simulate_new_admin_behavior(config, "192.168.1.100", "unknown", None, session_context), display_name)
 
     if chosen == "server_outbound_http":
         return (_simulate_server_outbound_http(config), display_name)

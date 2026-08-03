@@ -291,16 +291,30 @@ def _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, devi
             dest_ip = rand_ip_from_network(ip_network(dest_ip_range, strict=False))
         except Exception:
             dest_ip = "8.8.8.1"
+    dest_port = random.choice(destination.get("ports", [443]))
+    # nwsvc is the network SERVICE, so derive it from the destination port. The
+    # config's service_types are application categories ("Web Browsing",
+    # "PackageManagement", "ZoomMeeting", "Email"), and feeding them through here put
+    # non-service values into xdm.network.application_protocol — the field the
+    # app-aware detectors read. Fall back to the config value only when it is already
+    # a real service name (several entries are "SSH" / "RDP" / "HTTPS").
+    _cfg_svc = random.choice(destination.get("service_types", ["HTTPS"])).replace(" ", "")
     fields = {
         "srcip": internal_host_ip, "sport": random.randint(49152, 65535),
-        "destip": dest_ip, "destport": random.choice(destination.get("ports", [443])),
+        "destip": dest_ip, "destport": dest_port,
         "proto": "6",
         "action": "Allow", "rulelabel": "Allow_Web_Outbound", "reason": "Allowed",
         "threatcat": None, "threatname": None,
         "destCountry": destination.get("country", "United States"),
         "srcCountry": "United States",
         "bytesin": random.randint(5000, 50000), "bytesout": random.randint(500, 5000),
-        "nwsvc": random.choice(destination.get("service_types", ["Web Browsing"])).replace(" ", ""),
+        "nwsvc": _port_service(dest_port) or (_cfg_svc if _cfg_svc in _PORT_SERVICE.values() else None),
+        # The config's service_types ("Web Browsing", "PackageManagement",
+        # "ZoomMeeting", "Email") are APPLICATIONS, not services — the vendor sample
+        # pairs nwsvc=HTTP with nwapp=ebay. They were never valid nwsvc values, so
+        # route them to nwapp where they are correct, and prefer the destination's own
+        # name when it has one.
+        "nwapp": destination.get("name") or _cfg_svc or None,
         "spriv": "domain users", "duration_ms": random.randint(100, 300000), "cefSeverity": "3",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
@@ -1030,11 +1044,38 @@ def _is_internal_ip(ip):
 
 _THREAT_COUNTRIES = ["Russia", "China", "Iran", "North Korea", "Romania", "Ukraine"]
 
+# Destination port -> Zscaler network service (CEF cs3 -> xdm.network.application_protocol).
+# The firewall feed identifies the SERVICE being reached, so a probe to 21 is FTP whether
+# it was allowed or blocked. Anything not listed returns None and the key is omitted:
+# real Zscaler leaves the field out rather than inventing a value, and a synthetic value
+# pollutes the application-protocol baseline for that port.
+_PORT_SERVICE = {
+    21: "FTP",    22: "SSH",     23: "Telnet",  25: "SMTP",    53: "DNS",
+    # Remote administration services. Without these three the administrative-behaviour
+    # ports resolve to no service at all, so cs3 is omitted and
+    # xdm.network.application_protocol lands null on exactly the events the NDR
+    # lateral-movement analytics needs an application for.
+    69: "TFTP",   512: "REXEC",  992: "TELNETS",
+    80: "HTTP",   110: "POP3",   135: "RPC",    139: "NetBIOS", 143: "IMAP",
+    389: "LDAP",  443: "HTTPS",  445: "SMB",    465: "SMTPS",  587: "SMTPS",
+    636: "LDAPS", 993: "IMAPS",  995: "POP3S",  1433: "MSSQL", 1521: "Oracle",
+    3306: "MySQL", 3389: "RDP",  5432: "PostgreSQL", 5900: "VNC", 5985: "WinRM",
+    5986: "WinRM", 8080: "HTTP", 8443: "HTTPS",
+}
+
+
+def _port_service(port):
+    """Zscaler network service for a destination port, or None when unclassified."""
+    try:
+        return _PORT_SERVICE.get(int(port))
+    except (TypeError, ValueError):
+        return None
+
 
 def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
               action, rule, nwsvc, threat_cat, threat_name, dest_country, sev,
               bytes_in=0, bytes_out=60, event_time_ms=None, src_country=None,
-              dst_fqdn=None, duration_ms=None, url_category=None):
+              dst_fqdn=None, duration_ms=None, url_category=None, nwapp=None):
     """Build a single nssfwlog CEF event — used by all firewall scenario generators.
 
     event_time_ms: optional ms-epoch to back-date the event (sets CEF rt -> XSIAM _time);
@@ -1080,6 +1121,11 @@ def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
         "srcCountry": src_country,
         "bytesin": bytes_in, "bytesout": bytes_out,
         "nwsvc": nwsvc, "spriv": "domain users",
+        # %s{nwapp} — the specific application. Defaults to the service name, which is
+        # what Zscaler's own doc shows for non-web protocols (nwapp example: SSH).
+        # Pass it explicitly when the generator knows a real application (a site or
+        # SaaS product), matching the vendor sample's nwsvc=HTTP / nwapp=ebay pairing.
+        "nwapp": nwapp,
         "urlcat": url_category,          # -> cs5 -> xdm.network.http.url_category
         "duration_ms": random.randint(100, 300000) if duration_ms is None else duration_ms,
         "cefSeverity": sev,
@@ -1137,7 +1183,10 @@ def _generate_tor_connection(config, user, dept, internal_host_ip, device_info):
     tor_dest  = random.choice(tor_nodes) if tor_nodes else {"ip": _random_external_ip(), "country": "Unknown"}
     dest_ip   = tor_dest.get("ip") or _random_external_ip()
     dest_port = random.choices([443, 9001, 9030], weights=[60, 30, 10])[0]
-    nwsvc_map = {443: "HTTPS", 9001: "TOR", 9030: "TOR"}
+    # Tor's ORPort/DirPort carry TLS, so the network SERVICE is SSL. "TOR" is not a
+    # Zscaler service name — the Tor attribution belongs in the threat category and
+    # threat name below, which already carry it.
+    nwsvc_map = {443: "HTTPS", 9001: "SSL", 9030: "SSL"}
     logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
     logs.append(_fw_event(config, user, dept, device_info,
                      internal_host_ip, dest_ip, dest_port, "6",
@@ -1286,9 +1335,14 @@ def _generate_port_scan(config, user, dept, internal_host_ip, device_info):
     logs = []
     for port in ports_to_scan:
         offset_ms += random.randint(300, 1500)
+        # nwsvc must be the SERVICE on the probed port, not the name of the threat.
+        # "PortScan" is not a Zscaler network service; emitting it here overwrote FTP on
+        # 21, SSH on 22, SMB on 445 and SMTP on 25 with a synthetic value, polluting
+        # xdm.network.application_protocol for exactly the ports the app-aware detectors
+        # read. The threat name belongs in cs6, which already carries it.
         logs.append(_fw_event(config, user, dept, device_info,
                               scanner_ip, target_ip, port, "6",
-                              "Blocked", "Block_PortScan", "PortScan",
+                              "Blocked", "Block_PortScan", _port_service(port),
                               "Network Scan", "PortScan",
                               "Unknown", "6",
                               random.randint(40, 60), random.randint(40, 80),
@@ -1297,12 +1351,11 @@ def _generate_port_scan(config, user, dept, internal_host_ip, device_info):
 
     # 1-2 open ports discovered — the scanner finds live services
     open_ports = random.sample([22, 80, 443, 445, 3389, 8080, 8443], k=random.randint(1, 2))
-    svc_map = {22: "SSH", 80: "HTTP", 443: "HTTPS", 445: "SMB", 3389: "RDP", 8080: "HTTP", 8443: "HTTPS"}
     for port in open_ports:
         offset_ms += random.randint(300, 1500)
         logs.append(_fw_event(config, user, dept, device_info,
                               scanner_ip, target_ip, port, "6",
-                              "Allowed", "Allow_Inbound_Services", svc_map.get(port, "Unknown"),
+                              "Allowed", "Allow_Inbound_Services", _port_service(port),
                               # real None (not the string) so the builder omits
                               # cat/cs6 entirely — "None" was landing in XSIAM as a
                               # threat category literally named None.
@@ -1636,6 +1689,324 @@ def _generate_smb_share_enumeration(config, user, dept, internal_host_ip, device
                               "Network Scan", "SMBShareEnumeration",
                               "Internal", "7",
                               random.randint(100, 500), random.randint(500, 5_000)))
+    return logs
+
+
+# ---------------------------------------------------------------------------
+# RARE-RDP peer bookkeeping — same idiom as the rare-SMB block above
+# ---------------------------------------------------------------------------
+# "rdprare::<src_ip>" -> peers this host has already reached on 3389. In memory only,
+# by design (single-session operation), and deliberately NOT seeded from hash(): CPython
+# salts str hashing per process, so a hash-derived "sticky" value re-rolls on restart.
+_rdp_rare_peer_map: dict = {}
+
+# Quiet internal /24s that receive RDP from nothing else in the estate. They sit outside
+# config['internal_networks'], so _generate_rdp_lateral — which draws its 5-10 targets
+# from those networks — cannot collide with them, and they are disjoint from
+# _SMB_RARE_SERVER_NETS so the two rare-session shapes never share a peer.
+_RDP_RARE_SERVER_NETS = ["192.168.12.0/24", "192.168.13.0/24",
+                         "192.168.14.0/24", "192.168.15.0/24"]
+
+# Peers handed out across ALL source hosts. Allocation must be globally unique, not
+# per-host: birthday collisions inside a 253-host /24 otherwise give some peers an RDP
+# fan-in of 2, which breaks the "destination rarely receives RDP" half of the shape.
+_rdp_rare_peers_taken: set = set()
+
+# Real workstation IPs this generator has been invoked for, used as the preferred pool of
+# rare RDP peers. The detector profiles the destination as a host as well as the source,
+# and an address that appears nowhere else in the estate may never resolve to a profiled
+# entity. Drawing the peer from hosts that genuinely appear as traffic sources elsewhere
+# gives the destination a real identity.
+_rdp_known_internal_hosts: set = set()
+
+
+def _next_rare_rdp_peer(src_ip, prefer_known_host=False):
+    """Allocate a globally NEVER-BEFORE-USED rare RDP peer for this source host.
+
+    Grows the host's RDP destination set by exactly ONE per invocation, which is the
+    shape the detector describes: the source stays a rare RDP initiator while each newly
+    allocated peer is a rare RDP receiver reached by this one host and nothing else.
+
+    prefer_known_host: draw the peer from hosts this module has actually generated traffic
+                       for, so the destination is a real entity rather than an address that
+                       exists in three log lines and nowhere else. Falls back to a quiet-
+                       band address until enough real hosts have been observed.
+    """
+    used = _rdp_rare_peer_map.setdefault("rdprare::%s" % src_ip, [])
+    if prefer_known_host:
+        pool = [h for h in _rdp_known_internal_hosts
+                if h != src_ip and h not in _rdp_rare_peers_taken and h not in used]
+        # Require a warm pool, else the first few invocations all collide on the handful
+        # of hosts seen so far and drive their fan-in above 1.
+        if len(_rdp_known_internal_hosts) >= 12 and pool:
+            cand = random.choice(pool)
+            _rdp_rare_peers_taken.add(cand)
+            used.append(cand)
+            return cand
+    for _ in range(256):
+        try:
+            net  = ip_network(random.choice(_RDP_RARE_SERVER_NETS), strict=False)
+            cand = rand_ip_from_network(net)
+        except Exception:
+            cand = "192.168.%d.%d" % (random.randint(12, 15), random.randint(2, 254))
+        if cand not in _rdp_rare_peers_taken and cand != src_ip:
+            _rdp_rare_peers_taken.add(cand)
+            used.append(cand)
+            return cand
+    # Pool exhausted (>1,000 sessions in one process). Fall back to any address this host
+    # has not used rather than looping forever; fan-in may reach 2 for these.
+    cand = "192.168.%d.%d" % (random.randint(12, 15), random.randint(2, 254))
+    used.append(cand)
+    return cand
+
+
+def _generate_rdp_rare_session(config, user, dept, internal_host_ip, device_info):
+    """A RARE internal RDP session from a seldom-seen workstation to a seldom-used host.
+
+    Targets "Abnormal RDP session to a remote host from a rarely seen host" (category
+    Lateral Movement, DT:NDR Lateral Movement Analytics). That detector needs THREE
+    rarity conditions at once: the source host is rarely observed, the RDP pattern is
+    abnormal for the network segment, and the destination rarely RECEIVES RDP from other
+    hosts. Each is easy alone and the intersection is not — _generate_rdp_lateral fans out
+    to 5-10 destinations, which makes its source a frequent RDP initiator and its targets
+    ordinary members of the estate's RDP mesh.
+
+    This generator produces the intersection instead, reusing the rare-SMB idiom: a
+    per-host sticky peer drawn from a band nothing else reaches on 3389, so the session has
+    an RDP fan-out of 1-2 and an RDP fan-in of exactly 1 at the same time. Do NOT point it
+    at config['internal_networks'] or config['internal_servers'] — both are already dense
+    RDP destinations and the fan-in condition is lost.
+
+    Emits ONE session as 3 flows to the SAME peer so the pipeline sees a session rather
+    than an isolated packet while the destination count stays at 1. Breadth belongs to the
+    sibling shape in _generate_rdp_lateral, not here.
+
+    Returns list of CEF log strings (nssfwlog).
+    """
+    print(f"    - Zscaler Module simulating: Rare RDP Session from {internal_host_ip} (rarely seen host)")
+    # NB: the peer is allocated AFTER the prior-history guard below. Allocating it here
+    # silently disables that guard, because _next_rare_rdp_peer() creates the host's map
+    # entry via setdefault() and the guard tests that same entry for emptiness.
+    _rdp_known_internal_hosts.add(internal_host_ip)   # real host, usable as a peer later
+
+    # Explicit per-flow event_time_ms throughout: without it every flow calls time.time()
+    # inside the same millisecond and the whole session collapses into one _time bucket,
+    # so recurrence logic sees a single observation instead of a session.
+    logs = []
+
+    # --- thin, multi-day PRIOR RDP history, emitted once per host -------------------
+    # A host with an EMPTY RDP history is unknown to the profiler, not "rarely seen" — the
+    # detector describes a host that HAS been observed, just seldom. On a host's first
+    # invocation, back-date a couple of short sessions to ONE established peer across
+    # earlier days, then do today's session to a brand-new one. RDP fan-out becomes 2,
+    # still firmly rare, and the host reads as "known, hardly ever does RDP".
+    if not _rdp_rare_peer_map.get("rdprare::%s" % internal_host_ip):
+        home_peer = _next_rare_rdp_peer(internal_host_ip)
+        for day in (11, 6, 3):
+            day_ms = (int(time.time() * 1000) - day * 86_400_000
+                      + random.randint(-4, 4) * 3_600_000
+                      + random.randint(0, 59) * 60_000)
+            logs.append(_fw_event(config, user, dept, device_info,
+                                  internal_host_ip, home_peer, 3389, "6",
+                                  "Allow", "Allow_Internal_Admin", _port_service(3389),
+                                  None, None,
+                                  "Internal", "1",
+                                  random.randint(20_000, 200_000),
+                                  random.randint(10_000, 90_000),
+                                  event_time_ms=day_ms,
+                                  duration_ms=random.randint(120_000, 900_000)))
+
+    # --- today's RARE session to a peer nothing has ever RDP'd to --------------------
+    # prefer_known_host: make the peer a host that exists elsewhere in the feed so the
+    # destination can be profiled as an entity. The back-dated home_peer above stays
+    # synthetic — an established jump box, not a workstation.
+    dst_ip  = _next_rare_rdp_peer(internal_host_ip, prefer_known_host=True)
+    base_ms = int(time.time() * 1000) - random.randint(20, 40) * 60_000
+    # Interactive RDP: a short negotiation, a long screen-data session, then teardown.
+    flows = [
+        (random.randint(1_200, 4_000),   random.randint(800, 3_000),      random.randint(1_000, 6_000)),
+        (random.randint(200_000, 900_000), random.randint(40_000, 500_000), random.randint(600_000, 3_600_000)),
+        (random.randint(2_000, 12_000),  random.randint(1_000, 6_000),    random.randint(2_000, 20_000)),
+    ]
+    for i, (b_in, b_out, dur) in enumerate(flows):
+        logs.append(_fw_event(config, user, dept, device_info,
+                              internal_host_ip, dst_ip, 3389, "6",
+                              "Allow", "Allow_Internal_Admin", _port_service(3389),
+                              "Lateral Movement", "RDPRareSession",
+                              "Internal", "7",
+                              b_in, b_out,
+                              event_time_ms=base_ms + i * random.randint(60_000, 150_000),
+                              duration_ms=dur))
+    return logs
+
+
+# ---------------------------------------------------------------------------
+# ADMINISTRATIVE-BEHAVIOUR ANALYTICS SUPPORT
+# ---------------------------------------------------------------------------
+# Destination ports the detector actually COUNTS as an administrative action. Measured
+# against the tenant: 22 and 69 count reliably, 512 was never counted on any feed and 992
+# counts on some feeds and not others. So 22/69 carry the budget and the other two are
+# emitted only for fidelity with the port set the alert reports — never counted on as
+# contributing to the threshold. A burst spread evenly over all four wastes most of itself.
+# TFTP is emitted over TCP here rather than its real-world UDP: that is what the feeds
+# observed to fire this detector carry, and matching them matters more than protocol purity.
+_ADMIN_COUNTED_PORTS  = [22, 69]
+_ADMIN_FIDELITY_PORTS = [512, 992]
+_ADMIN_SERVICE_PORTS  = _ADMIN_COUNTED_PORTS + _ADMIN_FIDELITY_PORTS
+
+# Dedicated internal management segment for administrative sessions. 172.19.0.0/16 is
+# RFC1918 (so _is_internal_ip and XSIAM both read the destinations as internal) and carries
+# no traffic at all on any feed in this estate, which is what keeps every (destination,
+# port) pair here genuinely first-seen. It also sits OUTSIDE config['internal_networks'],
+# so no other generator in this module can draw an address from it by accident, and it is
+# disjoint from the management segments the Check Point and FortiGate modules reserve —
+# novelty appears to be scored estate-wide per (destination, port), not per source host,
+# so an overlapping segment would burn another module's pairs as well as its own.
+_ADMIN_SEGMENT_PREFIX = "172.19"
+_ADMIN_SEGMENT_BASE3  = 0            # full /16
+_ADMIN_SEGMENT_SPAN   = 256 * 256    # addresses available in the segment
+_ADMIN_BLOCK_SIZE     = 24           # addresses reserved per invocation
+
+# In-memory only, by design: single-session operation, no disk persistence.
+_admin_block_cursor = None
+
+# "admin::<src_ip>" -> (destination, port) pairs this host has already used, so a repeat
+# invocation on the same workstation still contributes only NEW pairs.
+_admin_pair_map: dict = {}
+
+
+def _next_admin_targets(count):
+    """Reserve `count` internal destinations not yet used on an administrative port.
+
+    The detector counts FIRST-SEEN (destination, administrative port) pairs, so a generator
+    that reuses destinations exhausts itself after one run — which is exactly how this
+    shape went quiet before: admin-port traffic only ever reached the 25 addresses in
+    config['internal_servers'], and every pair there was used up.
+
+    The cursor never moves backwards and is floored at the current hour, so it keeps pace
+    with the wall clock and a restart resumes ahead of any block a previous run spent in an
+    earlier hour. Hour granularity is deliberate: the segment holds enough blocks for ~114
+    days before wrapping, comfortably longer than the detector's lookback, whereas a finer
+    slot would wrap inside it.
+    """
+    global _admin_block_cursor
+    hour_slot = int(time.time() // 3600)
+    if _admin_block_cursor is None or _admin_block_cursor < hour_slot:
+        _admin_block_cursor = hour_slot
+    block = _admin_block_cursor
+    _admin_block_cursor += 1
+
+    targets = []
+    for i in range(count):
+        idx = (block * _ADMIN_BLOCK_SIZE + i) % _ADMIN_SEGMENT_SPAN
+        targets.append("%s.%d.%d" % (_ADMIN_SEGMENT_PREFIX,
+                                     _ADMIN_SEGMENT_BASE3 + (idx // 256), idx % 256))
+    return targets
+
+
+def _admin_port_sequence(count):
+    """Port list of length `count`, all on ports the detector actually counts.
+
+    Returns `count` entries drawn only from _ADMIN_COUNTED_PORTS. The fidelity ports are
+    appended by the caller as extra sessions rather than taken out of this budget, so the
+    counted total never drops when they are included.
+    """
+    return [random.choice(_ADMIN_COUNTED_PORTS) for _ in range(count)]
+
+
+def _generate_new_admin_behavior(config, user, dept, internal_host_ip, device_info):
+    """One workstation opens administrative sessions to many NEW internal destinations.
+
+    Targets "New Administrative Behavior" (category Lateral Movement, DT:NDR Lateral
+    Movement Analytics). The detector profiles, per source host, the set of (destination,
+    administrative port) pairs that host has used before, and alerts when the number of
+    previously unseen pairs inside a 12-HOUR window is uncharacteristically high for that
+    host — the reported threshold shape is 7 new actions. Breadth over new destinations
+    inside a short window is the whole signal: repeating a destination the host already
+    reached counts for nothing, and the same breadth spread thinly across weeks does not
+    count either.
+
+    Emits 14-16 accepted sessions on the ports that actually count (SSH and TFTP) plus two
+    on rexec/telnets for fidelity with the port set the alert reports, each to a
+    destination from the reserved management segment that nothing in the estate has ever
+    reached on an administrative port, spread over 1-2 hours so the burst never lands on a
+    single timestamp. The count deliberately sits at roughly twice the reported threshold:
+    a burst sized to the threshold exactly leaves no margin for sessions the detector
+    declines to count, which is the observed failure mode for this shape.
+
+    THE SOURCE MUST BE AN INTERNAL HOST WITH ITS OWN BASELINE. The detector alerts on
+    deviation from that host's profile, so a freshly minted address has nothing to deviate
+    from. The back-dated block below gives a first-seen workstation a thin prior record of
+    routine administration, so today's burst reads as a deviation rather than as the only
+    thing ever known about the host.
+
+    Returns list of CEF log strings (nssfwlog).
+    """
+    print(f"    - Zscaler Module simulating: New Administrative Behavior from {internal_host_ip}")
+    used_pairs = _admin_pair_map.setdefault("admin::%s" % internal_host_ip, set())
+    logs = []
+
+    # --- thin, multi-day ROUTINE administration, emitted once per host --------------
+    # One jump host reached on SSH across earlier days. Two pairs total, so the host's
+    # normal rate of NEW administrative actions is well under one per 12 hours.
+    if not used_pairs:
+        jump_hosts = _next_admin_targets(1)
+        for day in (12, 8, 5, 2):
+            day_ms = (int(time.time() * 1000) - day * 86_400_000
+                      + random.randint(-3, 3) * 3_600_000
+                      + random.randint(0, 59) * 60_000)
+            logs.append(_fw_event(config, user, dept, device_info,
+                                  internal_host_ip, jump_hosts[0], 22, "6",
+                                  "Allow", "Allow_Internal_Admin", _port_service(22),
+                                  None, None,
+                                  "Internal", "1",
+                                  random.randint(4_000, 60_000),
+                                  random.randint(2_000, 40_000),
+                                  event_time_ms=day_ms,
+                                  duration_ms=random.randint(30_000, 600_000)))
+        used_pairs.add((jump_hosts[0], 22))
+
+    # --- today's burst of NEW (destination, administrative port) pairs ---------------
+    # Counted sessions first, then one session per fidelity port on its own fresh
+    # destination. Every destination is distinct, so no pair can repeat inside the burst.
+    n_counted  = random.randint(14, 16)
+    n_sessions = n_counted + len(_ADMIN_FIDELITY_PORTS)
+    targets    = _next_admin_targets(n_sessions)
+    ports      = _admin_port_sequence(n_counted) + list(_ADMIN_FIDELITY_PORTS)
+
+    # A second operator account on part of the run: administrative sweeps are usually run
+    # under a shared or secondary credential rather than one identity, and the detector
+    # reports the account set it observed.
+    alt_user = None
+    users_map = (config.get(CONFIG_KEY, {}).get('user_ip_map')
+                 or config.get('shared_user_ip_map', {}))
+    candidates = [u for u in users_map if u != user]
+    if candidates:
+        alt_user = random.choice(candidates)
+
+    # Span the burst over 1-2 hours: comfortably inside the detector's 12-hour window,
+    # and never collapsed onto one millisecond the way an un-timestamped loop would be.
+    span_ms   = random.randint(70, 140) * 60_000
+    base_ms   = int(time.time() * 1000) - span_ms
+    step_ms   = span_ms // max(n_sessions, 1)
+    for i, (dest_ip, port) in enumerate(zip(targets, ports)):
+        if (dest_ip, port) in used_pairs:
+            continue
+        used_pairs.add((dest_ip, port))
+        ev_user  = alt_user if (alt_user and random.random() < 0.3) else user
+        duration = random.randint(20_000, 900_000)
+        logs.append(_fw_event(config, ev_user, dept, device_info,
+                              internal_host_ip, dest_ip, port, "6",
+                              # nwsvc must be the SERVICE on the port, never the threat
+                              # name — a synthetic value pollutes the application-protocol
+                              # baseline for exactly the ports this detector reads.
+                              "Allow", "Allow_Internal_Admin", _port_service(port),
+                              "Lateral Movement", "NewAdminBehavior",
+                              "Internal", "6",
+                              random.randint(2_000, 250_000),
+                              random.randint(2_000, 90_000),
+                              event_time_ms=base_ms + i * step_ms + random.randint(0, 45_000),
+                              duration_ms=duration))
     return logs
 
 
@@ -2028,6 +2399,10 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "New Administrative Behavior"},
     {"event": "rdp_lateral",          "weight": 3,  "analytic": True,
      "xsiam_alert": "Failed Connections"},
+    {"event": "rdp_rare_session",     "weight": 4,  "analytic": True,
+     "xsiam_alert": "Abnormal RDP session to a remote host from a rarely seen host"},
+    {"event": "new_admin_behavior",   "weight": 4,  "analytic": True,
+     "xsiam_alert": "New Administrative Behavior"},
     {"event": "ssh_over_https",       "weight": 3,  "analytic": False,
      "xsiam_alert": None},
     {"event": "smb_new_host_lateral", "weight": 4,  "analytic": True,
@@ -2277,6 +2652,8 @@ _NAMED_THREATS = {
     "dns_c2_beacon":        _generate_dns_c2_beacon,
     "server_outbound_http": _generate_server_outbound_http,
     "rdp_lateral":          _generate_rdp_lateral,
+    "rdp_rare_session":     _generate_rdp_rare_session,
+    "new_admin_behavior":   _generate_new_admin_behavior,
     "ssh_over_https":       _generate_ssh_over_https,
     "smb_new_host_lateral": _generate_smb_new_host_lateral,
     "smb_rare_file_transfer": _generate_smb_rare_file_transfer,
@@ -2476,8 +2853,24 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
     else:  # nssfwlog
         cef_map  = {
             # XIF-mapped cs/cn fields:
-            "cs2": fields.get("rulelabel"),    "cs2Label": "nwapp",
+            # cs2 carries the firewall RULE name and the modeling rule maps it to
+            # xdm.network.rule, so the label must say so. It previously read "nwapp"
+            # (network application), which described neither the value nor the mapping.
+            "cs2": fields.get("rulelabel"),    "cs2Label": "rulelabel",
             "cs3": fields.get("nwsvc"),        "cs3Label": "nwsvc",
+            # %s{nwapp} "The network application that was accessed" (example: SSH) —
+            # a documented firewall-feed field and one of the five keys Zscaler
+            # aggregates on. Distinct from nwsvc, "the network service that was used"
+            # (example: HTTP): the vendor's own sample log carries nwsvc=HTTP with
+            # nwapp=ebay, i.e. service vs the specific application. Defaults to the
+            # service, which is what the doc shows for non-web protocols.
+            #
+            # POSITION IS DELIBERATE — keep `nwapp` immediately after `cs3Label`. The
+            # CEF parser absorbs an unrecognised key into the PRECEDING value, so if
+            # nwapp is not recognised on this feed the only casualty is cs3Label, a
+            # label string nothing maps or reads. Moving it next to a value-bearing
+            # key risks destroying that value instead.
+            "nwapp": fields.get("nwapp") or fields.get("nwsvc"),
             "cs5": fields.get("urlcat"),       "cs5Label": "urlcat",
             "cs6": fields.get("threatname"),   "cs6Label": "threatname",
             "cn1": fields.get("duration_ms"),  "cn1Label": "duration",
@@ -2717,6 +3110,8 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         ("dns_c2_beacon",          5, lambda: _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info)),
         ("server_outbound_http",   4, lambda: _generate_server_outbound_http(config, user, dept, internal_host_ip, device_info)),
         ("rdp_lateral",            3, lambda: _generate_rdp_lateral(config, user, dept, internal_host_ip, device_info)),
+        ("rdp_rare_session",       4, lambda: _generate_rdp_rare_session(config, user, dept, internal_host_ip, device_info)),
+        ("new_admin_behavior",     4, lambda: _generate_new_admin_behavior(config, user, dept, internal_host_ip, device_info)),
         ("ssh_over_https",         3, lambda: _generate_ssh_over_https(config, user, dept, internal_host_ip, device_info)),
         ("smb_new_host_lateral",   4, lambda: _generate_smb_new_host_lateral(config, user, dept, internal_host_ip, device_info)),
         ("smb_rare_file_transfer", 3, lambda: _generate_smb_rare_file_transfer(config, user, dept, internal_host_ip, device_info)),

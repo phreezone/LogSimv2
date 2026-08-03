@@ -12,7 +12,7 @@ The wire format is `<PRI>YYYY-MM-DDThh:mm:ssZ HOSTNAME : %ASA-N-MSGID: text` —
 
 ### Format fidelity — verified against official Cisco docs (source of truth)
 
-All emitted message bodies were cross-checked against the Cisco Secure Firewall ASA Series Syslog Messages guide: `302013`/`302014` Built/Teardown (incl. `for iface:addr/port (mapped) to iface:addr/port (mapped)`, `duration H:MM:SS bytes N reason`), `302015`/`302016` UDP, `106023` deny (`by access-group "ACL" [0x..., 0x0]`), `109005`/`109006` auth (`for user 'user' from ip/port to ip/port on interface`), and the AnyConnect `113019`/`113039`/`722051` — all match. **ICMP `302020`/`302021`** was corrected 2026-07-24: Cisco's template is `faddr <addr>/<icmp_seq_num> gaddr <addr>/<icmp_type> laddr <addr>/<icmp_code>`; the module previously emitted the ICMP *type* in both the faddr and gaddr slots and now emits a sequence number after `faddr` and the type after `gaddr`.
+All emitted message bodies were cross-checked against the Cisco Secure Firewall ASA Series Syslog Messages guide: `302013`/`302014` Built/Teardown (incl. `duration H:MM:SS bytes N reason`), `302015`/`302016` UDP, `106023` deny (`by access-group "ACL" [0x..., 0x0]`), `109005`/`109006` auth (`for user 'user' from ip/port to ip/port on interface`), and the AnyConnect `113019`/`113039`/`722051` — all match, **with one deliberate exception documented under "Source orientation" below**. **ICMP `302020`/`302021`** was corrected 2026-07-24: Cisco's template is `faddr <addr>/<icmp_seq_num> gaddr <addr>/<icmp_type> laddr <addr>/<icmp_code>`; the module previously emitted the ICMP *type* in both the faddr and gaddr slots and now emits a sequence number after `faddr` and the type after `gaddr`.
 
 ### XSIAM only models a fixed set of message IDs
 
@@ -27,6 +27,39 @@ Every ASA analytics detection therefore has to be driven by connection events or
 - **`vpn_bruteforce`** — DELISTED from the threat catalog (no supported AnyConnect auth-failure message exists). Its generator is retained only for the cross-source XQL-hunt scenario that reads the raw `109006` text.
 - **Benign** `aaa_auth`/`inbound_block`/ICMP/NAT are intentionally kept as realistic raw-stream noise (they don't parse; harmless).
 
+### Source orientation — a deliberate deviation from genuine Cisco
+
+Genuine Cisco logs an **outbound** connection with the destination leading the `for` clause and the initiator in the `to` clause:
+
+```
+Built outbound TCP connection 506986 for outside:17.151.140.30/80 (17.151.140.30/80) to inside:192.168.1.44/61094 (50.197.188.217/61094)
+```
+
+Cortex's built-in `parse_cisco()` assigns `for`→`src_ip` and `to`→`dst_ip` unconditionally, so emitting the genuine order made XSIAM record the **external peer as the actor** on ~91% of events. Analytics baseline the source entity, so nothing could accumulate. Measured in-tenant 2026-07-28: `xdm.source.ipv4` was an internal address on only **9.02%** of ASA rows, versus 77–88% for Firepower / Check Point / FortiGate, which were the only three firing network analytics.
+
+**The module therefore emits the clauses swapped** (internal host leads `for`), which took the same measurement to **100%**. This is intentional — the emit site in `modules/cisco_asa.py` carries a `DO NOT "FIX" BACK` comment. Inbound sessions are unaffected: genuine inbound ASA is already source-first, so only outbound output deviates.
+
+### VPN identity must be a BARE username — no `EXAMPLECORP\` prefix
+
+AnyConnect messages (`113039`/`113019`/`722051`) use `_vpn_user()`, **not** `_ad_user()`. XSIAM's Identity Analytics reduces `EXAMPLECORP\jdoe` to the **domain**, collapsing every VPN user into one identity called `examplecorp`. Proven by controlled A/B in-tenant 2026-07-28 — two different probe users sent with the prefix both surfaced as `examplecorp`, while bare usernames surfaced correctly:
+
+| sent | alert `user_name` |
+|---|---|
+| `p.probealpha` (bare) | `p.probealpha` |
+| `p.probecharlie` (bare) | `p.probecharlie` |
+| `EXAMPLECORP\p.probebravo` **and** `EXAMPLECORP\p.probedelta` | both → `examplecorp` |
+
+The prefix was added on 2026-04-27 (`6befff4`) for cross-source identity stitching and had the opposite effect: with all logins merged into one identity, Tor access became that identity's baseline-normal behaviour and **"A Successful VPN connection from TOR" stopped firing on 2026-05-18 after 343 alerts**. Bare usernames restored it within minutes. The message *format* (`Group <G> User <U> IP <P>` vs `Group = G, Username = U, IP = P`) makes no difference — both parse identically. Connection-event IDFW parentheticals still use `_ad_user()`; they parse to `dst_fwuser`, which the modeling rule never reads.
+
+### What ASA analytics actually fire
+
+Two different subsystems, and only one of them works for ASA today:
+
+- **Identity Analytics (works).** Driven by AnyConnect session events — e.g. *A Successful VPN connection from TOR*, *First successful VPN access from a country in organization*. These are the ~11% of ASA rows where `xdm.source.user.username` is populated (from `vpn_user`).
+- **Third-party firewall analytics (essentially unproven).** In this tenant ASA has fired exactly **one** — a single *Suspicious port scan* on 2026-04-16 — across the whole alert history. The source-orientation fix above targets this gap, but each detector still needs a fresh baseline before it can fire, so the `xsiam_alert` values in the threat table below are the alert each generator is **designed** to drive, not a confirmed firing.
+
+Note also that non-VPN user attribution is **unreachable**: `parse_cisco` files the connection IDFW user under `dst_fwuser`, and `CiscoASA_1_4.xif` sets `xdm.source.user.username` from `coalesce(user, src_fwuser, vpn_user)` only.
+
 ---
 
 ## Benign Events
@@ -37,7 +70,7 @@ Benign events are dispatched from `generate_log` using weighted random choice. T
 |---|---|---|---|
 | `benign_session` | Standard office traffic: Web Browsing (65%), DNS Query (15%), Email Client (10%), SSH (5%), ICMP Ping (5%). Generates `302013`/`302014` Built+Teardown pairs for TCP, `302015`/`302016` for UDP, or `302020`/`302021` for ICMP. NAT/PAT applied for outbound sessions. | Web: `%ASA-6-302013/302014`, `dpt=80 or 443`, duration 5–120s; DNS: `302015/302016`, `dpt=53`, proto=UDP; Email: `302013/302014`, `dpt=25/587/993`; SSH: `302013/302014`, `dpt=22`; ICMP: `302020/302021` | 50 |
 | `inbound_block` | External internet probe blocked by outside-in ACL. Single `%ASA-4-106023` deny message per event. | `%ASA-4-106023: Deny tcp/udp src outside:ext_ip/port dst inside:target_ip/port by access-group "ACL_NAME"`, `dpt` one of 22/23/25/80/135/139/443/445/1433/1521/3306/3389/4444/5900/6379/8080/8443, proto TCP (85%) or UDP (15%) | 22 |
-| `anyconnect_vpn` | AnyConnect VPN session start (113039) or end (113019), chosen randomly. Session start has 0 bytes; session end has duration 60–3600s and byte counters. | `%ASA-4-113039` (start): `Group=group, Username=user, IP=public_ip`; `%ASA-4-113019` (end): `Duration=H:MM:SS, Bytes xmt=N, Bytes rcv=N` | 9 |
+| `anyconnect_vpn` | AnyConnect VPN session start (113039) or end (113019), chosen randomly. Session start has 0 bytes; session end has duration 60–3600s and byte counters. | `%ASA-6-113039` (start): `Group <group> User <user> IP <public_ip> AnyConnect parent session started.`; `%ASA-4-113019` (end): `Group = group, Username = user, IP = ip, ... Duration: H:MM:SS, Bytes xmt: N, Bytes rcv: N` — username is **bare**, see "VPN identity" above | 9 |
 | `aaa_auth` | AAA authentication request+result pair. `109001` auth start followed by `109005` success (85%) or `109006` failure (15%). | `%ASA-6-109001: Auth start for user 'user' from src/0 to outside/443`; `%ASA-6-109005: Authentication succeeded` or `%ASA-6-109006: Authentication failed` | 5 |
 | `ntp_sync` | NTP time synchronisation — UDP/123 Built+Teardown pair from an internal host to a public NTP pool server. Very short duration (0 seconds), tiny bytes (~48–76 each direction). | `%ASA-7-302015/302016: Built/Teardown UDP connection`, `src=internal_host/random_port`, `dst=ntp_server/123`, `duration=0:00:00`, `bytes=48–76` | 6 |
 | `internal_traffic` | East-west LAN traffic — workstation to internal file/app/print server (both interfaces = inside). Service types: SMB/445 (30%), RPC/135 (15%), LDAP/389 (15%), HTTP-internal/8080 (15%), MSSQL/1433 (10%), Print/9100 (10%), HTTPS-internal/8443 (5%). Returns Built+Teardown pair. | `%ASA-6-302013/302014`, `src_interface=inside`, `dest_interface=inside`, `dpt=445/135/389/8080/1433/9100/8443`, `bytes_sent=1000–500000`, `bytes_recv=1000–50MB`, `duration=1–300s` | 5 |
@@ -63,7 +96,7 @@ Threat events are dispatched from `generate_log` by weighted random choice. The 
 | `dns_c2_beacon` | C2 / DNS Tunneling | Single short UDP/53 session to a random external IP (C2 beacon disguised as DNS). Returns list of 2 (Built+Teardown). | `%ASA-6-302015/302016`, `dpt=53`, `proto=UDP`, `bytes_sent=100–250`, `bytes_recv=150–500`, `duration=0–2s` | 2 |
 | `server_outbound_http` | Command and Control | Internal server initiating outbound TCP/80 HTTP session (anomalous). Returns list of 2. | `%ASA-6-302013/302014`, `src=internal_server`, `dpt=80`, `bytes_sent=300–1000`, `duration=1–10s` | 1 |
 | `workstation_lateral_rdp` | Lateral Movement | Workstation-to-workstation RDP on TCP/3389. Returns list of 2 (Built+Teardown). | `%ASA-6-302013/302014`, `dpt=3389`, `src_interface=inside`, `dest_interface=inside`, `bytes=50000 each direction`, `duration=2–30min` | 1 |
-| `vpn_tor_login` | Credential Theft | Successful AnyConnect VPN session start from a Tor exit node IP. Single `113039` message — the success from a Tor IP is the detection signal. Returns list of 1. | `%ASA-4-113039: Group=group, Username=user, IP=tor_exit_ip, Session Type=AnyConnect, Duration: 0:00:00, Reason: User Initiated` | 3 |
+| `vpn_tor_login` | Credential Theft | Successful AnyConnect VPN session start from a Tor exit node IP. Single `113039` message — the success from a Tor IP is the detection signal. Returns list of 1. | `%ASA-6-113039: Group <group> User <user> IP <tor_exit_ip> AnyConnect parent session started.` — bare username (a domain prefix collapses every user into `examplecorp` and kills the detector); Tor IP comes from the live exit-node list fetched at startup | 3 |
 | `smb_new_host_lateral` | Lateral Movement | TCP/445 Built+Teardown pairs to 5–10 different internal destination IPs. Distinct SMB destinations from one source is the XSIAM UEBA signal. Returns list. | `%ASA-6-302013/302014`, `dpt=445`, `src_interface=inside`, `dest_interface=inside`, 5–10 distinct `dst` addresses, `duration=1–30s` | 4 |
 | `smb_rare_file_transfer` | Data Staging | Single large SMB/445 session (100 MB – 1 GB sent, 2–15 min duration) to an internal server. Returns list of 2. | `%ASA-6-302013/302014`, `dpt=445`, `src_interface=inside`, `dest_interface=inside`, `bytes_sent=100MB–1GB`, `duration=2–15min` | 3 |
 | `smb_share_enumeration` | Reconnaissance | 15–40 short TCP/445 Built+Teardown pairs to distinct internal IPs, each with 0–2 bytes and `TCP Reset` teardown. Returns list. | `%ASA-6-302013/302014`, `dpt=445`, `src_interface=inside`, `dest_interface=inside`, 15–40 distinct `dst`, `bytes=40–200`, `teardown_reason=TCP Reset`, `duration=0s` | 5 |
