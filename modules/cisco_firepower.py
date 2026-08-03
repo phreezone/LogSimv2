@@ -96,12 +96,18 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Failed Connections"},
     {"event": "rdp_lateral",           "weight": 3,  "analytic": True,
      "xsiam_alert": "Failed Connections"},
+    {"event": "new_admin_behavior",    "weight": 4,  "analytic": True,
+     "xsiam_alert": "New Administrative Behavior"},
+    {"event": "abnormal_rdp_rare_host","weight": 4,  "analytic": True,
+     "xsiam_alert": "Abnormal RDP session to a remote host from a rarely seen host"},
     {"event": "tor",                   "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring access to rare IP"},
     {"event": "dns_c2_beacon",         "weight": 3,  "analytic": True,
      "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
+    # Outbound HTTP from a server to an external IP — not an administrative pattern.
+    # The dedicated new_admin_behavior generator models the admin-port detector.
     {"event": "server_outbound_http",  "weight": 2,  "analytic": True,
-     "xsiam_alert": "New Administrative Behavior"},
+     "xsiam_alert": "Abnormal Communication to a Rare IP"},
     {"event": "internal_smb",          "weight": 1,  "analytic": False,
      "xsiam_alert": None},
     {"event": "smb_new_host_lateral",  "weight": 4,  "analytic": True,
@@ -2137,6 +2143,164 @@ def _generate_rdp_lateral_event(config, src_ip, user, session_context=None, shos
     return logs
 
 
+# Remote-administration service ports, mapped to the application FTD reports for each.
+# "New Administrative Behavior" counts NOVEL (destination, admin-port) pairs per source
+# host over a 12-hour window, so breadth across BOTH axes is the signal — not volume.
+# Ports with no FTD application classifier are reported as UNKNOWN, which is what real
+# FTD emits for unclassified TCP and what keeps a no-application entry in the alert's
+# app_id, matching the reference alert's mixed application/no-application evidence.
+_ADMIN_PORTS = {
+    22:  "SSH",       # secure shell
+    23:  "Telnet",    # telnet
+    69:  "UNKNOWN",   # TFTP — device config push/pull
+    161: "UNKNOWN",   # SNMP
+    512: "UNKNOWN",   # exec / rexec
+    513: "UNKNOWN",   # login / rlogin
+    514: "UNKNOWN",   # shell / rsh
+    623: "UNKNOWN",   # IPMI / out-of-band management
+    992: "Telnet",    # telnets (Telnet over TLS)
+}
+
+
+def _rare_internal_host(config, exclude=()):
+    """Internal address drawn from the wide internal space, avoiding the hot server pool.
+
+    Rarity detectors score a destination by how often it has RECEIVED that protocol from
+    other hosts. config['internal_servers'] is a 25-address list, so every generator that
+    picks its destination from it concentrates all traffic onto the same few hosts and no
+    destination is ever a rare receiver. internal_networks spans /16s, so a destination
+    drawn from it is a first-time receiver and the rarity condition can actually hold.
+    """
+    servers = set(config.get('internal_servers', []))
+    nets    = config.get('internal_networks', ['10.1.0.0/16'])
+    for _ in range(40):
+        try:
+            candidate = rand_ip_from_network(ip_network(random.choice(nets), strict=False))
+        except (ValueError, AddressValueError, IndexError):
+            continue
+        if candidate not in servers and candidate not in exclude:
+            return candidate
+    return f"10.1.{random.randint(20, 250)}.{random.randint(2, 250)}"
+
+
+def _generate_new_admin_behavior(config, src_ip, user, shost=None, session_context=None):
+    """One internal host performing many FIRST-TIME administrative actions.
+
+    Opens 8-11 DISTINCT (internal destination, admin port) pairs from a single source.
+    Each pair is novel for that source, which is what the detector counts; a burst of
+    repeat connections to one destination scores as a single action and never fires.
+
+    The source must be an internal host that already carries ambient traffic — the
+    detector compares against that host's own administrative baseline, so a freshly
+    minted address has nothing to deviate from.
+
+    Destinations come from _rare_internal_host so the pairs stay novel across runs
+    instead of recycling the same 25 servers.
+
+    Returns a list of CEF log strings (multi-event threat generator).
+    Triggers XSIAM: "New Administrative Behavior".
+    """
+    print(f"    - Firepower Module simulating: New Administrative Behavior from {src_ip}")
+    firepower_conf = _get_config(config)
+    internal_iface = firepower_conf.get('inbound_interface', 'inside')
+
+    n_actions = random.randint(8, 11)
+    ports     = random.sample(list(_ADMIN_PORTS), min(n_actions, len(_ADMIN_PORTS)))
+
+    pairs, used_dests = [], {src_ip}
+    for i in range(n_actions):
+        # Reuse a destination across two different admin ports sometimes — the reference
+        # pattern is 7 actions over 5 destinations and 4 ports, not 7 separate hosts.
+        if pairs and random.random() < 0.3:
+            dest_ip = random.choice(pairs)[0]
+        else:
+            dest_ip = _rare_internal_host(config, exclude=used_dests)
+            used_dests.add(dest_ip)
+        pairs.append((dest_ip, ports[i % len(ports)]))
+
+    # Spread the actions over the past 30-75 minutes. A burst on a single timestamp reads
+    # as one automated action rather than a pattern of administrative behaviour.
+    now_ms    = int(time.time() * 1000)
+    window_ms = random.randint(30, 75) * 60_000
+    offsets   = sorted(random.randint(0, window_ms) for _ in pairs)
+
+    logs = []
+    for (dest_ip, dport), back_ms in zip(pairs, offsets):
+        start_ms = now_ms - back_ms
+        end_ms   = start_ms + random.randint(2_000, 90_000)
+        app      = _ADMIN_PORTS[dport]
+        fields   = _base_fields(config, src_ip, user, shost)
+        fields['deviceInboundInterface']  = internal_iface
+        fields['deviceOutboundInterface'] = internal_iface
+        fields['cs3'] = "User-Zone"
+        fields['cs4'] = "Server-Zone"
+        fields.update({
+            "_sig_id": SIG_IDS["CONNECTION"],
+            "act": "Allow", "app": app,
+            "dst": dest_ip, "dpt": dport,
+            "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
+            "cs2": "Allow_Internal_Admin", "cs2Label": "fwRule",
+            "cs5": "Lateral Movement",     "cs5Label": "secIntelCategory",
+            "cefSeverity": "5",
+            "bytesOut": random.randint(1_000, 40_000),
+            "bytesIn":  random.randint(1_000, 60_000),
+            "outcome": "SUCCESS", "reason": "Traffic Allowed",
+            "msg": (f"Administrative session: {src_ip} -> {dest_ip}:{dport} ({app}) "
+                    f"- first observed for this host"),
+            # rt drives XSIAM _time; without it every event collapses onto ingest time.
+            "rt":    start_ms,
+            "start": start_ms, "end": end_ms,
+        })
+        logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
+
+    return logs
+
+
+def _generate_abnormal_rdp_rare_host(config, src_ip, user, shost=None, session_context=None):
+    """A single RDP session from a seldom-seen internal host to a seldom-targeted one.
+
+    The detector needs three rarity conditions to hold at once: the source is rarely
+    observed, the RDP pattern is abnormal for the segment, and the destination has
+    rarely RECEIVED RDP from other hosts. That last condition is why this does NOT reuse
+    config['internal_servers'] — funnelling RDP into that small pool makes every
+    destination a frequent receiver.
+
+    Deliberately ONE allowed session, not a burst: repeated attempts to the same host
+    describe brute force or lateral sweep, which are different detections.
+
+    Returns a list of CEF log strings (multi-event threat generator).
+    Triggers XSIAM: "Abnormal RDP session to a remote host from a rarely seen host".
+    """
+    firepower_conf = _get_config(config)
+    internal_iface = firepower_conf.get('inbound_interface', 'inside')
+    dest_ip        = _rare_internal_host(config, exclude={src_ip})
+    print(f"    - Firepower Module simulating: Abnormal RDP to rare host "
+          f"{src_ip} -> {dest_ip}")
+
+    start_ms, end_ms = _conn_timing(random.randint(120_000, 2_400_000))
+    fields = _base_fields(config, src_ip, user, shost)
+    fields['deviceInboundInterface']  = internal_iface
+    fields['deviceOutboundInterface'] = internal_iface
+    fields['cs3'] = "User-Zone"
+    fields['cs4'] = "User-Zone"
+    fields.update({
+        "_sig_id": SIG_IDS["CONNECTION"],
+        "act": "Allow", "app": "RDP",
+        "dst": dest_ip, "dpt": 3389,
+        "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
+        "cs2": "Allow_Internal_Admin", "cs2Label": "fwRule",
+        "cs5": "Lateral Movement",     "cs5Label": "secIntelCategory",
+        "cefSeverity": "5",
+        "bytesOut": random.randint(20_000, 400_000),
+        "bytesIn":  random.randint(50_000, 3_000_000),
+        "outcome": "SUCCESS", "reason": "Traffic Allowed",
+        "msg": f"RDP session: {src_ip} -> {dest_ip}:3389 - rare source and rare destination",
+        "rt":    start_ms,
+        "start": start_ms, "end": end_ms,
+    })
+    return [_format_firepower_cef(config, fields, "CONNECTION STATISTICS")]
+
+
 _beacon_target_map: dict = {}   # src_ip -> stable C2 resolver, so repeat beacon runs
                                 # form a recurring-rare-IP pattern (not random noise)
 
@@ -3212,6 +3376,12 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_generate_reverse_ssh_tunnel(config, src_ip, user, shost), chosen)
     elif chosen == 'ldap_recon':
         return (_generate_ldap_recon(config, src_ip, user, shost), chosen)
+    elif chosen == 'new_admin_behavior':
+        return (_generate_new_admin_behavior(config, src_ip, user, shost,
+                                             session_context), chosen)
+    elif chosen == 'abnormal_rdp_rare_host':
+        return (_generate_abnormal_rdp_rare_host(config, src_ip, user, shost,
+                                                 session_context), chosen)
 
     # --- Single-event generators -- return via (fields, cef_name) path ---
     elif chosen == 'ips':
@@ -3274,6 +3444,8 @@ def generate_log(config, scenario=None, threat_level="Realistic",
       ssh_over_https     5  - SSH app on port 443 (protocol anomaly, allowed)
       workstation_smb    4  - w/w SMB lateral movement (Block)
       rdp_lateral        3  - internal RDP blocked (w/w or w/s lateral movement)
+      new_admin_behavior 4  - 8-11 novel (dest, admin-port) pairs from one host (multi-event)
+      abnormal_rdp_rare_host 4 - one RDP session, rare source to rare destination
       tor                3  - outbound Tor exit node connection (Allow)
       dns_c2_beacon      3  - many DNS queries to suspicious resolver (multi-event, Allow)
       server_outbound_http 2 - internal server -> external HTTP (anomalous, Allow)

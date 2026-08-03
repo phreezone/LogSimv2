@@ -108,6 +108,10 @@ _DEFAULT_THREAT_NAMES = [
     "unusual_ssh_session", "unusual_rdp_session", "ssh_proxy_attack",
     "tor_connection", "vpn_impossible_travel", "dns_c2_beacon",
     "server_outbound_http", "workstation_lateral_rdp",
+    # new_admin_behavior / abnormal_rdp_rare_host are deliberately ABSENT here — see the
+    # WIP notes on their generators. They stay reachable by name for testing but must not
+    # run ambiently: both target first-seen detectors, so unproven ambient runs burn
+    # scarce novel combinations and pollute the baselines the working detectors rely on.
     "vpn_tor_login", "vpn_new_country_login",
     "smb_new_host_lateral", "smb_rare_file_transfer", "smb_share_enumeration",
     "smtp_spray", "smtp_large_exfil",
@@ -119,7 +123,10 @@ _DEFAULT_THREAT_NAMES = [
     "web_c2_beacon", "cryptomining", "rare_port_connection",
     "vpn_data_exfil", "vpn_concurrent_sessions", "external_fanout",
 ]
-_DEFAULT_THREAT_WEIGHTS = [15, 10, 8, 4, 5, 3, 4, 3, 2, 1, 1, 1, 3, 4, 4, 3, 5, 3, 2, 3, 2, 3,
+# Positional 1:1 with _DEFAULT_THREAT_NAMES — keep the two lists in step when editing.
+_DEFAULT_THREAT_WEIGHTS = [15, 10, 8, 4, 5, 3, 4, 3, 2, 1, 1, 1,
+                           4, 4,
+                           3, 4, 4, 3, 5, 3, 2, 3, 2, 3,
                            2, 3,
                            2, 2, 2, 2, 2, 2]
 
@@ -338,9 +345,16 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
                                   user, bytes_sent, bytes_received, duration_sec,
                                   direction="outbound",
                                   src_interface="inside", dest_interface="outside",
-                                  teardown_reason="TCP FINs"):
+                                  teardown_reason="TCP FINs", event_time=None):
     """
     Generates a Built + Teardown log pair for a TCP, UDP, or ICMP session.
+
+    event_time: optional datetime for the Built message; the Teardown is placed
+                duration_sec later. Defaults to None, which keeps the original
+                behaviour of stamping both messages with the current time.
+                ASA syslog timestamps are second-resolution, so a multi-session
+                generator that does not pass this lands its whole burst inside one
+                second and any detection that reasons over time sees a single point.
 
     Syslog format (TCP/UDP outbound) — clause order intentionally SWAPPED versus
     genuine Cisco so that Cortex parse_cisco() resolves the internal host as the
@@ -379,6 +393,12 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
     session_logs = []
     conn_id  = random.randint(100000, 999999)
     src_port = random.randint(49152, 65535)
+
+    # Built at event_time, Teardown duration_sec later. Both stay None when the caller
+    # does not ask for placement, so _generate_full_syslog_message falls back to now.
+    built_time    = event_time
+    teardown_time = (event_time + timedelta(seconds=max(0, int(duration_sec)))
+                     if event_time else None)
 
     # Same-interface traffic (intra-interface lateral) → direction reported as
     # "inbound" — matches real ASA behaviour with `same-security-traffic permit
@@ -425,12 +445,12 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
         session_logs.append(_generate_full_syslog_message(config,
             f"%ASA-6-302020: Built {effective_direction} ICMP connection for "
             f"faddr {faddr}/0 gaddr {gaddr}/0 laddr {laddr}/0"
-            f"{icmp_tail}"
+            f"{icmp_tail}", built_time
         ))
         session_logs.append(_generate_full_syslog_message(config,
             f"%ASA-6-302021: Teardown ICMP connection for "
             f"faddr {faddr}/0 gaddr {gaddr}/0 laddr {laddr}/0"
-            f"{icmp_tail}"
+            f"{icmp_tail}", teardown_time
         ))
         return session_logs
 
@@ -469,7 +489,7 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
         f"to {dest_interface}:{dest_ip}/{dest_port} ({dest_ip}/{dest_port})"
         f"{user_paren}"
     )
-    session_logs.append(_generate_full_syslog_message(config, built_log))
+    session_logs.append(_generate_full_syslog_message(config, built_log, built_time))
 
     duration_str = _format_duration(duration_sec)
     reason_str   = f" {teardown_reason}" if teardown_reason else ""
@@ -482,7 +502,7 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
         f"duration {duration_str} bytes {total_bytes}{reason_str}"
         f"{user_paren}"
     )
-    session_logs.append(_generate_full_syslog_message(config, teardown_log))
+    session_logs.append(_generate_full_syslog_message(config, teardown_log, teardown_time))
     return session_logs
 
 
@@ -975,6 +995,120 @@ def _simulate_workstation_lateral_rdp(config, internal_host_ip, session_context=
             teardown_reason="TCP FINs"
         ))
     return logs
+
+
+# Remote-administration service ports. "New Administrative Behavior" counts NOVEL
+# (destination, admin-port) pairs per source host over a 12-hour window, so breadth
+# across both axes is the signal — volume to one destination is not.
+_ADMIN_PORTS = [22, 23, 69, 161, 512, 513, 514, 623, 992]
+
+
+def _rare_internal_host(config, exclude=()):
+    """Internal address drawn from the wide internal space, avoiding the hot server pool.
+
+    Rarity detectors score a destination by how often it has RECEIVED that protocol from
+    other hosts. config['internal_servers'] is a 25-address list, so any generator that
+    picks its destination from it makes every destination a frequent receiver and the
+    rarity condition can never hold. internal_networks spans /16s, so a destination drawn
+    from it is a first-time receiver.
+    """
+    servers = set(config.get('internal_servers', []))
+    nets    = config.get('internal_networks', ['10.1.0.0/16'])
+    for _ in range(40):
+        try:
+            candidate = rand_ip_from_network(ip_network(random.choice(nets), strict=False))
+        except (ValueError, AddressValueError, IndexError):
+            continue
+        if candidate not in servers and candidate not in exclude:
+            return candidate
+    return f"10.1.{random.randint(20, 250)}.{random.randint(2, 250)}"
+
+
+def _simulate_new_admin_behavior(config, internal_host_ip, session_context=None):
+    """One internal host performing many FIRST-TIME administrative actions.
+
+    WORK IN PROGRESS — NOT PROVEN TO FIRE FROM ASA, and deliberately not registered in
+    the ambient threat pool. ASA supplies no xdm.network.application_protocol at all,
+    while this detector's reference alerts carry an application in app_id. That gap is
+    inside Cortex's built-in parse_cisco(), so no change here can close it. Reachable by
+    name for testing; leave it out of ambient traffic until it is shown to fire, because
+    this is a first-seen detector and ambient runs burn scarce novel combinations.
+
+    Opens 8-11 DISTINCT (internal destination, admin port) pairs from a single source.
+    Each pair is novel for that source, which is what the detector counts; repeat
+    connections to one destination score as a single action and never fire.
+
+    The source must be an internal host that already carries ambient traffic — the
+    detector compares against that host's own administrative baseline, so a freshly
+    minted address has nothing to deviate from.
+
+    Sessions are placed across the past 30-75 minutes via event_time. ASA syslog
+    timestamps are second-resolution, so without that the whole set lands in one second
+    and reads as a single automated action rather than a behavioural pattern.
+
+    Returns list of syslog strings (multi-event).
+    """
+    user      = _get_user_from_ip(config, internal_host_ip, session_context)
+    n_actions = random.randint(8, 11)
+    ports     = random.sample(_ADMIN_PORTS, min(n_actions, len(_ADMIN_PORTS)))
+
+    pairs, used_dests = [], {internal_host_ip}
+    for i in range(n_actions):
+        # Reuse a destination across two admin ports sometimes — the reference pattern is
+        # several actions spread over fewer destinations than actions, not one host each.
+        if pairs and random.random() < 0.3:
+            dest_ip = random.choice(pairs)[0]
+        else:
+            dest_ip = _rare_internal_host(config, exclude=used_dests)
+            used_dests.add(dest_ip)
+        pairs.append((dest_ip, ports[i % len(ports)]))
+
+    now       = datetime.now(timezone.utc)
+    window_s  = random.randint(30, 75) * 60
+    offsets   = sorted(random.randint(0, window_s) for _ in pairs)
+
+    logs = []
+    for (dest_ip, dport), back_s in zip(pairs, offsets):
+        duration = random.randint(2, 90)
+        logs.extend(_generate_connection_session(
+            config, "TCP", internal_host_ip, dest_ip, dport, user,
+            random.randint(1_000, 40_000), random.randint(1_000, 60_000), duration,
+            src_interface="inside", dest_interface="inside",
+            teardown_reason="TCP FINs",
+            event_time=now - timedelta(seconds=back_s),
+        ))
+    return logs
+
+
+def _simulate_abnormal_rdp_rare_host(config, internal_host_ip, session_context=None):
+    """A single RDP session from a seldom-seen internal host to a seldom-targeted one.
+
+    WORK IN PROGRESS — NOT PROVEN TO FIRE FROM ASA, and deliberately not registered in
+    the ambient threat pool. The detector's alerts carry app_id 'ip,tcp,rdp' (Firepower
+    fires it with 'ip,rdp'), but ASA supplies no xdm.network.application_protocol at all,
+    so it cannot present an application by any route available to this module. The same
+    shape DOES fire from Firepower, Check Point and FortiGate. Reachable by name for
+    testing only.
+
+    The detector needs three rarity conditions at once: the source is rarely observed,
+    the RDP pattern is abnormal for the segment, and the destination has rarely RECEIVED
+    RDP from other hosts. That last condition is why the destination does NOT come from
+    config['internal_servers'] — funnelling RDP into that small pool makes every
+    destination a frequent receiver.
+
+    Deliberately ONE session, not a burst: repeated attempts to the same host describe
+    brute force or a lateral sweep, which are different detections.
+
+    Returns list of syslog strings (Built+Teardown pair).
+    """
+    dest_ip = _rare_internal_host(config, exclude={internal_host_ip})
+    user    = _get_user_from_ip(config, internal_host_ip, session_context)
+    return _generate_connection_session(
+        config, "TCP", internal_host_ip, dest_ip, 3389, user,
+        random.randint(20_000, 400_000), random.randint(50_000, 3_000_000),
+        random.randint(120, 2_400),
+        src_interface="inside", dest_interface="inside"
+    )
 
 
 def _simulate_rdp_session(config, internal_host_ip, session_context=None):
@@ -2006,7 +2140,7 @@ def generate_log(config, scenario=None, threat_level="Realistic",
       cumulative_upload_session    4  — XSIAM "Large Upload (HTTPS)" via accumulation
       ssh_proxy_attack             4  — XSIAM "Unusual SSH activity that resembles SSH proxy"
       smb_new_host_lateral         4  — XSIAM "Rare SMB session to a remote host"
-      unusual_rdp_session          3  — XSIAM "Rare RDP session" / "New Administrative Behavior"
+      unusual_rdp_session          3  — XSIAM "Rare RDP session"
       tor_connection               3  — XSIAM "Recurring access to rare IP"
       vpn_bruteforce               3  — XSIAM "VPN login Brute-Force" / "Password Spray"
       vpn_tor_login                3  — XSIAM "Successful VPN connection from TOR"
@@ -2021,7 +2155,10 @@ def generate_log(config, scenario=None, threat_level="Realistic",
       new_ftp_server               2  — XSIAM "New FTP Server"
       dns_c2_beacon                1  — XSIAM "Recurring access to rare IP"
       server_outbound_http         1  — XSIAM "Abnormal Communication to a Rare IP"
-      workstation_lateral_rdp      1  — XSIAM "Rare RDP session" / "New Administrative Behavior"
+      workstation_lateral_rdp      1  — XSIAM "Rare RDP session"
+      new_admin_behavior           4  — XSIAM "New Administrative Behavior"
+      abnormal_rdp_rare_host       4  — XSIAM "Abnormal RDP session to a remote host
+                                        from a rarely seen host"
     """
     global last_threat_event_time
     session_context = (context or {}).get("session_context")
@@ -2275,6 +2412,14 @@ def generate_log(config, scenario=None, threat_level="Realistic",
     elif log_choice == "workstation_lateral_rdp":
         print("    - ASA Module simulating: Workstation-to-Workstation RDP")
         _result = _simulate_workstation_lateral_rdp(config, internal_host_ip, session_context)
+
+    elif log_choice == "new_admin_behavior":
+        print("    - ASA Module simulating: New Administrative Behavior (novel admin-port pairs)")
+        _result = _simulate_new_admin_behavior(config, internal_host_ip, session_context)
+
+    elif log_choice == "abnormal_rdp_rare_host":
+        print("    - ASA Module simulating: Abnormal RDP session to a rare internal host")
+        _result = _simulate_abnormal_rdp_rare_host(config, internal_host_ip, session_context)
 
     elif log_choice == "failed_connections_burst":
         _result = _simulate_failed_connections_burst(config, attacker_ip=(context or {}).get('src_ip'))

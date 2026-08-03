@@ -116,21 +116,50 @@ clock — a concurrent generator would corrupt both).
   window. Once-per-day per pack is the intended cadence — add a suffix to the pack `seed` for a
   fresh IP set within the window.
 
-### Design note — regeneration vs. playback (future option)
+## Multi-Student Mode (capture-replay)
 
-Today Bulk and Stream **regenerate** the events from the same seed and are proven identical by
-the parity test — the *pivots* (user, IP, host, action, event-type, order, transport) are
-byte-identical; only timestamps and a few incidental *now-derived* fields (e.g. a resource's
-`creationDate = now − N days`) differ between the morning and afternoon runs.
+A class of up to ~50 students shares **one** XSIAM tenant, and every student needs the same
+attack story **re-keyed to their own identity** so their correlation rule fires only on their
+events — and one student's mistake can't touch another's lab. Training Mode delivers this by
+**capture-replay**: generate the story once, then replay it per student and per phase.
 
-A stronger **capture-once → replay** model was evaluated and **deferred**: generate the dataset
-once, store it, and replay both Bulk and Stream from those exact bytes with only the timestamps
-shifted. That would make *every* field byte-identical across morning/afternoon and be immune to
-future module nondeterminism and LogSim upgrades, at the cost of a timestamp-shift layer (rewrite
-every timestamp format by a constant Δ, preserving precision/timezone/epoch-unit) and ~0.5 GB of
-stored dataset per pack per run. It reuses the existing capture hook (`log_simulator._capture_sink`)
-and the timestamp locators in `_strip_volatile`, so it is an **extension, not a rewrite** — revisit
-it if incidental-field drift or upgrade-stability ever matters in practice.
+**How it works**
+1. **Generate the canonical once** (`training_engine.capture_canonical`) under a **fixed synthetic
+   anchor clock** (`training_config.anchor_epoch`), deterministic from `(pack, seed, eps)`. Because
+   the anchor is constant, the canonical is **day-independent** — a run on Monday and a re-run on
+   Thursday are byte-identical. It is cached to `training_cache/<pack>__<seed>__<eps>.jsonl.gz`.
+2. **Replay per student × phase** (`run_multi_student`): for student *n*, apply a deterministic
+   **entity rewrite** (`build_student_map` + `rewrite_payload`) and a **timestamp shift**
+   (`log_simulator.shift_timestamps`). Bulk shifts into `now−4h..now`; Stream shifts to live and
+   paces the events out, interleaved across all students.
+
+**Per-student isolation (single identity).** Every internal entity collapses to
+`EXAMPLECORP\student{n}` on IP block `10.{n}.0.0/16`, hosts `STU{n}-*`, a per-student SID; external
+attacker IPs are remapped to a per-student block too, so no two students ever group on a shared
+source IP. A **leak-check** (`leak_check`) verifies no canonical entity survives into a student's
+output, and that students are pairwise disjoint. Configure via `training_config.student_profiles`.
+
+**Auto-tiered volume.** The Web-UI "Number of students" selector auto-picks EPS/source from
+`training_config.eps_tiers` (≤5 → 2.0, 6–10 → 1.0, >10 → 0.5), holding a normal class (~≤20) near a
+5-student ingest load. Per student ≈ 22k–115k events (4h) depending on tier and source count.
+
+**Cycle to a fresh block.** Each pack has a `seed` ("variant"); the UI's *Variant / seed* field +
+*New variant* button mint a new-but-structurally-equivalent block. Same seed reproduces exactly.
+
+### Design note — capture-replay is now the training model
+
+Capture-replay (once considered a future option over "regenerate twice") is now the model for
+training runs, because it both (a) makes every student's morning and afternoon byte-identical
+except timestamps — immune to the modules' clock-dependent RNG that made regeneration drift for
+some scenarios — and (b) is the natural way to produce isolated per-student copies. The one
+subtlety: shifting timestamps is stricter than blanking them, so epoch shifts are guarded to only
+move values near the anchor (a bare 10–19 digit ID is left alone).
+
+### Verifying
+
+`python tests/training_multistudent.py` proves isolation/leak-freedom, **cross-day
+reproducibility** (Mon == Thu), backfill-window correctness, and per-student AM/PM alignment —
+no XSIAM tenant needed. `python tests/training_determinism.py` covers the single-tenant checks.
 
 ### Verifying determinism
 

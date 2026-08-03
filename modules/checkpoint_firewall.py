@@ -103,6 +103,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Suspicious reconnaissance using LDAP"},
     {"event": "external_port_scan",    "weight": 3,  "analytic": True,
      "xsiam_alert": "Port Scan"},
+    {"event": "new_admin_behavior",    "weight": 3,  "analytic": True,
+     "xsiam_alert": "New Administrative Behavior"},
 ]
 
 
@@ -146,6 +148,77 @@ def get_threat_info():
 
 
 last_threat_event_time = 0
+
+
+# ---------------------------------------------------------------------------
+# Administrative-behaviour analytics support
+# ---------------------------------------------------------------------------
+# Ports XSIAM's NDR lateral-movement analytics treats as an "administrative
+# action": remote shell, remote file transfer and remote console services.
+# Mapped to (service_id, app) so the parser derives a real app_id per session.
+_ADMIN_SERVICE_PORTS = {
+    22:  ("ssh",     "SSH"),
+    69:  ("tftp",    "TFTP"),
+    512: ("exec",    "REXEC"),
+    992: ("telnets", "TELNETS"),
+}
+
+# Ports the analytics profile is confirmed to count toward the new-administrative-
+# action total on this data source. Remote-shell and TLS-console sessions are
+# ingested but not counted, so the burst is filled only from these: the countable
+# session count then clears the detection threshold on every invocation rather than
+# depending on how the random port mix happens to fall.
+_ADMIN_PORT_FILL = (22, 69)
+
+# Dedicated internal management segment for administrative-behaviour sessions.
+# It sits inside config['internal_networks'] (10.100.0.0/16) so destinations are
+# genuinely internal, but is disjoint from config['internal_servers'] — which are
+# the only addresses any other generator reaches on an administrative port.
+_ADMIN_SEGMENT_PREFIX = "10.100"
+_ADMIN_SEGMENT_BASE3  = 128          # third octet 128-255, i.e. a /17
+_ADMIN_SEGMENT_SPAN   = 128 * 256    # addresses available in the segment
+_ADMIN_BLOCK_SIZE     = 16           # addresses reserved per invocation
+
+# In-memory only, by design: single-session operation, no disk persistence.
+_admin_block_cursor = None
+
+
+def _next_admin_targets(count):
+    """Reserve `count` internal destinations not yet used on an administrative port.
+
+    The detector counts FIRST-SEEN (destination, administrative port) pairs per
+    source host, so a generator that reuses destinations exhausts itself after one
+    run. The cursor is seeded from the wall clock and only ever moves forward, so a
+    process restart cannot rewind onto addresses an earlier run already spent.
+    """
+    global _admin_block_cursor
+    hour_slot = int(time.time() // 3600)
+    if _admin_block_cursor is None or _admin_block_cursor < hour_slot:
+        _admin_block_cursor = hour_slot
+    block = _admin_block_cursor
+    _admin_block_cursor += 1
+
+    targets = []
+    for i in range(count):
+        idx = (block * _ADMIN_BLOCK_SIZE + i) % _ADMIN_SEGMENT_SPAN
+        targets.append("%s.%d.%d" % (_ADMIN_SEGMENT_PREFIX,
+                                     _ADMIN_SEGMENT_BASE3 + (idx // 256), idx % 256))
+    return targets
+
+
+def _admin_port_sequence(count):
+    """Port list of length `count` in which every administrative port appears.
+
+    Only the fill ports are known to be counted as administrative actions by the
+    analytics profile; sessions on the remaining ports are ingested but may be
+    ignored. Every port still appears once so the traffic looks like a real
+    maintenance sweep, but the countable sessions carry the detection on their own.
+    """
+    seq = list(_ADMIN_SERVICE_PORTS)
+    while len(seq) < count:
+        seq.append(random.choice(_ADMIN_PORT_FILL))
+    random.shuffle(seq)
+    return seq[:count]
 
 
 # ---------------------------------------------------------------------------
@@ -1030,6 +1103,75 @@ def _simulate_lateral_movement(config, src_ip, user, shost):
                 "msg": f"{act} {service.upper()} from {src_ip} to {dest_ip}:{port}",
             }
             logs.append(_format_checkpoint_cef(config, extensions, event_time=base_time + timedelta(seconds=offset)))
+    return logs
+
+
+def _simulate_new_admin_behavior(config, src_ip, user, shost, session_context=None):
+    """One workstation opens administrative sessions to many NEW internal destinations.
+
+    XSIAM's NDR lateral-movement analytics profiles, per source host, the set of
+    (destination, administrative port) pairs that host has used before, and alerts
+    when the number of previously unseen pairs inside a 12-hour window is
+    uncharacteristically high for that host. Breadth over new destinations is the
+    signal — repeating destinations the host already reached counts for nothing.
+
+    Emits 13-15 accepted sessions over SSH/TFTP/rexec/telnets, each to a destination
+    from the dedicated management segment that no host has reached on an
+    administrative port, spread over 1-2 hours so the burst never lands on a single
+    timestamp. The source is a real internal workstation with its own traffic
+    baseline — a freshly minted address has no profile to deviate from.
+
+    Triggers XSIAM: "New Administrative Behavior".
+    """
+    if not shost:
+        _u, shost = _get_user_and_host_info(config, src_ip, session_context)
+        user = user or _u
+    print(f"    - Check Point Module simulating: New Administrative Behavior from {shost or src_ip}")
+
+    n_sessions = random.randint(13, 15)
+    targets    = _next_admin_targets(n_sessions)
+    ports      = _admin_port_sequence(n_sessions)
+
+    # A second operator account on part of the run: administrative sweeps are
+    # usually run under a shared/secondary credential rather than one identity.
+    alt_user = None
+    if session_context:
+        alt_info = get_random_user(session_context, preferred_device_type='workstation')
+        if alt_info and alt_info['username'] != user:
+            alt_user = alt_info['username']
+
+    span_minutes = random.randint(70, 140)
+    base_time    = datetime.now(timezone.utc) - timedelta(minutes=span_minutes)
+    step         = (span_minutes - 2) / max(n_sessions - 1, 1)
+
+    logs = []
+    for i, (dest_ip, port) in enumerate(zip(targets, ports)):
+        service, app = _ADMIN_SERVICE_PORTS[port]
+        duration     = random.randint(20, 900)
+        ev_user      = alt_user if (alt_user and random.random() < 0.3) else user
+        event_time   = base_time + timedelta(
+            minutes=step * i, seconds=random.uniform(0, 45))
+        extensions = {
+            "act": "Accept",
+            "src": src_ip, "dst": dest_ip,
+            "spt": random.randint(49152, 65535), "dpt": port,
+            "proto": "6",
+            # dhost stays unset: these destinations have no resolved name and an
+            # address in a hostname field makes XSIAM invent a host by that name.
+            "suser": ev_user, "shost": shost, "dhost": None,
+            "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
+            "deviceDirection": "1",
+            "service_id": service, "app": app,
+            "cs1": "Allow_Internal_Traffic", "cs1Label": "Rule Name",
+            "out": random.randint(2000, 90000),
+            "in":  random.randint(2000, 250000),
+            "cn1": duration, "cn1Label": "Elapsed Time in Seconds",
+            "duration": str(duration),
+            "reason": "TCP FIN",
+            "ifname": "eth1",
+            "msg": f"Accept {app} {src_ip} -> {dest_ip}:{port} (administrative session)",
+        }
+        logs.append(_format_checkpoint_cef(config, extensions, event_time=event_time))
     return logs
 
 
@@ -2374,6 +2516,8 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_simulate_ldap_recon(config, src_ip, user, shost), display_name)
     if threat_type == 'external_port_scan':
         return (_simulate_external_port_scan(config), display_name)
+    if threat_type == 'new_admin_behavior':
+        return (_simulate_new_admin_behavior(config, src_ip, user, shost, session_context), display_name)
 
     # --- single-event generators: IPS, URL block, identity ---
     # Each builds its own complete extensions dict with correct src/dst/zones/blade.

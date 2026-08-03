@@ -1630,10 +1630,6 @@
         {
           "event": "ad_auth_benign",
           "weight": 5
-        },
-        {
-          "event": "vpn_new_country_login",
-          "weight": 3
         }
       ],
       "threat": [
@@ -1747,6 +1743,10 @@
         },
         {
           "event": "dc_smb_outbound",
+          "weight": 3
+        },
+        {
+          "event": "vpn_new_country_login",
           "weight": 3
         }
       ]
@@ -1887,6 +1887,14 @@
         {
           "event": "ddns_connection",
           "weight": 3
+        },
+        {
+          "event": "new_admin_behavior",
+          "weight": 3
+        },
+        {
+          "event": "vpn_new_country_login",
+          "weight": 3
         }
       ]
     }
@@ -2025,10 +2033,6 @@
         {
           "event": "ad_auth",
           "weight": 5
-        },
-        {
-          "event": "vpn_new_country_login",
-          "weight": 3
         }
       ],
       "threat": [
@@ -2159,6 +2163,14 @@
         {
           "event": "ddns_connection",
           "weight": 2
+        },
+        {
+          "event": "new_admin_behavior",
+          "weight": 3
+        },
+        {
+          "event": "vpn_new_country_login",
+          "weight": 3
         }
       ]
     }
@@ -4501,6 +4513,14 @@
           "weight": 3
         },
         {
+          "event": "new_admin_behavior",
+          "weight": 4
+        },
+        {
+          "event": "abnormal_rdp_rare_host",
+          "weight": 4
+        },
+        {
           "event": "tor",
           "weight": 3
         },
@@ -4587,6 +4607,10 @@
         {
           "event": "network_anomaly",
           "weight": 4
+        },
+        {
+          "event": "vpn_new_country_login",
+          "weight": 3
         }
       ]
     },

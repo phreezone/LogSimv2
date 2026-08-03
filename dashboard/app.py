@@ -183,7 +183,7 @@ app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 # ── Load config ───────────────────────────────────────────────────────────────
 _CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
-with open(_CONFIG_PATH) as _f:
+with open(_CONFIG_PATH, encoding="utf-8") as _f:
     _config_str = _f.read()
 
 # Apply the same placeholder substitution as log_simulator.py so that
@@ -242,6 +242,15 @@ def _require_api_key():
 # threat generators (AWS BEDROCK_TOR_USAGE, GCP TOR_API_ACCESS, VERTEX_TOR_PREDICT,
 # and any other module that reads config['tor_exit_nodes']) use IPs that are
 # confirmed to be on the live Tor exit node list at startup time.
+# Outcome of the startup fetch, surfaced by /api/health.  config.json no longer ships
+# a static fallback list, so a failed fetch leaves config['tor_exit_nodes'] EMPTY and
+# every Tor generator silently degrades to _random_external_ip() — emitting ordinary
+# external IPs while still labelling the event vpn_tor_login/tor_connection.  XSIAM
+# then has nothing to match and the Tor detections go quiet with no error anywhere.
+# That exact silent failure is why this is reported as a hard health ERROR.
+TOR_FETCH_STATE: dict = {"ok": False, "count": 0, "error": "not attempted"}
+
+
 def _fetch_tor_exit_nodes() -> list[dict]:
     """Fetch the current Tor exit node list from the Tor Project bulk-exit URL.
     Returns a list of {ip, country} dicts on success, or empty list on failure."""
@@ -252,10 +261,16 @@ def _fetch_tor_exit_nodes() -> list[dict]:
             ips = resp.read().decode("utf-8").strip().splitlines()
         nodes = [{"ip": ip.strip(), "country": "Unknown"} for ip in ips if ip.strip()]
         print(f"[dashboard] Fetched {len(nodes)} live Tor exit nodes from torproject.org")
+        TOR_FETCH_STATE.update(ok=True, count=len(nodes), error=None)
         return nodes
     except Exception as exc:
-        print(f"[dashboard] WARNING: Could not fetch live Tor exit nodes ({exc}). "
-              "Using static fallback list from config.json.")
+        TOR_FETCH_STATE.update(ok=False, count=0, error=str(exc))
+        print("=" * 78)
+        print(f"[dashboard] ERROR: Could not fetch live Tor exit nodes ({exc}).")
+        print("            config.json ships NO static fallback, so the Tor list is EMPTY.")
+        print("            Tor generators will emit ordinary external IPs while still")
+        print("            labelling events as Tor — XSIAM Tor detections WILL NOT FIRE.")
+        print("=" * 78)
         return []
 
 # Capture the static config.json Tor list BEFORE the daily live overwrite, so the
@@ -267,6 +282,15 @@ CONFIG["_static_tor_exit_nodes"] = copy.deepcopy(CONFIG.get("tor_exit_nodes", []
 _live_tor = _fetch_tor_exit_nodes()
 if _live_tor:
     CONFIG["tor_exit_nodes"] = _live_tor
+
+# The static config.json list was removed (it went stale — 1 of 25 entries was still a
+# real exit node), so the capture above is now empty and Training determinism would
+# lose its pinned list. Fall back to pinning the list fetched at startup: stable for
+# the lifetime of this process, so a morning Bulk stage and afternoon Live stream in
+# the same run still pick identical anon IPs. It does change across restarts, which
+# the old static list did not.
+if not CONFIG.get("_static_tor_exit_nodes"):
+    CONFIG["_static_tor_exit_nodes"] = copy.deepcopy(CONFIG.get("tor_exit_nodes", []))
 
 THREAT_LEVELS = list(CONFIG.get("threat_generation_levels", {
     "Benign Traffic Only": 86400,
@@ -956,6 +980,16 @@ def api_fire_threat(name: str):
             process_and_send(msg, state.module, cfg, ret_name or event_name)
         if valid:
             state.record_log(ret_name or event_name, log_count=len(valid))
+        # Flush the trailing partial WEC batch before returning. WEC events accumulate in
+        # a module-level buffer and only auto-flush at wec_batch_size (20) or on a 1s
+        # timer, so a one-shot fire left its tail buffered and the caller was told
+        # log_count=N while fewer than N had actually been delivered. The scenario-run
+        # path already flushes in its finally block; this path did not.
+        try:
+            from log_simulator import _flush_wec_batch
+            _flush_wec_batch(cfg)
+        except Exception:
+            pass
         return jsonify({"fired": True, "event": event_name, "log_count": len(valid)})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -1087,11 +1121,20 @@ def _training_progress(info):
     with _training_lock:
         _training_state["index"] = info.get("index", 0)
         _training_state["total"] = info.get("total", 0)
-        _training_state["offset"] = info.get("offset", 0)
-        _training_state["duration"] = info.get("duration", 0)
+        if "offset" in info:
+            _training_state["offset"] = info["offset"]
+        if "duration" in info:
+            _training_state["duration"] = info["duration"]
+        if "num_students" in info:
+            _training_state["num_students"] = info["num_students"]
 
 
-def _run_training(pack, mode, stop_event):
+def _default_num_students():
+    sp = (CONFIG.get("training_config") or {}).get("student_profiles", {})
+    return int(sp.get("count", 20))
+
+
+def _run_training(pack, mode, stop_event, num_students=1, seed=None):
     import datetime as _dt
     from modules import training_engine as te
     modules = {name: state.module for name, state in MODULE_STATES.items()}
@@ -1099,11 +1142,11 @@ def _run_training(pack, mode, stop_event):
     with _training_lock:
         _training_state.update(active=True, mode=mode, pack=pack.get("id"),
                                status="running", started_at=start_ts,
-                               index=0, total=0, offset=0,
+                               index=0, total=0, offset=0, num_students=num_students,
                                duration=pack.get("duration_seconds", 0), message="")
     try:
-        te.run_pack(pack, modules, CONFIG, mode=mode, stop_event=stop_event,
-                    progress=_training_progress)
+        te.run_multi_student(pack, modules, CONFIG, mode=mode, num_students=num_students,
+                             seed=seed, stop_event=stop_event, progress=_training_progress)
         stopped = bool(stop_event and stop_event.is_set())
         with _training_lock:
             _training_state["status"] = "stopped" if stopped else "done"
@@ -1121,21 +1164,25 @@ def _run_training(pack, mode, stop_event):
             _training_state["active"] = False
 
 
-def _start_training_thread(pack, mode, stop_event=None):
-    threading.Thread(target=_run_training, args=(pack, mode, stop_event), daemon=True,
-                     name=f"training-{mode}-{pack.get('id')}").start()
+def _start_training_thread(pack, mode, stop_event=None, num_students=1, seed=None):
+    threading.Thread(target=_run_training, args=(pack, mode, stop_event, num_students, seed),
+                     daemon=True, name=f"training-{mode}-{pack.get('id')}").start()
 
 
 @app.get("/api/training/packs")
 def api_training_packs():
     import datetime as _dt
     today = _dt.date.today().isoformat()
-    return jsonify([
-        {"id": p.get("id"), "description": p.get("description", ""),
-         "duration_seconds": p.get("duration_seconds", 14400),
-         "bulk_done_today": _bulk_done.get(p.get("id")) == today}
-        for p in _training_packs()
-    ])
+    return jsonify({
+        "packs": [
+            {"id": p.get("id"), "description": p.get("description", ""),
+             "duration_seconds": p.get("duration_seconds", 14400),
+             "seed": str(p.get("seed", p.get("id"))),
+             "bulk_done_today": _bulk_done.get(p.get("id")) == today}
+            for p in _training_packs()
+        ],
+        "default_num_students": _default_num_students(),
+    })
 
 
 @app.get("/api/training/status")
@@ -1160,6 +1207,17 @@ def _guard_can_start_training():
     return True, None, 200
 
 
+def _parse_run_params(body):
+    from modules import training_engine as te
+    try:
+        num_students = max(1, int(body.get("num_students") or _default_num_students()))
+    except (TypeError, ValueError):
+        num_students = _default_num_students()
+    seed = (body.get("seed") or "").strip() or None
+    eps = te.resolve_eps(CONFIG, num_students)
+    return num_students, seed, eps
+
+
 @app.post("/api/training/bulk")
 def api_training_bulk():
     body = request.get_json(silent=True) or {}
@@ -1169,8 +1227,10 @@ def api_training_bulk():
     ok, resp, code = _guard_can_start_training()
     if not ok:
         return jsonify(resp), code
-    _start_training_thread(pack, "bulk")
-    return jsonify({"started": True, "mode": "bulk", "pack": pack.get("id")})
+    num_students, seed, eps = _parse_run_params(body)
+    _start_training_thread(pack, "bulk", None, num_students, seed)
+    return jsonify({"started": True, "mode": "bulk", "pack": pack.get("id"),
+                    "num_students": num_students, "eps": eps, "seed": seed})
 
 
 @app.post("/api/training/stream")
@@ -1190,9 +1250,11 @@ def api_training_stream():
     ok, resp, code = _guard_can_start_training()
     if not ok:
         return jsonify(resp), code
+    num_students, seed, eps = _parse_run_params(body)
     _training_stop = threading.Event()
-    _start_training_thread(pack, "stream", _training_stop)
-    return jsonify({"started": True, "mode": "stream", "pack": pack.get("id")})
+    _start_training_thread(pack, "stream", _training_stop, num_students, seed)
+    return jsonify({"started": True, "mode": "stream", "pack": pack.get("id"),
+                    "num_students": num_students, "eps": eps, "seed": seed})
 
 
 @app.post("/api/training/stop")
@@ -1375,6 +1437,30 @@ def _run_health_checks() -> dict:
             "check": f"{var} defined",
             "status": "ok" if val else "warn",
             "detail": "set" if val else "not set — transport will be skipped",
+        })
+
+    # ── Tor exit node list ────────────────────────────────────────────────────
+    # Without it every Tor generator silently emits ordinary external IPs while
+    # still labelling the event as Tor, so Tor detections stop with no other signal.
+    _tor_loaded = len(CONFIG.get("tor_exit_nodes") or [])
+    if _tor_loaded:
+        results.append({
+            "group": "Threat Intel",
+            "check": "Tor exit node list loaded",
+            "status": "ok",
+            "detail": f"{_tor_loaded} live exit nodes fetched at startup",
+        })
+    else:
+        results.append({
+            "group": "Threat Intel",
+            "check": "Tor exit node list loaded",
+            "status": "error",
+            "detail": (
+                f"EMPTY — live fetch failed ({TOR_FETCH_STATE.get('error')}) and "
+                "config.json has no static fallback. Tor generators will emit "
+                "ordinary external IPs labelled as Tor; XSIAM Tor detections will "
+                "NOT fire. Restart once connectivity to check.torproject.org is back."
+            ),
         })
 
     # Per-collector env vars (skip Google Workspace)
