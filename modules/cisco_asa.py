@@ -27,10 +27,12 @@ from ipaddress import ip_network, AddressValueError
 
 try:
     from modules.session_utils import (get_random_user, find_user_by_ip, get_user_by_name,
-        rand_ip_from_network, stable_vpn_ip, stable_mail_servers, weighted_destination)
+        rand_ip_from_network, stable_vpn_ip, stable_mail_servers, weighted_destination,
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 except ImportError:
     from session_utils import (get_random_user, find_user_by_ip, get_user_by_name,
-        rand_ip_from_network, stable_vpn_ip, stable_mail_servers, weighted_destination)
+        rand_ip_from_network, stable_vpn_ip, stable_mail_servers, weighted_destination,
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 
 last_threat_event_time = 0
 
@@ -42,9 +44,37 @@ def _ad_user(user):
     This lets XSIAM Identity stitch firewall users (EXAMPLECORP\\user)
     with cloud/SaaS users (user@examplecorp.com) into one identity.
     """
-    if user and "\\" not in user and "@" not in user:
+    # Unattributed / system flows have no identity-firewall user — real ASA omits
+    # the user clause entirely rather than printing a placeholder like "N/A".
+    if not user or user == "N/A":
+        return ""
+    if "\\" not in user and "@" not in user:
         return f"EXAMPLECORP\\{user}"
     return user
+
+
+def _vpn_user(user):
+    """Bare username for AnyConnect messages (113039 / 113019 / 722051).
+
+    Deliberately NOT _ad_user().  XSIAM's Identity Analytics resolves the identity
+    on VPN events by reducing "EXAMPLECORP\\jdoe" to the DOMAIN — alerts recorded
+    user_name "examplecorp" for every user, so every VPN login collapsed into one
+    synthetic identity.  TOR access then became that identity's normal behaviour and
+    the anomaly detectors went quiet: "A Successful VPN connection from TOR" fired
+    repeatedly with bare usernames and stopped firing once the
+    EXAMPLECORP\\ prefix was introduced.
+
+    Verified in-tenant: all four
+    layouts parse, and xdm.source.user.username keeps the full string either way
+    (bare -> "p.probealpha", prefixed -> "EXAMPLECORP\\p.probebravo") — the collapse
+    happens in analytics identity resolution, downstream of XDM.  Connection-event
+    IDFW parentheticals still use _ad_user(); they land in dst_fwuser, which the
+    modeling rule never reads.
+    """
+    if not user or user == "N/A":
+        return ""
+    return user.split("\\")[-1] if "\\" in user else user
+
 
 NAME        = "Cisco ASA Firewall"
 DESCRIPTION = "Simulates Cisco ASA syslog messages for the XSIAM cisco_asa_raw dataset."
@@ -57,23 +87,104 @@ CONFIG_KEY  = "cisco_asa_config"
 # VPN analytics detection that ASA syslog can drive directly. Detections that
 # require AppID, process info, AD identity sync, or AnyConnect posture data are
 # intentionally absent — ASA cannot supply the necessary fields.
+# NOTE: XSIAM's Cisco ASA analytics only consume connection messages
+# (302013/302014/302015/302016) and AnyConnect session messages
+# (113019/113039/716001/716002/722022/722023/722033/722034/722037/722051/722053).
+# ASA deny (106023) and cut-through auth (109001/109005/109006) messages are NOT
+# parsed into XDM, so any threat built on them can never fire a XSIAM analytic:
+#   - external_port_scan (106023)  -> REMOVED (internal port_scan uses 302013/14 and works;
+#                                      external denies are unparseable by XSIAM).
+#   - vpn_bruteforce      (109006) -> DELISTED from this catalog (no supported AnyConnect
+#                                      auth-failure message exists). The function is kept
+#                                      only for the cross-source XQL-hunt scenario, which
+#                                      reads the RAW cisco_asa_raw text, not XDM.
+#   - large_download (302013/14)  -> REMOVED (ASA logs one TOTAL byte value that maps to
+#                                      xdm.source.sent_bytes; a "download" is indistinguishable
+#                                      from an upload, so it fired "Large Upload", never a
+#                                      distinct download detection).
 _DEFAULT_THREAT_NAMES = [
     "port_scan", "failed_connections_burst",
     "large_single_upload_session", "cumulative_upload_session",
     "unusual_ssh_session", "unusual_rdp_session", "ssh_proxy_attack",
-    "tor_connection", "vpn_bruteforce", "vpn_impossible_travel", "dns_c2_beacon",
+    "tor_connection", "vpn_impossible_travel", "dns_c2_beacon",
     "server_outbound_http", "workstation_lateral_rdp",
-    "vpn_tor_login", "smb_new_host_lateral", "smb_rare_file_transfer", "smb_share_enumeration",
+    # new_admin_behavior / abnormal_rdp_rare_host are deliberately ABSENT here — see the
+    # WIP notes on their generators. They stay reachable by name for testing but must not
+    # run ambiently: both target first-seen detectors, so unproven ambient runs burn
+    # scarce novel combinations and pollute the baselines the working detectors rely on.
+    "vpn_tor_login", "vpn_new_country_login",
+    "smb_new_host_lateral", "smb_rare_file_transfer", "smb_share_enumeration",
     "smtp_spray", "smtp_large_exfil",
     "torrent_client", "new_ftp_server", "dc_smb_outbound",
+    "reverse_ssh_tunnel", "ldap_recon",
+    # Non-analytic events: genuine, XSIAM-parseable connection/session
+    # patterns with NO built-in XSIAM analytic. Surfaced for raw/XQL-hunt/custom-rule use
+    # and shown with a "[Non-Analytic] " prefix in the dashboard (see _NON_ANALYTIC_EVENTS).
+    "web_c2_beacon", "cryptomining", "rare_port_connection",
+    "vpn_data_exfil", "vpn_concurrent_sessions", "external_fanout",
 ]
-_DEFAULT_THREAT_WEIGHTS = [15, 10, 8, 4, 5, 3, 4, 3, 3, 2, 1, 1, 1, 3, 4, 3, 5, 3, 2, 3, 2, 3]
+# Positional 1:1 with _DEFAULT_THREAT_NAMES — keep the two lists in step when editing.
+_DEFAULT_THREAT_WEIGHTS = [15, 10, 8, 4, 5, 3, 4, 3, 2, 1, 1, 1,
+                           4, 4,
+                           3, 4, 4, 3, 5, 3, 2, 3, 2, 3,
+                           2, 3,
+                           2, 2, 2, 2, 2, 2]
+
+# Events with no built-in XSIAM detection — shown as "[Non-Analytic] <name>" in the
+# dashboard so operators know they won't fire a native analytic (raw / hunt / custom-rule use).
+_NON_ANALYTIC_PREFIX = "[Non-Analytic] "
+_NON_ANALYTIC_EVENTS = {
+    "web_c2_beacon", "cryptomining", "rare_port_connection",
+    # Volume-based events. ASA CONNECTION logs cannot carry byte volume into XDM.
+    # parse_cisco uses DIFFERENT byte key names per message family (measured
+    # over 64,264 events):
+    #   113019 AnyConnect  -> generalCiscoLog.sent_bytes + .received_bytes   (32, 0%)
+    #   302014/302016      -> generalCiscoLog.transferred_bytes             (31,902, 49%)
+    # CiscoASA_1_4.xif maps `xdm.source.sent_bytes = to_integer(_json ->
+    # generalCiscoLog.sent_bytes)`, which is CORRECT and works — but only for the
+    # AnyConnect family. It never reads transferred_bytes, so the 49% of events that
+    # carry connection volume are dropped from XDM. A one-line tenant-side change
+    # (coalesce sent_bytes with transferred_bytes) would fix it. Confirmed
+    # empirically: a 6-session 300-900 MB HTTPS upload burst was ingested at
+    # 19:43; the Large Upload detector ran at 20:01, fired for Check Point, and did not
+    # fire for ASA. These stay realistic raw traffic for XQL hunting. A tenant-side
+    # modeling rule mapping transferred_bytes -> xdm.source.sent_bytes would make all
+    # three analytic again — this classification is about the SHIPPED content pack.
+    "large_single_upload_session", "cumulative_upload_session", "smtp_large_exfil",
+    # smtp_spray targets "Spam Bot Traffic", which needs the APPLICATION identified —
+    # the firing alerts carry app_id 'ip,tcp,smtp'. Measured over the same
+    # window: xdm.network.application_protocol populated 0/6,770 on ASA SMTP events vs
+    # 816/816 (Firepower) and 1,054/1,054 (FortiGate), both of which fire it. It is NOT
+    # a volume or breadth problem — ASA shows 184 distinct mail servers from one host
+    # against Firepower's 50. ASA syslog is layer 3/4 and carries no application field,
+    # so parse_cisco never yields generalCiscoLog.application. The raw traffic is still
+    # good: the "Cisco ASA — Outbound SMTP Spam Bot Activity" correlation rule fires on
+    # it. Unreachable as a native analytic.
+    "smtp_spray",
+    # vpn_data_exfil stays Non-Analytic. It IS now the only ASA event whose volume
+    # reaches xdm.source.sent_bytes (see _simulate_vpn_data_exfil), but that alone is
+    # not enough for a volume detector. Measured: ASA events carrying
+    # sent_bytes = 7,752; carrying sent_bytes AND any destination port = 0; AND port
+    # 443 = 0 (Check Point, which fires Large Upload, has 1,243). The 113019 messages
+    # that carry bytes have dst_ip/dst_port/application all null — they are session
+    # summaries, not flow records — so nothing can satisfy "uploaded X to external
+    # host Y over port 443". Volume-based analytics are UNREACHABLE for ASA.
+    "vpn_data_exfil", "vpn_concurrent_sessions", "external_fanout",
+}
+
+
+def _strip_non_analytic_prefix(name):
+    """Dashboard passes display names that may carry the '[Non-Analytic] ' prefix; strip it."""
+    if name and name.lower().startswith(_NON_ANALYTIC_PREFIX.lower()):
+        return name[len(_NON_ANALYTIC_PREFIX):]
+    return name
 
 
 def get_threat_names():
-    """Return available threat names dynamically from _DEFAULT_THREAT_NAMES.
-    Adding a new entry to _DEFAULT_THREAT_NAMES automatically surfaces it here."""
-    return list(_DEFAULT_THREAT_NAMES)
+    """Return available threat names from _DEFAULT_THREAT_NAMES. Events with no built-in
+    XSIAM detection (_NON_ANALYTIC_EVENTS) are prefixed with '[Non-Analytic] '."""
+    return [(_NON_ANALYTIC_PREFIX + n) if n in _NON_ANALYTIC_EVENTS else n
+            for n in _DEFAULT_THREAT_NAMES]
 
 
 # ---------------------------------------------------------------------------
@@ -110,12 +221,19 @@ def _format_duration(seconds):
 
 
 def _random_external_ip():
-    """Realistic public (non-RFC-1918) IP address."""
-    first_octets = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 194, 212, 213]
-    return (f"{random.choice(first_octets)}."
-            f"{random.randint(1,254)}."
-            f"{random.randint(1,254)}."
-            f"{random.randint(1,254)}")
+    """Public (non-RFC-1918) IP from the shared ambient external-traffic pool.
+
+    DO NOT "FIX" THIS BACK to `random.choice(first_octets)` + 3 random octets.
+    That construction picked a random host inside one of 14
+    different /8 blocks; a /8 spans dozens of countries, and across all modules it
+    was a primary driver of the 210 DISTINCT COUNTRIES seen in
+    xdm.source.location.country over 30 days.  That saturation permanently
+    silenced the XSIAM analytic "First successful VPN access from a country in
+    organization", which only fires on a country unseen org-wide for 30 days.
+    session_utils.random_external_ip() draws from 35 individually XSIAM-PROBED
+    /24s that are disjoint from config['vpn_novel_country_pool'].
+    """
+    return random_external_ip()
 
 
 # Stable per-src NAT mapping — real PAT keeps a sticky external IP for each
@@ -179,10 +297,13 @@ def _generate_full_syslog_message(config, asa_message, event_time=None):
             break
 
     pri = 20 * 8 + sev
-    # RFC 5424 framing: <PRI>VERSION TIMESTAMP HOSTNAME : MSG
-    # Matches Cisco ASA with `logging timestamp rfc5424` enabled, which is the
-    # format the XSIAM parse_cisco() built-in is calibrated against.
-    return f"<{pri}>1 {timestamp} {hostname} : {asa_message}"
+    # Cisco ASA with `logging timestamp rfc5424`: <PRI>TIMESTAMP HOSTNAME : MSG
+    # ASA only switches the TIMESTAMP to ISO8601 — it does NOT emit an RFC 5424
+    # version digit or structured-data. Genuine sample from Cisco's syslog guide:
+    #   <166>2018-06-27T12:17:46Z asa : %ASA-6-110002: Failed to locate egress ...
+    # A spurious "1 " version token here breaks the XSIAM parse_cisco() built-in,
+    # leaving _json empty so NO fields extract and NO analytics ever fire.
+    return f"<{pri}>{timestamp} {hostname} : {asa_message}"
 
 
 def _get_user_ip_map(config):
@@ -224,17 +345,26 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
                                   user, bytes_sent, bytes_received, duration_sec,
                                   direction="outbound",
                                   src_interface="inside", dest_interface="outside",
-                                  teardown_reason="TCP FINs"):
+                                  teardown_reason="TCP FINs", event_time=None):
     """
     Generates a Built + Teardown log pair for a TCP, UDP, or ICMP session.
 
-    Syslog format (TCP/UDP outbound):
+    event_time: optional datetime for the Built message; the Teardown is placed
+                duration_sec later. Defaults to None, which keeps the original
+                behaviour of stamping both messages with the current time.
+                ASA syslog timestamps are second-resolution, so a multi-session
+                generator that does not pass this lands its whole burst inside one
+                second and any detection that reasons over time sees a single point.
+
+    Syslog format (TCP/UDP outbound) — clause order intentionally SWAPPED versus
+    genuine Cisco so that Cortex parse_cisco() resolves the internal host as the
+    source; see the comment block at the emit site before changing this:
       %ASA-6-302013: Built outbound TCP connection N
-        for outside:dest_ip/dest_port (dest_ip/dest_port)
-        to inside:src_ip/src_port (nat_ip/nat_port) (user)
+        for inside:src_ip/src_port (nat_ip/nat_port)
+        to outside:dest_ip/dest_port (dest_ip/dest_port) (user)
       %ASA-6-302014: Teardown TCP connection N
-        for outside:dest_ip/dest_port to inside:src_ip/src_port
-        duration H:MM:SS bytes N [reason] user username
+        for inside:src_ip/src_port to outside:dest_ip/dest_port
+        duration H:MM:SS bytes N [reason] (user)
 
     ICMP uses faddr/gaddr/laddr keywords (302020/302021).
 
@@ -248,7 +378,10 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
       xdm.target.interface       ← dest_interface
       xdm.intermediate.ipv4      ← nat_ip (NAT-translated address)
       xdm.intermediate.port      ← nat_port
-      xdm.source.user.username   ← user (in parentheses at end of Built line)
+      xdm.source.user.username   ← NOT populated for connection events: the trailing
+                                   parenthetical parses to generalCiscoLog.dst_fwuser,
+                                   which CiscoASA_1_4.xif never reads.  ASA usernames
+                                   in XDM come only from vpn_user on AnyConnect events.
       xdm.network.session_id     ← conn_id
       xdm.event.duration         ← duration_str (H:MM:SS → ms via XIF regex)
       xdm.source.sent_bytes      ← bytes_sent component of total bytes
@@ -260,6 +393,12 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
     session_logs = []
     conn_id  = random.randint(100000, 999999)
     src_port = random.randint(49152, 65535)
+
+    # Built at event_time, Teardown duration_sec later. Both stay None when the caller
+    # does not ask for placement, so _generate_full_syslog_message falls back to now.
+    built_time    = event_time
+    teardown_time = (event_time + timedelta(seconds=max(0, int(duration_sec)))
+                     if event_time else None)
 
     # Same-interface traffic (intra-interface lateral) → direction reported as
     # "inbound" — matches real ASA behaviour with `same-security-traffic permit
@@ -280,22 +419,38 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
     fw_user      = _ad_user(user) if user else ""
     user_paren   = f" ({fw_user})" if fw_user else ""
 
-    # ICMP uses the faddr/gaddr/laddr format (302020/302021)
+    # ICMP uses the faddr/gaddr/laddr format (302020/302021). Verified against the
+    # official Cisco PDF "Syslog Messages 302003 to 342008":
+    #
+    #   %ASA-6-302020: Built inbound ICMP connection for faddr src_ip_address/src_port
+    #   gaddr dest_ip_address/dest_port laddr dest_ip_address/dest_port [(user)]
+    #   type type code code
+    #
+    # and the field list defines: faddr = foreign host, gaddr = global host,
+    # laddr = local host, "type — Specifies the ICMP type", "code — Specifies the ICMP
+    # code". So the value after each address is a PORT, and the ICMP type and code are
+    # SEPARATE TRAILING KEYWORD FIELDS.
+    #
+    # This module previously emitted `faddr <addr>/<icmp_seq> gaddr <addr>/<icmp_type>
+    # laddr <addr>/<icmp_code>` with no trailing type/code, on the basis of a comment
+    # claiming that was the official template. It is not — the doc has no icmp_seq_num
+    # field at all. ICMP carries no ports, so real ASA logs /0.
     if protocol == "ICMP":
-        icmp_type = random.choice([0, 8])
+        icmp_type = random.choice([0, 8])       # 8 = echo request, 0 = echo reply
         icmp_code = 0
         faddr = dest_ip
         gaddr = nat_ip if dest_interface == "outside" else dest_ip
         laddr = src_ip
+        icmp_tail = f"{user_paren} type {icmp_type} code {icmp_code}"
         session_logs.append(_generate_full_syslog_message(config,
             f"%ASA-6-302020: Built {effective_direction} ICMP connection for "
-            f"faddr {faddr}/{icmp_type} gaddr {gaddr}/{icmp_type} laddr {laddr}/{icmp_code}"
-            f"{user_paren}"
+            f"faddr {faddr}/0 gaddr {gaddr}/0 laddr {laddr}/0"
+            f"{icmp_tail}", built_time
         ))
         session_logs.append(_generate_full_syslog_message(config,
             f"%ASA-6-302021: Teardown ICMP connection for "
-            f"faddr {faddr}/{icmp_type} gaddr {gaddr}/{icmp_type} laddr {laddr}/{icmp_code}"
-            f"{user_paren}"
+            f"faddr {faddr}/0 gaddr {gaddr}/0 laddr {laddr}/0"
+            f"{icmp_tail}", teardown_time
         ))
         return session_logs
 
@@ -306,16 +461,35 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
         built_id, teardown_id = "302015", "302016"
         teardown_reason = ""  # UDP teardowns have no reason field
 
-    # Real Cisco ASA format puts a SPACE between the NAT mapping and the IDFW
-    # user parenthetical, and omits the parenthetical entirely when no user is
-    # mapped (system / unattributed sessions like NTP, DHCP).
+    # DELIBERATE DEVIATION FROM GENUINE CISCO — DO NOT "FIX" BACK.  Real ASA logs an
+    # outbound connection with the DESTINATION leading the `for` clause and the
+    # initiator in the `to` clause:
+    #   Built outbound TCP connection 506986 for outside:17.151.140.30/80
+    #     (17.151.140.30/80) to inside:192.168.1.44/61094 (50.197.188.217/61094)
+    # (Cisco Secure Firewall ASA Series Syslog Messages, 302003-342008.)  Cortex's
+    # built-in parse_cisco() assigns `for`->src_ip and `to`->dst_ip unconditionally,
+    # so emitting the genuine order made XSIAM record the EXTERNAL PEER as the actor
+    # on ~91% of our events.  Analytics baseline the source entity, so nothing could
+    # ever accumulate and cisco_asa_raw fired ZERO analytics while Check Point /
+    # FortiGate / Firepower (all source-correct) fired normally.  Verified in-tenant
+    # swapping the clauses makes generalCiscoLog.src_ip the internal host.
+    # We choose parser-correctness over byte-fidelity here because driving XSIAM
+    # analytics is this module's purpose.
+    #
+    # The IDFW user parenthetical stays TRAILING with a leading SPACE: that is the
+    # only layout parse_cisco recognises (no-space and per-side forms parse to
+    # nothing).  It lands in generalCiscoLog.dst_fwuser, which CiscoASA_1_4.xif does
+    # not read -- xdm.source.user.username comes from coalesce(user, src_fwuser,
+    # vpn_user) -- so non-VPN user attribution is unreachable through this parser.
+    # It is kept for raw-log searching and correlation rules.  Omitted entirely when
+    # no user is mapped (system / unattributed sessions like NTP, DHCP).
     built_log = (
         f"%ASA-6-{built_id}: Built {effective_direction} {protocol} connection {conn_id} "
-        f"for {dest_interface}:{dest_ip}/{dest_port} ({dest_ip}/{dest_port}) "
-        f"to {src_interface}:{src_ip}/{src_port} ({nat_ip}/{nat_port})"
+        f"for {src_interface}:{src_ip}/{src_port} ({nat_ip}/{nat_port}) "
+        f"to {dest_interface}:{dest_ip}/{dest_port} ({dest_ip}/{dest_port})"
         f"{user_paren}"
     )
-    session_logs.append(_generate_full_syslog_message(config, built_log))
+    session_logs.append(_generate_full_syslog_message(config, built_log, built_time))
 
     duration_str = _format_duration(duration_sec)
     reason_str   = f" {teardown_reason}" if teardown_reason else ""
@@ -323,12 +497,12 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
 
     teardown_log = (
         f"%ASA-6-{teardown_id}: Teardown {protocol} connection {conn_id} "
-        f"for {dest_interface}:{dest_ip}/{dest_port} "
-        f"to {src_interface}:{src_ip}/{src_port} "
+        f"for {src_interface}:{src_ip}/{src_port} "
+        f"to {dest_interface}:{dest_ip}/{dest_port} "
         f"duration {duration_str} bytes {total_bytes}{reason_str}"
         f"{user_paren}"
     )
-    session_logs.append(_generate_full_syslog_message(config, teardown_log))
+    session_logs.append(_generate_full_syslog_message(config, teardown_log, teardown_time))
     return session_logs
 
 
@@ -376,14 +550,14 @@ def _generate_anyconnect_vpn_log(config, user=None, public_ip=None, session_cont
         # Session Start — documented Cisco format is positional, severity 6:
         #   %ASA-6-113039: Group <group> User <user> IP <peer> AnyConnect parent session started.
         message = (
-            f"%ASA-6-113039: Group <{group_name}> User <{_ad_user(user)}> IP <{public_ip}> "
+            f"%ASA-6-113039: Group <{group_name}> User <{_vpn_user(user)}> IP <{public_ip}> "
             f"AnyConnect parent session started."
         )
     else:
         # Session End
         duration = random.randint(60, 3600)
         message = (
-            f"%ASA-4-113019: Group = {group_name}, Username = {_ad_user(user)}, IP = {public_ip}, "
+            f"%ASA-4-113019: Group = {group_name}, Username = {_vpn_user(user)}, IP = {public_ip}, "
             f"Session disconnected. Session Type: {session_type}, "
             f"Duration: {_format_duration(duration)}, "
             f"Bytes xmt: {random.randint(5000, 1000000)}, "
@@ -563,7 +737,7 @@ def _simulate_inbound_block(config):
     message = (
         f"%ASA-4-106023: Deny {protocol.lower()} src outside:{scanner_ip}/{src_port} "
         f"dst inside:{target_ip}/{dest_port} "
-        f"by access_group {acl_name} [0x{hash1:08x}, 0x0]"
+        f'by access-group "{acl_name}" [0x{hash1:08x}, 0x0]'
     )
     return _generate_full_syslog_message(config, message)
 
@@ -783,19 +957,156 @@ def _simulate_server_outbound_http(config, session_context=None, src_ip_override
 
 
 def _simulate_workstation_lateral_rdp(config, internal_host_ip, session_context=None):
-    """RDP from one internal workstation to another — suspicious lateral movement."""
-    internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
-    try:
-        dest_ip = rand_ip_from_network(ip_network(internal_net))
-    except (AddressValueError, IndexError):
-        dest_ip = "192.168.1.101"
-    if dest_ip == internal_host_ip:
-        return None
+    """RDP from one workstation to MULTIPLE internal hosts — lateral movement.
 
-    user = _get_user_from_ip(config, internal_host_ip, session_context)
+    UEBA lateral-movement detection keys on breadth: a single RDP is background noise,
+    but one workstation opening RDP (3389) to many internal hosts in a short window is
+    the anomaly. Generates 5-8 RDP sessions to DISTINCT internal destinations.
+    Returns list of syslog strings (multi-event).
+    """
+    user     = _get_user_from_ip(config, internal_host_ip, session_context)
+    n_hosts  = random.randint(5, 8)
+    dest_ips = set()
+
+    if session_context:
+        for _ in range(30):
+            peer = get_random_user(session_context, preferred_device_type='workstation')
+            if peer and peer.get('ip') and peer['ip'] != internal_host_ip:
+                dest_ips.add(peer['ip'])
+            if len(dest_ips) >= n_hosts:
+                break
+
+    internal_nets = config.get('internal_networks', ['192.168.1.0/24'])
+    while len(dest_ips) < n_hosts:
+        try:
+            host = rand_ip_from_network(ip_network(random.choice(internal_nets), strict=False))
+            if host != internal_host_ip:
+                dest_ips.add(host)
+        except (ValueError, AddressValueError, IndexError):
+            dest_ips.add(f"192.168.1.{random.randint(101, 200)}")
+
+    logs = []
+    for dst_ip in list(dest_ips)[:n_hosts]:
+        logs.extend(_generate_connection_session(
+            config, "TCP", internal_host_ip, dst_ip, 3389, user,
+            random.randint(5_000, 80_000), random.randint(5_000, 80_000),
+            random.randint(30, 600),
+            src_interface="inside", dest_interface="inside",
+            teardown_reason="TCP FINs"
+        ))
+    return logs
+
+
+# Remote-administration service ports. "New Administrative Behavior" counts NOVEL
+# (destination, admin-port) pairs per source host over a 12-hour window, so breadth
+# across both axes is the signal — volume to one destination is not.
+_ADMIN_PORTS = [22, 23, 69, 161, 512, 513, 514, 623, 992]
+
+
+def _rare_internal_host(config, exclude=()):
+    """Internal address drawn from the wide internal space, avoiding the hot server pool.
+
+    Rarity detectors score a destination by how often it has RECEIVED that protocol from
+    other hosts. config['internal_servers'] is a 25-address list, so any generator that
+    picks its destination from it makes every destination a frequent receiver and the
+    rarity condition can never hold. internal_networks spans /16s, so a destination drawn
+    from it is a first-time receiver.
+    """
+    servers = set(config.get('internal_servers', []))
+    nets    = config.get('internal_networks', ['10.1.0.0/16'])
+    for _ in range(40):
+        try:
+            candidate = rand_ip_from_network(ip_network(random.choice(nets), strict=False))
+        except (ValueError, AddressValueError, IndexError):
+            continue
+        if candidate not in servers and candidate not in exclude:
+            return candidate
+    return f"10.1.{random.randint(20, 250)}.{random.randint(2, 250)}"
+
+
+def _simulate_new_admin_behavior(config, internal_host_ip, session_context=None):
+    """One internal host performing many FIRST-TIME administrative actions.
+
+    WORK IN PROGRESS — NOT PROVEN TO FIRE FROM ASA, and deliberately not registered in
+    the ambient threat pool. ASA supplies no xdm.network.application_protocol at all,
+    while this detector's reference alerts carry an application in app_id. That gap is
+    inside Cortex's built-in parse_cisco(), so no change here can close it. Reachable by
+    name for testing; leave it out of ambient traffic until it is shown to fire, because
+    this is a first-seen detector and ambient runs burn scarce novel combinations.
+
+    Opens 8-11 DISTINCT (internal destination, admin port) pairs from a single source.
+    Each pair is novel for that source, which is what the detector counts; repeat
+    connections to one destination score as a single action and never fire.
+
+    The source must be an internal host that already carries ambient traffic — the
+    detector compares against that host's own administrative baseline, so a freshly
+    minted address has nothing to deviate from.
+
+    Sessions are placed across the past 30-75 minutes via event_time. ASA syslog
+    timestamps are second-resolution, so without that the whole set lands in one second
+    and reads as a single automated action rather than a behavioural pattern.
+
+    Returns list of syslog strings (multi-event).
+    """
+    user      = _get_user_from_ip(config, internal_host_ip, session_context)
+    n_actions = random.randint(8, 11)
+    ports     = random.sample(_ADMIN_PORTS, min(n_actions, len(_ADMIN_PORTS)))
+
+    pairs, used_dests = [], {internal_host_ip}
+    for i in range(n_actions):
+        # Reuse a destination across two admin ports sometimes — the reference pattern is
+        # several actions spread over fewer destinations than actions, not one host each.
+        if pairs and random.random() < 0.3:
+            dest_ip = random.choice(pairs)[0]
+        else:
+            dest_ip = _rare_internal_host(config, exclude=used_dests)
+            used_dests.add(dest_ip)
+        pairs.append((dest_ip, ports[i % len(ports)]))
+
+    now       = datetime.now(timezone.utc)
+    window_s  = random.randint(30, 75) * 60
+    offsets   = sorted(random.randint(0, window_s) for _ in pairs)
+
+    logs = []
+    for (dest_ip, dport), back_s in zip(pairs, offsets):
+        duration = random.randint(2, 90)
+        logs.extend(_generate_connection_session(
+            config, "TCP", internal_host_ip, dest_ip, dport, user,
+            random.randint(1_000, 40_000), random.randint(1_000, 60_000), duration,
+            src_interface="inside", dest_interface="inside",
+            teardown_reason="TCP FINs",
+            event_time=now - timedelta(seconds=back_s),
+        ))
+    return logs
+
+
+def _simulate_abnormal_rdp_rare_host(config, internal_host_ip, session_context=None):
+    """A single RDP session from a seldom-seen internal host to a seldom-targeted one.
+
+    WORK IN PROGRESS — NOT PROVEN TO FIRE FROM ASA, and deliberately not registered in
+    the ambient threat pool. The detector's alerts carry app_id 'ip,tcp,rdp' (Firepower
+    fires it with 'ip,rdp'), but ASA supplies no xdm.network.application_protocol at all,
+    so it cannot present an application by any route available to this module. The same
+    shape DOES fire from Firepower, Check Point and FortiGate. Reachable by name for
+    testing only.
+
+    The detector needs three rarity conditions at once: the source is rarely observed,
+    the RDP pattern is abnormal for the segment, and the destination has rarely RECEIVED
+    RDP from other hosts. That last condition is why the destination does NOT come from
+    config['internal_servers'] — funnelling RDP into that small pool makes every
+    destination a frequent receiver.
+
+    Deliberately ONE session, not a burst: repeated attempts to the same host describe
+    brute force or a lateral sweep, which are different detections.
+
+    Returns list of syslog strings (Built+Teardown pair).
+    """
+    dest_ip = _rare_internal_host(config, exclude={internal_host_ip})
+    user    = _get_user_from_ip(config, internal_host_ip, session_context)
     return _generate_connection_session(
         config, "TCP", internal_host_ip, dest_ip, 3389, user,
-        50000, 50000, random.randint(120, 1800),
+        random.randint(20_000, 400_000), random.randint(50_000, 3_000_000),
+        random.randint(120, 2_400),
         src_interface="inside", dest_interface="inside"
     )
 
@@ -829,7 +1140,13 @@ def _simulate_ssh_session(config, internal_host_ip, session_context=None):
 def _simulate_port_scan(config, scanner_ip, session_context=None):
     """
     Internal port scan — 100–200 rapid TCP connections to the same victim.
-    All sessions use teardown_reason "TCP Reset-I" (no service listening).
+    All sessions use teardown_reason "TCP Reset - I" (no service listening).
+
+    NOTE THE SPACES. Cisco's TCP Termination Reasons table (Syslog Messages 302003 to
+    342008, message 302014) documents the value as "TCP Reset - I" — "Reset was from
+    the inside" — alongside "TCP Reset - O" and "TCP Reset - APPLIANCE". This module
+    previously emitted "TCP Reset-I" (no spaces), which is not a real ASA value.
+    Verified against the official PDF: "TCP Reset-I" does not appear anywhere in it.
     Triggers: "Port Scan" XSIAM analytics detection.
     """
     if not config.get('internal_servers'):
@@ -840,11 +1157,22 @@ def _simulate_port_scan(config, scanner_ip, session_context=None):
 
     user      = _get_user_from_ip(config, scanner_ip, session_context)
     scan_logs = []
-    for port in random.sample(range(1, 65535), random.randint(100, 200)):
+    # Scan WELL-KNOWN SERVICE PORTS only (1-1023), matching checkpoint_firewall and
+    # fortinet_fortigate — both of which fire "Suspicious port scan" reliably, and both
+    # of which use random.sample(range(1, 1024), ...).
+    #
+    # This previously sampled range(1, 65535). Uniform sampling over the full range puts
+    # ~75% of probes in the EPHEMERAL range (49152-65535), which reads as ordinary return
+    # traffic rather than service enumeration; measured in-tenant, whole ASA
+    # scans landed at 49247..65503 / 49442..65490 with not a single service port. The one
+    # ASA "Suspicious port scan" that ever fired scanned ports 2, 4, 25, 33,
+    # 60, 63, 77, 80, 86, 95, 102, 525... — all low. Check Point/FortiGate scans that fire
+    # today sit at 2..8443 / 1..1013.
+    for port in random.sample(range(1, 1024), random.randint(100, 200)):
         scan_logs.extend(_generate_connection_session(
             config, "TCP", scanner_ip, victim_ip, port, user, 0, 0, 0,
             src_interface="inside", dest_interface="inside",
-            teardown_reason="TCP Reset-I"
+            teardown_reason="TCP Reset - I"
         ))
     # 1-2 successful connections on common open ports — attacker finds live services
     open_ports = random.sample([22, 80, 443, 445, 3389, 8080, 8443], k=random.randint(1, 2))
@@ -914,15 +1242,16 @@ def _simulate_tor_connection_session(config, internal_host_ip, session_context=N
 
 def _simulate_vpn_bruteforce_or_scan(config, session_context=None, victim_user=None, attacker_ip=None):
     """
-    Credential stuffing attack against the VPN gateway — single external IP trying
-    many usernames, each with 2–5 rapid 109006 auth failures.
+    Credential stuffing against the VPN gateway — single external IP trying many
+    usernames, each with 2–5 rapid 109006 auth failures, then one 109005 success.
 
-    Uses %ASA-6-109006 (Authentication failed) on interface outside, which is the
-    correct signal for XSIAM VPN brute force / credential scan detection.
-    109006 is distinct from AnyConnect session events (113039/113019) — it fires
-    when the auth exchange itself fails, before a session is built.
-
-    Triggers: "VPN Brute Force / Credential Scan" analytics detection.
+    RAW-ONLY: this is built on 109001/109005/109006 cut-through-auth
+    messages, which XSIAM's Cisco ASA analytics do NOT parse into XDM — so it can
+    never fire a XSIAM analytic and is intentionally DELISTED from the threat catalog
+    (_DEFAULT_THREAT_NAMES). It is retained only for the cross-source XQL-hunt scenario
+    (ASA vpn_bruteforce username ∩ Okta impossible_travel), which correlates the RAW
+    cisco_asa_raw text, not XDM. There is no supported AnyConnect auth-failure message,
+    so failed VPN logins cannot be represented in a XSIAM-parseable way.
     """
     print("    - ASA Module simulating: VPN Brute-force/Scan")
 
@@ -980,10 +1309,21 @@ def _simulate_vpn_bruteforce_or_scan(config, session_context=None, victim_user=N
 
 def _simulate_vpn_impossible_travel(config, session_context=None, victim_user=None, vpn_inside_ip=None):
     """
-    One user connecting from two geographically distant IPs in rapid succession.
-    Triggers: "Impossible Travel" / "Anomalous VPN Location" analytics detection.
+    One user with two SUCCESSFUL AnyConnect logins from two geographically distant
+    source IPs within an impossible time window.
+
+    IMPORTANT: XSIAM's Cisco ASA analytics only parse AnyConnect SESSION
+    messages (113039/722051/…), NOT the 109001/109005/109006 cut-through-auth messages.
+    The earlier fail→success "door-knock" design (109006 failures then 109005 success)
+    is therefore invisible to XSIAM for ASA — those lines never model into XDM. The
+    genuine, parseable impossible-travel signal is two SUCCESSFUL AnyConnect sessions
+    for the same user from impossibly-distant IPs. Each login emits the supported
+    session sequence 113039 (parent session started) + 722051 (address assigned), with
+    a 5–10 minute gap between the two locations.
+
+    Returns list of syslog strings (multi-event).
     """
-    print("    - ASA Module simulating: VPN Impossible Travel")
+    print("    - ASA Module simulating: VPN Impossible Travel (door-knock + success x2 geos)")
 
     user = victim_user
     if not user and session_context:
@@ -996,49 +1336,12 @@ def _simulate_vpn_impossible_travel(config, session_context=None, victim_user=No
             return None
         user = random.choice(list(user_ip_map.keys()))
 
-    benign_loc    = config.get('impossible_travel_scenario', {}).get('benign_location', {})
+    benign_loc     = config.get('impossible_travel_scenario', {}).get('benign_location', {})
     suspicious_loc = config.get('impossible_travel_scenario', {}).get('suspicious_location', {})
 
-    # Place the legitimate login 5–10 minutes in the past; the attacker login is
-    # timestamped at now.  The gap is long enough for XSIAM to evaluate the pair
-    # as an impossible travel sequence while short enough to model a credential
-    # compromise (stolen creds used minutes after the real user authenticated).
-    gap_minutes   = random.randint(5, 10)
-    t_benign      = datetime.now(timezone.utc) - timedelta(minutes=gap_minutes)
-    t_suspicious  = datetime.now(timezone.utc)
-
-    asa_conf   = _get_asa_config(config)
-    group_name = asa_conf.get('vpn_group_name', 'TunnelGroup_AnyConnect')
-
-    # VPN pool IP assigned to the attacker session. The 722051 event binds the
-    # compromised user to this internal IP, so lateral movement (SMB/RDP) sourced
-    # from it stitches back to the same identity in XSIAM.
-    if not vpn_inside_ip:
-        vpn_pool = asa_conf.get('vpn_pool', '10.250.0.0/16')
-        try:
-            vpn_inside_ip = rand_ip_from_network(ip_network(vpn_pool, strict=False))
-        except Exception:
-            vpn_inside_ip = f"10.250.{random.randint(1,254)}.{random.randint(1,254)}"
-
-    def _vpn_start(public_ip, event_time):
-        msg = (
-            f"%ASA-6-113039: Group <{group_name}> User <{_ad_user(user)}> IP <{public_ip}> "
-            f"AnyConnect parent session started."
-        )
-        return _generate_full_syslog_message(config, msg, event_time)
-
-    def _vpn_assign(public_ip, inside_ip, event_time):
-        msg = (
-            f"%ASA-6-722051: Group <{group_name}> User <{_ad_user(user)}> IP <{public_ip}> "
-            f"Address <{inside_ip}> assigned to session"
-        )
-        return _generate_full_syslog_message(config, msg, event_time)
-
-    # Randomize the host octet of each public IP so every run gets distinct
-    # source IPs within the same /24 (same geo/country for the impossible-travel
-    # logic). A fixed suspicious IP makes XSIAM bind every run's impossible-travel
-    # alert to one shared source-IP incident; a per-run IP lets that alert group
-    # by user into the victim's own incident instead.
+    # Randomize the host octet so each run gets distinct source IPs within the same
+    # /24 (same geo/country) — lets the alert group by user into the victim's incident
+    # instead of binding every run to one shared source-IP incident.
     def _rand_host(ip, default):
         base = ip or default
         parts = base.split(".")
@@ -1048,10 +1351,101 @@ def _simulate_vpn_impossible_travel(config, session_context=None, victim_user=No
 
     benign_ip = _rand_host(benign_loc.get("ip"), "68.185.12.14")
     susp_ip   = _rand_host(suspicious_loc.get("ip"), "175.45.176.10")
+
+    # Legit login 5–10 min in the past; attacker login now. The gap between the two
+    # SUCCESSFUL logins is what makes the travel impossible.
+    gap_minutes  = random.randint(5, 10)
+    t_benign     = datetime.now(timezone.utc) - timedelta(minutes=gap_minutes)
+    t_suspicious = datetime.now(timezone.utc)
+
+    asa_conf   = _get_asa_config(config)
+    group_name = asa_conf.get('vpn_group_name', 'TunnelGroup_AnyConnect')
+    outside_ip = asa_conf.get('outside_ip', '203.0.113.1')
+    vpn_pool   = asa_conf.get('vpn_pool', '10.250.0.0/16')
+
+    def _inside_ip():
+        try:
+            return rand_ip_from_network(ip_network(vpn_pool, strict=False))
+        except Exception:
+            return f"10.250.{random.randint(1,254)}.{random.randint(1,254)}"
+
+    logs = []
+    for loc_ip, t_base in [(benign_ip, t_benign), (susp_ip, t_suspicious)]:
+        # Bind the compromised (suspicious) session to the caller's inside IP so
+        # scenario lateral movement stitches to this identity.
+        inside_ip = vpn_inside_ip if (loc_ip == susp_ip and vpn_inside_ip) else _inside_ip()
+        # Genuine successful-login AnyConnect sequence (supported messages only).
+        logs.append(_generate_full_syslog_message(config,
+            f"%ASA-6-113039: Group <{group_name}> User <{_vpn_user(user)}> IP <{loc_ip}> "
+            f"AnyConnect parent session started.", t_base))
+        logs.append(_generate_full_syslog_message(config,
+            f"%ASA-6-722051: Group <{group_name}> User <{_vpn_user(user)}> IP <{loc_ip}> "
+            f"Address <{inside_ip}> assigned to session", t_base + timedelta(seconds=1)))
+    return logs
+
+
+def _simulate_vpn_new_country_login(config, session_context=None):
+    """One SUCCESSFUL AnyConnect login from a country the org has never seen.
+
+    Drives the XSIAM analytic "First successful VPN access from a country in
+    organization", whose description reads:
+        "The user <u> connected to AnyConnect from <country>. The result of the
+         connection attempt was a SUCCESS. This behavior has not been observed
+         in the organization in the last 30 days."
+
+    WHY THIS EXISTS / DO NOT "FIX" IT AWAY:
+    The analytic is FIRST-SEEN and ORG-SCOPED. It had been silent because the
+    simulator had already emitted VPN logins
+    from 210 distinct countries in 30 days — every country on Earth was "seen",
+    so nothing could ever be novel.  Scarcity alone is not enough to restart it:
+    something has to deliberately visit a country the ambient baseline never
+    touches.  That is this function.
+
+    session_utils.novel_country_vpn_ip() picks from config['vpn_novel_country_pool']
+    (70 XSIAM-PROBED single-country /24s, disjoint from benign_ingress_sources,
+    external_traffic_sources and the Tor prefix allowlist) and rotates on the day
+    number, so a given country recurs every 70 days — comfortably outside the
+    detector's 30-day novelty window.  The rotation is day-keyed rather than
+    random so that ASA, Check Point, FortiGate, Firepower and Zscaler all choose
+    the SAME country on the same day: the detector is org-scoped, so five sources
+    picking five different countries per day would burn the pool in 14 days.
+
+    Emits the supported successful-session sequence only (113039 parent session
+    started + 722051 address assigned) — XSIAM's Cisco ASA analytics do not parse
+    the 109001/109005 cut-through-auth messages, see _simulate_vpn_impossible_travel.
+    """
+    novel_ip, cc, country, isp = novel_country_vpn_ip(config)
+    if not novel_ip:
+        return None
+    print(f"    - ASA Module simulating: First VPN access from new country "
+          f"({country} / {isp} / {novel_ip})")
+
+    user = None
+    if session_context:
+        user_info = get_random_user(session_context, preferred_device_type='workstation')
+        user = user_info['username'] if user_info else None
+    if not user:
+        user_ip_map = _get_user_ip_map(config)
+        if not user_ip_map:
+            return None
+        user = random.choice(list(user_ip_map.keys()))
+
+    asa_conf   = _get_asa_config(config)
+    group_name = asa_conf.get('vpn_group_name', 'TunnelGroup_AnyConnect')
+    vpn_pool   = asa_conf.get('vpn_pool', '10.250.0.0/16')
+    try:
+        inside_ip = rand_ip_from_network(ip_network(vpn_pool, strict=False))
+    except Exception:
+        inside_ip = f"10.250.{random.randint(1,254)}.{random.randint(1,254)}"
+
+    t0 = datetime.now(timezone.utc)
     return [
-        _vpn_start(benign_ip, t_benign),
-        _vpn_start(susp_ip, t_suspicious),
-        _vpn_assign(susp_ip, vpn_inside_ip, t_suspicious),
+        _generate_full_syslog_message(config,
+            f"%ASA-6-113039: Group <{group_name}> User <{_vpn_user(user)}> IP <{novel_ip}> "
+            f"AnyConnect parent session started.", t0),
+        _generate_full_syslog_message(config,
+            f"%ASA-6-722051: Group <{group_name}> User <{_vpn_user(user)}> IP <{novel_ip}> "
+            f"Address <{inside_ip}> assigned to session", t0 + timedelta(seconds=1)),
     ]
 
 
@@ -1061,8 +1455,17 @@ def _simulate_vpn_tor_login(config, session_context=None):
     Triggers XSIAM: Suspicious VPN Login / TOR-based Access analytics detection.
     """
     print("    - ASA Module simulating: VPN Login from TOR Exit Node (successful)")
-    tor_nodes = config.get('tor_exit_nodes', [])
-    tor_ip    = random.choice(tor_nodes).get('ip', _random_external_ip()) if tor_nodes else _random_external_ip()
+    # DO NOT "FIX" THIS BACK to random.choice(config['tor_exit_nodes']).
+    # Probing the full live exit-node list through the tenant
+    # resolved them to 55 DISTINCT COUNTRIES with a rotating long tail
+    # (Seychelles, Belize, Nicaragua, Panama, Peru ...).  As the SOURCE IP of a
+    # successful VPN login that tail kept marking reserve countries "already
+    # seen", permanently silencing the analytic "First successful VPN access
+    # from a country in organization".  tor_vpn_ip() restricts the pool to the
+    # 182 probed /16 prefixes that resolve ONLY to the genuine Tor-heavy
+    # countries (US/DE/NL/FR/RO) — still 930 live nodes, so the HIGH-severity
+    # "A Successful VPN connection from TOR" analytic is unaffected.
+    tor_ip    = tor_vpn_ip(config, default=_random_external_ip())
 
     if session_context:
         user_info = get_random_user(session_context, preferred_device_type='workstation')
@@ -1099,7 +1502,7 @@ def _simulate_vpn_tor_login(config, session_context=None):
     # Log 2: VPN session start (113039) — primary detection event.
     # Documented Cisco format: positional, severity 6.
     start_msg = (
-        f"%ASA-6-113039: Group <{group_name}> User <{_ad_user(user)}> IP <{tor_ip}> "
+        f"%ASA-6-113039: Group <{group_name}> User <{_vpn_user(user)}> IP <{tor_ip}> "
         f"AnyConnect parent session started."
     )
     logs.append(_generate_full_syslog_message(config, start_msg,
@@ -1227,7 +1630,7 @@ def _simulate_smb_share_enumeration(config, src_ip, session_context=None):
     for dst_ip in list(target_ips)[:n_targets]:
         # Brief session: small bytes, short duration — probe then immediately disconnect.
         # Share enumeration completes the TCP handshake before walking shares, so
-        # use TCP FINs (clean close) rather than TCP Reset-I (port-scan semantics).
+        # use TCP FINs (clean close) rather than "TCP Reset - I" (port-scan semantics).
         logs.extend(_generate_connection_session(
             config, "TCP", src_ip, dst_ip, 445, user,
             random.randint(40, 200), random.randint(40, 200),
@@ -1308,16 +1711,18 @@ def _simulate_smtp_large_exfil(config, src_ip, session_context=None):
 
 
 def _simulate_failed_connections_burst(config, attacker_ip=None):
-    """High volume of 106023 denies from one external IP — XSIAM "Failed Connections" detection.
+    """High volume of FAILED connection attempts from one external source — XSIAM
+    "Failed Connections" detection.
 
-    The detection fires when a single source generates an abnormal count of blocked
-    connections in a short window.  Single-shot inbound_block events don't reach
-    the threshold; this generator emits 50–150 denies from one attacker IP across
-    a varied internal target set.  `attacker_ip` pins the source so a scenario can
+    XSIAM's Cisco ASA analytics only parse connection messages (302013/302014), NOT
+    ACL denies (106023). So a genuine, parseable "failed connection" is one the ASA
+    PERMITS but that the target never answers: the ASA builds the flow (302013) then
+    tears it down (302014) with reason "SYN Timeout" and 0 bytes. A burst of these
+    from one source to many internal host/port pairs is the detection signal. Emits
+    50–150 such Built+Teardown pairs. `attacker_ip` pins the source so a scenario can
     key every perimeter stage to one external attacker.
     """
-    print("    - ASA Module simulating: Failed Connections burst")
-    acl_name    = _get_acl_name(config)
+    print("    - ASA Module simulating: Failed Connections burst (302013/302014 SYN Timeout)")
     attacker_ip = attacker_ip or _random_external_ip()
 
     internal_networks = config.get('internal_networks', ['10.10.1.0/24'])
@@ -1329,20 +1734,255 @@ def _simulate_failed_connections_burst(config, attacker_ip=None):
     scan_ports = [22, 23, 25, 80, 135, 139, 443, 445, 1433, 1521,
                   3306, 3389, 4444, 5900, 6379, 8080, 8443]
 
-    deny_logs = []
+    logs = []
     for _ in range(random.randint(50, 150)):
         target_ip = rand_ip_from_network(net) if net else f"10.10.1.{random.randint(2, 254)}"
         dest_port = random.choice(scan_ports)
-        src_port  = random.randint(1024, 65535)
-        protocol  = random.choices(["tcp", "udp"], weights=[85, 15], k=1)[0]
-        hash1     = random.randint(0, 0xFFFFFFFF)
-        deny_msg = (
-            f"%ASA-4-106023: Deny {protocol} src outside:{attacker_ip}/{src_port} "
-            f"dst inside:{target_ip}/{dest_port} "
-            f"by access_group {acl_name} [0x{hash1:08x}, 0x0]"
-        )
-        deny_logs.append(_generate_full_syslog_message(config, deny_msg))
-    return deny_logs
+        # Permitted inbound flow that the internal host never answers -> SYN Timeout,
+        # zero bytes. Emitted as a genuine 302013 (Built inbound) + 302014 (Teardown) pair.
+        logs.extend(_generate_connection_session(
+            config, "TCP", attacker_ip, target_ip, dest_port, "N/A", 0, 0, 0,
+            direction="inbound", src_interface="outside", dest_interface="inside",
+            teardown_reason="SYN Timeout"
+        ))
+    return logs
+
+
+# ---------------------------------------------------------------------------
+# XSIAM-firewall-analytics-aligned threat generators
+# ---------------------------------------------------------------------------
+# ASA native syslog does not log DNS query names, so DNS tunnelling and VPN
+# client-OS anomalies are NOT feasible here (no mappable field) and are omitted.
+
+def _asa_domain_controllers(config):
+    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses."""
+    asa_conf = _get_asa_config(config)
+    dcs = asa_conf.get('dc_servers') or config.get('domain_controllers')
+    return dcs or ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+
+
+def _simulate_reverse_ssh_tunnel(config, internal_host_ip, session_context=None):
+    """Internal host -> EXTERNAL IP on SSH/22 — reverse SSH tunnel / C2 over SSH.
+    Long-lived, high bidirectional volume; a few sessions to the SAME external host
+    (stable destination = the recurring-rare-destination signal). Returns list."""
+    dest_ip = _beacon_target_map.get(f"revssh::{internal_host_ip}")
+    if not dest_ip:
+        dest_ip = _random_external_ip()
+        _beacon_target_map[f"revssh::{internal_host_ip}"] = dest_ip
+    user = _get_user_from_ip(config, internal_host_ip, session_context)
+    logs = []
+    for _ in range(random.randint(2, 4)):
+        logs.extend(_generate_connection_session(
+            config, "TCP", internal_host_ip, dest_ip, 22, user,
+            random.randint(5, 80) * 1024 * 1024,
+            random.randint(5, 80) * 1024 * 1024,
+            random.randint(1800, 14400)
+        ))
+    return logs
+
+
+def _simulate_ldap_recon(config, internal_host_ip, session_context=None):
+    """One host querying MANY domain controllers on LDAP 389/636 — AD reconnaissance
+    (breadth + volume is the signal). Internal-to-internal sessions. Returns list."""
+    user = _get_user_from_ip(config, internal_host_ip, session_context)
+    logs = []
+    for dc in _asa_domain_controllers(config):
+        for _ in range(random.randint(3, 6)):
+            port = random.choice([389, 389, 636])
+            logs.extend(_generate_connection_session(
+                config, "TCP", internal_host_ip, dc, port, user,
+                random.randint(2_000, 40_000),      # large search requests
+                random.randint(20_000, 400_000),    # bulk directory results
+                random.randint(0, 5),
+                src_interface="inside", dest_interface="inside"
+            ))
+    return logs
+
+
+# ---------------------------------------------------------------------------
+# Non-analytic events — genuine, XSIAM-parseable connection/session
+# patterns with NO built-in XSIAM analytic. Raw / XQL-hunt / custom-rule targets.
+# Every one emits only supported message IDs (302013-16 / 113039 / 113019 / 722051).
+# ---------------------------------------------------------------------------
+
+_MINING_PORTS    = [3333, 4444, 5555, 7777, 8888, 9999, 14444, 45700]
+_RARE_DEST_PORTS = [1080, 1337, 2222, 5222, 6667, 8443, 9001, 9050]
+
+
+def _simulate_web_c2_beacon(config, internal_host_ip, session_context=None):
+    """HTTP(S) C2 beacon — repeated small TCP/443 connections to a STABLE rare external
+    IP at a regular cadence (web-layer counterpart to the DNS beacon). The recurring rare
+    destination IP + regular small transfers is the signal. Returns list."""
+    dest_ip = _beacon_target_map.get(f"webc2::{internal_host_ip}")
+    if not dest_ip:
+        dest_ip = _random_external_ip()
+        _beacon_target_map[f"webc2::{internal_host_ip}"] = dest_ip
+    user = _get_user_from_ip(config, internal_host_ip, session_context)
+    logs = []
+    for _ in range(random.randint(15, 40)):
+        logs.extend(_generate_connection_session(
+            config, "TCP", internal_host_ip, dest_ip, 443, user,
+            random.randint(200, 900), random.randint(200, 1500), random.randint(0, 3)
+        ))
+    return logs
+
+
+def _simulate_cryptomining(config, internal_host_ip, session_context=None):
+    """Cryptomining — long-lived, steady connections to a STABLE external IP on a mining
+    pool port. Persistence + rare port + rare IP. Returns list."""
+    dest_ip = _beacon_target_map.get(f"mining::{internal_host_ip}")
+    if not dest_ip:
+        dest_ip = _random_external_ip()
+        _beacon_target_map[f"mining::{internal_host_ip}"] = dest_ip
+    port = random.choice(_MINING_PORTS)
+    user = _get_user_from_ip(config, internal_host_ip, session_context)
+    logs = []
+    for _ in range(random.randint(4, 8)):
+        logs.extend(_generate_connection_session(
+            config, "TCP", internal_host_ip, dest_ip, port, user,
+            random.randint(50_000, 500_000), random.randint(100_000, 2_000_000),
+            random.randint(1800, 14400)   # long-lived pool sessions
+        ))
+    return logs
+
+
+def _simulate_rare_port_connection(config, internal_host_ip, session_context=None):
+    """Uncommon destination port — a host making an outbound connection to an unusual
+    service port it never normally uses. Returns list (Built+Teardown pair)."""
+    dest_ip = _random_external_ip()
+    port    = random.choice(_RARE_DEST_PORTS)
+    user    = _get_user_from_ip(config, internal_host_ip, session_context)
+    return _generate_connection_session(
+        config, "TCP", internal_host_ip, dest_ip, port, user,
+        random.randint(2_000, 50_000), random.randint(5_000, 200_000), random.randint(30, 600)
+    )
+
+
+def _simulate_external_fanout(config, internal_host_ip, session_context=None):
+    """One internal host connecting to a large number of DISTINCT external IPs in a short
+    window — mass scan / worm propagation / C2 discovery (distinct from port_scan, which
+    is many ports on ONE dest). Returns list."""
+    user = _get_user_from_ip(config, internal_host_ip, session_context)
+    port = random.choice([80, 443, 445])
+    logs = []
+    for _ in range(random.randint(60, 150)):
+        dest_ip = _random_external_ip()
+        logs.extend(_generate_connection_session(
+            config, "TCP", internal_host_ip, dest_ip, port, user,
+            random.randint(100, 2_000), random.randint(0, 1_500), random.randint(0, 3)
+        ))
+    return logs
+
+
+def _resolve_vpn_user_ip(config, session_context):
+    """Resolve a (user, public_ip) pair for the VPN-session non-analytic generators."""
+    user = None
+    if session_context:
+        ui = get_random_user(session_context, preferred_device_type='workstation')
+        user = ui['username'] if ui else None
+    if not user:
+        umap = _get_user_ip_map(config)
+        user = random.choice(list(umap.keys())) if umap else None
+    ingress = config.get('benign_ingress_sources', [{}])
+    src = random.choice(ingress) if ingress else {}
+    try:
+        public_ip = rand_ip_from_network(ip_network(src.get("ip_range", "68.185.12.0/24"), strict=False))
+    except (AddressValueError, ValueError):
+        public_ip = f"68.185.12.{random.randint(2, 254)}"
+    return user, public_ip
+
+
+def _simulate_vpn_data_exfil(config, session_context=None):
+    """AnyConnect session with anomalously high UPLOAD volume — data exfiltration over VPN.
+    Session start (113039) + disconnect (113019) carrying the volume. Returns list.
+
+    THE ONLY ASA PATH TO BYTE-VOLUME ANALYTICS. Connection events (302013/302014) can
+    never carry volume into XDM: parse_cisco puts the teardown byte count at
+    `_json.sentBytes`, but CiscoASA_1_4.xif reads `_json.generalCiscoLog.sent_bytes`,
+    which is ALWAYS null. Measured in-tenant across production
+    302014 teardowns, generalCiscoLog.sent_bytes populated 0 times while
+    _json.sentBytes populated 65,427 times. Only 113019/113039 reach
+    xdm.source.sent_bytes. So large_single_upload_session / cumulative_upload_session /
+    smtp_large_exfil / torrent_client CANNOT drive a volume detector however big their
+    byte values are — this generator is the substitute.
+
+    Field mapping verified in-tenant:
+        'Bytes xmt' -> xdm.source.sent_bytes   (what the detector profiles as upload)
+        'Bytes rcv' -> xdm.target.sent_bytes
+    The large value therefore goes in **Bytes xmt**. Putting it in Bytes rcv (the prior
+    behaviour) parked 5-50 GB in target.sent_bytes, the wrong side for an upload
+    analytic, which is why this event never fired and was marked Non-Analytic.
+    """
+    print("    - ASA Module simulating: VPN Data Exfiltration (high upload volume)")
+    user, public_ip = _resolve_vpn_user_ip(config, session_context)
+    if not user:
+        return None
+    asa_conf     = _get_asa_config(config)
+    group_name   = asa_conf.get('vpn_group_name', 'TunnelGroup_AnyConnect')
+    session_type = asa_conf.get('vpn_session_type', 'AnyConnect')
+    duration  = random.randint(1800, 14400)
+    bytes_xmt = random.randint(5 * 1024**3, 50 * 1024**3)     # 5-50 GB -> source.sent_bytes
+    bytes_rcv = random.randint(10 * 1024**2, 300 * 1024**2)   # modest inbound
+    now = datetime.now(timezone.utc)
+    return [
+        _generate_full_syslog_message(config,
+            f"%ASA-6-113039: Group <{group_name}> User <{_vpn_user(user)}> IP <{public_ip}> "
+            f"AnyConnect parent session started.", now - timedelta(seconds=duration)),
+        _generate_full_syslog_message(config,
+            f"%ASA-4-113019: Group = {group_name}, Username = {_vpn_user(user)}, IP = {public_ip}, "
+            f"Session disconnected. Session Type: {session_type}, "
+            f"Duration: {_format_duration(duration)}, "
+            f"Bytes xmt: {bytes_xmt}, Bytes rcv: {bytes_rcv}, Reason: User Requested", now),
+    ]
+
+
+def _simulate_vpn_concurrent_sessions(config, session_context=None):
+    """Same user, two AnyConnect sessions from DIFFERENT public IPs active in the SAME
+    window (overlapping — not time-separated like impossible travel) — account sharing /
+    stolen-credential co-use. Returns list."""
+    print("    - ASA Module simulating: Concurrent VPN sessions (same user, two IPs)")
+    user, ip1 = _resolve_vpn_user_ip(config, session_context)
+    if not user:
+        return None
+    _, ip2 = _resolve_vpn_user_ip(config, session_context)
+    tries = 0
+    while ip2 == ip1 and tries < 5:
+        _, ip2 = _resolve_vpn_user_ip(config, session_context)
+        tries += 1
+    asa_conf   = _get_asa_config(config)
+    group_name = asa_conf.get('vpn_group_name', 'TunnelGroup_AnyConnect')
+    vpn_pool   = asa_conf.get('vpn_pool', '10.250.0.0/16')
+
+    def _inside():
+        try:
+            return rand_ip_from_network(ip_network(vpn_pool, strict=False))
+        except Exception:
+            return f"10.250.{random.randint(1,254)}.{random.randint(1,254)}"
+
+    now  = datetime.now(timezone.utc)
+    logs = []
+    for i, ip in enumerate([ip1, ip2]):   # both start within seconds -> concurrent
+        t = now + timedelta(seconds=i * random.randint(2, 20))
+        logs.append(_generate_full_syslog_message(config,
+            f"%ASA-6-113039: Group <{group_name}> User <{_vpn_user(user)}> IP <{ip}> "
+            f"AnyConnect parent session started.", t))
+        logs.append(_generate_full_syslog_message(config,
+            f"%ASA-6-722051: Group <{group_name}> User <{_vpn_user(user)}> IP <{ip}> "
+            f"Address <{_inside()}> assigned to session", t + timedelta(seconds=1)))
+    return logs
+
+
+def _generate_ldap_kerberos_benign(config, internal_host_ip, session_context=None):
+    """Normal AD auth: workstation -> its DC on LDAP/Kerberos/SMB (baseline so LDAP
+    recon stands out). Returns list of syslog strings."""
+    user = _get_user_from_ip(config, internal_host_ip, session_context)
+    dc   = random.choice(_asa_domain_controllers(config))
+    port = random.choice([389, 389, 636, 88, 88, 445])
+    return _generate_connection_session(
+        config, "TCP", internal_host_ip, dc, port, user,
+        random.randint(500, 4_000), random.randint(1_000, 20_000), random.randint(0, 3),
+        src_interface="inside", dest_interface="inside"
+    )
 
 
 # Known BitTorrent tracker / DHT node IP ranges seen in real traffic.  Used by
@@ -1500,10 +2140,12 @@ def generate_log(config, scenario=None, threat_level="Realistic",
       cumulative_upload_session    4  — XSIAM "Large Upload (HTTPS)" via accumulation
       ssh_proxy_attack             4  — XSIAM "Unusual SSH activity that resembles SSH proxy"
       smb_new_host_lateral         4  — XSIAM "Rare SMB session to a remote host"
-      unusual_rdp_session          3  — XSIAM "Rare RDP session" / "New Administrative Behavior"
+      unusual_rdp_session          3  — XSIAM "Rare RDP session"
       tor_connection               3  — XSIAM "Recurring access to rare IP"
       vpn_bruteforce               3  — XSIAM "VPN login Brute-Force" / "Password Spray"
       vpn_tor_login                3  — XSIAM "Successful VPN connection from TOR"
+      vpn_new_country_login        4  — XSIAM "First successful VPN access from a country
+                                        in organization" (see _simulate_vpn_new_country_login)
       smb_rare_file_transfer       3  — XSIAM "Rare SMB session" / large-volume internal
       smtp_spray                   3  — XSIAM "Spam Bot Traffic"
       torrent_client               3  — XSIAM "A Torrent client was detected on a host"
@@ -1513,7 +2155,10 @@ def generate_log(config, scenario=None, threat_level="Realistic",
       new_ftp_server               2  — XSIAM "New FTP Server"
       dns_c2_beacon                1  — XSIAM "Recurring access to rare IP"
       server_outbound_http         1  — XSIAM "Abnormal Communication to a Rare IP"
-      workstation_lateral_rdp      1  — XSIAM "Rare RDP session" / "New Administrative Behavior"
+      workstation_lateral_rdp      1  — XSIAM "Rare RDP session"
+      new_admin_behavior           4  — XSIAM "New Administrative Behavior"
+      abnormal_rdp_rare_host       4  — XSIAM "Abnormal RDP session to a remote host
+                                        from a rarely seen host"
     """
     global last_threat_event_time
     session_context = (context or {}).get("session_context")
@@ -1535,8 +2180,8 @@ def generate_log(config, scenario=None, threat_level="Realistic",
                 config, "TCP", src_ip, dest_ip, 443, user,
                 bytes_sent, random.randint(1000, 5000), random.randint(60, 300)
             )
-        # Named threat from dashboard — set forced_choice and fall through to dispatch
-        forced_choice = scenario_event.lower()
+        # Named threat from dashboard — strip any "[Non-Analytic] " prefix, then dispatch
+        forced_choice = _strip_non_analytic_prefix(scenario_event).lower()
 
     # --- Event mix from config or fallback defaults ---
     module_config = config.get(CONFIG_KEY, {})
@@ -1554,6 +2199,7 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         {"event": "vpn_failure_benign","weight": 2},
         {"event": "rdp_internal_benign","weight": 3},
         {"event": "ftp_internal_benign","weight": 2},
+        {"event": "ad_auth_benign",     "weight": 5},
     ])
     benign_functions = [e['event'] for e in benign_events]
     benign_weights   = [e['weight'] for e in benign_events]
@@ -1590,6 +2236,7 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         "anyconnect_vpn", "vpn_bruteforce", "vpn_impossible_travel",
         "server_outbound_http", "inbound_block", "aaa_auth",
         "vpn_tor_login",    # resolves its own user/IP from TOR nodes config
+        "vpn_new_country_login",  # resolves its own user/IP from vpn_novel_country_pool
         "vpn_login_benign", "vpn_failure_benign",  # resolve own user/IP
         "ntp_sync",         # picks IP from internal_networks directly
         "internal_traffic", # resolves user/IP from session_context itself
@@ -1597,6 +2244,8 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         "failed_connections_burst",  # one external attacker IP, targets are random
         "new_ftp_server",            # picks server IP from internal_servers
         "dc_smb_outbound",           # picks DC from dc_servers config
+        "vpn_data_exfil",            # resolves own VPN user/IP
+        "vpn_concurrent_sessions",   # resolves own VPN user/IP
     }
     internal_host_ip = "192.168.1.100"
     if log_choice not in no_internal_ip_needed:
@@ -1764,6 +2413,14 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         print("    - ASA Module simulating: Workstation-to-Workstation RDP")
         _result = _simulate_workstation_lateral_rdp(config, internal_host_ip, session_context)
 
+    elif log_choice == "new_admin_behavior":
+        print("    - ASA Module simulating: New Administrative Behavior (novel admin-port pairs)")
+        _result = _simulate_new_admin_behavior(config, internal_host_ip, session_context)
+
+    elif log_choice == "abnormal_rdp_rare_host":
+        print("    - ASA Module simulating: Abnormal RDP session to a rare internal host")
+        _result = _simulate_abnormal_rdp_rare_host(config, internal_host_ip, session_context)
+
     elif log_choice == "failed_connections_burst":
         _result = _simulate_failed_connections_burst(config, attacker_ip=(context or {}).get('src_ip'))
 
@@ -1778,6 +2435,9 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     elif log_choice == "vpn_tor_login":
         _result = _simulate_vpn_tor_login(config, session_context)
+
+    elif log_choice == "vpn_new_country_login":
+        _result = _simulate_vpn_new_country_login(config, session_context)
 
     elif log_choice == "smb_new_host_lateral":
         _result = _simulate_smb_new_host_lateral(config, internal_host_ip, session_context)
@@ -1796,5 +2456,39 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         _dns = _dns_precursor(config, internal_host_ip, _user)
         _exfil = _simulate_smtp_large_exfil(config, internal_host_ip, session_context)
         _result = _dns + (_exfil if isinstance(_exfil, list) else [_exfil]) if _exfil else _dns
+
+    elif log_choice == "reverse_ssh_tunnel":
+        print("    - ASA Module simulating: Reverse SSH Tunnel to external host")
+        _result = _simulate_reverse_ssh_tunnel(config, internal_host_ip, session_context)
+
+    elif log_choice == "ldap_recon":
+        print("    - ASA Module simulating: LDAP Reconnaissance across DCs")
+        _result = _simulate_ldap_recon(config, internal_host_ip, session_context)
+
+    # --- Non-analytic events (no built-in XSIAM detection; raw/hunt value) ---
+    elif log_choice == "web_c2_beacon":
+        print("    - ASA Module simulating: Web/HTTPS C2 Beacon (recurring rare IP)")
+        _result = _simulate_web_c2_beacon(config, internal_host_ip, session_context)
+
+    elif log_choice == "cryptomining":
+        print("    - ASA Module simulating: Cryptomining pool connection")
+        _result = _simulate_cryptomining(config, internal_host_ip, session_context)
+
+    elif log_choice == "rare_port_connection":
+        print("    - ASA Module simulating: Uncommon destination port")
+        _result = _simulate_rare_port_connection(config, internal_host_ip, session_context)
+
+    elif log_choice == "external_fanout":
+        print("    - ASA Module simulating: Connection fan-out to many external IPs")
+        _result = _simulate_external_fanout(config, internal_host_ip, session_context)
+
+    elif log_choice == "vpn_data_exfil":
+        _result = _simulate_vpn_data_exfil(config, session_context)
+
+    elif log_choice == "vpn_concurrent_sessions":
+        _result = _simulate_vpn_concurrent_sessions(config, session_context)
+
+    elif log_choice == "ad_auth_benign":
+        _result = _generate_ldap_kerberos_benign(config, internal_host_ip, session_context)
 
     return (_result, log_choice) if _result is not None else None

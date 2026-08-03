@@ -77,9 +77,10 @@ def main():
     with open(SPEC, encoding="utf-8") as f:
         spec = yaml.safe_load(f)
 
-    # Group items into folders by first path segment (Scenarios / Modules / Status).
-    folder_for = {"scenarios": "Scenarios", "modules": "Modules",
-                  "health": "Status", "metrics": "Status"}
+    # Group items into folders by first path segment (Scenarios / Modules / Bad User / Status).
+    folder_for = {"scenarios": "Scenarios", "modules": "Modules", "baduser": "Bad User",
+                  "health": "Status", "metrics": "Status", "threat_levels": "Status",
+                  "timeline": "Status"}
     folders = {}
     for path, methods in spec["paths"].items():
         top = path.strip("/").split("/")[0]

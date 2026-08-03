@@ -33,22 +33,29 @@ Named threat generators (via `scenario_event` = the key below, or fired individu
 
 **Confirmed detections:**
 
-| Generator (`scenario_event`) | XSIAM Detection | Severity | MITRE |
+> **Names verified against live alerts on 2026-07-30** via
+> `python tests/detector_loop.py --controls` (see [Detector Test Loop](../detector-test-loop.md)).
+> Eight of the names previously in this table were wrong — the tenant's wording differs
+> from the detector's description. Do not re-transcribe them by hand; re-run the sweep.
+
+| Generator (`scenario_event`) | XSIAM Detection (as the tenant fires it) | Source | Verified |
 |---|---|---|---|
-| `DCSYNC` | Possible DCSync by an unusual user | High | T1003.006 |
-| `DELEGATION_CHANGE` | User account delegation to KRBTGT | High | T1558 |
-| `DELEGATION_CHANGE` | User account delegation to a DC | Low | T1098 |
-| `DNSHOSTNAME_SPOOFING` | dNSHostName attribute spoofing | Medium | T1078 |
-| `SAMACCOUNTNAME_SPOOFING` | sAMAccountName spoofing | Medium | T1078 |
-| `MULTIPLE_SERVICE_TICKETS` | Abnormal issuance of weakly encrypted service tickets (Kerberoast) | Low | T1558.003 |
-| `PRIV_GROUP_ADDITION` | User added to a privileged group | Medium | T1098.002 |
-| `PRIV_GROUP_ADD_REMOVE` | User added to a privileged group and removed | Low-Medium | T1098.002 |
-| `ACCOUNT_LOCKOUT` | Excessive user lockouts | Low | T1110 |
-| `SUSPICIOUS_ACCOUNT_LOCKOUT` | Suspicious account lockout pattern | Low | T1110 |
-| `DEFAULT_ACCOUNT_ENABLED` | User enabled a default local account | Low | T1078.001 |
-| `SMS_ADMINS_ADDITION` | User added to SMS Admins group | Medium | T1098 |
-| `SUSPICIOUS_ACCOUNT_CREATION` | Suspicious hidden user account created | Low | T1136 |
-| `MASS_ACCOUNT_DELETION` | Multiple user accounts deleted | Medium | T1531 |
+| `DCSYNC` | Possible DCSync by an unusual user | Analytics BIOC | ✅ |
+| `DELEGATION_CHANGE` | User account delegation to KRBTGT | Analytics BIOC | ✅ |
+| `DNSHOSTNAME_SPOOFING` | Suspicious dNSHostName attribute change to DC name | Analytics BIOC | ✅ |
+| `SAMACCOUNTNAME_SPOOFING` | Service ticket request with a spoofed sAMAccountName | Analytics BIOC | ✅ |
+| `PRIV_GROUP_ADDITION` | User added to a Windows privileged group | Analytics BIOC | ✅ |
+| `ACCOUNT_LOCKOUT` | Multiple user accounts failed login due to account lockouts | XDR Analytics | ✅ |
+| `DEFAULT_ACCOUNT_ENABLED` | A user enabled the Windows DefaultAccount | Analytics BIOC | ✅ |
+| `SUSPICIOUS_ACCOUNT_CREATION` | Suspicious hidden user created | Analytics BIOC | ✅ |
+| `MASS_ACCOUNT_DELETION` | A user deleted multiple users for the first time | XDR Analytics | ✅ |
+| `MULTIPLE_SERVICE_TICKETS` | *(re-test pending)* | — | ⏳ |
+| `SUSPICIOUS_ACCOUNT_LOCKOUT` | *(re-test pending)* | — | ⏳ |
+| `PRIV_GROUP_ADD_REMOVE` | **no alert** — events ingest, detector silent | — | ❌ |
+| `SMS_ADMINS_ADDITION` | **no alert** — events ingest, detector silent | — | ❌ |
+
+The last two were previously listed as confirmed detections. They are not: their events
+ingest correctly and no alert is produced within a 10-minute window. Treat them as WIP.
 
 **WIP** (events ingest correctly; detection pending baseline/investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_DMSA_PRIVESC`, `WIP_SENSITIVE_PASSWORD_RESET`, `WIP_PASSWORD_NEVER_EXPIRES`, `WIP_AS_REP_ROASTING`, `WIP_IRREGULAR_SERVICE_TGS`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`.
 

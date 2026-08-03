@@ -582,19 +582,38 @@
   <div class="threats-panel" style="margin-top:16px;">
     <div class="panel-title">Training Mode — Deterministic Bulk Stage / Live Stream</div>
     <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px;">
-      Same seeded story every run — identical events, order, and transport.
-      <b>Bulk stage</b> backfills ~4&nbsp;hours of history (now&minus;4h&nbsp;&rarr;&nbsp;now) so students can
-      explore a populated tenant and build correlation rules. <b>Stream now</b> replays the identical
-      story live over ~4&nbsp;hours so those rules fire in real time.
+      Generated once, replayed <b>per student</b> re-keyed to their own identity
+      (<code>EXAMPLECORP\student{n}</code>, own IP block) so one student's rule can't touch another's.
+      <b>Bulk stage</b> backfills ~4&nbsp;hours of history (now&minus;4h&nbsp;&rarr;&nbsp;now); <b>Stream now</b>
+      replays the identical story live over ~4&nbsp;hours so their rules fire in real time.
+      Same seed reproduces exactly any day; change the variant for a fresh block.
       Runs are exclusive — stop manual module generation first.
     </p>
     <div class="form-row" style="align-items:flex-end;gap:12px;flex-wrap:wrap;">
       <div class="form-group">
         <label class="form-label">Pack</label>
-        <select id="training-pack-select" class="level-select" style="width:340px;">
+        <select id="training-pack-select" class="level-select" style="width:300px;" onchange="onPackChange()">
           <option value="">— loading packs —</option>
         </select>
       </div>
+      <div class="form-group">
+        <label class="form-label"># Students</label>
+        <input type="number" id="training-num-students" class="level-select" style="width:90px;"
+               min="1" max="50" value="20" oninput="updateEpsHint()" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Variant / seed</label>
+        <div style="display:flex;gap:6px;">
+          <input type="text" id="training-seed" class="level-select" style="width:170px;" placeholder="pack default" />
+          <button class="btn btn-ghost btn-sm" onclick="newVariant()" title="Fresh block of events">New variant</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">EPS/src</label>
+        <div id="training-eps-hint" class="rate-display" style="padding-bottom:6px;">—</div>
+      </div>
+    </div>
+    <div class="form-row" style="gap:12px;margin-top:6px;">
       <button class="btn btn-ghost btn-sm" id="training-bulk-btn" onclick="runBulk()">Bulk stage (backfill 4h)</button>
       <button class="btn btn-ghost btn-sm" id="training-stream-btn" onclick="runStream(false)">Stream now (4h live)</button>
       <button class="btn btn-stop btn-sm" id="training-stop-btn" onclick="stopTraining()">Stop</button>
@@ -1552,7 +1571,8 @@
   // ── Training Mode ─────────────────────────────────────────────────────────
   async function loadTrainingPacks() {
     try {
-      const packs = await api('/api/training/packs');
+      const data = await api('/api/training/packs');
+      const packs = data.packs || [];
       const sel = document.getElementById('training-pack-select');
       if (!packs.length) {
         sel.innerHTML = '<option value="">No training packs configured</option>';
@@ -1562,6 +1582,10 @@
       sel.innerHTML = packs.map(p =>
         `<option value="${escHtml(p.id)}">${escHtml(p.id)}${p.description ? ' — ' + escHtml(p.description) : ''}</option>`
       ).join('');
+      if (data.default_num_students) {
+        document.getElementById('training-num-students').value = data.default_num_students;
+      }
+      onPackChange();
     } catch (e) {
       document.getElementById('training-result').innerHTML =
         `<span style="color:var(--red);">Failed to load packs: ${escHtml(e.message)}</span>`;
@@ -1571,17 +1595,40 @@
   function _selectedTrainingPack() {
     return document.getElementById('training-pack-select').value;
   }
+  function _numStudents() {
+    return Math.max(1, parseInt(document.getElementById('training-num-students').value || '20', 10));
+  }
+  function _seedValue() {
+    return document.getElementById('training-seed').value.trim();
+  }
+  function _resolveEps(n) { return n <= 5 ? 2.0 : (n <= 10 ? 1.0 : 0.5); }  // mirrors config eps_tiers
+
+  function updateEpsHint() {
+    const n = _numStudents();
+    document.getElementById('training-eps-hint').textContent = n > 0 ? _resolveEps(n) + ' /s' : '—';
+  }
+  function onPackChange() {
+    const id = _selectedTrainingPack();
+    const p = (window._trainingPacks || []).find(x => x.id === id);
+    document.getElementById('training-seed').placeholder = p ? ('default: ' + p.seed) : 'pack default';
+    updateEpsHint();
+  }
+  function newVariant() {
+    document.getElementById('training-seed').value = 'v-' + Math.random().toString(36).slice(2, 8);
+  }
 
   async function runBulk() {
     const pack = _selectedTrainingPack();
     const resultEl = document.getElementById('training-result');
     if (!pack) { resultEl.style.color = 'var(--red)'; resultEl.textContent = 'Select a pack first'; return; }
+    const num_students = _numStudents(), seed = _seedValue();
     resultEl.style.color = 'var(--text-muted)';
-    resultEl.textContent = `Starting bulk stage for "${pack}"…`;
+    resultEl.textContent = `Starting bulk stage for "${pack}" (${num_students} students)…`;
     try {
-      const data = await api('/api/training/bulk', 'POST', { pack });
+      const data = await api('/api/training/bulk', 'POST', { pack, num_students, seed });
       resultEl.style.color = 'var(--green)';
-      resultEl.textContent = `✓ Bulk stage started for "${data.pack}" — backfilling ~4h of history`;
+      resultEl.textContent = `✓ Bulk started — ${data.num_students} students @ ${data.eps} eps/src`
+        + `${data.seed ? ', variant "' + escHtml(data.seed) + '"' : ''}. First run generates the canonical (cached).`;
     } catch (e) {
       resultEl.style.color = 'var(--red)';
       resultEl.textContent = e.message;
@@ -1592,19 +1639,20 @@
     const pack = _selectedTrainingPack();
     const resultEl = document.getElementById('training-result');
     if (!pack) { resultEl.style.color = 'var(--red)'; resultEl.textContent = 'Select a pack first'; return; }
+    const num_students = _numStudents(), seed = _seedValue();
     resultEl.style.color = 'var(--text-muted)';
-    resultEl.textContent = `Starting live stream for "${pack}"…`;
+    resultEl.textContent = `Starting live stream for "${pack}" (${num_students} students)…`;
     // Raw fetch so the 409 soft-gate (needs_confirm) can be read instead of thrown.
     const _streamHeaders = { 'Content-Type': 'application/json' };
     if (API_KEY) _streamHeaders['X-API-Key'] = API_KEY;
     const r = await fetch('/api/training/stream', {
       method: 'POST', headers: _streamHeaders,
-      body: JSON.stringify({ pack, confirm: !!confirmed }),
+      body: JSON.stringify({ pack, confirm: !!confirmed, num_students, seed }),
     });
     const data = await r.json().catch(() => ({ error: r.statusText }));
     if (r.ok && data.started) {
       resultEl.style.color = 'var(--green)';
-      resultEl.textContent = `✓ Live stream started for "${data.pack}" — events stream over ~4h`;
+      resultEl.textContent = `✓ Live stream started — ${data.num_students} students @ ${data.eps} eps/src over ~4h`;
       return;
     }
     if (r.status === 409 && data.needs_confirm) {
@@ -1648,9 +1696,8 @@
       if (st.active) {
         const pct = st.total ? Math.min(100, Math.floor(100 * st.index / st.total)) : 0;
         const finalizing = st.total && st.index >= st.total;
-        const offMin = Math.floor((st.offset || 0) / 60);
-        const durMin = Math.floor((st.duration || 0) / 60);
         const label = st.mode === 'bulk' ? 'Bulk stage (backfill)' : 'Live stream';
+        const students = st.num_students ? ` across ${st.num_students} students` : '';
         bar.style.display = 'block';
         fill.style.background = 'var(--accent)';
         fill.style.width = pct + '%';
@@ -1661,8 +1708,8 @@
                        + `flushing / uploading batched events… (${elapsed})`;
         } else {
           el.innerHTML = `<b>${label}</b> [${escHtml(st.pack || '')}] — `
-            + `event ${st.index.toLocaleString()}/${st.total.toLocaleString()} (${pct}%), `
-            + `sim ${offMin}/${durMin} min · <b>${eta}</b> · ${elapsed}`;
+            + `event ${st.index.toLocaleString()}/${st.total.toLocaleString()} (${pct}%)${students} · `
+            + `<b>${eta}</b> · ${elapsed}`;
         }
       } else if (st.status && st.status !== 'idle') {
         const done = st.status === 'done';

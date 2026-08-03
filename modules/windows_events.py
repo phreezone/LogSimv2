@@ -153,6 +153,7 @@ _EVENT_META = {
     4886: {"task": 12290, "category": "Certification Services",    "version": 0, "outcome": "success"},
     4887: {"task": 12290, "category": "Certification Services",    "version": 0, "outcome": "success"},
     4888: {"task": 12290, "category": "Certification Services",    "version": 0, "outcome": "failure"},
+    4898: {"task": 12293, "category": "Certification Services",    "version": 0, "outcome": "success"},
     4720: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4722: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4724: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
@@ -517,25 +518,42 @@ def _msg_4767(d):
     )
 
 
+# Access mask -> "Accesses:" display name. Values per the Active Directory Access Codes
+# and Rights table in the Microsoft reference for event 4662.
 _ACCESS_MASK_TO_NAME = {
-    "0x100":   "Control Access",
-    "0x10":    "Read Property",
-    "0x20":    "Write Property",
     "0x1":     "Create Child",
     "0x2":     "Delete Child",
-    "0x4":     "List Children",
-    "0x40000": "WRITE_DAC",
+    "0x4":     "List Contents",
+    "0x8":     "Write Self",
+    "0x10":    "Read Property",
+    "0x20":    "Write Property",
+    "0x40":    "Delete Tree",
+    "0x80":    "List Object",
+    "0x100":   "Control Access",
     "0x10000": "DELETE",
+    "0x20000": "READ_CONTROL",
+    "0x40000": "WRITE_DAC",
+    "0x80000": "WRITE_OWNER",
 }
 
 
+# msobjs.dll message codes used in the AccessList / Properties fields. Directory-service
+# rights live in the %%768x range; standard rights in %%153x. The previous table conflated
+# the two, so a Read Property access was emitted as "%%1537" (DELETE).
 _PROP_CODE_TO_NAME = {
-    "%%1537": "Read Property",
-    "%%1538": "Write Property",
-    "%%1539": "WRITE_DAC",
-    "%%1540": "Delete Child",
-    "%%1541": "List Children",
+    "%%7680": "Create Child",
+    "%%7681": "Delete Child",
+    "%%7682": "List Contents",
+    "%%7683": "Write Self",
+    "%%7684": "Read Property",
+    "%%7685": "Write Property",
+    "%%7686": "Delete Tree",
+    "%%7687": "List Object",
     "%%7688": "Control Access",
+    "%%1537": "DELETE",
+    "%%1538": "READ_CONTROL",
+    "%%1539": "WRITE_DAC",
+    "%%1540": "WRITE_OWNER",
     "%%5649": "Query secret value",
 }
 
@@ -872,6 +890,22 @@ def _msg_4886(d):
     )
 
 
+def _msg_4898(d):
+    # Shape per the published 4898 description: "%1 v%2 (Schema V%3)" then the template
+    # DN, Template Content and Security Descriptor.
+    return (
+        "Certificate Services loaded a template.\r\n\r\n"
+        f"Version:\t{d.get('TemplateInternalName','')} "
+        f"v{d.get('TemplateVersion','')} "
+        f"(Schema V{d.get('TemplateSchemaVersion','')})\r\n"
+        f"Template Information:\r\n"
+        f"\tTemplate Content:\t{d.get('TemplateContent','')}\r\n"
+        f"\tSecurity Descriptor:\t{d.get('SecurityDescriptor','')}\r\n"
+        f"\tOID:\t{d.get('TemplateOID','')}\r\n"
+        f"\tTemplate DS Object FQDN:\t{d.get('TemplateDSObjectFQDN','')}"
+    )
+
+
 def _msg_4887(d):
     return (
         "Certificate Services approved a certificate request and issued a certificate.\r\n\r\n"
@@ -1086,6 +1120,7 @@ _MSG_BUILDERS = {
     4886: _msg_4886,
     4887: _msg_4887,
     4888: _msg_4888,
+    4898: _msg_4898,
     4720: _msg_4720,
     4697: _msg_4697,
     1102: _msg_1102,
@@ -1225,6 +1260,83 @@ _SPN_TO_SERVICE_ACCOUNT = {
     "SAPService/sap01.examplecorp.local":          "svc_crm",
     "WSMAN/mgmt01.examplecorp.local":              "svc_monitoring",
 }
+
+
+# Kerberoastable SPN inventory used by the volume-based Kerberoasting generator.
+# Two properties matter to the XSIAM Identity Analytics detectors
+# ("A user requested multiple service tickets" / "A user received multiple weakly
+# encrypted service tickets"), both of which count DISTINCT services associated
+# with *user* accounts per requesting user:
+#   1. every SPN maps 1:1 to its own service account, so N tickets == N distinct
+#      ServiceName values (the benign _SERVICE_ACCOUNT_SPNS pool is many-to-one
+#      and collapses 23 SPNs down to 9 accounts);
+#   2. no entry resolves to a computer account — every published 4769
+#      Kerberoasting rule discards ServiceName values ending in "$".
+_KERBEROAST_SERVICE_ACCOUNTS = [
+    ("svc_mssql_fin",     "MSSQLSvc/fin-sql01.examplecorp.local:1433"),
+    ("svc_mssql_hr",      "MSSQLSvc/hr-sql01.examplecorp.local:1433"),
+    ("svc_mssql_crm",     "MSSQLSvc/crm-sql01.examplecorp.local:1433"),
+    ("svc_mssql_erp",     "MSSQLSvc/erp-sql01.examplecorp.local:1433"),
+    ("svc_mssql_dw",      "MSSQLSvc/dw-sql01.examplecorp.local:1433"),
+    ("svc_mssql_rpt",     "MSSQLSvc/rpt-sql01.examplecorp.local:1433"),
+    ("svc_mssql_dev",     "MSSQLSvc/dev-sql01.examplecorp.local:1433"),
+    ("svc_mssql_qa",      "MSSQLSvc/qa-sql01.examplecorp.local:1433"),
+    ("svc_mssql_stage",   "MSSQLSvc/stg-sql01.examplecorp.local:1433"),
+    ("svc_mssql_arch",    "MSSQLSvc/arch-sql01.examplecorp.local:1433"),
+    ("svc_oracle_fin",    "oracle/fin-ora01.examplecorp.local:1521"),
+    ("svc_oracle_erp",    "oracle/erp-ora01.examplecorp.local:1521"),
+    ("svc_postgres_app",  "postgres/app-pg01.examplecorp.local:5432"),
+    ("svc_iis_intranet",  "HTTP/intranet-app.examplecorp.local"),
+    ("svc_iis_portal",    "HTTP/portal.examplecorp.local"),
+    ("svc_iis_extranet",  "HTTP/extranet.examplecorp.local"),
+    ("svc_sp_prod",       "HTTP/sp-prod.examplecorp.local"),
+    ("svc_sp_dr",         "HTTP/sp-dr.examplecorp.local"),
+    ("svc_jenkins_build", "HTTP/jenkins-build.examplecorp.local"),
+    ("svc_jenkins_deploy","HTTP/jenkins-deploy.examplecorp.local"),
+    ("svc_gitlab_web",    "HTTP/gitlab-web.examplecorp.local"),
+    ("svc_gitlab_runner", "HTTP/gitlab-runner.examplecorp.local"),
+    ("svc_confluence",    "HTTP/confluence-app.examplecorp.local"),
+    ("svc_jira",          "HTTP/jira-app.examplecorp.local"),
+    ("svc_bamboo",        "HTTP/bamboo.examplecorp.local"),
+    ("svc_nexus",         "HTTP/nexus.examplecorp.local"),
+    ("svc_artifactory",   "HTTP/artifactory.examplecorp.local"),
+    ("svc_grafana",       "HTTP/grafana.examplecorp.local"),
+    ("svc_kibana",        "HTTP/kibana.examplecorp.local"),
+    ("svc_splunk_web",    "HTTP/splunk-web.examplecorp.local"),
+    ("svc_tableau",       "HTTP/tableau.examplecorp.local"),
+    ("svc_powerbi_gw",    "HTTP/pbi-gateway.examplecorp.local"),
+    ("svc_adfs_farm",     "HTTP/adfs-farm.examplecorp.local"),
+    ("svc_wsus",          "HTTP/wsus.examplecorp.local"),
+    ("svc_sccm_mp",       "HTTP/sccm-mp.examplecorp.local"),
+    ("svc_vcenter",       "HTTP/vcenter.examplecorp.local"),
+    ("svc_netapp_mgmt",   "HTTP/netapp-mgmt.examplecorp.local"),
+    ("svc_nessus_scan",   "HTTP/nessus.examplecorp.local"),
+    ("svc_exchange_ews",  "HTTP/ews.examplecorp.local"),
+    ("svc_exchange_owa",  "HTTP/owa.examplecorp.local"),
+    ("svc_exchange_ab",   "exchangeAB/exch-ab01.examplecorp.local"),
+    ("svc_exchange_rfr",  "exchangeRFR/exch-rfr01.examplecorp.local"),
+    ("svc_exchange_mdb",  "exchangeMDB/exch-mdb01.examplecorp.local"),
+    ("svc_sap_prod",      "SAPService/sap-prod01.examplecorp.local"),
+    ("svc_sap_dev",       "SAPService/sap-dev01.examplecorp.local"),
+    ("svc_termsrv_farm",  "TERMSRV/rds-farm01.examplecorp.local"),
+    ("svc_termsrv_gw",    "TERMSRV/rds-gw01.examplecorp.local"),
+    ("svc_wsman_mgmt",    "WSMAN/wsman-mgmt01.examplecorp.local"),
+    ("svc_wsman_auto",    "WSMAN/wsman-auto01.examplecorp.local"),
+    ("svc_ftp_edi",       "ftp/edi-ftp01.examplecorp.local"),
+    ("svc_smtp_relay",    "SMTP/smtp-relay01.examplecorp.local"),
+    ("svc_ldap_proxy",    "ldap/ldap-proxy01.examplecorp.local"),
+    ("svc_kafka",         "kafka/kafka01.examplecorp.local:9092"),
+    ("svc_mongodb",       "mongodb/mongo01.examplecorp.local:27017"),
+    ("svc_rabbitmq",      "amqp/mq01.examplecorp.local:5672"),
+    ("svc_veeam_backup",  "VeeamBackupSvc/veeam01.examplecorp.local"),
+]
+
+_KERBEROAST_SPNS = [spn for _acct, spn in _KERBEROAST_SERVICE_ACCOUNTS]
+
+# Register the 1:1 mapping so _build_4769 resolves ServiceName for these SPNs
+# without polluting the benign _SERVICE_ACCOUNT_SPNS pool used by normal traffic.
+_SPN_TO_SERVICE_ACCOUNT.update(
+    {spn: acct for acct, spn in _KERBEROAST_SERVICE_ACCOUNTS})
 
 
 # ---------------------------------------------------------------------------
@@ -2117,15 +2229,25 @@ def _build_4767(user_info, config, *, unlocked_by="Administrator", ts=None) -> d
     return _build_event(4767, dc_host, event_data, success=True, ts=ts)
 
 
+# Access mask -> AccessList message code. The old table mapped the DS rights (0x1..0x100)
+# onto the standard-rights %%153x codes, so a Read Property (0x10) event was logged as
+# "%%1537" (DELETE). Corrected against msobjs.dll. _threat_dcsync is unaffected: it uses
+# only 0x100 -> %%7688, which is identical in both tables — which is precisely why it
+# fires while the 4662-heavy generators do not.
 _ACCESS_MASK_TO_LIST = {
-    "0x100":    "%%7688",
-    "0x10":     "%%1537",
-    "0x20":     "%%1538",
-    "0x1":      "%%1539",
-    "0x2":      "%%1540",
-    "0x4":      "%%1541",
-    "0x10000":  "%%1537",
-    "0x40000":  "%%1539",
+    "0x1":      "%%7680",   # Create Child
+    "0x2":      "%%7681",   # Delete Child
+    "0x4":      "%%7682",   # List Contents
+    "0x8":      "%%7683",   # Write Self
+    "0x10":     "%%7684",   # Read Property
+    "0x20":     "%%7685",   # Write Property
+    "0x40":     "%%7686",   # Delete Tree
+    "0x80":     "%%7687",   # List Object
+    "0x100":    "%%7688",   # Control Access
+    "0x10000":  "%%1537",   # DELETE
+    "0x20000":  "%%1538",   # READ_CONTROL
+    "0x40000":  "%%1539",   # WRITE_DAC
+    "0x80000":  "%%1540",   # WRITE_OWNER
 }
 
 
@@ -2541,8 +2663,64 @@ def _random_ski():
     return " ".join(f"{random.randint(0,255):02x}" for _ in range(20))
 
 
+def _build_4898(user_info, config, *, template_name, enrollee_supplies_subject=True,
+                schema_version="2", template_version="100.2", ts=None) -> dict:
+    """4898 - Certificate Services loaded a template (CA event).
+
+    Why this exists: 4898 is the only event that tells XSIAM a certificate template is
+    *abusable*. It is in XSIAM's published Object Access intake list and feeds
+    "Vulnerable certificate template loaded" and "Suspicious certificate template
+    modification" (ESC4). `msPKI-Certificate-Name-Flag = 0x1`
+    (CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT) inside Template Content is the literal ESC1
+    condition — a requester may name any subject, including a privileged one.
+
+    CAVEAT: the exact EventData parameter names below could not be confirmed against a
+    captured 4898 from this environment; they follow the published field list
+    (TemplateInternalName / TemplateVersion / TemplateSchemaVersion / TemplateOID /
+    TemplateDSObjectFQDN / TemplateContent / SecurityDescriptor). If the detector stays
+    silent with a correct-looking event, verify these names against a real 4898 before
+    changing anything else — a wrong EventData key is invisible in the rendered XML.
+    """
+    ca_host = _get_ca_hostname(config)
+    dns_domain = _get_dns_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+
+    # 0x1 = CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT (the ESC1 condition); 0x0 = subject built
+    # from AD, which is the safe configuration.
+    name_flag = "0x1" if enrollee_supplies_subject else "0x0"
+    content = (
+        f"msPKI-Certificate-Name-Flag: {name_flag}\r\n"
+        f"msPKI-Enrollment-Flag: 0x0\r\n"
+        f"msPKI-Private-Key-Flag: 0x10\r\n"
+        f"msPKI-RA-Signature: 0\r\n"                      # 0 = no manager approval (ESC1)
+        f"pKIExtendedKeyUsage: 1.3.6.1.5.5.7.3.2\r\n"     # Client Authentication
+        f"msPKI-Certificate-Application-Policy: 1.3.6.1.5.5.7.3.2"
+    )
+    # Authenticated Users granted Enroll — the other half of ESC1.
+    sd = ("O:DAG:DAD:PAI(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;DA)"
+          "(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;EA)"
+          "(A;;CCDCLCSWRPWPRC;;;AU)")
+    event_data = {
+        "SubjectUserSid":         _stable_user_sid(user_info["username"]),
+        "SubjectUserName":        user_info["username"],
+        "SubjectDomainName":      _get_domain(config),
+        "SubjectLogonId":         _new_logon_id(),
+        "TemplateInternalName":   template_name,
+        "TemplateVersion":        template_version,
+        "TemplateSchemaVersion":  schema_version,
+        "TemplateOID":            f"1.3.6.1.4.1.311.21.8.{random.randint(1000000, 9999999)}."
+                                  f"{random.randint(1000000, 9999999)}",
+        "TemplateDSObjectFQDN":   (f"CN={template_name},CN=Certificate Templates,"
+                                   f"CN=Public Key Services,CN=Services,"
+                                   f"CN=Configuration,{base_dn}"),
+        "TemplateContent":        content,
+        "SecurityDescriptor":     sd,
+    }
+    return _build_event(4898, ca_host, event_data, success=True, ts=ts)
+
+
 def _build_4886(user_info, config, *, template_name, request_id=None,
-                san_override=None, ts=None) -> dict:
+                san_override=None, san_kind="upn", ts=None) -> dict:
     """4886 – Certificate Services received a certificate request (CA event)."""
     ca_host = _get_ca_hostname(config)
     domain = _get_domain(config)
@@ -2551,7 +2729,7 @@ def _build_4886(user_info, config, *, template_name, request_id=None,
     requester = f"{domain}\\{user_info['username']}"
     attrs_parts = [f"CertificateTemplate:{template_name}"]
     if san_override:
-        attrs_parts.append(f"san:upn={san_override}")
+        attrs_parts.append(f"san:{san_kind}={san_override}")
     hostname = user_info.get("hostname", "WKS-TEMP")
     if "." not in hostname:
         hostname = f"{hostname}.{dns_domain}"
@@ -2566,7 +2744,7 @@ def _build_4886(user_info, config, *, template_name, request_id=None,
 
 
 def _build_4887(user_info, config, *, template_name, request_id=None,
-                san_override=None, subject_dn=None, ts=None) -> dict:
+                san_override=None, san_kind="upn", subject_dn=None, ts=None) -> dict:
     """4887 – Certificate Services approved and issued a certificate (CA event)."""
     ca_host = _get_ca_hostname(config)
     domain = _get_domain(config)
@@ -2575,7 +2753,7 @@ def _build_4887(user_info, config, *, template_name, request_id=None,
     requester = f"{domain}\\{user_info['username']}"
     attrs_parts = [f"CertificateTemplate:{template_name}"]
     if san_override:
-        attrs_parts.append(f"san:upn={san_override}")
+        attrs_parts.append(f"san:{san_kind}={san_override}")
     hostname = user_info.get("hostname", "WKS-TEMP")
     if "." not in hostname:
         hostname = f"{hostname}.{dns_domain}"
@@ -2596,7 +2774,7 @@ def _build_4887(user_info, config, *, template_name, request_id=None,
 
 
 def _build_4888(user_info, config, *, template_name, request_id=None,
-                san_override=None, subject_dn=None, ts=None) -> dict:
+                san_override=None, san_kind="upn", subject_dn=None, ts=None) -> dict:
     """4888 – Certificate Services denied a certificate request (CA event)."""
     ca_host = _get_ca_hostname(config)
     domain = _get_domain(config)
@@ -2605,7 +2783,7 @@ def _build_4888(user_info, config, *, template_name, request_id=None,
     requester = f"{domain}\\{user_info['username']}"
     attrs_parts = [f"CertificateTemplate:{template_name}"]
     if san_override:
-        attrs_parts.append(f"san:upn={san_override}")
+        attrs_parts.append(f"san:{san_kind}={san_override}")
     hostname = user_info.get("hostname", "WKS-TEMP")
     if "." not in hostname:
         hostname = f"{hostname}.{dns_domain}"
@@ -2792,7 +2970,13 @@ def _build_4776(user_info, config, *, status="0x0", workstation=None, ts=None) -
 
 
 # UAC value constants for 4720/4722/4738
-_UAC_NORMAL_ACCOUNT        = "0x200"     # 512: normal user account
+# WARNING: these are LDAP userAccountControl values. Event 4738's OldUacValue/NewUacValue
+# fields are SAM USER_ACCOUNT flags ([MS-SAMR]), a DIFFERENT bitmask — there
+# USER_NORMAL_ACCOUNT is 0x10 and USER_DONT_EXPIRE_PASSWORD is 0x200. Passing the LDAP
+# constants into a 4738 emits a change that contradicts the %%-token beside it (this is
+# why _threat_password_never_expires never fired its intended detector). Use SAM literals
+# for 4738; these constants are correct for LDAP-facing events such as 4720.
+_UAC_NORMAL_ACCOUNT        = "0x200"     # 512: normal user account (LDAP)
 _UAC_ACCOUNTDISABLE        = "0x202"     # 514: disabled + normal
 _UAC_DONT_EXPIRE_PASSWD    = "0x10200"   # 66048: normal + DONT_EXPIRE_PASSWORD
 _UAC_PASSWD_NOTREQD        = "0x220"     # 544: PASSWD_NOTREQD + normal
@@ -4029,12 +4213,22 @@ _BENIGN_GENERATORS["lateral_movement"] = _threat_lateral_movement_chain
 # dMSA privilege escalation targets — privileged accounts whose privileges
 # the attacker inherits via msDS-ManagedAccountPrecededByLink
 # ---------------------------------------------------------------------------
+# These must be *accounts*. msDS-ManagedAccountPrecededByLink is a DN link to the
+# superseded user/computer object, so a group DN ("Domain Admins") can never be
+# superseded and leaves the detector with no identity to resolve.
 _DMSA_TARGETS = [
     ("Administrator",  "CN=Administrator,CN=Users,{base_dn}"),
     ("krbtgt",         "CN=krbtgt,CN=Users,{base_dn}"),
-    ("Domain Admins",  "CN=Domain Admins,CN=Users,{base_dn}"),
-    ("Enterprise Admins", "CN=Enterprise Admins,CN=Users,{base_dn}"),
 ]
+
+# Schema GUIDs for the 4662 (Directory Service Access) footprint of a dMSA succession.
+# XSIAM's "Possible Privilege Escalation using Delegated MSA account" is fed by 4662, not
+# 5136: 5136 is not in XSIAM's WEC event-ID intake table, and the XSIAM 4662 setup topic
+# requires a SACL on "Descendant msDS-DelegatedManagedServiceAccount Objects" purely for
+# this detector. GUIDs published by Unit 42's BadSuccessor analysis.
+_GUID_CLASS_DMSA                 = "{0feb936f-47b3-49f2-9386-1dedc2c23765}"
+_GUID_ATTR_DELEGATED_MSA_STATE   = "{2f5c138a-bd38-4016-88b4-0ec87cbb4919}"
+_GUID_ATTR_MANAGED_ACCT_PRECEDED = "{a0945b2b-57a2-43bd-b327-4d112a4e8bd1}"
 
 _DMSA_NAMES = [
     "svc-backup-dmsa", "svc-monitor-dmsa", "svc-deploy-dmsa",
@@ -4150,6 +4344,19 @@ def _threat_dmsa_privesc(config, session_context):
                                          logon_id=logon_id, ts=t)))
     t += 0.01
 
+    # 7. 4662: write-property on the dMSA object — THE detection trigger. XSIAM consumes
+    #    4662 (Audit Directory Service Access) for dMSA succession; the 5136 events below
+    #    are corroboration only and are not in XSIAM's analytics intake.
+    dmsa_link_props = (f"{_GUID_CLASS_DMSA}\n    "
+                       f"{_GUID_ATTR_MANAGED_ACCT_PRECEDED}\n")
+    events.append(json.dumps(_build_4662(u, config,
+                                         object_type="%" + _GUID_CLASS_DMSA,
+                                         object_name=dmsa_dn,
+                                         access_mask="0x20",
+                                         properties=dmsa_link_props,
+                                         logon_id=logon_id, ts=t)))
+    t += 0.01
+
     # 7a. 5136: msDS-DelegatedMSAState = 0 (initial state)
     events.append(json.dumps(_build_5136(u, config,
                                          object_dn=dmsa_dn,
@@ -4213,6 +4420,20 @@ def _threat_dmsa_privesc(config, session_context):
                                          logon_id=logon_id, ts=t)))
     t += 0.01
 
+    # 7d-bis. 4662: write-property flipping msDS-DelegatedMSAState to 2 ("migration
+    #         complete") — Unit 42's BadSuccessor analysis shows this as a distinct 4662
+    #         from the link write. Shares logon_id so the 4741<->4662<->4624
+    #         SubjectLogonId join they describe holds.
+    dmsa_state_props = (f"{_GUID_CLASS_DMSA}\n    "
+                        f"{_GUID_ATTR_DELEGATED_MSA_STATE}\n")
+    events.append(json.dumps(_build_4662(u, config,
+                                         object_type="%" + _GUID_CLASS_DMSA,
+                                         object_name=dmsa_dn,
+                                         access_mask="0x20",
+                                         properties=dmsa_state_props,
+                                         logon_id=logon_id, ts=t)))
+    t += 0.01
+
     # 7e. 5136: msDS-SupersededManagedAccountLink on the target (points back to dMSA)
     events.append(json.dumps(_build_5136(u, config,
                                          object_dn=target_dn,
@@ -4254,6 +4475,92 @@ def _threat_dmsa_privesc(config, session_context):
     return events
 
 
+def _threat_machine_account_to_domain_admins(config, session_context):
+    """A MACHINE account is added to Domain Admins — XSIAM rule 3c3c9d51.
+
+    Deterministic by design. _threat_priv_group_addition can produce this shape, but only
+    when its random draw picks a machine account (60%) AND lands on Domain Admins rather
+    than Enterprise Admins — roughly a coin flip per fire. That is why the alert appeared
+    intermittently and then not at all: it was incidental, never targeted. Here the member
+    is always a machine account and the group is always Domain Admins.
+
+    Live reference (alerts 458206 / 458606):
+      "The machine account YOURPC03 was added to a group with Domain Admins privileges
+       by the user examplecorp\\a.tucker."
+
+    Sequence:
+      1. Attacker authenticates -> DC-side 4624 + endpoint 4624 + 4672
+      2. 4688 net.exe / PowerShell group manipulation
+      3. 4728 machine account added to Domain Admins (global group -> 4728)
+      4. 4689 process exit
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    victim = _pick_windows_user(session_context)
+    if not victim or victim["username"] == u["username"]:
+        victim = _pick_windows_user(session_context)
+    if not victim:
+        return None
+
+    dns_domain = _get_dns_domain(config)
+    domain = _get_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+
+    # The member is ALWAYS a machine account — that is the whole point of this detection.
+    machine_host = victim.get("hostname") or "WKS001"
+    machine_short = machine_host.split(".")[0].upper()
+    machine_sam = f"{machine_short}$"
+    member_dn = f"CN={machine_short},CN=Computers,{base_dn}"
+    member_sid = _stable_user_sid(machine_sam)
+
+    grp = _PRIVILEGED_GROUPS["Domain Admins"]
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+
+    tool = random.choice([
+        ("C:\\Windows\\System32\\net.exe",
+         f'net group "Domain Admins" {machine_sam} /add /domain'),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f'powershell.exe -c "Add-ADGroupMember -Identity \'Domain Admins\' '
+         f'-Members \'{machine_sam}\'"'),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f'powershell.exe -c "Get-ADComputer {machine_short} | '
+         f'Add-ADPrincipalGroupMembership -MemberOf \'Domain Admins\'"'),
+    ])
+    events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+
+    # _build_4728 derives TargetDomainName itself; it takes no target_domain kwarg.
+    events.append(json.dumps(_build_4728(u, config,
+                                         member_name=member_dn,
+                                         member_sid=member_sid,
+                                         target_group="Domain Admins",
+                                         target_sid=grp["sid"],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
 def _threat_priv_group_addition(config, session_context):
     """Machine or user account added to a privileged AD group (Domain Admins,
     Enterprise Admins, or Builtin Administrators).
@@ -4280,7 +4587,13 @@ def _threat_priv_group_addition(config, session_context):
     dc_parts = dns_domain.split(".")
     base_dn = ",".join(f"DC={p}" for p in dc_parts)
 
-    group_name, group_info = random.choice(list(_PRIVILEGED_GROUPS.items()))
+    # Domain-scoped groups only. Builtin\Administrators (S-1-5-32-544 / "Builtin") does
+    # not resolve as a domain privileged group and fires nothing — this generator's
+    # "verified working" status rested on runs that happened to draw a domain group, so
+    # the unrestricted draw made an already-passing detection intermittently regress.
+    # See _threat_priv_group_add_remove for the supporting A/B evidence.
+    group_name = random.choice(["Domain Admins", "Enterprise Admins"])
+    group_info = _PRIVILEGED_GROUPS[group_name]
 
     is_machine = random.random() < 0.6
     if is_machine:
@@ -4359,6 +4672,13 @@ def _threat_priv_group_addition(config, session_context):
     return events
 
 
+# Authoritative AD schema GUIDs.
+#   container class -> MS-ADSC "Class container", schemaIdGuid
+#   nTSecurityDescriptor attribute -> MS-ADA3, schemaIdGuid
+_GUID_CLASS_CONTAINER           = "{bf967a8b-0de6-11d0-a285-00aa003049e2}"
+_GUID_ATTR_NTSECURITYDESCRIPTOR = "{bf9679e3-0de6-11d0-a285-00aa003049e2}"
+
+
 def _threat_adminsdholder_acl_modification(config, session_context):
     """AdminSDHolder ACL modification: attacker writes a new ACE to the
     AdminSDHolder object's nTSecurityDescriptor, granting themselves (or a
@@ -4390,7 +4710,10 @@ def _threat_adminsdholder_acl_modification(config, session_context):
     dc_parts = dns_domain.split(".")
     base_dn = ",".join(f"DC={p}" for p in dc_parts)
     adminsdholder_dn = f"CN=AdminSDHolder,CN=System,{base_dn}"
-    adminsdholder_guid = "{" + str(uuid.uuid4()) + "}"
+    # STABLE objectGUID, derived from the DN. A real AD object keeps one GUID for its
+    # entire lifetime; this was uuid.uuid4() per fire, so every run presented XSIAM with a
+    # brand-new object and no history could ever accumulate against AdminSDHolder itself.
+    adminsdholder_guid = "{" + str(uuid.uuid5(uuid.NAMESPACE_DNS, adminsdholder_dn)) + "}"
 
     events = []
     t = time.time()
@@ -4412,17 +4735,30 @@ def _threat_adminsdholder_acl_modification(config, session_context):
 
     attacker_sid = _stable_user_sid(u["username"])
 
-    # Default AdminSDHolder SDDL (before attacker modifies it)
-    base_sddl = (
-        "O:DAG:DAD:PAI"
-        "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;SY)"
-        "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)"
-        "(OA;;CR;ab721a56-1e2f-11d0-9819-00aa0040529b;;BA)"
-        "(A;;RPLCLORC;;;AU)"
+    # Default AdminSDHolder security descriptor, written the way Windows' SDDL serializer
+    # emits it: rights in canonical order CC DC LC SW RP WP DT LO CR SD RC WD WO — the
+    # "full control" string detection content matches on. The previous version used
+    # RPWPCRCCDCLCLORCWOWDSDDTSW, which is the ordering found in schema
+    # defaultSecurityDescriptor strings, NOT serializer output, so an SDDL-diffing rule
+    # would never classify the added ACE as a rights grant.
+    #
+    # The old descriptor also carried (OA;;CR;ab721a56-...;;BA) — the Exchange Receive-As
+    # extended right, which is nonsense on AdminSDHolder. Real AdminSDHolder carries
+    # Reset-Password (00299570-...) and Change-Password (ab721a53-...). The SACL is what
+    # makes this object audited at all, which is why 5136 fires on it.
+    base_dacl = (
+        "(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)"
+        "(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;DA)"
+        "(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)"
+        "(OA;;CR;00299570-246d-11d0-a768-00aa006e0529;;BA)"
+        "(OA;;CR;ab721a53-1e2f-11d0-9819-00aa0040529b;;WD)"
+        "(A;;LCRPLORC;;;AU)"
         "(A;;LCRPLORC;;;ED)"
     )
-    # New SDDL with attacker's full-control ACE appended
-    new_sddl = base_sddl + f"(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;{attacker_sid})"
+    sacl = "S:(AU;SAFA;WDWOSDWPCCDCSW;;;WD)"
+    attacker_ace = f"(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;{attacker_sid})"
+    base_sddl = f"O:DAG:DAD:P{base_dacl}{sacl}"
+    new_sddl = f"O:DAG:DAD:P{base_dacl}{attacker_ace}{sacl}"
 
     tool = random.choice([
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
@@ -4451,15 +4787,47 @@ def _threat_adminsdholder_acl_modification(config, session_context):
                                          logon_id=logon_id, ts=t)))
     t += random.uniform(0.5, 1.5)
 
-    # 4662 — WRITE_DACL on AdminSDHolder container
-    # Real events use %{GUID} for ObjectName, not the DN
-    write_dacl_props = "%%1539\n    {bf967a8b-0de6-11d0-a285-00aa003049e2}\n"
+    # ── Recon first: read the ACL before rewriting it. dsacls and Get-Acl both do this,
+    #    and it gives the detector a read -> write progression on the same object.
+    read_props = f"%%7684\n    {_GUID_CLASS_CONTAINER}\n"
     events.append(json.dumps(_build_4662(
         u, config,
-        object_type="%{bf967a8b-0de6-11d0-a285-00aa003049e2}",
-        object_name=f"%{adminsdholder_guid}",
+        object_type=f"%{_GUID_CLASS_CONTAINER}",
+        object_name=adminsdholder_dn,
+        access_mask="0x10",
+        properties=read_props,
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.6)
+
+    # 4662 — WRITE_DAC on the AdminSDHolder container.
+    # ObjectName MUST be the distinguished name. That is how Microsoft defines the field
+    # ("distinguished name of the object that was accessed"), it is what MS's monitoring
+    # guidance for 4662 says to match on for this object, and it is what the working
+    # DCSync generator emits. The previous code passed "%{uuid4()}" — a GUID minted fresh
+    # every fire, resolving to nothing tenant-side — so the 4662 leg was inert by
+    # construction and the string "AdminSDHolder" never appeared in it at all.
+    write_dacl_props = f"%%1539\n    {_GUID_CLASS_CONTAINER}\n"
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=f"%{_GUID_CLASS_CONTAINER}",
+        object_name=adminsdholder_dn,
         access_mask="0x40000",
         properties=write_dacl_props,
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += 0.05
+
+    # 4662 — the nTSecurityDescriptor property write that accompanies the DACL change
+    # (dsacls and Set-Acl both emit this alongside the WRITE_DAC).
+    write_prop_props = (f"%%7685\n    {_GUID_CLASS_CONTAINER}\n    "
+                        f"{_GUID_ATTR_NTSECURITYDESCRIPTOR}\n")
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=f"%{_GUID_CLASS_CONTAINER}",
+        object_name=adminsdholder_dn,
+        access_mask="0x20",
+        properties=write_prop_props,
         operation_type="Object Access",
         logon_id=logon_id, ts=t)))
     t += 0.05
@@ -4492,98 +4860,255 @@ def _threat_adminsdholder_acl_modification(config, session_context):
 
     events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
                                          logon_id=logon_id, ts=t)))
+
+    # ── SDProp propagation: the reason this attack matters ──────────────────────────
+    # Within 60 minutes the Security Descriptor Propagator on the PDC emulator copies
+    # AdminSDHolder's DACL onto every protected principal (adminCount=1), which is how a
+    # single ACL write becomes durable control over every privileged account. Without it
+    # the generator tells half the story: an ACL edit with no consequence.
+    #
+    # These writes are performed by the DC machine account, NOT the attacker — that is
+    # what SDProp is. The attacker's ACE rides along in every propagated descriptor,
+    # which is what ties the propagation back to the original modification.
+    dc_host = _get_dc_hostname(config)
+    dc_short = dc_host.split(".")[0]
+    sdprop_subject = {"username": f"{dc_short}$", "hostname": dc_host, "ip": u.get("ip")}
+    sdprop_logon = _new_logon_id()
+
+    protected_objects = [
+        (f"CN=Domain Admins,CN=Users,{base_dn}", "group"),
+        (f"CN=Enterprise Admins,CN=Users,{base_dn}", "group"),
+        (f"CN=Schema Admins,CN=Users,{base_dn}", "group"),
+        (f"CN=Administrators,CN=Builtin,{base_dn}", "group"),
+        (f"CN=Account Operators,CN=Builtin,{base_dn}", "group"),
+        (f"CN=Backup Operators,CN=Builtin,{base_dn}", "group"),
+        (f"CN=Server Operators,CN=Builtin,{base_dn}", "group"),
+        (f"CN=Print Operators,CN=Builtin,{base_dn}", "group"),
+        (f"CN=Replicator,CN=Builtin,{base_dn}", "group"),
+        (f"CN=Administrator,CN=Users,{base_dn}", "user"),
+        (f"CN=krbtgt,CN=Users,{base_dn}", "user"),
+    ]
+    # A real SDProp cycle also touches the individual members of those groups.
+    for member in _get_windows_users(session_context)[:random.randint(3, 6)]:
+        protected_objects.append(
+            (f"CN={member['username']},CN=Users,{base_dn}", "user"))
+
+    # SDProp runs on its own cycle, not inline with the attacker's session.
+    t += random.uniform(120.0, 480.0)
+    for obj_dn, obj_class in protected_objects:
+        obj_guid = "{" + str(uuid.uuid4()) + "}"
+        events.append(json.dumps(_build_5136(
+            sdprop_subject, config,
+            object_dn=obj_dn, object_class=obj_class, object_guid=obj_guid,
+            attribute_name="nTSecurityDescriptor",
+            attribute_value=new_sddl,
+            attribute_syntax_oid="2.5.5.15",
+            operation_type="%%14674",
+            op_correlation_id=_new_logon_guid(),
+            logon_id=sdprop_logon, ts=t)))
+        t += random.uniform(0.05, 0.4)
+
     return events
 
 
-_IRREGULAR_SERVICE_SPNS = [
-    "HOST/{dc_host}",
-    "RPCSS/{dc_host}",
-    "LDAP/{dc_host}",
-    "LDAP/{dc_host}/{dns_domain}",
-    "DNS/{dc_host}",
-    "GC/{dc_host}/{dns_domain}",
-    "cifs/{dc_host}",
-    "E3514235-4B06-11D1-AB04-00C04FC2DCD2/{dc_host}/{dns_domain}",
-    "HOST/fs01.{dns_domain}",
-    "HOST/fs02.{dns_domain}",
-    "WSMAN/mgmt01.{dns_domain}",
-    "WSMAN/mgmt02.{dns_domain}",
-    "cifs/backup01.{dns_domain}",
-    "cifs/backup02.{dns_domain}",
-    "HTTP/adfs.{dns_domain}",
-    "HTTP/sccm01.{dns_domain}",
-    "MSSQLSvc/sql01.{dns_domain}:1433",
-    "MSSQLSvc/sql02.{dns_domain}:1433",
-    "exchangeRFR/exchange01.{dns_domain}",
-    "exchangeAB/exchange01.{dns_domain}",
-    "SAPService/sap01.{dns_domain}",
-    "TERMSRV/rdp-gw01.{dns_domain}",
-    "FTP/ftp01.{dns_domain}",
-    "HTTP/printing.{dns_domain}",
-    "SMTP/mail01.{dns_domain}",
-    "HOST/citrix01.{dns_domain}",
-    "RestrictedKrbHost/{dc_host}",
+# Irregular Kerberos service targets — one entry per DISTINCT service principal.
+# Used by _threat_irregular_service_tgs, which drives the XSIAM Identity Analytics
+# detector "A user sent multiple TGT requests to irregular service"
+# ("A user sent multiple TGT requests to services other than KRBTGT and KADMIN").
+# Each tuple is (ServiceName as the KDC logs it, SPN named in the request).  The
+# previous flat SPN list collapsed nine {dc_host} SPNs onto the single name
+# "DC01$", so 27 SPNs produced only ~18 distinct services.
+# Irregular Kerberos service targets — one entry per DISTINCT service principal.
+#
+# Every ServiceName here is an ORDINARY SERVICE ACCOUNT, never a machine account. The
+# previous table was 26/36 machine accounts ("FS01$", "SCCM01$", …). Published Kerberoasting
+# rules discard ServiceName values ending in "$", and that same filter is what kept
+# _threat_multiple_service_tickets silent until its table was rebuilt with non-machine
+# accounts — after which it fired immediately.
+#
+# Every SPN here is also DISJOINT from _SERVICE_ACCOUNT_SPNS, the pool the benign
+# Kerberos traffic uses. Nine entries previously collided (HTTP/intranet, MSSQLSvc/sql01,
+# SAPService/sap01, ...), which meant a quarter of the 'irregular' burst was naming
+# services these users legitimately touch every day — the opposite of the signal the
+# detector looks for. Keep this list disjoint if either pool is edited.
+_IRREGULAR_TGT_TARGETS = [
+    ("svc_sql_legacy",   "MSSQLSvc/sqllegacy.{dns_domain}:1433"),
+    ("svc_sql_stage",    "MSSQLSvc/sqlstage.{dns_domain}:1433"),
+    ("svc_sql_archive",  "MSSQLSvc/sqlarchive.{dns_domain}:1433"),
+    ("svc_sql_audit",    "MSSQLSvc/sqlaudit.{dns_domain}:1433"),
+    ("svc_sql_bi",       "MSSQLSvc/bi01.{dns_domain}:1433"),
+    ("svc_sql_erp",      "MSSQLSvc/erpdb.{dns_domain}:1433"),
+    ("svc_legacyweb",    "HTTP/legacyapp.{dns_domain}"),
+    ("svc_docsvc",       "HTTP/docs-internal.{dns_domain}"),
+    ("svc_buildsvc",     "HTTP/buildsvc.{dns_domain}"),
+    ("svc_monitoring",   "HTTP/monitoring.{dns_domain}"),
+    ("svc_grafana",      "HTTP/grafana.{dns_domain}"),
+    ("svc_wiki",         "HTTP/wiki.{dns_domain}"),
+    ("svc_scmsvc",       "HTTP/scm-internal.{dns_domain}"),
+    ("svc_artifactory",  "HTTP/artifactory.{dns_domain}"),
+    ("svc_api_gw",       "HTTP/api-gw.{dns_domain}"),
+    ("svc_portal",       "HTTP/portal.{dns_domain}"),
+    ("svc_sap_legacy",   "SAPService/sap-legacy.{dns_domain}"),
+    ("svc_sap_pi",       "SAPService/sappi.{dns_domain}"),
+    ("svc_backup",       "VeeamBackupSvc/veeam01.{dns_domain}"),
+    ("svc_veeam_proxy",  "VeeamBackupSvc/veeam02.{dns_domain}"),
+    ("svc_oracle",       "oracle/orcl01.{dns_domain}:1521"),
+    ("svc_postgres",     "POSTGRES/pg01.{dns_domain}:5432"),
+    ("svc_mongo",        "MONGO/mongo01.{dns_domain}:27017"),
+    ("svc_tableau",      "HTTP/tableau.{dns_domain}"),
+    ("svc_qlik",         "HTTP/qlik.{dns_domain}"),
+    ("svc_exchange",     "exchangeRFR/exchsvc.{dns_domain}"),
+    ("svc_smtp_relay",   "SMTP/relay.{dns_domain}"),
+    ("svc_ftp",          "ftp/ftpsvc.{dns_domain}"),
+    ("svc_termsrv",      "TERMSRV/tsfarm.{dns_domain}"),
+    ("svc_citrix",       "TERMSRV/xenapp.{dns_domain}"),
+    ("svc_vmware",       "STS/vcsa.{dns_domain}"),
+    ("svc_netapp",       "nfs/netappsvc.{dns_domain}"),
+    ("svc_printsvc",     "IPP/printsvc.{dns_domain}"),
+    ("svc_adfs",         "host/adfssvc.{dns_domain}"),
+    ("svc_wsus",         "HTTP/wsus.{dns_domain}"),
+    ("svc_ansible",      "HTTP/ansible.{dns_domain}"),
 ]
 
 
-def _threat_irregular_service_tgs(config, session_context):
-    """A user sends TGS requests to many services they don't normally access,
-    including non-standard SPNs like HOST/, RPCSS/, DNS/, GC/, and other
-    admin-tier services.
+def _threat_irregular_tgt_burst(config, session_context):
+    """Excessive TGT requests to services other than KRBTGT/KADMIN — rule for
+    "A user sent multiple TGT requests to irregular service".
 
-    Unlike our Kerberoasting generator (which targets RC4 encryption),
-    this attack uses NORMAL encryption — the anomaly is the breadth and
-    novelty of services being probed, not the cipher.
+    A SEPARATE generator from _threat_irregular_service_tgs, deliberately. That one pairs
+    every 4768 with a weak-encryption 4769, and the 4769 burst reliably raises "Abnormal
+    issuance of weakly encrypted service tickets to a user" — an alert already owned by
+    _threat_multiple_service_tickets — which is all it has ever produced. Rather than
+    weaken a working signal, this variant isolates the other half:
 
-    XSIAM fires three variants based on volume:
-      - "A user sent a TGT request to irregular service" (single unusual target)
-      - "A user sent multiple TGT requests to irregular services" (3-10 targets)
-      - "A user sent an excessive number of TGT requests to irregular services" (10+)
+      * 4768 ONLY, no paired 4769 -> nothing to trigger the weak-encryption sibling
+      * ServiceName is an irregular service principal, never krbtgt/kadmin
+      * PreAuthType stays 2 (normal). PreAuthType=0 is the AS-REP roasting signature and
+        belongs to _threat_as_rep_roasting, which fires "An excessive number of TGT
+        requests were sent for users that do not require Kerberos pre-authentication" and
+        must keep doing so untouched.
+      * AES encryption, not RC4 — RC4 is the weak-encryption signature.
 
     Sequence:
-      1. Attacker authenticates normally → 4768 TGT
-      2. 4624 interactive logon + 4672 elevated privileges
-      3. 4688 PowerShell / LDAP recon tool process creation
-      4. Burst of 4769 TGS requests to many unusual services — all from
-         the same TargetUserName, all with normal AES encryption
-      5. 4689 process exit + eventual 4634 logoff
+      1. Attacker authenticates -> DC 4624 + endpoint 4624 + 4672
+      2. 4688 enumeration tool
+      3. 40-55 x 4768, each naming a DIFFERENT irregular service, one requesting user
+      4. 4689 process exit
+    """
+    users = _get_windows_users(session_context)
+    if not users:
+        return None
+    u = random.choice(users)
+    src_ip = u.get("ip") or "10.0.0.1"
+    dns_domain = _get_dns_domain(config)
 
-    Detection keys:
-      - Single TargetUserName across many 4769 events in a short window
-      - ServiceName values are NOT krbtgt or kadmin (those are normal)
-      - Services are outside the user's baseline access pattern
-      - High distinct-service count in a short time window
+    targets = _IRREGULAR_TGT_TARGETS[:]
+    random.shuffle(targets)
+    targets = targets[:random.randint(40, 55)] if len(targets) >= 40 else targets
+
+    events = []
+    t = time.time() - len(targets) - 30
+    logon_id = _new_logon_id()
+
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=src_ip,
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         ip_override=src_ip, elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(1.0, 3.0)
+
+    tool = ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            'powershell.exe -c "setspn -T {d} -Q */* | Select-String \'CN=\'"'
+            .format(d=dns_domain))
+    events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+
+    for svc_name, spn in targets:
+        tgt = _build_4768(u, config, ip_override=src_ip, encryption="0x12", ts=t)
+        tgt["event_data"]["ServiceName"] = svc_name
+        tgt["event_data"]["ServiceSid"] = _stable_user_sid(svc_name)
+        tgt["event_data"]["TicketOptions"] = "0x40810010"
+        events.append(json.dumps(tgt))
+        t += random.uniform(0.15, 0.45)
+
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_irregular_service_tgs(config, session_context):
+    """A user requests Kerberos tickets for services they never normally touch.
+
+    XSIAM detector: "A user sent multiple TGT requests to irregular service"
+      variations: "A user sent an excessive number of TGT requests to irregular
+                   services" (Medium) and "A user sent a TGT request to irregular
+                   service" (Informational)
+      module: Identity Analytics · source: Windows Event Collector
+      test period: 10 minutes · deduplication: 1 day (per user)
+      description: "A user sent multiple TGT requests to services other than
+                    KRBTGT and KADMIN."
+
+    A *TGT* request is event 4768, and its ServiceName is normally "krbtgt".
+    The attack modelled here is Kerberoasting performed inside the AS-REQ: the
+    tool sets the request's sname to the target SPN instead of krbtgt, so the DC
+    logs 4768 events whose ServiceName is an ordinary service principal.  On 4769
+    "a service other than KRBTGT" is true of every event ever logged, so the
+    detector cannot be reading TGS events — an earlier 4769-only version of this
+    generator ingested cleanly and never fired.
+
+    We emit both shapes: the 4768 burst is the key trigger for this detector, and
+    a matching 4769 for each target keeps the Kerberos exchange internally
+    consistent (a real AS-REQ-roast is still followed by ticket use).
+
+    Sequence:
+      1. Attacker authenticates → 4768 TGT (normal, krbtgt, AES)
+      2. 4624 interactive logon + 4672 elevated privileges
+      3. 4688 Rubeus / LDAP recon tool process creation
+      4. Burst of 25-36 4768 requests whose ServiceName is an irregular service
+         principal, each paired with the corresponding 4769 — KEY TRIGGER
+      5. 4689 process exit + 4634 logoff
     """
     u = _pick_windows_user(session_context)
     if not u:
         return None
 
     dc_host = _get_dc_hostname(config)
+    dc_short = _get_dc_short(config)
     dns_domain = _get_dns_domain(config)
+    src_ip = u.get("ip") or "10.0.0.1"
 
-    resolved_spns = [
-        spn.format(dc_host=dc_host, dns_domain=dns_domain)
-        for spn in _IRREGULAR_SERVICE_SPNS
+    resolved = [
+        (name.format(dc_short=dc_short),
+         spn.format(dc_host=dc_host, dns_domain=dns_domain))
+        for name, spn in _IRREGULAR_TGT_TARGETS
     ]
 
-    num_targets = random.randint(15, 25)
-    targets = random.sample(resolved_spns, k=min(len(resolved_spns), num_targets))
+    num_targets = random.randint(25, min(36, len(resolved)))
+    targets = random.sample(resolved, k=num_targets)
 
     events = []
-    t = time.time() - len(targets) * 2
+    t = time.time() - len(targets) * 3
 
     logon_id = _new_logon_id()
     logon_guid = _new_logon_guid()
 
-    events.append(json.dumps(_build_4768(u, config, ts=t)))
+    events.append(json.dumps(_build_4768(u, config, ip_override=src_ip, ts=t)))
     t += 1.0
-    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=src_ip,
                                              logon_id=logon_id, ts=t)))
     t += 1.2
     events.append(json.dumps(_build_4624(u, config, logon_type=2,
                                          auth_pkg=_NEG_PACKAGE,
                                          target_logon_id=logon_id,
                                          logon_guid=logon_guid,
+                                         ip_override=src_ip,
                                          elevated=True, ts=t)))
     t += 0.05
     events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
@@ -4591,26 +5116,54 @@ def _threat_irregular_service_tgs(config, session_context):
     t += random.uniform(2.0, 5.0)
 
     tool = random.choice([
+        ("C:\\Users\\Public\\Rubeus.exe",
+         "C:\\Users\\Public\\Rubeus.exe kerberoast /rc4opsec /nowrap"),
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
          "powershell.exe -ep bypass -c \"[adsisearcher]'(&(servicePrincipalName=*))'"
          ".FindAll() | ForEach { $_.Properties.serviceprincipalname }\""),
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
          "powershell.exe -ep bypass -c \"Get-ADObject -Filter {servicePrincipalName -like '*'}"
          " -Properties servicePrincipalName\""),
-        ("C:\\Users\\Public\\Rubeus.exe",
-         "C:\\Users\\Public\\Rubeus.exe kerberoast /stats"),
     ])
     events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
                                          command_line=tool[1],
                                          logon_id=logon_id, ts=t)))
     t += random.uniform(0.5, 1.5)
 
-    for spn in targets:
-        ev = _build_4769(u, config, service_spn=spn,
-                         encryption=random.choice(_TICKET_ENC_NORMAL), ts=t)
-        ev["event_data"]["LogonGuid"] = logon_guid
-        events.append(json.dumps(ev))
-        t += random.uniform(0.3, 1.0)
+    for idx, (svc_name, spn) in enumerate(targets):
+        # KEY TRIGGER — a TGT (AS-REQ) naming a service other than krbtgt/kadmin.
+        # _build_4768 hardcodes ServiceName="krbtgt", so override it here, the
+        # same way _threat_as_rep_roasting overrides PreAuthType/TicketOptions.
+        # TWO REPRESENTATIONS of "the service this TGT names", alternating per target.
+        # Kerberos allows the AS-REQ sname to be either the service account's
+        # sAMAccountName or its SPN, and the detector's own wording ("services other than
+        # KRBTGT and KADMIN") does not say which form it reads. The account-name form
+        # alone was tested and produced nothing, so emitting both gives the detector a
+        # match under either interpretation instead of re-guessing one at a time.
+        # ServiceSid stays keyed to the ACCOUNT in both cases — that is the principal the
+        # ticket is actually for, regardless of how the name is rendered.
+        svc_label = spn if (idx % 2 == 0) else svc_name
+        tgt = _build_4768(u, config, ip_override=src_ip,
+                          encryption="0x17", ts=t)
+        tgt["event_data"]["ServiceName"] = svc_label
+        tgt["event_data"]["ServiceSid"] = _stable_user_sid(svc_name)
+        tgt["event_data"]["TicketOptions"] = "0x40810010"
+        events.append(json.dumps(tgt))
+        t += random.uniform(0.2, 0.5)
+
+        # RC4 (0x17) is deliberate and must stay. XSIAM detects Kerberoasting (T1558.003)
+        # under SEVERAL alert names, and triggering all of them is the goal — not one
+        # each. These RC4 4769s legitimately feed "A user received multiple weakly
+        # encrypted service tickets" while the 4768 burst above feeds "A user sent
+        # multiple TGT requests to irregular service". One generator raising both is the
+        # desired outcome; do not "fix" the overlap by weakening a signal.
+        tgs = _build_4769(u, config, service_spn=spn, encryption="0x17",
+                          ip_override=src_ip, ts=t)
+        tgs["event_data"]["ServiceName"] = svc_name
+        tgs["event_data"]["ServiceSid"] = _stable_user_sid(svc_name)
+        tgs["event_data"]["LogonGuid"] = logon_guid
+        events.append(json.dumps(tgs))
+        t += random.uniform(0.3, 0.8)
 
     events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
                                          logon_id=logon_id, ts=t)))
@@ -4622,9 +5175,8 @@ def _threat_irregular_service_tgs(config, session_context):
     return events
 
 
-# ---------------------------------------------------------------------------
-# Well-known SID for SMS Admins local group (static in SCCM deployments)
-# ---------------------------------------------------------------------------
+# SMS Admins is a domain-scoped group in this synthetic forest (RID 1200), NOT a BUILTIN
+# alias — that is why its 4732 resolves and fires while Builtin\Administrators does not.
 _SID_SMS_ADMINS = "S-1-5-21-3457937927-2839227994-823803824-1200"
 
 
@@ -4717,11 +5269,138 @@ def _threat_sms_admins_addition(config, session_context):
     return events
 
 
-# bf967a86 = "container" schema class GUID
-_SCCM_CONTAINER_OBJECT_TYPE = "{bf967a86-0de6-11d0-a285-00aa003049e2}"
+def _threat_sms_admins_add_remove(config, session_context):
+    """User added to the SMS Admins group and removed shortly after.
 
-_SCCM_READ_PROPERTY = "0x10"
-_SCCM_LIST_CHILDREN = "0x4"
+    Separate generator from _threat_sms_admins_addition on purpose: that one fires
+    "User added to the SMS Admins local group" and is verified working, so it is left
+    untouched. This mirrors the priv_group_addition / priv_group_add_remove split, where
+    the add-and-remove pair turned out to have its own distinct detection ("Rare
+    privileged group addition and removal") rather than being a variant of the addition.
+
+    Sequence:
+      1. Attacker authenticates -> DC-side 4624 + endpoint 4624 + 4672
+      2. 4688 net.exe / PowerShell process creation
+      3. 4732 member added to SMS Admins
+      4. dwell (5-10 min) while the access is used
+      5. 4733 member removed from SMS Admins — covering tracks
+      6. 4689 process exit
+
+    The whole arc is BACKDATED so the removal lands at roughly "now" rather than in the
+    future: events are shipped at generation time, and a 4733 stamped 15+ minutes ahead of
+    wall clock is something no real WEC source produces and no pair correlation can act
+    on. This is the same defect that kept priv_group_add_remove silent.
+
+    Both halves carry the identical group identity (name, SID, domain). _build_4732 and
+    _build_4733 default target_domain differently ("Builtin" vs the AD domain), so both
+    are passed explicitly here — otherwise the pair disagrees about which group it is.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    victim = _pick_windows_user(session_context)
+    if not victim or victim["username"] == u["username"]:
+        victim = _pick_windows_user(session_context)
+    if not victim or victim["username"] == u["username"]:
+        return None
+
+    dns_domain = _get_dns_domain(config)
+    domain = _get_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+
+    victim_name = victim["username"]
+    victim_dn = f"CN={victim_name},CN=Users,{base_dn}"
+    victim_sid = _stable_user_sid(victim_name)
+    sccm_server = f"SCCM01.{dns_domain}"
+
+    dwell = random.uniform(300.0, 600.0)
+    events = []
+    start_ts = time.time() - dwell - 90.0
+    t = start_ts
+
+    logon_id = _new_logon_id()
+
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+
+    tool = random.choice([
+        ("C:\\Windows\\System32\\net.exe",
+         f'net localgroup "SMS Admins" {domain}\\{victim_name} /add'),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f'powershell.exe -c "Add-LocalGroupMember -Group \'SMS Admins\' '
+         f'-Member \'{domain}\\{victim_name}\'"'),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f'powershell.exe -c "Invoke-Command -ComputerName {sccm_server} '
+         f'-ScriptBlock {{ net localgroup \'SMS Admins\' {domain}\\{victim_name} /add }}"'),
+    ])
+    events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+
+    events.append(json.dumps(_build_4732(u, config,
+                                         member_name=victim_dn,
+                                         member_sid=victim_sid,
+                                         target_group="SMS Admins",
+                                         target_sid=_SID_SMS_ADMINS,
+                                         target_domain=domain,
+                                         logon_id=logon_id, ts=t)))
+
+    # ── dwell: the access is used before the tracks are covered ──
+    t += random.uniform(30.0, 90.0)
+    events.append(json.dumps(_build_4688(
+        u, config,
+        process_name="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        command_line=(f'powershell.exe -c "Invoke-Command -ComputerName {sccm_server} '
+                      f'-ScriptBlock {{ Get-CMDevice }}"'),
+        logon_id=logon_id, ts=t)))
+    # Land the removal a full dwell after the addition, but never in the future.
+    t = min(max(t, start_ts + dwell), time.time() - 5.0)
+
+    removal_tool = ("C:\\Windows\\System32\\net.exe",
+                    f'net localgroup "SMS Admins" {domain}\\{victim_name} /delete')
+    events.append(json.dumps(_build_4688(u, config, process_name=removal_tool[0],
+                                         command_line=removal_tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 0.8)
+
+    events.append(json.dumps(_build_4733(u, config,
+                                         member_name=victim_dn,
+                                         member_sid=victim_sid,
+                                         target_group="SMS Admins",
+                                         target_sid=_SID_SMS_ADMINS,
+                                         target_domain=domain,
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+
+    events.append(json.dumps(_build_4689(u, config, process_name=removal_tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+# The System Management container is objectClass "container". Its schemaIDGUID is
+# bf967a8b-... (MS-ADSC); bf967a86-... — used previously — is the Computer class. Real
+# 4662 ObjectType values carry a '%' prefix, as the DCSync generator already does.
+_SCCM_CONTAINER_OBJECT_TYPE = f"%{_GUID_CLASS_CONTAINER}"
+
+# SCCM's mSSMSSite / mSSMSManagementPoint / mSSMSServerLocatorPoint classes are schema
+# extensions whose schemaIDGUIDs are generated per forest at extadsch time, so there is no
+# canonical value to hard-code. The child reads are reported against the container class;
+# detection content keys on ObjectName, not ObjectType.
+_SCCM_CHILD_OBJECT_TYPE = f"%{_GUID_CLASS_CONTAINER}"
+
+_SCCM_READ_PROPERTY = "0x10"   # ACTRL_DS_READ_PROP -> AccessList %%7684
+_SCCM_LIST_CHILDREN = "0x4"    # ACTRL_DS_LIST      -> AccessList %%7682
 
 
 def _threat_sccm_container_recon(config, session_context):
@@ -4758,11 +5437,41 @@ def _threat_sccm_container_recon(config, session_context):
     base_dn = ",".join(f"DC={p}" for p in dc_parts)
     sysm_container_dn = f"CN=System Management,CN=System,{base_dn}"
 
-    sccm_site_objects = [
-        f"CN=SMS-Site-XS1,CN=System Management,CN=System,{base_dn}",
-        f"CN=SMS-MP-SCCM01.{dns_domain},CN=System Management,CN=System,{base_dn}",
-        f"CN=SMS-SLP-SCCM01.{dns_domain},CN=System Management,CN=System,{base_dn}",
-    ]
+    # SCCM publishes site/role objects under the System Management container as
+    # CN=SMS-Site-<SITECODE>, CN=SMS-MP-<SITECODE>-<SERVER>, CN=SMS-SLP-<SITECODE>-<SERVER>
+    # — short server names, no FQDN.
+    #
+    # BREADTH, not just correctness. The previous version enumerated three objects against
+    # one hardcoded site/server. A real recon (SharpSCCM, `adfind -b "CN=System
+    # Management,..."`) walks the whole container, and the two generators that started
+    # firing today did so after their distinct-target count was raised (9 -> 56 for
+    # kerberoasting). Four 4662 events is almost certainly under any breadth threshold, so
+    # this enumerates 25-34 distinct child objects across several sites and servers.
+    #
+    # Site codes and server names vary per fire; the schema GUIDs and %% access codes do
+    # NOT vary and must not — they are universal AD/msobjs.dll constants, and randomising
+    # them is what made the old ObjectType wrong (it used the Computer class GUID).
+    site_codes = random.sample(["XS1", "PS1", "CAS", "PR1", "SEC", "TS1"],
+                               k=random.randint(2, 4))
+    # >=5 servers keeps the floor at 27 child objects even with only 2 sites.
+    sccm_servers = random.sample(
+        ["SCCM01", "SCCM02", "SCCM03", "MP01", "MP02", "DP01", "DP02",
+         "SUP01", "FSP01", "MECM01"], k=random.randint(5, 7))
+
+    sccm_site_objects = []
+    for sc in site_codes:
+        sccm_site_objects.append(
+            f"CN=SMS-Site-{sc},CN=System Management,CN=System,{base_dn}")
+        for srv in sccm_servers:
+            sccm_site_objects.append(
+                f"CN=SMS-MP-{sc}-{srv},CN=System Management,CN=System,{base_dn}")
+            sccm_site_objects.append(
+                f"CN=SMS-SLP-{sc}-{srv},CN=System Management,CN=System,{base_dn}")
+    # Roles that live under the container regardless of site.
+    for srv in sccm_servers:
+        sccm_site_objects.append(
+            f"CN=SMS-DP-{srv},CN=System Management,CN=System,{base_dn}")
+    random.shuffle(sccm_site_objects)
 
     events = []
     t = time.time()
@@ -4797,13 +5506,16 @@ def _threat_sccm_container_recon(config, session_context):
                                          logon_id=logon_id, ts=t)))
     t += random.uniform(0.5, 1.5)
 
+    # %%7684 = Read Property, %%7682 = List Contents (msobjs.dll). The old values were
+    # %%1537 (DELETE) and %%1541 (SYNCHRONIZE) — the wrong bitmask family entirely, the
+    # same defect that kept the 4662-based generators silent while DCSync worked.
     read_props = (
-        "%%1537\n    "
-        "{bf967a86-0de6-11d0-a285-00aa003049e2}\n"
+        "%%7684\n    "
+        f"{_GUID_CLASS_CONTAINER}\n"
     )
     list_props = (
-        "%%1541\n    "
-        "{bf967a86-0de6-11d0-a285-00aa003049e2}\n"
+        "%%7682\n    "
+        f"{_GUID_CLASS_CONTAINER}\n"
     )
     events.append(json.dumps(_build_4662(
         u, config,
@@ -4818,7 +5530,7 @@ def _threat_sccm_container_recon(config, session_context):
     for site_obj in sccm_site_objects:
         events.append(json.dumps(_build_4662(
             u, config,
-            object_type=_SCCM_CONTAINER_OBJECT_TYPE,
+            object_type=_SCCM_CHILD_OBJECT_TYPE,
             object_name=site_obj,
             access_mask=_SCCM_LIST_CHILDREN,
             properties=list_props,
@@ -5145,11 +5857,48 @@ def _threat_samaccountname_spoofing(config, session_context):
         operation_type="%%14674",
         op_correlation_id=op_corr_id,
         logon_id=logon_id, ts=t)))
+    t += 0.05
+
+    # 4742 carrying the SPOOFED name — this is the event the detector can actually read.
+    # The rename to a DC name was previously expressed only in the 5136 pair above, and
+    # 5136 is NOT in XSIAM's analytics intake, so "this machine account name was modified
+    # to <DC name>" was invisible: the single 4742 emitted earlier still reported the
+    # ORIGINAL name. "TGT request with a spoofed sAMAccountName - Event log"
+    # (rule aa13b505) last fired 2026-07-02, consistent with the rename never being
+    # visible on a consumed event.
+    events.append(json.dumps(_build_4742(
+        u, config,
+        target_computer_name=machine_sam,
+        target_sid=machine_sid,
+        sam_account_name=dc_short,
+        dns_host_name=f"{machine_name.lower()}.{dns_domain}",
+        spns="-",
+        logon_id=logon_id, ts=t)))
     t += random.uniform(0.3, 0.8)
 
+    # The 4768 must name the spoofed account WITH its trailing "$".
+    #
+    # This is not theory — it is what the events that actually fired "TGT request with a
+    # spoofed sAMAccountName - Event log" (rule aa13b505) contained. The last such event
+    # still in retention, 2026-07-02 08:39, carries TargetUserName="DC01$". The rule then
+    # stopped firing entirely, and the current generator emits "DC01" with no "$".
+    #
+    # (Conceptually noPac renames the machine account to the DC name *without* the "$";
+    # the KDC still logs the principal with it. Match the observed event, not the theory.)
+    #
+    # The 4769 below deliberately keeps the bare "DC01" form: that shape currently fires
+    # "Service ticket request with a spoofed sAMAccountName" (rule 633ca673) reliably, and
+    # is not to be disturbed while fixing its sibling.
+    # IpAddress "::1" — the request appears to originate ON the DC, which is what the
+    # alert text describes ("requested from host DC01.examplecorp.local"). This is the one
+    # SYSTEMATIC difference between the events that fired rule aa13b505 on 2026-07-02 and
+    # the ones that stopped firing: the July events carried ::1, the current generator
+    # always emits the acting user's routable IP. (TicketEncryptionType also differed,
+    # 0x11 vs 0x12, but that is random from _TICKET_ENC_NORMAL and therefore noise.)
+    spoofed_tgt_user = {**u, "username": f"{dc_short}$", "hostname": dc_host, "ip": "::1"}
     spoofed_user = {**u, "username": dc_short, "hostname": dc_host}
-    events.append(json.dumps(_build_4768(spoofed_user, config,
-                                         ip_override=u.get("ip"), ts=t)))
+    events.append(json.dumps(_build_4768(spoofed_tgt_user, config, ip_override="::1",
+                                         ts=t)))
     t += random.uniform(0.2, 0.5)
 
     events.append(json.dumps(_build_5136(
@@ -5212,6 +5961,134 @@ _DELEGATION_TARGETS_KRBTGT = [
     "krbtgt/{dns_domain_upper}",
     "krbtgt",
 ]
+
+
+def _threat_new_machine_delegation(config, session_context):
+    """A NEWLY CREATED machine account is configured for Kerberos delegation.
+
+    The two halves are independently proven on this tenant, and have simply never been
+    combined: three generators create machine accounts via 4741, and _threat_delegation_change
+    fires "User account delegation to KRBTGT" from a delegation change. That generator
+    operates only on USER accounts (Set-ADUser), so this is genuinely new coverage rather
+    than a variant of it.
+
+    Which event carries the signal matters. delegation_change corroborates with 5136
+    (msDS-AllowedToDelegateTo, userAccountControl) but the event XSIAM actually consumes is
+    the 4738 that carries AllowedToDelegateTo. 5136 is not in XSIAM's Windows analytics
+    intake, so a 5136-only sequence is invisible — that is exactly why wip_dmsa_privesc sat
+    silent until a 4662 was added. For a machine the 4738 equivalent is 4742, which has its
+    own AllowedToDelegateTo field, so the delegation is expressed there.
+
+    Attack: an attacker with machine-account-creation rights (the AD default
+    ms-DS-MachineAccountQuota = 10 allows any authenticated user to create up to ten)
+    creates a computer object and immediately grants it constrained delegation to a DC
+    service. The new machine can then impersonate users to that service.
+
+    Sequence:
+      1. Attacker authenticates -> DC 4624 + endpoint 4624 + 4672
+      2. 4688 PowerShell New-ADComputer / Set-ADComputer
+      3. 4741 computer account CREATED (the "new machine")
+      4. 5136 msDS-AllowedToDelegateTo added   (corroboration)
+      5. 5136 userAccountControl -> TRUSTED_TO_AUTH_FOR_DELEGATION (corroboration)
+      6. 4742 computer account CHANGED, AllowedToDelegateTo = DC SPN  (KEY TRIGGER)
+      7. 4689 process exit
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    dns_domain = _get_dns_domain(config)
+    domain = _get_domain(config)
+    dc_host = _get_dc_hostname(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+
+    # A brand-new machine account, named the way the default quota abuse tools do.
+    machine_short = f"DESKTOP-{random.randint(1000, 9999)}"
+    machine_sam = f"{machine_short}$"
+    machine_dn = f"CN={machine_short},CN=Computers,{base_dn}"
+    machine_sid = _stable_user_sid(machine_sam)
+    machine_guid = "{" + str(uuid.uuid4()) + "}"
+
+    target_spn = random.choice(_DELEGATION_TARGETS_DC).format(
+        dc_host=dc_host, dns_domain=dns_domain)
+
+    events = []
+    t = time.time() - random.uniform(60.0, 180.0)
+    logon_id = _new_logon_id()
+    op_corr_id = _new_logon_guid()
+
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+
+    tool = ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            f'powershell.exe -ep bypass -c "New-ADComputer -Name {machine_short} '
+            f'-SAMAccountName {machine_sam} -ServicePrincipalNames \'HOST/{machine_short}\'; '
+            f'Set-ADComputer {machine_short} -Add @{{\'msDS-AllowedToDelegateTo\'='
+            f'\'{target_spn}\'}} -TrustedToAuthForDelegation $true"')
+    events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+
+    # 4741 — the machine is CREATED. This is what makes it a "new" machine.
+    events.append(json.dumps(_build_4741(u, config,
+                                         target_computer_name=machine_sam,
+                                         target_sid=machine_sid,
+                                         sam_account_name=machine_sam,
+                                         dns_host_name=f"{machine_short.lower()}.{dns_domain}",
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 4.0)
+
+    # 5136 corroboration — the delegation attribute and the UAC flag.
+    events.append(json.dumps(_build_5136(
+        u, config, object_dn=machine_dn, object_class="computer",
+        object_guid=machine_guid,
+        attribute_name="msDS-AllowedToDelegateTo",
+        attribute_value=target_spn,
+        attribute_syntax_oid="2.5.5.12",
+        operation_type="%%14674",
+        op_correlation_id=op_corr_id,
+        logon_id=logon_id, ts=t)))
+    t += 0.001
+    events.append(json.dumps(_build_5136(
+        u, config, object_dn=machine_dn, object_class="computer",
+        object_guid=machine_guid,
+        attribute_name="userAccountControl",
+        attribute_value="0x1080000",   # WORKSTATION_TRUST | TRUSTED_TO_AUTH_FOR_DELEGATION
+        attribute_syntax_oid="2.5.5.9",
+        operation_type="%%14674",
+        op_correlation_id=op_corr_id,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.6)
+
+    # 4742 — KEY TRIGGER. The machine-account equivalent of the 4738 that carries
+    # delegation_change's signal; this is the consumed event.
+    events.append(json.dumps(_build_4742(
+        u, config,
+        target_computer_name=machine_sam,
+        target_sid=machine_sid,
+        sam_account_name=machine_sam,
+        dns_host_name=f"{machine_short.lower()}.{dns_domain}",
+        spns=f"HOST/{machine_short}",
+        old_uac_value="0x80000",
+        new_uac_value="0x1080000",
+        uac_control="%%2093",          # TRUSTED_TO_AUTH_FOR_DELEGATION - Enabled
+        allowed_to_delegate=target_spn,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
 
 
 def _threat_delegation_change(config, session_context):
@@ -5367,43 +6244,56 @@ def _threat_delegation_change(config, session_context):
 def _threat_multiple_service_tickets(config, session_context):
     """A user requested multiple service tickets — volume-based Kerberoasting.
 
-    This variant requests TGS tickets with RC4 encryption to many distinct
-    service accounts in a short window.  XSIAM detects this on breadth: a single
-    user requesting 10+ distinct service tickets within minutes.
+    XSIAM detectors targeted (both Identity Analytics, both fed by the Windows
+    Event Collector, both 10-minute test period, both deduplicated for 1 day
+    per user — so a re-fire for the same user inside 24h is suppressed):
+      - "A user requested multiple service tickets"
+        variation "Abnormal issuance of service tickets to a user"
+      - "A user received multiple weakly encrypted service tickets"
+        variation "Abnormal issuance of weakly encrypted service tickets to a user"
 
-    Also covers "Abnormal issuance of service tickets to a user" which fires on
-    the same volume pattern regardless of encryption type.
+    Both count 4769 events grouped by the requesting user.  Two things decide
+    whether they fire:
+      - breadth: the number of DISTINCT services associated with *user* accounts.
+        Tickets issued to computer accounts (ServiceName ending in "$") are
+        ordinary Kerberos traffic and are filtered out, so every target here is
+        an SPN-bearing service account from _KERBEROAST_SPNS (1:1 SPN→account).
+      - weak encryption: RC4-HMAC (0x17) on every ticket, which is what
+        Kerberoasting tools request to get crackable hashes.
 
     Sequence:
-      1. Attacker authenticates → 4768 TGT (normal AES)
+      1. Attacker authenticates → 4768 TGT (normal AES, krbtgt)
       2. DC-side 4624 + endpoint 4624 + 4672
-      3. 4688 PowerShell / LDAP query tool
-      4. Burst of 15-30 4769 TGS requests with AES256 encryption
-         to many distinct SPNs — KEY TRIGGER (volume + breadth)
+      3. 4688 Rubeus / PowerShell kerberoast tool
+      4. Burst of 40-55 4769 TGS requests, RC4 (0x17), TicketOptions 0x40810000,
+         each to a DISTINCT service account — KEY TRIGGER
       5. 4689 process exit
     """
     u = _pick_windows_user(session_context)
     if not u:
         return None
 
-    num_tickets = random.randint(15, 30)
-    targets = random.sample(_SERVICE_ACCOUNT_SPNS,
-                            k=min(len(_SERVICE_ACCOUNT_SPNS), num_tickets))
+    src_ip = u.get("ip") or "10.0.0.1"
+
+    num_tickets = random.randint(40, min(55, len(_KERBEROAST_SPNS)))
+    targets = random.sample(_KERBEROAST_SPNS, k=num_tickets)
+
     events = []
     t = time.time() - len(targets) * 2
 
     logon_id = _new_logon_id()
     logon_guid = _new_logon_guid()
 
-    events.append(json.dumps(_build_4768(u, config, ts=t)))
+    events.append(json.dumps(_build_4768(u, config, ip_override=src_ip, ts=t)))
     t += 1.0
-    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=src_ip,
                                              logon_id=logon_id, ts=t)))
     t += 1.2
     events.append(json.dumps(_build_4624(u, config, logon_type=2,
                                          auth_pkg=_NEG_PACKAGE,
                                          target_logon_id=logon_id,
                                          logon_guid=logon_guid,
+                                         ip_override=src_ip,
                                          elevated=True, ts=t)))
     t += 0.05
     events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
@@ -5411,6 +6301,8 @@ def _threat_multiple_service_tickets(config, session_context):
     t += random.uniform(2.0, 5.0)
 
     tool = random.choice([
+        ("C:\\Users\\Public\\Rubeus.exe",
+         "C:\\Users\\Public\\Rubeus.exe kerberoast /rc4opsec /format:hashcat /nowrap"),
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
          "powershell.exe -ep bypass -c \"Get-ADUser -Filter {ServicePrincipalName -ne '$null'} "
          "-Properties ServicePrincipalName | ForEach { Add-Type -AssemblyName System.IdentityModel; "
@@ -5426,13 +6318,23 @@ def _threat_multiple_service_tickets(config, session_context):
     t += random.uniform(0.5, 1.5)
 
     for spn in targets:
-        ev = _build_4769(u, config, service_spn=spn, encryption="0x17", ts=t)
+        ev = _build_4769(u, config, service_spn=spn, encryption="0x17",
+                         ip_override=src_ip, ts=t)
         ev["event_data"]["LogonGuid"] = logon_guid
+        # One service account == one SID.  _build_4769 derives ServiceSid from
+        # the SPN string, which hands the same account a different SID per SPN.
+        ev["event_data"]["ServiceSid"] = _stable_user_sid(
+            ev["event_data"]["ServiceName"])
         events.append(json.dumps(ev))
         t += random.uniform(0.3, 0.8)
 
     events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
                                          logon_id=logon_id, ts=t)))
+    t += random.uniform(60, 300)
+    session = _pop_open_session(u["hostname"], u["username"])
+    if session:
+        events.append(json.dumps(_build_4634(session, config, ts=t)))
+
     return events
 
 
@@ -5470,7 +6372,15 @@ def _threat_priv_group_add_remove(config, session_context):
     dc_parts = dns_domain.split(".")
     base_dn = ",".join(f"DC={p}" for p in dc_parts)
 
-    group_name = random.choice(list(_PRIVILEGED_GROUPS.keys()))
+    # Builtin\Administrators is deliberately excluded. It is a machine-local BUILTIN alias
+    # (S-1-5-32-544, TargetDomainName="Builtin") with no domain SID prefix, and XSIAM's
+    # Identity Analytics resolves the added-to group as a domain principal — the live alert
+    # text reads "The group is on the domain EXAMPLECORP". Every LogSim add event using a
+    # domain-prefixed group SID fired an alert (Domain Admins/512 via 4728, Enterprise
+    # Admins/519 via 4756, SMS Admins/1200 via 4732); the only run that drew Administrators
+    # produced 4732+4733 and total silence. The event ID is not the discriminator — the
+    # group identity is.
+    group_name = random.choice(["Domain Admins", "Enterprise Admins"])
     grp = _PRIVILEGED_GROUPS[group_name]
     add_eid = grp["event_id"]
     remove_eid = grp["remove_id"]
@@ -5483,8 +6393,16 @@ def _threat_priv_group_add_remove(config, session_context):
         member_name = f"CN={victim['username']},CN=Users,{base_dn}"
         member_sid = _stable_user_sid(victim["username"])
 
+    # The whole add -> dwell -> remove arc is BACKDATED so the removal lands at roughly
+    # "now" rather than in the future. The previous form started at time.time() and then
+    # padded to t0 + dwell + 60, shipping the removal with a time_created 16-46 minutes
+    # ahead of wall clock — something no real WEC source does, and which no pair
+    # correlation can act on. dwell is shortened so the removal falls inside a plausible
+    # "shortly after" window and inside the harness's alert SLA.
+    dwell = random.uniform(300.0, 600.0)
     events = []
-    t = time.time()
+    start_ts = time.time() - dwell - 90.0
+    t = start_ts
 
     logon_id = _new_logon_id()
 
@@ -5522,14 +6440,18 @@ def _threat_priv_group_add_remove(config, session_context):
         logon_id=logon_id, ts=t)))
 
     # ── Attacker dwell time: use the elevated access before removing tracks ──
-    dwell = random.uniform(900, 2700)
+    # (dwell is drawn above, before the backdated start_ts is computed from it)
     t += random.uniform(30.0, 120.0)
 
     # Attacker logs into other machines with the elevated account
     victim_u = {**victim, "ip": u.get("ip")}
-    _lateral_pool = [p for p in session_context.values()
-                     if isinstance(p, dict) and p.get("hostname")
-                     and p["username"] != u["username"]]
+    # session_context.values() are raw profile dicts (keyed on primary_os_type); only
+    # get_user_by_name() -- via _get_windows_users() -- returns the resolved user_info
+    # shape carrying hostname/username. The old comprehension therefore always produced
+    # an empty pool and the whole lateral-movement block was dead code (the failing run
+    # ingested exactly 4624 x2 / 4672 x1: zero lateral iterations).
+    _lateral_pool = [p for p in _get_windows_users(session_context)
+                     if p.get("hostname") and p["username"] != u["username"]]
     lateral_targets = random.sample(
         _lateral_pool,
         k=min(random.randint(1, 3), len(_lateral_pool))) if _lateral_pool else []
@@ -5576,10 +6498,10 @@ def _threat_priv_group_add_remove(config, session_context):
                                          ts=t)))
     t += random.uniform(2.0, 5.0)
 
-    # Pad remaining dwell time
-    remaining = dwell - (t - (time.time() + 60))
-    if remaining > 0:
-        t += remaining
+    # Land the removal a full dwell after the addition, but never in the future: the
+    # interior pacing above can overrun dwell when several lateral/recon iterations are
+    # drawn, so clamp to just before wall clock.
+    t = min(max(t, start_ts + dwell), time.time() - 5.0)
 
     # ── Remove from group to cover tracks ──
     remove_builder = _REMOVE_BUILDERS[remove_eid]
@@ -5598,7 +6520,9 @@ def _threat_priv_group_add_remove(config, session_context):
 
 
 # Privileged accounts and templates used for ADCS attack simulation
-_PRIV_CERT_TARGETS = ["Administrator", "krbtgt", "DC01$", "svc_sql_prod"]
+# krbtgt is disabled and never enrolls, so a krbtgt certificate subject will never
+# resolve against an identity XSIAM has ever seen authenticate.
+_PRIV_CERT_TARGETS = ["Administrator", "DC01$", "svc_sql_prod"]
 
 def _threat_priv_cert_request(config, session_context):
     """Privileged certificate request via certificate template (ADCS ESC attacks).
@@ -5630,14 +6554,29 @@ def _threat_priv_cert_request(config, session_context):
 
     dns_domain = _get_dns_domain(config)
 
+    # The issued path carries the detection: 4887 is the only event in the family that
+    # states both Requester and the issued certificate's Subject, and every AD CS analytic
+    # (privileged request / user-cert mismatch / machine-cert mismatch) compares those two.
+    # A denial gives XSIAM a requester and nothing to compare it against, so keep it a
+    # minority.
     variant = random.choices(
         ["suspicious_issued", "denied"],
-        weights=[55, 45], k=1)[0]
+        weights=[80, 20], k=1)[0]
 
     priv_target = random.choice(_PRIV_CERT_TARGETS)
-    san_upn = f"{priv_target}@{dns_domain}" if "$" not in priv_target else None
-    san_dns = f"{priv_target.rstrip('$').lower()}.{dns_domain}" if "$" in priv_target else None
-    san_value = san_upn or san_dns
+    is_machine_target = priv_target.endswith("$")
+    san_kind = "dns" if is_machine_target else "upn"
+    san_value = (f"{priv_target.rstrip('$').lower()}.{dns_domain}"
+                 if is_machine_target else f"{priv_target}@{dns_domain}")
+
+    # The certificate is issued to the *privileged target*, not to the attacker who
+    # submitted the request — that Requester/Subject divergence is the ESC1 signal.
+    # Without it Requester == Subject and nothing fires.
+    cert_base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    priv_subject_dn = (
+        f"CN={priv_target.rstrip('$')}, CN=Computers, {cert_base_dn}"
+        if is_machine_target else
+        f"CN={priv_target}, CN=Users, {cert_base_dn}")
 
     template = random.choice(_CERT_TEMPLATES_VULNERABLE)
 
@@ -5677,11 +6616,21 @@ def _threat_priv_cert_request(config, session_context):
 
     request_id = str(random.randint(100, 99999))
 
-    # 4886 always fires first — CA received the request
+    # 4898 first: the CA loads the template. This is the only event that tells XSIAM the
+    # template is abusable (CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT + no manager approval +
+    # Client Auth EKU + Authenticated Users enroll = ESC1), and it is in XSIAM's Object
+    # Access intake list. Without it the request events describe an enrollment against a
+    # template the tenant has no reason to consider vulnerable.
+    events.append(json.dumps(_build_4898(u, config, template_name=template,
+                                         enrollee_supplies_subject=True, ts=t)))
+    t += random.uniform(0.1, 0.4)
+
+    # 4886 — CA received the request
     events.append(json.dumps(_build_4886(u, config,
                                          template_name=template,
                                          request_id=request_id,
                                          san_override=san_value,
+                                         san_kind=san_kind,
                                          ts=t)))
     t += random.uniform(0.1, 0.5)
 
@@ -5690,12 +6639,16 @@ def _threat_priv_cert_request(config, session_context):
                                              template_name=template,
                                              request_id=request_id,
                                              san_override=san_value,
+                                             san_kind=san_kind,
+                                             subject_dn=priv_subject_dn,
                                              ts=t)))
     else:
         events.append(json.dumps(_build_4887(u, config,
                                              template_name=template,
                                              request_id=request_id,
                                              san_override=san_value,
+                                             san_kind=san_kind,
+                                             subject_dn=priv_subject_dn,
                                              ts=t)))
         t += random.uniform(2.0, 5.0)
 
@@ -5886,8 +6839,13 @@ def _threat_mass_account_deletion(config, session_context):
     return events
 
 
+# Only accounts whose sensitivity XSIAM could plausibly derive on its own. The built-in
+# Administrator (well-known RID 500) and krbtgt (RID 502) carry their identity in the SID.
+# "DSRM_Admin" was an invented name that _stable_user_sid() maps to an ordinary hashed
+# RID, so Identity Analytics saw a plain domain user — one draw in three could never fire
+# "Sensitive account password reset attempt" regardless of event shape.
 _SENSITIVE_ACCOUNTS_FOR_RESET = [
-    "Administrator", "krbtgt", "DSRM_Admin",
+    "Administrator", "krbtgt",
 ]
 
 
@@ -5968,19 +6926,23 @@ _SENSITIVE_GROUP_ACCOUNTS = [
 
 
 def _threat_password_never_expires(config, session_context):
-    """Sensitive account modified to set password-never-expires flag.
+    """Account modified to set the password-never-expires flag.
 
     Detection targets:
-      - "A sensitive account was modified to password never expires"
-      - Target must be a member of a sensitive built-in AD group
+      - "A user account was modified to password never expires" (base variation,
+        Informational). Per the XSIAM Analytics Alert Reference this variation has NO
+        sensitivity precondition — a single correctly encoded 4738 is enough.
+      - The "A sensitive account was modified to password never expires" variation (Low)
+        additionally requires the target to be a member of a sensitive built-in AD group,
+        which XSIAM resolves from its own identity inventory, not from a group-add event
+        emitted seconds earlier in the same burst.
 
     Sequence:
       1. Attacker authenticates → DC 4624 + endpoint 4624 + 4672
       2. 4688 process creation
-      3. 4728 member added to Domain Admins (establishes sensitive context)
-      4. 4738 account changed — OldUacValue=0x200, NewUacValue=0x10200
-         (DONT_EXPIRE_PASSWORD flag added)
-      5. 4689 process exit
+      3. 4738 account changed — OldUacValue=0x10, NewUacValue=0x210,
+         UserAccountControl=%%2089 (SAM USER_DONT_EXPIRE_PASSWORD added)
+      4. 4689 process exit
     """
     u = _pick_windows_user(session_context)
     if not u:
@@ -6022,28 +6984,28 @@ def _threat_password_never_expires(config, session_context):
                                          command_line=tool[1],
                                          logon_id=logon_id, ts=t)))
 
-    t += random.uniform(0.5, 1.0)
-
-    dns_domain = _get_dns_domain(config)
-    dc_parts = dns_domain.split(".")
-    base_dn = ",".join(f"DC={p}" for p in dc_parts)
-    member_dn = f"CN={target_acct},CN=Users,{base_dn}"
-
-    group_name, grp = random.choice(list(_PRIVILEGED_GROUPS.items()))
-    events.append(json.dumps(_ADD_BUILDERS[grp["event_id"]](
-        u, config,
-        member_name=member_dn,
-        member_sid=target_sid,
-        target_group=group_name,
-        target_sid=grp["sid"],
-        logon_id=logon_id, ts=t)))
     t += random.uniform(0.5, 2.0)
 
+    # No group-membership event here. The base variation of "A user account was modified
+    # to password never expires" (Informational) has no sensitivity precondition, and a
+    # 4728 emitted seconds earlier cannot reclassify the target in XSIAM's identity model
+    # in time for the 4738 anyway. All it actually did was fire "User added to a Windows
+    # privileged group" — stealing this generator's result and burning the 1-day dedup
+    # window belonging to _threat_priv_group_addition.
+    #
+    # 4738 OldUacValue/NewUacValue are SAM USER_ACCOUNT flags ([MS-SAMR]), NOT the LDAP
+    # userAccountControl bitmask: USER_NORMAL_ACCOUNT is 0x10 and USER_DONT_EXPIRE_PASSWORD
+    # is 0x200. The _UAC_* constants hold LDAP values (0x200 -> 0x10200), which decode in
+    # SAM space as "don't-expire was already set, DONT_REQUIRE_PREAUTH just turned on" —
+    # the wrong change, and directly contradicting the %%2089 token shipped alongside it.
+    # 0x10 -> 0x210 is the only delta consistent with %%2089 ("'Don't Expire Password' -
+    # Enabled", msobjs.dll). Literals are passed here rather than editing _UAC_*, because
+    # those constants also back _build_4720, which works.
     events.append(json.dumps(_build_4738(u, config,
                                          target_username=target_acct,
                                          target_sid=target_sid,
-                                         old_uac_value=_UAC_NORMAL_ACCOUNT,
-                                         new_uac_value=_UAC_DONT_EXPIRE_PASSWD,
+                                         old_uac_value="0x10",
+                                         new_uac_value="0x210",
                                          uac_control="%%2089",
                                          logon_id=logon_id, ts=t)))
 
@@ -6133,13 +7095,17 @@ _THREAT_WEIGHTS = {
     "dcsync":                      4,
     "wip_dmsa_privesc":            3,
     "priv_group_addition":         5,
+    "machine_account_to_domain_admins": 3,
     "wip_adminsdholder_acl_modification": 3,
     "wip_irregular_service_tgs":   6,
+    "irregular_tgt_burst":         4,
     "sms_admins_addition":         3,
+    "sms_admins_add_remove":       3,
     "wip_sccm_container_recon":    3,
     "dnshostname_spoofing":        3,
     "samaccountname_spoofing":     3,
     "delegation_change":           3,
+    "new_machine_delegation":      3,
     "multiple_service_tickets":    5,
     "priv_group_add_remove":       4,
     "wip_priv_cert_request":       3,
@@ -6157,13 +7123,17 @@ _THREAT_GENERATORS = {
     "dcsync":                           _threat_dcsync,
     "wip_dmsa_privesc":                 _threat_dmsa_privesc,
     "priv_group_addition":              _threat_priv_group_addition,
+    "machine_account_to_domain_admins": _threat_machine_account_to_domain_admins,
     "wip_adminsdholder_acl_modification": _threat_adminsdholder_acl_modification,
     "wip_irregular_service_tgs":        _threat_irregular_service_tgs,
+    "irregular_tgt_burst":              _threat_irregular_tgt_burst,
     "sms_admins_addition":              _threat_sms_admins_addition,
+    "sms_admins_add_remove":            _threat_sms_admins_add_remove,
     "wip_sccm_container_recon":         _threat_sccm_container_recon,
     "dnshostname_spoofing":             _threat_dnshostname_spoofing,
     "samaccountname_spoofing":          _threat_samaccountname_spoofing,
     "delegation_change":                _threat_delegation_change,
+    "new_machine_delegation":           _threat_new_machine_delegation,
     "multiple_service_tickets":         _threat_multiple_service_tickets,
     "priv_group_add_remove":            _threat_priv_group_add_remove,
     "wip_priv_cert_request":            _threat_priv_cert_request,
@@ -6249,13 +7219,17 @@ def _generate_scenario_event(scenario_event, config, context):
         "DCSYNC":                           _threat_dcsync,
         "WIP_DMSA_PRIVESC":                 _threat_dmsa_privesc,
         "PRIV_GROUP_ADDITION":              _threat_priv_group_addition,
+        "MACHINE_ACCOUNT_TO_DOMAIN_ADMINS": _threat_machine_account_to_domain_admins,
         "WIP_ADMINSDHOLDER_ACL_MODIFICATION": _threat_adminsdholder_acl_modification,
         "WIP_IRREGULAR_SERVICE_TGS":        _threat_irregular_service_tgs,
+        "IRREGULAR_TGT_BURST":              _threat_irregular_tgt_burst,
         "SMS_ADMINS_ADDITION":              _threat_sms_admins_addition,
+        "SMS_ADMINS_ADD_REMOVE":            _threat_sms_admins_add_remove,
         "WIP_SCCM_CONTAINER_RECON":         _threat_sccm_container_recon,
         "DNSHOSTNAME_SPOOFING":             _threat_dnshostname_spoofing,
         "SAMACCOUNTNAME_SPOOFING":          _threat_samaccountname_spoofing,
         "DELEGATION_CHANGE":                _threat_delegation_change,
+        "NEW_MACHINE_DELEGATION":           _threat_new_machine_delegation,
         "MULTIPLE_SERVICE_TICKETS":         _threat_multiple_service_tickets,
         "PRIV_GROUP_ADD_REMOVE":            _threat_priv_group_add_remove,
         "WIP_PRIV_CERT_REQUEST":            _threat_priv_cert_request,

@@ -10,20 +10,76 @@ import hashlib
 try:
     from modules.session_utils import (get_random_user, get_user_by_name,
         get_zscaler_device_info, rand_ip_from_network,
-        stable_vpn_ip, stable_mail_servers, weighted_destination)
+        stable_vpn_ip, stable_mail_servers, weighted_destination,
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name,
         get_zscaler_device_info, rand_ip_from_network,
-        stable_vpn_ip, stable_mail_servers, weighted_destination)
+        stable_vpn_ip, stable_mail_servers, weighted_destination,
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 
 def _cef_escape(value):
-    """Escape CEF extension values per the CEF spec (backslash, equals, newlines)."""
+    """Encode an NSS extension value the way a real Zscaler feed does.
+
+    NOT plain CEF backslash-escaping. Zscaler HEX-ENCODES the characters listed in the
+    feed's "Feed Escape Character" setting rather than backslash-escaping them, and
+    XSIAM's onboarding guide configures that setting to `=`. So a genuine Zscaler ->
+    XSIAM feed never contains a literal `=` inside a value; it contains `%3D` and the
+    receiver can split on `=` safely.
+
+    The previous implementation emitted `\\=`, which leaves a real `=` in the value and
+    only helps a parser that honours CEF escaping. XSIAM's does not reliably: we already
+    measured this class of failure on this module, where unrecognised extension keys
+    caused devicehostname to swallow everything up to the next known key. Hex-encoding
+    removes the ambiguity at the source, which is what the documented configuration does.
+
+    Refs: "General Guidelines for NSS Feeds and Feed Formats" (Zscaler) — the service
+    encodes the characters entered in Feed Escape Character, e.g. a comma becomes %2C;
+    "Ingest logs from Zscaler Internet Access" (Cortex XDR 3.x) — Feed Escape Character `=`.
+    """
     s = str(value)
     s = s.replace('\\', '\\\\')
-    s = s.replace('=', '\\=')
-    s = s.replace('\n', '\\n')
-    s = s.replace('\r', '\\r')
+    s = s.replace('=', '%3D')
+    s = s.replace('\n', '%0A')
+    s = s.replace('\r', '%0D')
     return s
+
+
+_DEVICE_MODELS = [
+    "20L8S7WC08", "20XW004QUS", "21CB007PUS",      # ThinkPad
+    "MacBookPro18,3", "MacBookAir10,1", "Mac14,7",  # Apple
+    "Latitude 7440", "Latitude 5550", "XPS 9530",   # Dell
+    "EliteBook 840 G10", "ProBook 450 G9",          # HP
+]
+
+
+def _device_model(hostname):
+    """Stable hardware model per device — %s{devicemodel} in the NSS field reference.
+
+    Sticky by hostname so a given endpoint keeps the same model across events; a
+    workstation whose reported hardware changes every log line is a giveaway.
+    """
+    if not hostname:
+        return None
+    return _DEVICE_MODELS[hash(("model", str(hostname))) % len(_DEVICE_MODELS)]
+
+
+def _zscaler_url_encode(url):
+    """Hex-encode a URL the way Zscaler does before streaming it to a SIEM.
+
+    "The Zscaler service hex encodes all non-printable ASCII characters that are in URLs
+    when it sends logs to the NSS. Any URL character that is less than or equal to 0x20,
+    or greater than or equal to 0x7F, is encoded as %HH." — so a space becomes %20 and a
+    newline %0A. Applied to url/referer fields only; Zscaler does this for URLs, not for
+    every field.
+    """
+    if url is None:
+        return None
+    out = []
+    for ch in str(url):
+        o = ord(ch)
+        out.append("%%%02X" % o if (o <= 0x20 or o >= 0x7F) else ch)
+    return "".join(out)
 
 
 NAME = "Zscaler Web Gateway"
@@ -41,8 +97,40 @@ _EXT_FIRST_OCTETS = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 194, 212, 
 
 
 def _random_external_ip():
-    """Return a realistic-looking random external IP."""
-    return f"{random.choice(_EXT_FIRST_OCTETS)}.{random.randint(0,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+    """Public (non-RFC-1918) IP from the shared ambient external-traffic pool.
+
+    DO NOT "FIX" THIS BACK to `random.choice(first_octets)` + 3 random octets.
+    That construction picked a random host inside one of 14
+    different /8 blocks; a /8 spans dozens of countries, and across all modules it
+    was a primary driver of the 210 DISTINCT COUNTRIES seen in
+    xdm.source.location.country over 30 days.  That saturation permanently
+    silenced the XSIAM analytic "First successful VPN access from a country in
+    organization", which only fires on a country unseen org-wide for 30 days.
+    session_utils.random_external_ip() draws from 35 individually XSIAM-PROBED
+    /24s that are disjoint from config['vpn_novel_country_pool'].
+    """
+    return random_external_ip()
+
+
+# Realistic file names for upload / data-transfer events, grouped by the kind of
+# content being moved. Used to populate fileName/fileType/filesize (cn2) so web
+# upload events carry the file metadata a real Zscaler NSS web feed reports.
+_UPLOAD_FILES = {
+    "document": [("Q3_Financial_Report.xlsx", "xlsx"), ("Board_Deck_Draft.pptx", "pptx"),
+                 ("Contract_Amendment.docx", "docx"), ("2026_Budget_Forecast.xlsx", "xlsx"),
+                 ("Strategy_Review.pdf", "pdf"), ("Vendor_SOW.docx", "docx")],
+    "archive":  [("project_backup.zip", "zip"), ("export_bundle.tar.gz", "gz"),
+                 ("photos_archive.7z", "7z"), ("case_files.zip", "zip")],
+    "pii":      [("customer_records.csv", "csv"), ("employee_roster.xlsx", "xlsx"),
+                 ("account_export.csv", "csv"), ("payroll_run.xlsx", "xlsx")],
+    "source":   [("app_source.tar.gz", "gz"), ("build_pipeline.py", "py"),
+                 ("api_service.java", "java"), ("repo_snapshot.zip", "zip")],
+}
+
+
+def _pick_upload_file(kind="document"):
+    """Return (filename, filetype) for an upload event of the given content kind."""
+    return random.choice(_UPLOAD_FILES.get(kind, _UPLOAD_FILES["document"]))
 
 
 def _get_threat_interval(threat_level, config):
@@ -89,7 +177,13 @@ def _get_user_and_device_info(config, user_override=None, session_context=None):
 
     # Legacy static-map fallback
     zscaler_conf = config.get(CONFIG_KEY, {})
-    user_ip_map = zscaler_conf.get('user_ip_map', {})
+    # Fall back to the shared map like cisco_firepower does. zscaler_config has no
+    # user_ip_map of its own (0 entries), so without this the legacy path returned
+    # the "unknown_user"/"unknown-host" placeholders — which then land in XSIAM as
+    # a real identity. Benign generation with no session
+    # context produced placeholder identities on every event.
+    user_ip_map = (zscaler_conf.get('user_ip_map')
+                   or config.get('shared_user_ip_map', {}))
     zscaler_users = zscaler_conf.get('users', {})
     zscaler_device_map = zscaler_conf.get('device_map', {})
     if not user_ip_map:
@@ -110,11 +204,21 @@ def _get_user_and_device_info(config, user_override=None, session_context=None):
     return user, dept, ip, device_info
 
 
-def _dns_precursor_event(config, user, dept, device_info, src_ip):
+def _dns_precursor_event(config, user, dept, device_info, src_ip, domain=None,
+                         event_time_ms=None):
     """Generate a DNS resolution NSSFWlog event that precedes a connection.
 
     Returns a single CEF string representing the UDP/53 query that must
     logically precede any outbound TCP connection to an external host.
+
+    domain: the name being resolved. Pass it whenever the caller knows it. This function
+            previously took no domain at all and emitted a content-free UDP/53 event to
+            8.8.8.8, so the log recorded "this host made a DNS query" without recording
+            WHAT it resolved. Both comparison modules carry the name — Check Point's
+            `_dns_precursor(config, src_ip, user, shost, domain, ...)` and Firepower's
+            `_dns_precursor_log(config, src_ip, user, dest_hostname, shost)` — and that
+            host-to-domain association is precisely what the C2 / rare-domain /
+            dynamic-DNS detectors consume. Emitted as cdfqdn (Client Destination FQDN).
     """
     return _fw_event(config, user, dept, device_info,
                      src_ip, random.choice(["8.8.8.8", "8.8.4.4", "1.1.1.1"]),
@@ -122,7 +226,9 @@ def _dns_precursor_event(config, user, dept, device_info, src_ip):
                      "Allow", "Allow_DNS_Outbound", "DNS",
                      "N/A", "DNSQuery",
                      "United States", "1",
-                     random.randint(64, 512), random.randint(32, 128))
+                     random.randint(64, 512), random.randint(32, 128),
+                     dst_fqdn=domain, event_time_ms=event_time_ms,
+                     duration_ms=random.randint(1, 500))
 
 
 # ---------------------------------------------------------------------------
@@ -185,16 +291,30 @@ def _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, devi
             dest_ip = rand_ip_from_network(ip_network(dest_ip_range, strict=False))
         except Exception:
             dest_ip = "8.8.8.1"
+    dest_port = random.choice(destination.get("ports", [443]))
+    # nwsvc is the network SERVICE, so derive it from the destination port. The
+    # config's service_types are application categories ("Web Browsing",
+    # "PackageManagement", "ZoomMeeting", "Email"), and feeding them through here put
+    # non-service values into xdm.network.application_protocol — the field the
+    # app-aware detectors read. Fall back to the config value only when it is already
+    # a real service name (several entries are "SSH" / "RDP" / "HTTPS").
+    _cfg_svc = random.choice(destination.get("service_types", ["HTTPS"])).replace(" ", "")
     fields = {
         "srcip": internal_host_ip, "sport": random.randint(49152, 65535),
-        "destip": dest_ip, "destport": random.choice(destination.get("ports", [443])),
+        "destip": dest_ip, "destport": dest_port,
         "proto": "6",
         "action": "Allow", "rulelabel": "Allow_Web_Outbound", "reason": "Allowed",
         "threatcat": None, "threatname": None,
         "destCountry": destination.get("country", "United States"),
         "srcCountry": "United States",
         "bytesin": random.randint(5000, 50000), "bytesout": random.randint(500, 5000),
-        "nwsvc": random.choice(destination.get("service_types", ["Web Browsing"])).replace(" ", ""),
+        "nwsvc": _port_service(dest_port) or (_cfg_svc if _cfg_svc in _PORT_SERVICE.values() else None),
+        # The config's service_types ("Web Browsing", "PackageManagement",
+        # "ZoomMeeting", "Email") are APPLICATIONS, not services — the vendor sample
+        # pairs nwsvc=HTTP with nwapp=ebay. They were never valid nwsvc values, so
+        # route them to nwapp where they are correct, and prefer the destination's own
+        # name when it has one.
+        "nwapp": destination.get("name") or _cfg_svc or None,
         "spriv": "domain users", "duration_ms": random.randint(100, 300000), "cefSeverity": "3",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
@@ -290,6 +410,10 @@ def _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_in
     except Exception:
         dest_ip = "40.99.1.1"
     method = random.choice(["PUT", "POST"])
+    # bytesout = client→server (large: uploading files); bytesin = server→client (small: ACK)
+    upload_bytes = random.randint(500_000, 50_000_000)
+    ack_bytes    = random.randint(200, 2_000)
+    filename, filetype = _pick_upload_file(random.choice(["document", "archive"]))
     fields = {
         "action": "Allowed",
         "urlcat":      url_cat,
@@ -310,9 +434,11 @@ def _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_in
         "cip":   internal_host_ip,
         "sip":   dest_ip,
         "proto": "HTTPS",
-        # bytesout = client→server (large: uploading files); bytesin = server→client (small: ACK)
-        "bytesout": random.randint(500_000, 50_000_000),
-        "bytesin":  random.randint(200, 2_000),
+        "bytesout": upload_bytes,
+        "bytesin":  ack_bytes,
+        # file metadata: cn2=filesize (the uploaded file), cn3=totalsize (transaction)
+        "filename": filename, "filetype": filetype,
+        "filesize": upload_bytes, "totalsize": upload_bytes + ack_bytes,
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "2",
@@ -477,6 +603,46 @@ def _generate_benign_vpn_event(config, user, dept, internal_host_ip, device_info
                      random.randint(50_000, 2_000_000))
 
 
+def _generate_vpn_new_country_login(config, user, dept, internal_host_ip, device_info):
+    """One SUCCESSFUL RA-VPN/ZPA login from a country the org has never seen (nssfwlog).
+
+    Drives the XSIAM analytic "First successful VPN access from a country in
+    organization" — a FIRST-SEEN, ORG-SCOPED detector that fires only on a country
+    not observed anywhere in the org in the last 30 days.
+
+    WHY THIS EXISTS / DO NOT "FIX" IT AWAY:
+    The analytic had been silent because the
+    simulator was already emitting source IPs resolving to 210 distinct countries
+    over 30 days — every country on Earth was "seen", so nothing could be novel.
+    Restoring it needs BOTH a tight ambient baseline and something that
+    deliberately visits an unused country; this is the latter.
+
+    session_utils.novel_country_vpn_ip() draws from config['vpn_novel_country_pool']
+    (70 XSIAM-PROBED single-country /24s, disjoint from benign_ingress_sources,
+    external_traffic_sources and the Tor prefix allowlist) and rotates on the day
+    number => 70-day recurrence per country.  Day-keyed rather than random so that
+    ASA, Check Point, FortiGate, Firepower and Zscaler all pick the SAME country on
+    a given day; the detector is org-scoped, so five sources choosing independently
+    would consume the pool five times faster and never satisfy the 30-day window.
+    """
+    novel_ip, cc, country, isp = novel_country_vpn_ip(config)
+    if not novel_ip:
+        return None
+    print(f"    - Zscaler Module simulating: First VPN access from new country "
+          f"({country} / {isp} / {novel_ip})")
+    zscaler_conf = config.get('zscaler_config', {})
+    gateway_ip = zscaler_conf.get('vpn_gateway_ip',
+                     random.choice(config.get('internal_servers', ['10.0.10.1'])))
+    return _fw_event(config, user, dept, device_info,
+                     novel_ip, gateway_ip, 443, "6",
+                     "Allow", "Allow_VPN_Access", "HTTPS",
+                     None, None,
+                     "United States", "2",
+                     random.randint(100_000, 5_000_000),
+                     random.randint(50_000, 2_000_000),
+                     src_country=country or "Unknown")
+
+
 def _generate_benign_vpn_failure_event(config, user, dept, internal_host_ip, device_info):
     """Failed VPN auth attempt — baseline for vpn_brute_force detection (nssfwlog).
 
@@ -574,6 +740,7 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
         "malwareclass": malware_details.get('class'), "malwaretype": malware_details.get('type'),
         "reqmethod": "GET",
         "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "contenttype": "application/octet-stream",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"http://{details.get('domain', 'malware.example.com')}/{filename}",
@@ -583,6 +750,7 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
         "bytesin":  random.randint(200, 2_000),
         "bytesout": random.randint(300, 1_500),
         "filename": filename, "filetype": filetype,
+        "filesize": details.get('filesize', random.randint(50_000, 5_000_000)),
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "8",
@@ -591,30 +759,96 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
     return logs
 
 
+def _exfil_destination(config, kind="upload"):
+    """Pick a cloud-storage destination from the SHARED 25-entry pool.
+
+    Returns (domain, ip, url).
+
+    Every upload/DLP/download generator here used to hardcode
+    `dest_ip = f"104.18.30.{random.randint(1, 254)}"` and draw its domain from
+    zscaler_config.exfil_destinations, which holds only TWO entries. So all three threats
+    shared one /24 and two domains: LargeUpload reached
+    166 destinations, LargeDownload 90, DLP_Block 95 — all inside 104.18.30.0/24 and
+    mutually overlapping. Check Point and FortiGate both use
+    config['exfiltration_destinations'] instead: 25 entries spanning 352,512 addresses
+    across mega/dropbox/box/anonfiles/pastebin/wetransfer/proton, and the Check Point
+    "Large Upload (HTTPS)" alerts show that diversity in remote_ip (185.109.146.51,
+    205.196.121.147, 162.125.40.246, 154.53.224.128). A detector keying on "rare
+    destination" cannot treat 166 addresses in a single /24 as rare, and cannot tell
+    upload traffic from download traffic when both resolve into the same block.
+
+    Uploads and downloads draw from disjoint halves of the pool so the two directions
+    are distinguishable as destinations.
+    """
+    dests = config.get('exfiltration_destinations') or []
+    if not dests:
+        zc = config.get('zscaler_config', {})
+        entry = random.choice(zc.get('exfil_destinations')
+                             or [{"domain": "drive.google.com"}])
+        domain = entry.get('domain', 'drive.google.com')
+        return domain, _random_external_ip(), entry.get('url') or f"https://{domain}/upload"
+    ordered = sorted(dests, key=lambda d: d.get('domain') or '')
+    half    = max(1, len(ordered) // 2)
+    pool    = ordered[:half] if kind == "download" else ordered[half:]
+    entry   = random.choice(pool or ordered)
+    domain  = entry.get('domain') or 'drive.google.com'
+    # Some pool entries are wildcard patterns (e.g. "*.digitaloceanspaces.com"). A real log
+    # carries a concrete FQDN, never a wildcard, so substitute a plausible label.
+    if domain.startswith('*.'):
+        domain = random.choice(["files", "cdn", "assets", "static", "data"]) + domain[1:]
+    try:
+        dest_ip = rand_ip_from_network(ip_network(entry.get('ip_range'), strict=False))
+    except Exception:
+        dest_ip = _random_external_ip()
+    path = "/download" if kind == "download" else "/upload"
+    return domain, dest_ip, f"https://{domain}{path}"
+
+
 def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, device_info):
     """Large file upload to cloud storage — data exfiltration (ALLOWED).
 
     Returns [DNS precursor, NSSFWlog TCP/443 allowed, NSSWeblog allowed].
     """
     zscaler_conf = config.get('zscaler_config', {})
-    _default_exfil = [{"url": "https://drive.google.com/upload", "domain": "drive.google.com"}]
-    exfil_dest = random.choice(zscaler_conf.get('exfil_destinations', _default_exfil))
-    file_size_bytes = random.randint(5_242_880, 104_857_600)  # 5MB–100MB
-    dest_ip = f"104.18.30.{random.randint(1, 254)}"
+    _exfil_domain, dest_ip, _exfil_url = _exfil_destination(config, "upload")
+    exfil_dest = {"url": _exfil_url, "domain": _exfil_domain}
+    # 300 MB - 700 MB. "Large Upload (HTTPS)" has fired 85 times for Check Point and never
+    # for Zscaler; max xdm.source.sent_bytes on port 443 was 105 MB for
+    # Zscaler vs 523-524 MB for Check Point and FortiGate, and the Check Point sessions that
+    # actually fired were 300-500 MB (alert text: "uploaded 347.2MB to the external host
+    # ... over 1 sessions in the last 24 hours"). 5-100 MB was simply below the threshold.
+    file_size_bytes = random.randint(314_572_800, 734_003_200)
+    ack_bytes = random.randint(100, 500)
+    filename, filetype = _pick_upload_file(random.choice(["archive", "pii", "document"]))
     logs = []
-    # Log 1: DNS precursor
-    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip))
+    # Log 1: DNS precursor — carries the resolved domain so the host/domain association
+    # exists for rare-domain detectors (it previously resolved nothing).
+    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip,
+                                    domain=_exfil_domain))
     # Log 2: NSSFWlog — TCP/443 allowed connection (large upload)
     logs.append(_fw_event(config, user, dept, device_info,
                           internal_host_ip, dest_ip, 443, "6",
-                          "Allow", "Allow_Web_Outbound", "HTTPS",
+                          # nwsvc -> cs3 -> xdm.network.application_protocol. HYPOTHESIS
+                          # (unproven): the Check Point alerts that fire Large Upload (HTTPS)
+                          # carry app_id 'ip,tcp,ssl', and Zscaler emitted "HTTPS" here and
+                          # never "ssl". Cortex appears to derive app_id from the application
+                          # protocol, so "SSL" is what the firing vendor presents. "SSL" is a
+                          # legitimate Zscaler network-service name, so this costs no
+                          # fidelity. If Large Upload (HTTPS) still does not fire after the
+                          # byte-volume increase below, revert this to "HTTPS" and rule it out.
+                          "Allow", "Allow_Web_Outbound", "SSL",
                           "Data Exfiltration", "LargeUpload",
                           "Unknown", "7",
-                          random.randint(100, 500), file_size_bytes))
+                          ack_bytes, file_size_bytes,
+                          dst_fqdn=_exfil_domain,
+                          duration_ms=random.randint(300_000, 1_200_000),
+                          url_category="Online Storage and Backup"))
     # Log 3: NSSWeblog — web proxy event
     fields = {
         "action": "Allowed",
         "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
+        "urlclass": "Business and Productivity",
+        "riskscore": str(random.randint(40, 70)),
         "responsecode": "201", "reason": "Allowed", "reqmethod": "POST",
         "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
         "appname": "File Transfer", "appclass": "General", "contenttype": "application/zip",
@@ -622,7 +856,10 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": exfil_dest.get('url'), "ehost": exfil_dest.get('domain'),
         "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
-        "bytesin": random.randint(100, 500), "bytesout": file_size_bytes,
+        "bytesin": ack_bytes, "bytesout": file_size_bytes,
+        # file metadata: cn2=filesize (uploaded file), cn3=totalsize (transaction)
+        "filename": filename, "filetype": filetype,
+        "filesize": file_size_bytes, "totalsize": file_size_bytes + ack_bytes,
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "7",
@@ -647,24 +884,32 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
         return None
     dictionary = random.choice(dicts)
     rule       = random.choice(dlp_conf.get('rules', ["DLP-Default-Rule"]))
-    _default_exfil = [{"url": "https://drive.google.com/upload", "domain": "drive.google.com"}]
-    exfil_dest = random.choice(zscaler_conf.get('exfil_destinations', _default_exfil))
-    dest_ip = f"104.18.30.{random.randint(1, 254)}"
+    _exfil_domain, dest_ip, _exfil_url = _exfil_destination(config, "upload")
+    exfil_dest = {"url": _exfil_url, "domain": _exfil_domain}
     upload_bytes = random.randint(1000, 50000)
+    ack_bytes = random.randint(100, 500)
+    # Pick a filename whose type matches the DLP engine that fired.
+    _engine_kind = {"Source Code": "source", "PII": "pii"}.get(engine, "document")
+    filename, filetype = _pick_upload_file(_engine_kind)
     logs = []
-    # Log 1: DNS precursor
-    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip))
+    # Log 1: DNS precursor — carries the resolved domain
+    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip,
+                                    domain=_exfil_domain))
     # Log 2: NSSFWlog — TCP/443 blocked
     logs.append(_fw_event(config, user, dept, device_info,
                           internal_host_ip, dest_ip, 443, "6",
                           "Blocked", "Block_DLP_Upload", "HTTPS",
                           "DLP", "DLP_Block",
                           "Unknown", "6",
-                          random.randint(100, 500), upload_bytes))
+                          ack_bytes, upload_bytes,
+                          dst_fqdn=_exfil_domain,
+                          url_category="Online Storage and Backup"))
     # Log 3: NSSWeblog — DLP block with engine details
     fields = {
         "action": "Blocked",
         "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
+        "urlclass": "Business and Productivity",
+        "riskscore": str(random.randint(45, 75)),
         "responsecode": "403", "reason": "DLP Block", "reqmethod": "POST",
         "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
         "contenttype": "application/zip",
@@ -672,7 +917,10 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": exfil_dest.get('url'), "ehost": exfil_dest.get('domain'),
         "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
-        "bytesin": random.randint(100, 500), "bytesout": upload_bytes,
+        "bytesin": ack_bytes, "bytesout": upload_bytes,
+        # file metadata: cn2=filesize (blocked upload), cn3=totalsize (transaction)
+        "filename": filename, "filetype": filetype,
+        "filesize": upload_bytes, "totalsize": upload_bytes + ack_bytes,
         "dlpengine": engine, "dlpdictionary": dictionary, "dlprule": rule,
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
@@ -709,14 +957,19 @@ def _generate_cloud_app_control_event(config, user, dept, internal_host_ip, devi
     fields = {
         "action": "Blocked" if blocked else "Allowed",
         "urlcat": "Information Technology", "urlsupercat": "Information Technology",
+        "urlclass": "Business and Productivity",
+        "riskscore": str(random.randint(30, 60)),
         "responsecode": "403" if blocked else "200",
         "reason": f"Cloud App Control: {app.get('name', 'Unknown App')}",
         "reqmethod": "GET", "appname": app.get('name'), "appclass": app.get('class'),
+        "contenttype": "text/html",
+        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"https://{app.get('name', 'app').lower()}.com",
         "ehost": f"{app.get('name', 'app').lower()}.com",
         "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
+        "bytesin": random.randint(500, 5_000), "bytesout": random.randint(200, 2_000),
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "5" if blocked else "2",
@@ -758,7 +1011,10 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
         "malwarecat": threat.get('category', "Malware"), "threatname": threat.get('name', "Unknown"),
         "threatscore": "100", "malwareclass": "Sandbox", "malwaretype": threat.get('type', "exe"),
         "fileHash": file_hash, "filename": filename, "filetype": threat.get('type', "exe"),
+        "filesize": threat.get('filesize', random.randint(20_000, 8_000_000)),
         "reqmethod": "GET",
+        "contenttype": "application/octet-stream",
+        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"http://download.unsafe-storage.com/{filename}",
@@ -788,14 +1044,74 @@ def _is_internal_ip(ip):
 
 _THREAT_COUNTRIES = ["Russia", "China", "Iran", "North Korea", "Romania", "Ukraine"]
 
+# Destination port -> Zscaler network service (CEF cs3 -> xdm.network.application_protocol).
+# The firewall feed identifies the SERVICE being reached, so a probe to 21 is FTP whether
+# it was allowed or blocked. Anything not listed returns None and the key is omitted:
+# real Zscaler leaves the field out rather than inventing a value, and a synthetic value
+# pollutes the application-protocol baseline for that port.
+_PORT_SERVICE = {
+    21: "FTP",    22: "SSH",     23: "Telnet",  25: "SMTP",    53: "DNS",
+    # Remote administration services. Without these three the administrative-behaviour
+    # ports resolve to no service at all, so cs3 is omitted and
+    # xdm.network.application_protocol lands null on exactly the events the NDR
+    # lateral-movement analytics needs an application for.
+    69: "TFTP",   512: "REXEC",  992: "TELNETS",
+    80: "HTTP",   110: "POP3",   135: "RPC",    139: "NetBIOS", 143: "IMAP",
+    389: "LDAP",  443: "HTTPS",  445: "SMB",    465: "SMTPS",  587: "SMTPS",
+    636: "LDAPS", 993: "IMAPS",  995: "POP3S",  1433: "MSSQL", 1521: "Oracle",
+    3306: "MySQL", 3389: "RDP",  5432: "PostgreSQL", 5900: "VNC", 5985: "WinRM",
+    5986: "WinRM", 8080: "HTTP", 8443: "HTTPS",
+}
+
+
+def _port_service(port):
+    """Zscaler network service for a destination port, or None when unclassified."""
+    try:
+        return _PORT_SERVICE.get(int(port))
+    except (TypeError, ValueError):
+        return None
+
 
 def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
               action, rule, nwsvc, threat_cat, threat_name, dest_country, sev,
-              bytes_in=0, bytes_out=60):
-    """Build a single nssfwlog CEF event — used by all firewall scenario generators."""
+              bytes_in=0, bytes_out=60, event_time_ms=None, src_country=None,
+              dst_fqdn=None, duration_ms=None, url_category=None, nwapp=None):
+    """Build a single nssfwlog CEF event — used by all firewall scenario generators.
+
+    event_time_ms: optional ms-epoch to back-date the event (sets CEF rt -> XSIAM _time);
+                   used by time-spread threats such as impossible travel.
+    duration_ms:   session duration. Defaults to a <=5 minute session, which is wrong for
+                   any long-lived threat: this was hard-coded at randint(100, 300000) and
+                   NO generator could override it, so "long-lived reverse SSH tunnel"
+                   reported a 5-minute session. Max xdm.event.duration:
+                   Zscaler 299,981 ms vs FortiGate 14,334,000 and Check Point 143,460,000.
+                   Both comparison modules pass duration_s=randint(1800, 14400) for the
+                   same tunnel threat. Pass an explicit value whenever the session is not
+                   a short transaction.
+    dst_fqdn:      the destination FQDN, emitted as %s{cdfqdn} ("The client destination
+                   FDQN (e.g., the HTTP host header)" -> Insights "Client Destination
+                   Name") per Zscaler's NSS Feed Output Format: Firewall Logs. Pass it
+                   whenever the generator already knows a domain. Leave it None for pure
+                   IP traffic — real Zscaler omits the field rather than echoing the IP,
+                   and putting an address in a name field corrupts host/destination
+                   entity resolution in XSIAM.
+    url_category:  Zscaler URL category, emitted as CEF cs5. The nssfwlog modeling rule
+                   uppercases cs5 and derives xdm.network.http.url_category from it via a
+                   long substring ladder — "DYNAMIC DNS" -> URL_CATEGORY_DYNAMIC_DNS,
+                   "COMMAND AND CONTROL"/"C&C" -> URL_CATEGORY_COMMAND_AND_CONTROL, plus
+                   MALWARE, PHISHING, CRYPTO, PROXY/ANONYMIZERS, "ONLINE STORAGE"+"BACKUP",
+                   "PEER TO PEER" and ~60 more NO firewall
+                   generator set it, so cs5 was 0% on nssfwlog and url_category was
+                   empty on every firewall event. Use the literal Zscaler category strings
+                   so the substring match actually hits.
+    """
     zscaler_conf = config.get('zscaler_config', {})
-    src_country = "United States" if _is_internal_ip(src_ip) else random.choice(_THREAT_COUNTRIES)
-    return _format_nss_log_as_cef({
+    # src_country is normally a decorative label (XSIAM geo-resolves srcip itself),
+    # but callers that care about the resolved country pass it explicitly so the
+    # CEF field and the IP agree — see _generate_vpn_new_country_login.
+    if src_country is None:
+        src_country = "United States" if _is_internal_ip(src_ip) else random.choice(_THREAT_COUNTRIES)
+    fields = {
         "srcip": src_ip, "sport": random.randint(49152, 65535),
         "destip": dst_ip, "destport": dst_port, "proto": proto,
         "action": action, "rulelabel": rule,
@@ -805,13 +1121,24 @@ def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
         "srcCountry": src_country,
         "bytesin": bytes_in, "bytesout": bytes_out,
         "nwsvc": nwsvc, "spriv": "domain users",
-        "duration_ms": random.randint(100, 300000), "cefSeverity": sev,
+        # %s{nwapp} — the specific application. Defaults to the service name, which is
+        # what Zscaler's own doc shows for non-web protocols (nwapp example: SSH).
+        # Pass it explicitly when the generator knows a real application (a site or
+        # SaaS product), matching the vendor sample's nwsvc=HTTP / nwapp=ebay pairing.
+        "nwapp": nwapp,
+        "urlcat": url_category,          # -> cs5 -> xdm.network.http.url_category
+        "duration_ms": random.randint(100, 300000) if duration_ms is None else duration_ms,
+        "cefSeverity": sev,
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "destinationTranslatedAddress": dst_ip,
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
-    }, user, dept, 'nssfwlog')
+        "cdfqdn": dst_fqdn,
+    }
+    if event_time_ms is not None:
+        fields["rt"] = event_time_ms
+    return _format_nss_log_as_cef(fields, user, dept, 'nssfwlog')
 
 
 # ---------------------------------------------------------------------------
@@ -856,7 +1183,10 @@ def _generate_tor_connection(config, user, dept, internal_host_ip, device_info):
     tor_dest  = random.choice(tor_nodes) if tor_nodes else {"ip": _random_external_ip(), "country": "Unknown"}
     dest_ip   = tor_dest.get("ip") or _random_external_ip()
     dest_port = random.choices([443, 9001, 9030], weights=[60, 30, 10])[0]
-    nwsvc_map = {443: "HTTPS", 9001: "TOR", 9030: "TOR"}
+    # Tor's ORPort/DirPort carry TLS, so the network SERVICE is SSL. "TOR" is not a
+    # Zscaler service name — the Tor attribution belongs in the threat category and
+    # threat name below, which already carry it.
+    nwsvc_map = {443: "HTTPS", 9001: "SSL", 9030: "SSL"}
     logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
     logs.append(_fw_event(config, user, dept, device_info,
                      internal_host_ip, dest_ip, dest_port, "6",
@@ -896,30 +1226,47 @@ def _generate_rdp_lateral(config, user, dept, internal_host_ip, device_info):
     Returns a list of CEF log strings.
     """
     print("    - Zscaler Module simulating: RDP Lateral Movement (workstation -> workstation)")
-    dest_ip = _get_random_internal_ip(config)
-    for _ in range(5):
-        if dest_ip != internal_host_ip:
-            break
-        dest_ip = _get_random_internal_ip(config)
+    # Fan out across MANY destinations, not one. Lateral movement is detected from a host
+    # reaching hosts it has never spoken to before, so a single destination gives the
+    # detector one new edge instead of many. Distinct destinations per
+    # burst: Zscaler 1, FortiGate 10, Check Point 7-8 (tenant, 7 d: RDPLateralMovement
+    # n=560 across 83 sources and 82 destinations — exactly one dest per source).
+    dest_ips = set()
+    while len(dest_ips) < random.randint(5, 10):
+        cand = _get_random_internal_ip(config)
+        if cand != internal_host_ip:
+            dest_ips.add(cand)
+    dest_ips = sorted(dest_ips)
 
+    # Spread the sweep over time so it reads as a sequence of attempts rather than one
+    # instantaneous observation (see the note in _generate_port_scan).
+    base_ms = int(time.time() * 1000)
+    offset_ms = 0
     logs = []
 
-    # 3-8 blocked RDP attempts
-    for _ in range(random.randint(3, 8)):
-        logs.append(_fw_event(config, user, dept, device_info,
-                              internal_host_ip, dest_ip, 3389, "6",
-                              "Blocked", "Block_RDP_Lateral", "RDP",
-                              "Lateral Movement", "RDPLateralMovement",
-                              "Internal", "6",
-                              0, random.randint(200, 2_000)))
+    # Blocked RDP attempts across every candidate host
+    for dest_ip in dest_ips:
+        for _ in range(random.randint(1, 3)):
+            offset_ms += random.randint(500, 4000)
+            logs.append(_fw_event(config, user, dept, device_info,
+                                  internal_host_ip, dest_ip, 3389, "6",
+                                  "Blocked", "Block_RDP_Lateral", "RDP",
+                                  "Lateral Movement", "RDPLateralMovement",
+                                  "Internal", "6",
+                                  0, random.randint(200, 2_000),
+                                  event_time_ms=base_ms + offset_ms,
+                                  duration_ms=random.randint(100, 5000)))
 
-    # Final successful RDP connection — attacker finds allowed path
+    # Final successful RDP connection — attacker finds an allowed path on one host
+    offset_ms += random.randint(500, 4000)
     logs.append(_fw_event(config, user, dept, device_info,
-                          internal_host_ip, dest_ip, 3389, "6",
+                          internal_host_ip, random.choice(dest_ips), 3389, "6",
                           "Allowed", "Allow_Internal_Admin", "RDP",
                           "Lateral Movement", "RDPLateralMovement",
                           "Internal", "5",
-                          random.randint(5_000, 50_000), random.randint(5_000, 50_000)))
+                          random.randint(5_000, 50_000), random.randint(5_000, 50_000),
+                          event_time_ms=base_ms + offset_ms,
+                          duration_ms=random.randint(600_000, 3_600_000)))
 
     return logs
 
@@ -949,39 +1296,73 @@ def _generate_ssh_over_https(config, user, dept, internal_host_ip, device_info):
 # ---------------------------------------------------------------------------
 
 def _generate_port_scan(config, user, dept, internal_host_ip, device_info):
-    """External attacker probing sequential ports on an internal server (nssfwlog).
+    """Internal host probing many ports on an internal server (nssfwlog).
 
-    Generates 20-50 blocked TCP connections from the same attacker IP to the same
-    internal target across sequential ports. Volume + sequential pattern = XSIAM signal.
-    Matches the port_scan pattern in Checkpoint, Firepower, ASA, and FortiGate modules.
+    Generates 100-200 blocked TCP connections from the same internal host to the same
+    internal target across a wide port range, spread over time. Breadth + volume is the
+    XSIAM signal. Matches the port_scan pattern in Checkpoint, ASA, and FortiGate.
     Returns a list of CEF log strings.
+
+    THE SOURCE MUST BE INTERNAL — DO NOT change this back to an external attacker IP.
+    "Suspicious port scan" profiles the SOURCE entity and alerts on deviation from that
+    entity's own baseline, so a freshly-minted random public IP has nothing to deviate
+    from and the detector stays silent however many ports are probed. Breadth is not the
+    blocker: an externally-sourced scan with the widest port range of any module here
+    still fired nothing. If an external-sourced scan is wanted, add it as a separate
+    `external_port_scan` threat rather than changing this one.
     """
-    print("    - Zscaler Module simulating: Port Scan (external -> internal server)")
-    attacker_ip     = _random_external_ip()
-    internal_targets = config.get('internal_servers', []) or [_get_random_internal_ip(config)]
+    print("    - Zscaler Module simulating: Port Scan (internal host -> internal server)")
+    scanner_ip      = internal_host_ip or _get_random_internal_ip(config)
+    internal_targets = [t for t in (config.get('internal_servers', []) or [])
+                        if t != scanner_ip] or [_get_random_internal_ip(config)]
     target_ip       = random.choice(internal_targets)
-    scan_ports      = [21, 22, 23, 25, 53, 80, 110, 135, 139, 443, 445, 1433, 1521, 3306, 3389, 5900, 8080, 8443]
-    n = random.randint(min(20, len(scan_ports)), min(50, len(scan_ports)))
-    ports_to_scan   = sorted(random.sample(scan_ports, n))
+    # Breadth of distinct destination ports is the signal, so sample widely and keep the
+    # well-known services as a guaranteed subset — the scan should read as service
+    # discovery, not noise. Sample service ports only (1-1023): the ephemeral range reads
+    # as ordinary return traffic rather than enumeration.
+    WELL_KNOWN_PORTS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 443,
+                        445, 1433, 1521, 3306, 3389, 5900, 8080, 8443]
+    n = random.randint(100, 200)
+    extra_ports = random.sample(
+        [p for p in range(1, 1024) if p not in WELL_KNOWN_PORTS],
+        max(0, n - len(WELL_KNOWN_PORTS)))
+    ports_to_scan = sorted(set(WELL_KNOWN_PORTS + extra_ports))
+    # Spread the probes over time. Without an explicit event_time the whole loop finishes
+    # inside one millisecond bucket, and a scan collapsed to a single instant counts as
+    # one observation rather than N.
+    base_ms = int(time.time() * 1000)
+    offset_ms = 0
     logs = []
     for port in ports_to_scan:
+        offset_ms += random.randint(300, 1500)
+        # nwsvc must be the SERVICE on the probed port, not the name of the threat.
+        # "PortScan" is not a Zscaler network service; emitting it here overwrote FTP on
+        # 21, SSH on 22, SMB on 445 and SMTP on 25 with a synthetic value, polluting
+        # xdm.network.application_protocol for exactly the ports the app-aware detectors
+        # read. The threat name belongs in cs6, which already carries it.
         logs.append(_fw_event(config, user, dept, device_info,
-                              attacker_ip, target_ip, port, "6",
-                              "Blocked", "Block_PortScan", "PortScan",
+                              scanner_ip, target_ip, port, "6",
+                              "Blocked", "Block_PortScan", _port_service(port),
                               "Network Scan", "PortScan",
                               "Unknown", "6",
-                              random.randint(40, 60), random.randint(40, 80)))
+                              random.randint(40, 60), random.randint(40, 80),
+                              event_time_ms=base_ms + offset_ms,
+                              duration_ms=random.randint(0, 200)))
 
-    # 1-2 open ports discovered — attacker finds live services
+    # 1-2 open ports discovered — the scanner finds live services
     open_ports = random.sample([22, 80, 443, 445, 3389, 8080, 8443], k=random.randint(1, 2))
-    svc_map = {22: "SSH", 80: "HTTP", 443: "HTTPS", 445: "SMB", 3389: "RDP", 8080: "HTTP", 8443: "HTTPS"}
     for port in open_ports:
+        offset_ms += random.randint(300, 1500)
         logs.append(_fw_event(config, user, dept, device_info,
-                              attacker_ip, target_ip, port, "6",
-                              "Allowed", "Allow_Inbound_Services", svc_map.get(port, "Unknown"),
-                              "None", "None",
+                              scanner_ip, target_ip, port, "6",
+                              "Allowed", "Allow_Inbound_Services", _port_service(port),
+                              # real None (not the string) so the builder omits
+                              # cat/cs6 entirely — "None" was landing in XSIAM as a
+                              # threat category literally named None.
+                              None, None,
                               "Unknown", "3",
-                              random.randint(500, 5000), random.randint(500, 5000)))
+                              random.randint(500, 5000), random.randint(500, 5000),
+                              event_time_ms=base_ms + offset_ms))
     return logs
 
 
@@ -1016,6 +1397,9 @@ def _generate_brute_force(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
+_beacon_target_map: dict = {}   # internal_host_ip -> stable C2 resolver for recurring-rare-IP detection
+
+
 def _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info):
     """Repeated DNS queries (UDP/53) to a suspicious external resolver — C2 beacon pattern.
 
@@ -1025,21 +1409,37 @@ def _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info):
     Returns a list of CEF log strings.
     """
     print("    - Zscaler Module simulating: DNS C2 Beacon (volume DNS to suspicious resolver)")
-    # Suspicious resolvers that are not on standard block lists
-    suspicious_resolvers = (
-        [_random_external_ip() for _ in range(3)] +
-        ["91.108.4.1", "176.10.104.240", "185.220.101.1"]
-    )
-    resolver_ip = random.choice(suspicious_resolvers)
+    # Stable resolver per source so successive runs recur to the same rare IP
+    # (the recurring-rare-IP detection signal), not random noise.
+    resolver_ip = _beacon_target_map.get(internal_host_ip)
+    if not resolver_ip:
+        suspicious_resolvers = (
+            [_random_external_ip() for _ in range(3)] +
+            ["91.108.4.1", "176.10.104.240", "185.220.101.1"]
+        )
+        resolver_ip = random.choice(suspicious_resolvers)
+        _beacon_target_map[internal_host_ip] = resolver_ip
     n_queries   = random.randint(15, 40)
+    # A beacon is defined by its CADENCE, so the queries must carry distinct timestamps
+    # spread over a realistic window. Previously every event called time.time() inside one
+    # millisecond bucket, so 15-40 queries collapsed to a single _time. Recurrence
+    # detectors then see one observation instead of a tempo. Check Point accumulates an
+    # explicit offset for exactly this reason.
+    base_ms  = int(time.time() * 1000)
+    interval = random.randint(45, 120) * 1000      # steady beacon tempo
+    jitter   = int(interval * 0.08)
     logs = []
-    for _ in range(n_queries):
+    for _i in range(n_queries):
         logs.append(_fw_event(config, user, dept, device_info,
                               internal_host_ip, resolver_ip, 53, "17",
                               "Allow", "Allow_DNS_Outbound", "DNS",
                               "N/A", "SuspiciousDNS",
                               "Unknown", "4",
-                              random.randint(64, 256), random.randint(32, 128)))
+                              random.randint(64, 256), random.randint(32, 128),
+                              event_time_ms=base_ms - (n_queries - 1 - _i) * interval
+                                            + random.randint(-jitter, jitter),
+                              duration_ms=random.randint(1, 500),
+                              url_category="Command and Control"))
     return logs
 
 
@@ -1081,26 +1481,181 @@ def _generate_smb_new_host_lateral(config, user, dept, internal_host_ip, device_
     return logs
 
 
-def _generate_smb_rare_file_transfer(config, user, dept, internal_host_ip, device_info):
-    """Large SMB file transfer (100 MB – 1 GB) to an unusual internal server — data staging.
+# Rare-SMB peer bookkeeping: "smbrare::<src_ip>" -> list of peers this host has already
+# used. Same in-memory idiom as _beacon_target_map / "revssh::" (deliberately NOT
+# persisted to disk — single-session operation is the assumption), and deliberately NOT
+# seeded from hash(): CPython salts str hashing per process, so a hash-derived "sticky"
+# value re-rolls on every restart.
+_smb_rare_peer_map: dict = {}
 
-    A single Allow event with anomalously large bytesOut (data sent / read from the share).
-    The large volume on an internal SMB session is the XSIAM UEBA detection signal.
-    Session ALLOWED because no block rule matches — purely volume-based detection.
+# Quiet internal /24s that are the SMB destination of nothing else in the estate. They
+# sit outside config['internal_networks'], so the two fan-out SMB generators
+# (share_enumeration, new_host_lateral) draw random targets from a pool that cannot
+# collide with these — which is what keeps every peer allocated here at an SMB fan-in of
+# 1. Four /24s give ~1,012 peers before wraparound.
+_SMB_RARE_SERVER_NETS = ["192.168.4.0/24", "192.168.5.0/24",
+                         "192.168.6.0/24", "192.168.7.0/24"]
 
-    Returns single CEF log string (nssfwlog).
+# Peers handed out across ALL source hosts. Allocation must be globally unique, not
+# per-host: birthday collisions inside a 253-host /24 otherwise give some peers a fan-in
+# of 2, weakening the "destination rarely receives SMB from other hosts" half of the
+# shape. Global allocation pins fan-in at exactly 1.
+_smb_rare_peers_taken: set = set()
+
+# Alternates the rare session between TCP/139 and TCP/445 (see the port-choice note in
+# _generate_smb_rare_file_transfer). A list rather than a module-level int so it can be
+# appended to from inside the generator without a `global` declaration.
+_smb_rare_port_toggle: list = []
+
+# Real workstation IPs this generator has been invoked for, used as the preferred pool of
+# rare SMB peers. The detector profiles the destination as a host as well as the source,
+# and an invented address that appears nowhere else in the estate may never resolve to a
+# profiled host entity at all. Drawing the peer from hosts that genuinely appear as
+# traffic sources elsewhere gives the destination a real identity. Naming the peer in the
+# log is not an available substitute: xdm.target.host.hostname is ~0% on all five
+# firewall feeds and nssfwlog's cdfqdn maps to no target-host XDM field.
+_smb_known_internal_hosts: set = set()
+
+
+def _next_rare_smb_peer(src_ip, prefer_known_host=False):
+    """Allocate a globally NEVER-BEFORE-USED rare SMB peer for this source host.
+
+    Grows the host's SMB destination set by exactly ONE per invocation. That is the
+    shape the "Rare SMB session to a remote host" detector describes: the host stays a
+    rare SMB *initiator* (fan-out of 1-3, not the 15-69 the fan-out generators produce),
+    while each newly allocated peer is a rare SMB *receiver* reached by this one host and
+    nothing else. Verbatim detector text: "This host is rarely seen initiating SMB
+    sessions to other hosts. The destination host is also rarely seen receiving SMB
+    connections from other hosts in the network In the past 30 days".
+
+    prefer_known_host: draw the peer from hosts this module has actually generated traffic
+                       for, so the destination is a real entity rather than an address that
+                       exists in three log lines and nowhere else. Falls back to a quiet-
+                       band address until enough real hosts have been observed.
     """
-    print("    - Zscaler Module simulating: SMB Rare File Transfer (large internal SMB)")
-    internal_servers = config.get('internal_servers', [])
-    dst_ip     = random.choice([s for s in internal_servers if s != internal_host_ip]
-                                or internal_servers or [_get_random_internal_ip(config)])
+    used = _smb_rare_peer_map.setdefault("smbrare::%s" % src_ip, [])
+    if prefer_known_host:
+        pool = [h for h in _smb_known_internal_hosts
+                if h != src_ip and h not in _smb_rare_peers_taken and h not in used]
+        # Require a warm pool, else the first few invocations would all collide on the
+        # handful of hosts seen so far and drive their fan-in above 1.
+        if len(_smb_known_internal_hosts) >= 12 and pool:
+            cand = random.choice(pool)
+            _smb_rare_peers_taken.add(cand)
+            used.append(cand)
+            return cand
+    for _ in range(256):
+        try:
+            net  = ip_network(random.choice(_SMB_RARE_SERVER_NETS), strict=False)
+            cand = rand_ip_from_network(net)
+        except Exception:
+            cand = "192.168.%d.%d" % (random.randint(4, 7), random.randint(2, 254))
+        if cand not in _smb_rare_peers_taken and cand != src_ip:
+            _smb_rare_peers_taken.add(cand)
+            used.append(cand)
+            return cand
+    # Pool exhausted (>1,000 sessions in one process). Fall back to any unused-by-this-
+    # host address rather than looping forever; fan-in may reach 2 for these.
+    cand = "192.168.%d.%d" % (random.randint(4, 7), random.randint(2, 254))
+    used.append(cand)
+    return cand
+
+
+def _generate_smb_rare_file_transfer(config, user, dept, internal_host_ip, device_info):
+    """A RARE SMB session from a workstation to a seldom-used internal server.
+
+    Targets the analytics detector "Rare SMB session to a remote host" ("The endpoint
+    performed a rare SMB activity to a remote host", TA0008 / T1021, category Lateral
+    Movement, DT:NDR Lateral Movement Analytics).
+
+    The detector needs TWO rarity conditions at once: the SOURCE rarely initiates SMB,
+    AND the DESTINATION rarely receives it. Each is easy to satisfy alone and their
+    intersection is not — pointing this generator at config['internal_servers'] gave a
+    rare initiator but a destination with heavy fan-in, while the fan-out generators
+    (share_enumeration, new_host_lateral) give rare destinations but sources with a
+    fan-out of 11-69. A per-host sticky peer in an estate-wide-unused /24 creates the
+    missing intersection: fan-out 1-3 AND fan-in 1 on the same session.
+
+    Emits ONE session as 3 flows to the SAME peer, so the pipeline sees a session rather
+    than an isolated packet while the destination count stays at 1. Breadth belongs to
+    the sibling detector "Abnormal SMB activity to multiple hosts", not here.
+
+    NOTE: this shape has not been observed to fire. See the project memory on network
+    analytics tuning before investing further in it.
+
+    Returns list of CEF log strings (nssfwlog).
+    """
+    print("    - Zscaler Module simulating: SMB Rare Session to a rare remote host")
+    # NB: the peer is allocated further down, AFTER the prior-history guard. Allocating it
+    # here instead silently disabled that guard, because _next_rare_smb_peer() creates the
+    # host's map entry via setdefault() and the guard tests that same entry for emptiness.
+    _smb_known_internal_hosts.add(internal_host_ip)   # real host, usable as a peer later
     file_size  = random.randint(104_857_600, 1_073_741_824)  # 100 MB – 1 GB
-    return _fw_event(config, user, dept, device_info,
-                     internal_host_ip, dst_ip, 445, "6",
-                     "Allow", "Allow_Internal_SMB", "SMB",
-                     "Data Staging", "SMBRareFileTransfer",
-                     "Internal", "7",
-                     file_size, random.randint(1000, 50000))
+    # Byte direction: _fw_event takes (bytes_in, bytes_out) and the modeling rule maps
+    # xdm.source.sent_bytes = to_integer(out). DO NOT re-invert — the staging volume must
+    # stay in bytes_out or it never reaches the field the upload analytics read.
+    #
+    # Explicit per-flow event_time_ms: without it every flow calls time.time() inside the
+    # same millisecond and the session collapses to a single _time bucket, so recurrence
+    # logic sees one observation instead of a session.
+    base_ms = int(time.time() * 1000) - random.randint(12, 25) * 60_000
+    logs = []
+    # Decided before the history block so the back-dated baseline and today's rare session
+    # sit on the SAME port — a host whose history is on 445 but whose new session is on 139
+    # presents two unrelated profiles rather than one thin, coherent SMB record.
+    _smb_rare_port_toggle.append(1)
+    dst_port = 139 if len(_smb_rare_port_toggle) % 2 else 445
+
+    # --- thin, multi-day PRIOR SMB history, emitted once per host -----------------
+    # A host with an EMPTY SMB history is unknown to the profiler, not "rare" — the
+    # detector describes a host "rarely seen initiating SMB sessions", which presupposes
+    # it has been seen at all. So on a host's first invocation, back-date a few short
+    # sessions to ONE established share across earlier days, then do today's session to a
+    # brand-new peer. Fan-out becomes 2 (still firmly rare) and the host reads as "known,
+    # rarely does SMB" rather than "never seen doing SMB".
+    if not _smb_rare_peer_map.get("smbrare::%s" % internal_host_ip):
+        home_share = _next_rare_smb_peer(internal_host_ip)
+        for day in (9, 7, 5, 3, 2):
+            day_ms = (int(time.time() * 1000) - day * 86_400_000
+                      + random.randint(-4, 4) * 3_600_000
+                      + random.randint(0, 59) * 60_000)
+            logs.append(_fw_event(config, user, dept, device_info,
+                                  internal_host_ip, home_share, dst_port, "6",
+                                  "Allow", "Allow_Internal_SMB", "SMB",
+                                  None, None,
+                                  "Internal", "1",
+                                  random.randint(2_000, 40_000),
+                                  random.randint(1_000, 30_000),
+                                  event_time_ms=day_ms,
+                                  duration_ms=random.randint(2_000, 90_000)))
+
+    # --- today's RARE session to a peer nothing has ever contacted ----------------
+    # Port choice: every alert this detector has been observed to produce was on
+    # remote_port 139 (NetBIOS Session Service), never 445, whereas every firing of the
+    # breadth sibling ("Abnormal SMB activity to multiple hosts") was on 445. Alternate
+    # 139/445 per invocation: 139 reproduces the only shape observed to fire, 445 keeps
+    # the variant the rest of the estate uses, and whichever fires is attributable from
+    # the alert's remote_port. Both are well-known ports — 49152+ reads as return traffic.
+    # prefer_known_host: make the peer a host that exists elsewhere in the feed, so the
+    # destination can be profiled as an entity (see _smb_known_internal_hosts). The
+    # back-dated home_share above stays synthetic — a routine file share, not a workstation.
+    dst_ip = _next_rare_smb_peer(internal_host_ip, prefer_known_host=True)
+    flows = [
+        # tree connect / negotiate, then the bulk read, then session teardown
+        (random.randint(600, 2_400),   random.randint(400, 1_800), random.randint(200, 900)),
+        (random.randint(1_000, 50_000), file_size,                 random.randint(300_000, 1_200_000)),
+        (random.randint(300, 1_500),   random.randint(200, 1_200), random.randint(100, 600)),
+    ]
+    for i, (b_in, b_out, dur) in enumerate(flows):
+        logs.append(_fw_event(config, user, dept, device_info,
+                              internal_host_ip, dst_ip, dst_port, "6",
+                              "Allow", "Allow_Internal_SMB", "SMB",
+                              "Lateral Movement", "SMBRareSession",
+                              "Internal", "7",
+                              b_in, b_out,
+                              event_time_ms=base_ms + i * random.randint(45_000, 90_000),
+                              duration_ms=dur))
+    return logs
 
 
 def _generate_smb_share_enumeration(config, user, dept, internal_host_ip, device_info):
@@ -1138,6 +1693,324 @@ def _generate_smb_share_enumeration(config, user, dept, internal_host_ip, device
 
 
 # ---------------------------------------------------------------------------
+# RARE-RDP peer bookkeeping — same idiom as the rare-SMB block above
+# ---------------------------------------------------------------------------
+# "rdprare::<src_ip>" -> peers this host has already reached on 3389. In memory only,
+# by design (single-session operation), and deliberately NOT seeded from hash(): CPython
+# salts str hashing per process, so a hash-derived "sticky" value re-rolls on restart.
+_rdp_rare_peer_map: dict = {}
+
+# Quiet internal /24s that receive RDP from nothing else in the estate. They sit outside
+# config['internal_networks'], so _generate_rdp_lateral — which draws its 5-10 targets
+# from those networks — cannot collide with them, and they are disjoint from
+# _SMB_RARE_SERVER_NETS so the two rare-session shapes never share a peer.
+_RDP_RARE_SERVER_NETS = ["192.168.12.0/24", "192.168.13.0/24",
+                         "192.168.14.0/24", "192.168.15.0/24"]
+
+# Peers handed out across ALL source hosts. Allocation must be globally unique, not
+# per-host: birthday collisions inside a 253-host /24 otherwise give some peers an RDP
+# fan-in of 2, which breaks the "destination rarely receives RDP" half of the shape.
+_rdp_rare_peers_taken: set = set()
+
+# Real workstation IPs this generator has been invoked for, used as the preferred pool of
+# rare RDP peers. The detector profiles the destination as a host as well as the source,
+# and an address that appears nowhere else in the estate may never resolve to a profiled
+# entity. Drawing the peer from hosts that genuinely appear as traffic sources elsewhere
+# gives the destination a real identity.
+_rdp_known_internal_hosts: set = set()
+
+
+def _next_rare_rdp_peer(src_ip, prefer_known_host=False):
+    """Allocate a globally NEVER-BEFORE-USED rare RDP peer for this source host.
+
+    Grows the host's RDP destination set by exactly ONE per invocation, which is the
+    shape the detector describes: the source stays a rare RDP initiator while each newly
+    allocated peer is a rare RDP receiver reached by this one host and nothing else.
+
+    prefer_known_host: draw the peer from hosts this module has actually generated traffic
+                       for, so the destination is a real entity rather than an address that
+                       exists in three log lines and nowhere else. Falls back to a quiet-
+                       band address until enough real hosts have been observed.
+    """
+    used = _rdp_rare_peer_map.setdefault("rdprare::%s" % src_ip, [])
+    if prefer_known_host:
+        pool = [h for h in _rdp_known_internal_hosts
+                if h != src_ip and h not in _rdp_rare_peers_taken and h not in used]
+        # Require a warm pool, else the first few invocations all collide on the handful
+        # of hosts seen so far and drive their fan-in above 1.
+        if len(_rdp_known_internal_hosts) >= 12 and pool:
+            cand = random.choice(pool)
+            _rdp_rare_peers_taken.add(cand)
+            used.append(cand)
+            return cand
+    for _ in range(256):
+        try:
+            net  = ip_network(random.choice(_RDP_RARE_SERVER_NETS), strict=False)
+            cand = rand_ip_from_network(net)
+        except Exception:
+            cand = "192.168.%d.%d" % (random.randint(12, 15), random.randint(2, 254))
+        if cand not in _rdp_rare_peers_taken and cand != src_ip:
+            _rdp_rare_peers_taken.add(cand)
+            used.append(cand)
+            return cand
+    # Pool exhausted (>1,000 sessions in one process). Fall back to any address this host
+    # has not used rather than looping forever; fan-in may reach 2 for these.
+    cand = "192.168.%d.%d" % (random.randint(12, 15), random.randint(2, 254))
+    used.append(cand)
+    return cand
+
+
+def _generate_rdp_rare_session(config, user, dept, internal_host_ip, device_info):
+    """A RARE internal RDP session from a seldom-seen workstation to a seldom-used host.
+
+    Targets "Abnormal RDP session to a remote host from a rarely seen host" (category
+    Lateral Movement, DT:NDR Lateral Movement Analytics). That detector needs THREE
+    rarity conditions at once: the source host is rarely observed, the RDP pattern is
+    abnormal for the network segment, and the destination rarely RECEIVES RDP from other
+    hosts. Each is easy alone and the intersection is not — _generate_rdp_lateral fans out
+    to 5-10 destinations, which makes its source a frequent RDP initiator and its targets
+    ordinary members of the estate's RDP mesh.
+
+    This generator produces the intersection instead, reusing the rare-SMB idiom: a
+    per-host sticky peer drawn from a band nothing else reaches on 3389, so the session has
+    an RDP fan-out of 1-2 and an RDP fan-in of exactly 1 at the same time. Do NOT point it
+    at config['internal_networks'] or config['internal_servers'] — both are already dense
+    RDP destinations and the fan-in condition is lost.
+
+    Emits ONE session as 3 flows to the SAME peer so the pipeline sees a session rather
+    than an isolated packet while the destination count stays at 1. Breadth belongs to the
+    sibling shape in _generate_rdp_lateral, not here.
+
+    Returns list of CEF log strings (nssfwlog).
+    """
+    print(f"    - Zscaler Module simulating: Rare RDP Session from {internal_host_ip} (rarely seen host)")
+    # NB: the peer is allocated AFTER the prior-history guard below. Allocating it here
+    # silently disables that guard, because _next_rare_rdp_peer() creates the host's map
+    # entry via setdefault() and the guard tests that same entry for emptiness.
+    _rdp_known_internal_hosts.add(internal_host_ip)   # real host, usable as a peer later
+
+    # Explicit per-flow event_time_ms throughout: without it every flow calls time.time()
+    # inside the same millisecond and the whole session collapses into one _time bucket,
+    # so recurrence logic sees a single observation instead of a session.
+    logs = []
+
+    # --- thin, multi-day PRIOR RDP history, emitted once per host -------------------
+    # A host with an EMPTY RDP history is unknown to the profiler, not "rarely seen" — the
+    # detector describes a host that HAS been observed, just seldom. On a host's first
+    # invocation, back-date a couple of short sessions to ONE established peer across
+    # earlier days, then do today's session to a brand-new one. RDP fan-out becomes 2,
+    # still firmly rare, and the host reads as "known, hardly ever does RDP".
+    if not _rdp_rare_peer_map.get("rdprare::%s" % internal_host_ip):
+        home_peer = _next_rare_rdp_peer(internal_host_ip)
+        for day in (11, 6, 3):
+            day_ms = (int(time.time() * 1000) - day * 86_400_000
+                      + random.randint(-4, 4) * 3_600_000
+                      + random.randint(0, 59) * 60_000)
+            logs.append(_fw_event(config, user, dept, device_info,
+                                  internal_host_ip, home_peer, 3389, "6",
+                                  "Allow", "Allow_Internal_Admin", _port_service(3389),
+                                  None, None,
+                                  "Internal", "1",
+                                  random.randint(20_000, 200_000),
+                                  random.randint(10_000, 90_000),
+                                  event_time_ms=day_ms,
+                                  duration_ms=random.randint(120_000, 900_000)))
+
+    # --- today's RARE session to a peer nothing has ever RDP'd to --------------------
+    # prefer_known_host: make the peer a host that exists elsewhere in the feed so the
+    # destination can be profiled as an entity. The back-dated home_peer above stays
+    # synthetic — an established jump box, not a workstation.
+    dst_ip  = _next_rare_rdp_peer(internal_host_ip, prefer_known_host=True)
+    base_ms = int(time.time() * 1000) - random.randint(20, 40) * 60_000
+    # Interactive RDP: a short negotiation, a long screen-data session, then teardown.
+    flows = [
+        (random.randint(1_200, 4_000),   random.randint(800, 3_000),      random.randint(1_000, 6_000)),
+        (random.randint(200_000, 900_000), random.randint(40_000, 500_000), random.randint(600_000, 3_600_000)),
+        (random.randint(2_000, 12_000),  random.randint(1_000, 6_000),    random.randint(2_000, 20_000)),
+    ]
+    for i, (b_in, b_out, dur) in enumerate(flows):
+        logs.append(_fw_event(config, user, dept, device_info,
+                              internal_host_ip, dst_ip, 3389, "6",
+                              "Allow", "Allow_Internal_Admin", _port_service(3389),
+                              "Lateral Movement", "RDPRareSession",
+                              "Internal", "7",
+                              b_in, b_out,
+                              event_time_ms=base_ms + i * random.randint(60_000, 150_000),
+                              duration_ms=dur))
+    return logs
+
+
+# ---------------------------------------------------------------------------
+# ADMINISTRATIVE-BEHAVIOUR ANALYTICS SUPPORT
+# ---------------------------------------------------------------------------
+# Destination ports the detector actually COUNTS as an administrative action. Measured
+# against the tenant: 22 and 69 count reliably, 512 was never counted on any feed and 992
+# counts on some feeds and not others. So 22/69 carry the budget and the other two are
+# emitted only for fidelity with the port set the alert reports — never counted on as
+# contributing to the threshold. A burst spread evenly over all four wastes most of itself.
+# TFTP is emitted over TCP here rather than its real-world UDP: that is what the feeds
+# observed to fire this detector carry, and matching them matters more than protocol purity.
+_ADMIN_COUNTED_PORTS  = [22, 69]
+_ADMIN_FIDELITY_PORTS = [512, 992]
+_ADMIN_SERVICE_PORTS  = _ADMIN_COUNTED_PORTS + _ADMIN_FIDELITY_PORTS
+
+# Dedicated internal management segment for administrative sessions. 172.19.0.0/16 is
+# RFC1918 (so _is_internal_ip and XSIAM both read the destinations as internal) and carries
+# no traffic at all on any feed in this estate, which is what keeps every (destination,
+# port) pair here genuinely first-seen. It also sits OUTSIDE config['internal_networks'],
+# so no other generator in this module can draw an address from it by accident, and it is
+# disjoint from the management segments the Check Point and FortiGate modules reserve —
+# novelty appears to be scored estate-wide per (destination, port), not per source host,
+# so an overlapping segment would burn another module's pairs as well as its own.
+_ADMIN_SEGMENT_PREFIX = "172.19"
+_ADMIN_SEGMENT_BASE3  = 0            # full /16
+_ADMIN_SEGMENT_SPAN   = 256 * 256    # addresses available in the segment
+_ADMIN_BLOCK_SIZE     = 24           # addresses reserved per invocation
+
+# In-memory only, by design: single-session operation, no disk persistence.
+_admin_block_cursor = None
+
+# "admin::<src_ip>" -> (destination, port) pairs this host has already used, so a repeat
+# invocation on the same workstation still contributes only NEW pairs.
+_admin_pair_map: dict = {}
+
+
+def _next_admin_targets(count):
+    """Reserve `count` internal destinations not yet used on an administrative port.
+
+    The detector counts FIRST-SEEN (destination, administrative port) pairs, so a generator
+    that reuses destinations exhausts itself after one run — which is exactly how this
+    shape went quiet before: admin-port traffic only ever reached the 25 addresses in
+    config['internal_servers'], and every pair there was used up.
+
+    The cursor never moves backwards and is floored at the current hour, so it keeps pace
+    with the wall clock and a restart resumes ahead of any block a previous run spent in an
+    earlier hour. Hour granularity is deliberate: the segment holds enough blocks for ~114
+    days before wrapping, comfortably longer than the detector's lookback, whereas a finer
+    slot would wrap inside it.
+    """
+    global _admin_block_cursor
+    hour_slot = int(time.time() // 3600)
+    if _admin_block_cursor is None or _admin_block_cursor < hour_slot:
+        _admin_block_cursor = hour_slot
+    block = _admin_block_cursor
+    _admin_block_cursor += 1
+
+    targets = []
+    for i in range(count):
+        idx = (block * _ADMIN_BLOCK_SIZE + i) % _ADMIN_SEGMENT_SPAN
+        targets.append("%s.%d.%d" % (_ADMIN_SEGMENT_PREFIX,
+                                     _ADMIN_SEGMENT_BASE3 + (idx // 256), idx % 256))
+    return targets
+
+
+def _admin_port_sequence(count):
+    """Port list of length `count`, all on ports the detector actually counts.
+
+    Returns `count` entries drawn only from _ADMIN_COUNTED_PORTS. The fidelity ports are
+    appended by the caller as extra sessions rather than taken out of this budget, so the
+    counted total never drops when they are included.
+    """
+    return [random.choice(_ADMIN_COUNTED_PORTS) for _ in range(count)]
+
+
+def _generate_new_admin_behavior(config, user, dept, internal_host_ip, device_info):
+    """One workstation opens administrative sessions to many NEW internal destinations.
+
+    Targets "New Administrative Behavior" (category Lateral Movement, DT:NDR Lateral
+    Movement Analytics). The detector profiles, per source host, the set of (destination,
+    administrative port) pairs that host has used before, and alerts when the number of
+    previously unseen pairs inside a 12-HOUR window is uncharacteristically high for that
+    host — the reported threshold shape is 7 new actions. Breadth over new destinations
+    inside a short window is the whole signal: repeating a destination the host already
+    reached counts for nothing, and the same breadth spread thinly across weeks does not
+    count either.
+
+    Emits 14-16 accepted sessions on the ports that actually count (SSH and TFTP) plus two
+    on rexec/telnets for fidelity with the port set the alert reports, each to a
+    destination from the reserved management segment that nothing in the estate has ever
+    reached on an administrative port, spread over 1-2 hours so the burst never lands on a
+    single timestamp. The count deliberately sits at roughly twice the reported threshold:
+    a burst sized to the threshold exactly leaves no margin for sessions the detector
+    declines to count, which is the observed failure mode for this shape.
+
+    THE SOURCE MUST BE AN INTERNAL HOST WITH ITS OWN BASELINE. The detector alerts on
+    deviation from that host's profile, so a freshly minted address has nothing to deviate
+    from. The back-dated block below gives a first-seen workstation a thin prior record of
+    routine administration, so today's burst reads as a deviation rather than as the only
+    thing ever known about the host.
+
+    Returns list of CEF log strings (nssfwlog).
+    """
+    print(f"    - Zscaler Module simulating: New Administrative Behavior from {internal_host_ip}")
+    used_pairs = _admin_pair_map.setdefault("admin::%s" % internal_host_ip, set())
+    logs = []
+
+    # --- thin, multi-day ROUTINE administration, emitted once per host --------------
+    # One jump host reached on SSH across earlier days. Two pairs total, so the host's
+    # normal rate of NEW administrative actions is well under one per 12 hours.
+    if not used_pairs:
+        jump_hosts = _next_admin_targets(1)
+        for day in (12, 8, 5, 2):
+            day_ms = (int(time.time() * 1000) - day * 86_400_000
+                      + random.randint(-3, 3) * 3_600_000
+                      + random.randint(0, 59) * 60_000)
+            logs.append(_fw_event(config, user, dept, device_info,
+                                  internal_host_ip, jump_hosts[0], 22, "6",
+                                  "Allow", "Allow_Internal_Admin", _port_service(22),
+                                  None, None,
+                                  "Internal", "1",
+                                  random.randint(4_000, 60_000),
+                                  random.randint(2_000, 40_000),
+                                  event_time_ms=day_ms,
+                                  duration_ms=random.randint(30_000, 600_000)))
+        used_pairs.add((jump_hosts[0], 22))
+
+    # --- today's burst of NEW (destination, administrative port) pairs ---------------
+    # Counted sessions first, then one session per fidelity port on its own fresh
+    # destination. Every destination is distinct, so no pair can repeat inside the burst.
+    n_counted  = random.randint(14, 16)
+    n_sessions = n_counted + len(_ADMIN_FIDELITY_PORTS)
+    targets    = _next_admin_targets(n_sessions)
+    ports      = _admin_port_sequence(n_counted) + list(_ADMIN_FIDELITY_PORTS)
+
+    # A second operator account on part of the run: administrative sweeps are usually run
+    # under a shared or secondary credential rather than one identity, and the detector
+    # reports the account set it observed.
+    alt_user = None
+    users_map = (config.get(CONFIG_KEY, {}).get('user_ip_map')
+                 or config.get('shared_user_ip_map', {}))
+    candidates = [u for u in users_map if u != user]
+    if candidates:
+        alt_user = random.choice(candidates)
+
+    # Span the burst over 1-2 hours: comfortably inside the detector's 12-hour window,
+    # and never collapsed onto one millisecond the way an un-timestamped loop would be.
+    span_ms   = random.randint(70, 140) * 60_000
+    base_ms   = int(time.time() * 1000) - span_ms
+    step_ms   = span_ms // max(n_sessions, 1)
+    for i, (dest_ip, port) in enumerate(zip(targets, ports)):
+        if (dest_ip, port) in used_pairs:
+            continue
+        used_pairs.add((dest_ip, port))
+        ev_user  = alt_user if (alt_user and random.random() < 0.3) else user
+        duration = random.randint(20_000, 900_000)
+        logs.append(_fw_event(config, ev_user, dept, device_info,
+                              internal_host_ip, dest_ip, port, "6",
+                              # nwsvc must be the SERVICE on the port, never the threat
+                              # name — a synthetic value pollutes the application-protocol
+                              # baseline for exactly the ports this detector reads.
+                              "Allow", "Allow_Internal_Admin", _port_service(port),
+                              "Lateral Movement", "NewAdminBehavior",
+                              "Internal", "6",
+                              random.randint(2_000, 250_000),
+                              random.randint(2_000, 90_000),
+                              event_time_ms=base_ms + i * step_ms + random.randint(0, 45_000),
+                              duration_ms=duration))
+    return logs
+
+
+# ---------------------------------------------------------------------------
 # VPN / REMOTE ACCESS GENERATORS — Zscaler ZPA / RA-VPN via cloud firewall
 # ---------------------------------------------------------------------------
 
@@ -1168,15 +2041,17 @@ def _generate_vpn_brute_force(config, user, dept, internal_host_ip, device_info)
 
 
 def _generate_vpn_impossible_travel(config, user, dept, internal_host_ip, device_info):
-    """Same user authenticates from geographically distant IPs within minutes (nssfwlog).
+    """Same user: FAILED then SUCCESSFUL VPN/ZPA auth from two distant IPs (nssfwlog).
 
-    Two ALLOWED VPN/ZPA sessions from the same user — the first from a benign
-    location, the second from a suspicious foreign location 5-10 minutes later.
-    Physical travel is impossible in that window. XSIAM detects the anomaly.
+    The XSIAM UEBA impossible-travel detector fires on a failed-then-succeeded auth
+    pattern (compromised creds) in EACH location — not on bare successful sessions. So
+    each of the two geos emits several Blocked auth attempts (door-knocking) followed
+    by an Allowed VPN session. Same user; the benign location is back-dated 5-10 min
+    (via rt) so the two successes sit an impossible distance apart in time.
 
     Returns list of CEF log strings (multi-event).
     """
-    print(f"    - Zscaler Module simulating: VPN Impossible Travel for {user}")
+    print(f"    - Zscaler Module simulating: VPN Impossible Travel (door-knock + success x2 geos) for {user}")
     zscaler_conf = config.get('zscaler_config', {})
     gateway_ip = zscaler_conf.get('vpn_gateway_ip',
                      random.choice(config.get('internal_servers', ['10.0.10.1'])))
@@ -1185,15 +2060,31 @@ def _generate_vpn_impossible_travel(config, user, dept, internal_host_ip, device
     benign_ip      = benign_loc.get('ip', '68.185.12.14')
     suspicious_ip  = suspicious_loc.get('ip', '175.45.176.10')
 
+    now_ms = int(time.time() * 1000)
+    gap_ms = random.randint(5, 10) * 60 * 1000
+
     logs = []
-    for vpn_src_ip, country in [(benign_ip, "United States"), (suspicious_ip, random.choice(_THREAT_COUNTRIES))]:
+    for vpn_src_ip, country, base_offset in [
+        (benign_ip,     "United States",                 -gap_ms),
+        (suspicious_ip, random.choice(_THREAT_COUNTRIES), 0),
+    ]:
+        n_fails = random.randint(3, 5)
+        for i in range(n_fails):     # door-knocking: blocked auth attempts
+            logs.append(_fw_event(config, user, dept, device_info,
+                                  vpn_src_ip, gateway_ip, 443, "6",
+                                  "Blocked", "Block_VPN_AuthFail", "HTTPS",
+                                  "Authentication", "VPN_AuthFailed",
+                                  country, "5",
+                                  random.randint(100, 400), random.randint(200, 800),
+                                  event_time_ms=now_ms + base_offset + i * 3000))
+        # successful session after the failures — the pattern the detector fires on
         logs.append(_fw_event(config, user, dept, device_info,
                               vpn_src_ip, gateway_ip, 443, "6",
                               "Allow", "Allow_VPN_Access", "HTTPS",
                               "N/A", "VPN_Session",
                               country, "3",
-                              random.randint(100_000, 2_000_000),
-                              random.randint(50_000, 500_000)))
+                              random.randint(100_000, 2_000_000), random.randint(50_000, 500_000),
+                              event_time_ms=now_ms + base_offset + n_fails * 3000))
     return logs
 
 
@@ -1208,9 +2099,17 @@ def _generate_vpn_tor_login(config, user, dept, internal_host_ip, device_info):
     zscaler_conf = config.get('zscaler_config', {})
     gateway_ip = zscaler_conf.get('vpn_gateway_ip',
                      random.choice(config.get('internal_servers', ['10.0.10.1'])))
-    tor_nodes = config.get('tor_exit_nodes', [])
-    tor_ip = (random.choice(tor_nodes).get('ip', _random_external_ip())
-              if tor_nodes else _random_external_ip())
+    # DO NOT "FIX" THIS BACK to random.choice(config['tor_exit_nodes']).
+    # Probing the full live exit-node list through the tenant
+    # resolved them to 55 DISTINCT COUNTRIES with a rotating long tail
+    # (Seychelles, Belize, Nicaragua, Panama, Peru ...).  As the SOURCE IP of a
+    # successful VPN login that tail kept marking reserve countries "already
+    # seen", permanently silencing the analytic "First successful VPN access
+    # from a country in organization".  tor_vpn_ip() restricts the pool to the
+    # 182 probed /16 prefixes that resolve ONLY to the genuine Tor-heavy
+    # countries (US/DE/NL/FR/RO) — still 930 live nodes, so the HIGH-severity
+    # "A Successful VPN connection from TOR" analytic is unaffected.
+    tor_ip = tor_vpn_ip(config, default=_random_external_ip())
     # VPN-assigned inside IP (typical ZPA/AnyConnect pool: 10.250.x.x)
     vpn_pool_net = zscaler_conf.get('vpn_pool', '10.250.0.0/16')
     try:
@@ -1388,12 +2287,23 @@ def _generate_ddns_connection(config, user, dept, internal_host_ip, device_info)
         "hopto.org", "zapto.org", "sytes.net", "ddns.net",
         "servebeer.com", "myftp.biz", "myvnc.com", "redirectme.net",
     ]
-    subdomain = random.choice([
+    subdomains = [
         "update-service", "cdn-relay", "mail-check", "vpn-gateway",
         "api-health", "sync-node", "cloud-backup", "office-proxy",
-    ])
-    ddns_hostname = f"{subdomain}.{random.choice(ddns_providers)}"
-    resolved_ip = _random_external_ip()
+    ]
+    # STICKY PER SOURCE HOST — XSIAM's "Recurring rare domain access to dynamic DNS
+    # domain" needs one endpoint returning to ONE rare domain repeatedly. A fresh
+    # provider x subdomain per call (12 x 8 combinations) with a random source
+    # produced scattered single hits, the opposite of recurrence. A concentrated replay
+    # (1 host -> 1 domain, many sessions) produces the correct shape.
+    # DO NOT restore per-call randomisation.
+    if internal_host_ip not in _ddns_beacon_map:
+        _rnd = random.Random(hash(("ddns", internal_host_ip)) & 0xFFFFFFFF)
+        _ddns_beacon_map[internal_host_ip] = (
+            f"{_rnd.choice(subdomains)}.{_rnd.choice(ddns_providers)}",
+            _random_external_ip(),
+        )
+    ddns_hostname, resolved_ip = _ddns_beacon_map[internal_host_ip]
 
     logs = []
     # Log 1: DNS query resolving the DDNS hostname
@@ -1402,15 +2312,58 @@ def _generate_ddns_connection(config, user, dept, internal_host_ip, device_info)
                           "Allow", "Allow_DNS_Outbound", "DNS",
                           "N/A", "DDNS_Query",
                           "United States", "3",
-                          random.randint(80, 300), random.randint(60, 120)))
-    # Log 2: HTTPS session to the resolved DDNS IP
-    logs.append(_fw_event(config, user, dept, device_info,
-                          internal_host_ip, resolved_ip, 443, "6",
-                          "Allow", "Allow_Web_Outbound", "HTTPS",
-                          "Dynamic DNS", "DDNS_Connection",
-                          "Unknown", "5",
-                          random.randint(5_000, 500_000),
-                          random.randint(1_000, 100_000)))
+                          random.randint(80, 300), random.randint(60, 120),
+                          dst_fqdn=ddns_hostname,
+                          # -> URL_CATEGORY_DYNAMIC_DNS, the category the
+                          # "Recurring rare domain access to dynamic DNS domain"
+                          # detector is named after
+                          url_category="Dynamic DNS"))
+    # Logs 2..N: a BURST of web callbacks to the same DDNS host.
+    #
+    # These are nssweblog events. The web feed carries the domain as ehost/eurl and
+    # maps it to xdm.network.http.domain, which is what "Recurring rare domain access
+    # to dynamic DNS domain" keys on: zscaler ddns_connection
+    # produced zero populated domain fields until these were switched from _fw_event.
+    # (An earlier note here said the FIREWALL feed "carries NO hostname field". That is
+    # wrong: Zscaler's firewall field reference defines %s{cdfqdn}, the client
+    # destination FQDN, and the DNS-query event above now emits it. The firewall feed
+    # simply is not where a web callback belongs.)
+    #
+    # The callbacks must also be SPREAD OVER TIME. "Recurring" is a temporal property: a
+    # burst of 8-16 callbacks stamped with one timestamp is a single observation, not
+    # recurrence, and this detector has never fired from any source in this project.
+    # Zscaler DDNS bursts spanned 1-2 distinct timestamps while
+    # Check Point spanned 30-53 and FortiGate 15-72 for the same threat.
+    zscaler_conf = config.get('zscaler_config', {})
+    n_callbacks  = random.randint(8, 16)
+    ddns_base_ms = int(time.time() * 1000)
+    ddns_gap     = random.randint(3, 12) * 60 * 1000    # minutes apart, over hours
+    for _i in range(n_callbacks):
+        fields = {
+            "action": "Allowed",
+            # walk backwards so the beacon train occupies the recent past
+            "rt": ddns_base_ms - (n_callbacks - 1 - _i) * ddns_gap
+                  + random.randint(-20_000, 20_000),
+            "urlcat":      "Dynamic DNS",
+            "urlsupercat": "Information Technology",
+            "urlclass":    "Business and Productivity",
+            "riskscore":   str(random.randint(45, 80)),
+            "responsecode": "200", "reason": "Allowed", "reqmethod": "POST",
+            "useragent":   random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+            "appname":     "General Browsing", "appclass": "Web",
+            "contenttype": "application/octet-stream",
+            "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
+            "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
+            "eurl": f"https://{ddns_hostname}/", "ehost": ddns_hostname,
+            "cip": internal_host_ip, "sip": resolved_ip, "proto": "HTTPS",
+            "bytesin":  random.randint(5_000, 500_000),
+            "bytesout": random.randint(1_000, 100_000),
+            "sourceTranslatedAddress": random.choice(
+                zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+            "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
+            "cefSeverity": "5",
+        }
+        logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
     return logs
 
 
@@ -1418,6 +2371,8 @@ def _generate_ddns_connection(config, user, dept, internal_host_ip, device_info)
 # analytic: True  -> event is expected to trigger an XSIAM Third-Party analytics alert
 # analytic: False -> event is realistic but won't fire a dedicated XSIAM alert
 # xsiam_alert:    -> name of the matching XSIAM analytics alert (or None)
+_ddns_beacon_map: dict = {}   # src_ip -> stable (ddns_hostname, resolved_ip) for DDNS recurrence
+
 _NON_ANALYTIC_PREFIX = "[Non-Analytic] "
 _DEFAULT_THREAT_EVENTS = [
     {"event": "web_threat",           "weight": 12, "analytic": False,
@@ -1444,6 +2399,10 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "New Administrative Behavior"},
     {"event": "rdp_lateral",          "weight": 3,  "analytic": True,
      "xsiam_alert": "Failed Connections"},
+    {"event": "rdp_rare_session",     "weight": 4,  "analytic": True,
+     "xsiam_alert": "Abnormal RDP session to a remote host from a rarely seen host"},
+    {"event": "new_admin_behavior",   "weight": 4,  "analytic": True,
+     "xsiam_alert": "New Administrative Behavior"},
     {"event": "ssh_over_https",       "weight": 3,  "analytic": False,
      "xsiam_alert": None},
     {"event": "smb_new_host_lateral", "weight": 4,  "analytic": True,
@@ -1458,6 +2417,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": None},
     {"event": "vpn_tor_login",        "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "vpn_new_country_login","weight": 3,  "analytic": True,
+     "xsiam_alert": "First successful VPN access from a country in organization"},
     {"event": "rare_external_rdp",    "weight": 3,  "analytic": True,
      "xsiam_alert": "Rare RDP session to a remote host"},
     {"event": "rare_ssh",             "weight": 3,  "analytic": True,
@@ -1470,6 +2431,20 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "New FTP Server"},
     {"event": "ddns_connection",      "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
+    {"event": "large_download",       "weight": 3,  "analytic": True,
+     "xsiam_alert": "Large Download"},
+    # Was annotated "Uncommon reverse SSH tunnel to external domain/ip" — that alert name
+    # does not exist in the tenant (searched the whole alerts dataset
+    # for every name containing SSH or tunnel). The real detector this drives is
+    {"event": "reverse_ssh_tunnel",   "weight": 2,  "analytic": True,
+     "xsiam_alert": "Unusual, long SSH activity with tunnel characteristics"},
+    # web_c2_beacon was ORPHANED: present in _NAMED_THREATS but absent from this list and
+    # from generate_log's threat map, so it never fired ambiently, never appeared in
+    # get_threat_names(), and was reachable only via the single hardcoded
+    # scenario_event="web_c2_beacon" call in log_simulator.py. Registering it here makes
+    # the generator actually reachable.
+    {"event": "web_c2_beacon",        "weight": 4,  "analytic": True,
+     "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
 ]
 
 # --- Display-name mapping (same pattern as checkpoint_firewall.py) ---
@@ -1490,11 +2465,25 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info):
     zscaler_conf = config.get('zscaler_config', {})
     c2_domain = random.choice(zscaler_conf.get('c2_domains',
                 ["cdn-analytics-sync.com", "telemetry-edge-api.net", "update-check-svc.org", "cloud-metric-relay.io"]))
-    c2_ip     = f"{random.randint(45,223)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
+    # Use the shared helper, NOT a hand-rolled random /8. Picking a random host inside a
+    # random octet range is the exact construction the "DO NOT FIX THIS BACK" note near
+    # the top of this module warns about: it scattered sources across 210 distinct
+    # countries and destroyed geo-based detection. _random_external_ip() draws from the
+    # curated external ranges instead.
+    c2_ip     = _random_external_ip()
     beacon_ua = random.choice(["python-requests/2.31.0", "Go-http-client/1.1", "curl/8.4.0",
                                "Mozilla/5.0 (Windows NT 10.0) WinHTTP/1.0"])
+    # A beacon is defined by its CADENCE, so the callbacks must carry distinct timestamps.
+    # Every event previously called time.time() inside one millisecond bucket, so 12-20
+    # callbacks landed on a single _time — one observation, not a regular tempo. Beacon
+    # detectors ("Abnormal Recurring Communications to a Rare Domain") cannot measure
+    # periodicity from a single instant.
+    base_ms   = int(time.time() * 1000)
+    interval  = random.randint(30, 90) * 1000          # fixed tempo per beacon
+    jitter    = int(interval * 0.05)                   # small jitter, still regular
     logs = []
-    for _ in range(random.randint(12, 20)):
+    n_beacons = random.randint(12, 20)
+    for _i in range(n_beacons):
         method = random.choices(["GET", "POST"], weights=[70, 30])[0]
         uri    = random.choice(["/api/v1/checkin", "/gate.php", "/submit.php", "/beacon", "/j/collect"])
         fields = {
@@ -1512,6 +2501,10 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info):
             "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
             "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
             "cefSeverity": "5",
+            # walk backwards from now so the beacon train sits in the recent past at a
+            # steady cadence rather than all arriving in the same millisecond
+            "rt": base_ms - (n_beacons - 1 - _i) * interval
+                  + random.randint(-jitter, jitter),
         }
         logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
     return logs
@@ -1519,8 +2512,134 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info):
 
 # Module-level dispatch map for named-threat mode.
 # Functions accept (config, user, dept, internal_host_ip, device_info).
+def _generate_large_download(config, user, dept, internal_host_ip, device_info):
+    """Large INBOUND web transfer — 'Large Download' volume anomaly. The proxy
+    counterpart to data_exfil: huge bytesin (download) / small bytesout (request).
+    Returns [DNS precursor, NSSFWlog TCP/443 allow, NSSWeblog allow]."""
+    print("    - Zscaler Module simulating: Large Download (inbound volume anomaly)")
+    zscaler_conf = config.get('zscaler_config', {})
+    # `download_destinations` is not present in config, so this silently fell back to the
+    # 2-entry upload list and downloads resolved to the SAME hosts as uploads. Draw from
+    # the download half of the shared pool instead — see _exfil_destination().
+    _dl_domain, dest_ip, _dl_url = _exfil_destination(config, "download")
+    dl_dest        = {"url": _dl_url, "domain": _dl_domain}
+    download_bytes = random.randint(524_288_000, 4_294_967_296)  # 500 MB - 4 GB
+    req_bytes      = random.randint(200, 2000)
+    filename, filetype = _pick_upload_file(random.choice(["archive", "document"]))
+
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip,
+                                domain=_dl_domain)]
+    # NSSFWlog — bytes_in = download (large), bytes_out = request (small)
+    logs.append(_fw_event(config, user, dept, device_info,
+                          internal_host_ip, dest_ip, 443, "6",
+                          "Allow", "Allow_Web_Outbound", "HTTPS",
+                          "Large Download", "LargeDownload",
+                          "Unknown", "5",
+                          download_bytes, req_bytes,
+                          dst_fqdn=_dl_domain,
+                          duration_ms=random.randint(300_000, 1_200_000),
+                          url_category="Online Storage and Backup"))
+    fields = {
+        "action": "Allowed",
+        "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
+        "urlclass": "Business and Productivity",
+        "riskscore": str(random.randint(30, 60)),
+        "responsecode": "200", "reason": "Allowed", "reqmethod": "GET",
+        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "appname": "File Transfer", "appclass": "General", "contenttype": "application/octet-stream",
+        "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
+        "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
+        "eurl": dl_dest.get('url'), "ehost": dl_dest.get('domain'),
+        "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
+        "bytesin": download_bytes, "bytesout": req_bytes,
+        "filename": filename, "filetype": filetype,
+        "filesize": download_bytes, "totalsize": download_bytes + req_bytes,
+        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
+        "cefSeverity": "5",
+    }
+    logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
+    return logs
+
+
+def _generate_reverse_ssh_tunnel(config, user, dept, internal_host_ip, device_info):
+    """Internal host -> EXTERNAL IP on SSH/22 through the ZIA firewall — reverse SSH
+    tunnel / C2 over SSH. Long-lived, high bidirectional volume; a few sessions to the
+    SAME external host (stable destination = recurring-rare-destination signal).
+    Returns list of nssfwlog CEF events."""
+    print("    - Zscaler Module simulating: Reverse SSH tunnel to external host")
+    # --- STICKY PEER (the "tracker") ---------------------------------------------
+    # One internal host must keep returning to ONE novel external IP. The map lives for
+    # the life of the process, which is the right scope here: LogSim is normally left
+    # running, so every later invocation for this host reuses the same peer and the
+    # multi-day pattern deepens on its own. (Deliberately NOT persisted to disk —
+    # single-session operation is the assumption.)
+    #
+    # Do NOT reseed this from hash(): CPython salts str hashing with PYTHONHASHSEED, so
+    # hash(("x", ip)) returns a different value in every interpreter (verified
+    # different values for identical input). Irrelevant
+    # while the process stays up, but it is why any restart re-rolls a "sticky" target.
+    peer_key = f"revssh::{internal_host_ip}"
+    dest_ip  = _beacon_target_map.get(peer_key)
+    if not dest_ip:
+        # _random_external_ip() draws a specific /32 from 35 XSIAM-probed /24s. The exact
+        # address is effectively novel, which is what a rare-destination detector keys on
+        # — the same helper already sustains "An Uncommon SSH session was established to a
+        # rare IP" for Zscaler (n=155).
+        dest_ip = _random_external_ip()
+        _beacon_target_map[peer_key] = dest_ip
+
+    # --- SHAPE ------------------------------------------------------------------
+    # Determined by manual inspection of the detector (rule
+    # f1545c54-11c4-4af8-9119-4a21b890b7c3, "Unusual, long SSH activity with tunnel
+    # characteristics"). It needs SUCCESSFUL SSH connections to the SAME previously
+    # unseen external IP, observed ACROSS MULTIPLE DAYS — not a burst.
+    #
+    # So emit exactly TWO successful sessions per invocation, hours apart, with the
+    # first back-dated far enough that the pair straddles two calendar days. A single
+    # injection therefore already presents the multi-day shape instead of waiting a day
+    # for the second observation to arrive naturally.
+    #
+    # Earlier attempts and why they failed, so this is not re-litigated:
+    #   * 2-4 sessions all on ONE timestamp     -> one observation, no recurrence
+    #   * sessions 45 min - 3 h apart           -> same calendar day, still not multi-day
+    #   * 5-80 MB volume                        -> below the ~171 MB the Check Point
+    #                                              session that fired actually carried
+    #   * app_proto was NEVER the gap: Zscaler already emits SSH, identical to the
+    #     Check Point event that fired. An earlier note here
+    #     blaming app_id was wrong — that app_id came off a Large Upload alert.
+    now_ms = int(time.time() * 1000)
+    session_offsets = [
+        random.randint(26, 34) * 3600 * 1000,   # yesterday
+        random.randint(1, 5) * 3600 * 1000,     # today, hours later
+    ]
+    logs = []
+    for offset_ms in session_offsets:
+        logs.append(_fw_event(config, user, dept, device_info,
+                              internal_host_ip, dest_ip, 22, "6",
+                              # SUCCESSFUL — a blocked attempt cannot satisfy this
+                              # detector. Do not change to Block/Blocked.
+                              "Allow", "Allow_Web_Outbound", "SSH",
+                              "Remote Access", "ReverseSSHTunnel",
+                              "Unknown", "6",
+                              # 120-350 MB each way: the detector wants "a higher than
+                              # usual volume of data transfer" AND "an abnormally long
+                              # session". The Check Point session that fired carried
+                              # ~171 MB at 117,350,000 ms (32.6 h), app_proto SSH.
+                              random.randint(120, 350) * 1024 * 1024,
+                              random.randint(120, 350) * 1024 * 1024,
+                              event_time_ms=now_ms - offset_ms,
+                              # 6-20 h per session: abnormally long, but short enough
+                              # that the two sessions read as distinct connections
+                              # rather than one continuously overlapping tunnel.
+                              duration_ms=random.randint(21_600_000, 72_000_000)))
+    return logs
+
+
 _NAMED_THREATS = {
     "web_c2_beacon":        _generate_web_c2_beacon,
+    "large_download":       _generate_large_download,
+    "reverse_ssh_tunnel":   _generate_reverse_ssh_tunnel,
     "web_threat":           _generate_threat_web_traffic,
     "data_exfil":           _generate_data_exfil_web_traffic,
     "dlp_threat":           _generate_dlp_web_traffic,
@@ -1533,6 +2652,8 @@ _NAMED_THREATS = {
     "dns_c2_beacon":        _generate_dns_c2_beacon,
     "server_outbound_http": _generate_server_outbound_http,
     "rdp_lateral":          _generate_rdp_lateral,
+    "rdp_rare_session":     _generate_rdp_rare_session,
+    "new_admin_behavior":   _generate_new_admin_behavior,
     "ssh_over_https":       _generate_ssh_over_https,
     "smb_new_host_lateral": _generate_smb_new_host_lateral,
     "smb_rare_file_transfer": _generate_smb_rare_file_transfer,
@@ -1540,6 +2661,7 @@ _NAMED_THREATS = {
     "vpn_brute_force":        _generate_vpn_brute_force,
     "vpn_impossible_travel":  _generate_vpn_impossible_travel,
     "vpn_tor_login":          _generate_vpn_tor_login,
+    "vpn_new_country_login":  _generate_vpn_new_country_login,
     "rare_external_rdp":      _generate_rare_external_rdp,
     "rare_ssh":               _generate_rare_ssh,
     "smtp_spray":             _generate_smtp_spray,
@@ -1590,7 +2712,9 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
     are both the action string (Allowed/Blocked for web, Allow/Blocked for FW).
     deviceProduct uses mixed case: NSSWeblog, NSSFWlog.
     """
-    rt = int(time.time() * 1000)
+    # XSIAM keys _time off the CEF rt field. Respect an explicitly-set rt (ms epoch)
+    # so time-spread threats (e.g. impossible travel) can back-date events; else now.
+    rt = fields.get("rt") or int(time.time() * 1000)
     # Zscaler NSS deviceProduct uses mixed case per XSIAM dataset naming
     _PRODUCT_MAP = {"nssweblog": "NSSWeblog", "nssfwlog": "NSSFWlog"}
     cef_product = _PRODUCT_MAP.get(log_product, log_product)
@@ -1599,49 +2723,120 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
         "rt": rt,
         "suser": user if '@' in user else f"{user}@examplecorp.com",
         "externalId": str(random.randint(1000000, 9999999999)),
-        "deviceHostName":              fields.get("devicehostname"),
+        # Lowercase `devicehostname` is the key the Zscaler modeling rule reads, not
+        # CEF-standard deviceHostName. The nssweblog block maps it to
+        # xdm.source.host.hostname; the nssfwlog block assigns no hostname at all, so
+        # the firewall feed reaches XDM without one. That is a pack-side mapping gap,
+        # not a missing field — the value is present as a native CEF column and is
+        # usable from XQL and correlation rules. Do not try to close it with more CEF
+        # keys; it needs native-JSON transport or a tenant-side modeling rule.
+        "devicehostname":              fields.get("devicehostname"),
+        # `shost` MUST stay immediately after `devicehostname`. It is a recognised CEF
+        # key and acts as the VALUE TERMINATOR: the parser absorbs unrecognised keys
+        # into the preceding value, and deviceOwner / deviceOperatingSystem /
+        # deviceOperatingSystemVersion below are not recognised. Without shost between
+        # them, devicehostname swallows all three and runs on to the next known key.
+        "shost":                       fields.get("devicehostname"),
         "deviceOwner":                 fields.get("deviceowner"),
         "deviceOperatingSystem":       fields.get("deviceostype"),
         "deviceOperatingSystemVersion":fields.get("deviceosversion"),
         "sourceTranslatedAddress":     fields.get("sourceTranslatedAddress"),
         "flexString1": fields.get("flexString1"), "flexString1Label": "location",
         "dept": dept,
+        # %s{eedone} — "Indicates if the characters specified in the Feed Escape
+        # Character field of the NSS feed configuration page were hex encoded".
+        # _cef_escape() hex-encodes `=` (the character XSIAM's onboarding guide
+        # specifies), so a real feed in this configuration reports Yes.
+        "eedone": "Yes",
         "clienttranstime": random.randint(10, 2000),
         "servertranstime": random.randint(10, 5000),
         "ssldecrypted":    random.choice(["Yes", "No"]),
         "contentclass":    fields.get("contentclass", "Web Browsing"),
+        # Additional documented NSS fields (present in BOTH the web-log and
+        # firewall-log field references, "Zscaler Client Connector Device
+        # Information" and "Miscellaneous"). Cheap fidelity: they are what a real
+        # Client Connector-enrolled endpoint reports. Appended AFTER the fields that
+        # matter for XDM so that, if the CEF parser absorbs an unrecognised key into
+        # the preceding value, it cannot damage devicehostname (which is terminated
+        # by the recognised `shost` immediately after it) — see the note above.
+        "devicetype":       "Zscaler Client Connector",
+        "devicemodel":      _device_model(fields.get("devicehostname")),
+        "deviceappversion": "2.0.0.120",
+        "ztunnelversion":   "ZTUNNEL_1_0",
+        "flow_type":        "ZIA",
+        "company":          "ExampleCorp",
+        "cloudname":        "zscaler.net",
+        "nsssvcip":         "10.10.102.30",
+        "productversion":   "5.0.902.95524_04",
     }
 
     if log_product == 'nssweblog':
-        cef_name = "Web Traffic"
+        # totalsize = full transaction bytes. Fall back to bytesin+bytesout when a
+        # generator doesn't set it explicitly, so cn3 is never empty on a web
+        # transaction that reported byte counts.
+        _totalsize = fields.get("totalsize")
+        if _totalsize is None and (fields.get("bytesin") is not None
+                                   or fields.get("bytesout") is not None):
+            _totalsize = (fields.get("bytesin") or 0) + (fields.get("bytesout") or 0)
+        # Raw-completeness fields: present in the zscaler_nssweblog_raw schema but
+        # NOT XDM-mapped by the web modeling rule (queryable via XQL). Derive sane
+        # values from what the generator already provides.
+        _web_proto = fields.get("proto")
+        _web_dpt = fields.get("destport") or {"HTTPS": 443, "HTTP": 80}.get(_web_proto, 443)
+        _web_spt = fields.get("sport") or random.randint(49152, 65535)
+        _web_destcountry = fields.get("destCountry") or (
+            "United States" if fields.get("action") in ("Allow", "Allowed") else "Unknown")
+        _web_desttrans = fields.get("destinationTranslatedAddress") or fields.get("sip")
         cef_map  = {
-            # XIF-mapped cs/cn fields:
-            "cs2": fields.get("urlcat"),       "cs2Label": "urlcat",
-            "cs4": fields.get("malwarecat"),   "cs4Label": "malwarecat",
-            "cs5": fields.get("threatname"),   "cs5Label": "threatname",
-            "cn1": fields.get("threatscore"),  "cn1Label": "threatscore",
-            # Raw dataset hunting fields:
+            # XIF-mapped cs/cn fields (consumed by XSIAM ZscalerModelingRule):
+            "cs2": fields.get("urlcat"),       "cs2Label": "urlcat",       # -> http.url_category
+            "cs4": fields.get("malwarecat"),   "cs4Label": "malwarecat",   # -> alert.category
+            "cs5": fields.get("threatname"),   "cs5Label": "threatname",   # -> alert.name
+            # cn1 -> xdm.alert.severity: use threatscore on threats, else riskscore,
+            # so severity is populated on benign web events too.
+            "cn1": fields.get("threatscore") or fields.get("riskscore"), "cn1Label": "threatscore",
+            # URL class -> xdm.event.type. XSIAM reads the custom key
+            # ZscalerNSSWeblogURLClass; cs1 is kept for back-compat with
+            # correlation rules that filter `cs1 = "Malicious Content"`.
+            "ZscalerNSSWeblogURLClass": fields.get("urlclass"),
+            "spriv": fields.get("spriv", "domain users"),                  # -> source.zone
+            "destinationServiceName": fields.get("appname"),              # -> target.interface
+            # Raw dataset hunting fields (queryable, not XDM-mapped by XSIAM):
             "cs1": fields.get("urlclass"),     "cs1Label": "urlclass",
             "cs3": fields.get("malwareclass"), "cs3Label": "malwareclass",
             "cs6": fields.get("riskscore"),    "cs6Label": "riskscore",
             "cn2": fields.get("filesize"),     "cn2Label": "filesize",
-            "cn3": fields.get("totalsize"),    "cn3Label": "totalsize",
+            "cn3": _totalsize,                 "cn3Label": "totalsize",
             # Standard XIF-mapped fields:
             "act": fields.get("action"),
             "outcome": fields.get("responsecode"),
             "reason": fields.get("reason"),
             "app": fields.get("proto"),
             "cat": fields.get("urlcat"),
-            "dhost": fields.get("ehost"),
+            # `ehost` / `eurl` are the HEX-ENCODED variants in Zscaler's web-log field
+            # reference (%s{ehost}, %s{eurl}) — the plain forms are %s{host}/%s{url}.
+            # Our internal field names already use the e-prefixed spelling, so both
+            # must actually carry the encoding to match what a real feed streams.
+            "dhost": _zscaler_url_encode(fields.get("ehost")),
             "dst": fields.get("sip"),    "src": fields.get("cip"),
-            "request": fields.get("eurl"),
+            # Zscaler hex-encodes URL characters <=0x20 / >=0x7F before streaming
+            # (space -> %20, newline -> %0A). Applied centrally here so every
+            # generator's eurl gets it without touching each call site.
+            "request": _zscaler_url_encode(fields.get("eurl")),
             "requestMethod": fields.get("reqmethod"),
             "requestClientApplication": fields.get("useragent"),
             "contenttype": fields.get("contenttype"),
             "in": fields.get("bytesin"),  "out": fields.get("bytesout"),
             "fileName": fields.get("filename"), "fileType": fields.get("filetype"),
             "fileHash": fields.get("fileHash"),
+            "appname": fields.get("appname"),
             "appclass": fields.get("appclass"),
+            "urlsupercat": fields.get("urlsupercat"),
+            # Raw schema columns (not XDM-mapped for web; complete the raw dataset):
+            "proto": _web_proto,
+            "spt": _web_spt, "dpt": _web_dpt,
+            "destCountry": _web_destcountry,
+            "destinationTranslatedAddress": _web_desttrans,
         }
         if fields.get("event_type") == "dlp":
             cef_map.update({
@@ -1650,15 +2845,32 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
                 "cs3": fields.get("dlprule"),      "cs3Label": "dlprulename",
                 "cs4": None, "cs4Label": None,
                 "cs5": None, "cs5Label": None,
-                "cn1": None, "cn1Label": None,
+                # DLP isn't a malware threat, so clear threatscore — but keep cn1
+                # populated from riskscore so xdm.alert.severity still resolves.
+                "cn1": fields.get("riskscore"),    "cn1Label": "riskscore",
             })
 
     else:  # nssfwlog
-        cef_name = "Firewall Traffic"
         cef_map  = {
             # XIF-mapped cs/cn fields:
-            "cs2": fields.get("rulelabel"),    "cs2Label": "nwapp",
+            # cs2 carries the firewall RULE name and the modeling rule maps it to
+            # xdm.network.rule, so the label must say so. It previously read "nwapp"
+            # (network application), which described neither the value nor the mapping.
+            "cs2": fields.get("rulelabel"),    "cs2Label": "rulelabel",
             "cs3": fields.get("nwsvc"),        "cs3Label": "nwsvc",
+            # %s{nwapp} "The network application that was accessed" (example: SSH) —
+            # a documented firewall-feed field and one of the five keys Zscaler
+            # aggregates on. Distinct from nwsvc, "the network service that was used"
+            # (example: HTTP): the vendor's own sample log carries nwsvc=HTTP with
+            # nwapp=ebay, i.e. service vs the specific application. Defaults to the
+            # service, which is what the doc shows for non-web protocols.
+            #
+            # POSITION IS DELIBERATE — keep `nwapp` immediately after `cs3Label`. The
+            # CEF parser absorbs an unrecognised key into the PRECEDING value, so if
+            # nwapp is not recognised on this feed the only casualty is cs3Label, a
+            # label string nothing maps or reads. Moving it next to a value-bearing
+            # key risks destroying that value instead.
+            "nwapp": fields.get("nwapp") or fields.get("nwsvc"),
             "cs5": fields.get("urlcat"),       "cs5Label": "urlcat",
             "cs6": fields.get("threatname"),   "cs6Label": "threatname",
             "cn1": fields.get("duration_ms"),  "cn1Label": "duration",
@@ -1678,17 +2890,71 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
             "spriv": fields.get("spriv"),
             "sourceTranslatedAddress":      fields.get("sourceTranslatedAddress"),
             "destinationTranslatedAddress": fields.get("destinationTranslatedAddress"),
+            # %s{cdfqdn} — client destination FQDN (Insights "Client Destination
+            # Name"). Carried as CEF dhost so it lands in a destination-name field.
+            # Only set when the generator genuinely knows a domain; None for pure
+            # IP traffic, and the builder drops None.
+            "cdfqdn": fields.get("cdfqdn"),
+            "dhost":  fields.get("cdfqdn"),
         }
 
     merged = dict(common_map)
     merged.update(cef_map)
+    # Drop any "<base>Label" whose partner value is absent — otherwise a dropped
+    # None value (e.g. filesize on a browsing event) leaves an orphan label like
+    # "cn2Label=filesize" with no matching cn2 in the output.
+    for _lbl in [k for k in merged if k.endswith("Label")]:
+        if merged.get(_lbl[:-5]) is None:
+            merged[_lbl] = None
+
+    # The CEF parser recognises a fixed key set PER FEED, and an unrecognised
+    # `key=value` is absorbed into the PRECEDING key's value instead of becoming its
+    # own column. Every key we emit on the FIREWALL feed is recognised. On the WEB feed
+    # the keys below are not, and each one silently destroyed the field preceding it:
+    #     out               <- swallowed fileName
+    #     dpt               <- swallowed destCountry
+    #     flexString1Label  <- swallowed dept..contentclass
+    #     shost             <- swallowed deviceOwner/OS/OSVersion
+    #     fileType          <- swallowed appname/appclass/urlsupercat
+    # `out` is the damaging one: the web modeling rule assigns
+    # xdm.source.sent_bytes = to_integer(out), and "39550844 fileName=records.csv" is
+    # not an integer — so sent_bytes sat at 0% (0/1754) and Large Upload could never
+    # fire from the web feed no matter how many bytes a generator claimed.
+    #
+    # Keep emitting these keys (they are real NSS web-log fields and stay useful for
+    # XQL hunting) but move them into one contiguous block at the END of the
+    # extension, behind a sacrificial recognised key. The parser can then only
+    # corrupt the sacrificial value. `dvchost` is CEF-standard, recognised, and
+    # redundant here — devicehostname and shost already carry the hostname — so
+    # losing it to the absorb costs nothing.
+    if log_product == 'nssweblog':
+        _WEB_UNRECOGNISED = (
+            "deviceOwner", "deviceOperatingSystem", "deviceOperatingSystemVersion",
+            "dept", "eedone", "clienttranstime", "servertranstime", "ssldecrypted",
+            "contentclass", "devicetype", "devicemodel", "deviceappversion",
+            "ztunnelversion", "flow_type", "company", "cloudname", "nsssvcip",
+            "productversion", "fileName", "appname", "appclass", "urlsupercat",
+            "destCountry")
+        _tail = [(k, merged.pop(k)) for k in _WEB_UNRECOGNISED if k in merged]
+        if any(v is not None for _k, v in _tail):
+            merged["dvchost"] = fields.get("devicehostname")
+        for _k, _v in _tail:
+            merged[_k] = _v
+
     cef_severity = fields.get('cefSeverity', '3')
     # Zscaler uses the action string as both signatureId (pos 4) and name (pos 5)
     action_str   = fields.get('action', 'Allow')
     cef_header   = f"CEF:0|Zscaler|{cef_product}|6.1|{action_str}|{action_str}|{cef_severity}|"
     extension_parts  = [f"{key}={_cef_escape(value)}" for key, value in merged.items() if value is not None]
     extension_string = " ".join(extension_parts)
-    return f"<14>{datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')} zscaler-nss {cef_header}{extension_string}"
+    # XSIAM's Zscaler onboarding guide specifies a DIFFERENT syslog identifier per NSS
+    # feed type, and both feeds were previously emitted as "zscaler-nss":
+    #   NSS for Firewall -> "%s{mon} %02d{dd} %02d{hh}:%02d{mm}:%02d{ss} zscaler-nss-fw CEF:0"
+    #   NSS for Web      -> "%s{mon} %02d{dd} %02d{hh}:%02d{mm}:%02d{ss} zscaler-nss CEF:0"
+    # (Ingest logs from Zscaler Internet Access, Cortex XDR 3.x documentation.)
+    syslog_host = "zscaler-nss-fw" if log_product == "nssfwlog" else "zscaler-nss"
+    return (f"<14>{datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')} "
+            f"{syslog_host} {cef_header}{extension_string}")
 
 
 # ---------------------------------------------------------------------------
@@ -1704,10 +2970,13 @@ def _generate_scenario_log(config, scenario):
     zscaler_conf = config.get('zscaler_config', {})
     fields = {
         "action": "Blocked", "urlcat": "Malware", "urlsupercat": "Security",
+        "urlclass": "Malicious Content",
+        "riskscore": str(random.randint(75, 100)),
         "responsecode": "403", "reason": "Threat Block",
         "malwarecat": scenario.get('threat_category', 'Adware'),
         "threatname":  scenario.get('threat_name',     'JS/Adware.Gen'),
         "reqmethod": "GET", "useragent": "Mozilla/5.0",
+        "contenttype": "text/html",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"http://{scenario.get('dest_domain', 'malware.example.com')}/",
@@ -1812,6 +3081,12 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         [lambda: _generate_benign_ssh_event(config, user, dept, internal_host_ip, device_info)] +
         [lambda: _generate_benign_rdp_event(config, user, dept, internal_host_ip, device_info)] +
         [lambda: _generate_benign_vpn_event(config, user, dept, internal_host_ip, device_info)] +
+        # On the BENIGN pool on purpose: the threat pool is interval-gated and then
+        # weighted, which yields well under one emission per day, but the country
+        # rotation is keyed on the day number — a day with zero emissions silently
+        # skips that day's country.  Every emission on a given day carries the SAME
+        # country, so firing often costs exactly one reserve country per day.
+        [lambda: _generate_vpn_new_country_login(config, user, dept, internal_host_ip, device_info)] +
         [lambda: _generate_benign_vpn_failure_event(config, user, dept, internal_host_ip, device_info)] +
         [lambda: _generate_benign_email_event(config, user, dept, internal_host_ip, device_info)] +
         [lambda: _generate_benign_ftp_event(config, user, dept, internal_host_ip, device_info)]
@@ -1835,6 +3110,8 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         ("dns_c2_beacon",          5, lambda: _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info)),
         ("server_outbound_http",   4, lambda: _generate_server_outbound_http(config, user, dept, internal_host_ip, device_info)),
         ("rdp_lateral",            3, lambda: _generate_rdp_lateral(config, user, dept, internal_host_ip, device_info)),
+        ("rdp_rare_session",       4, lambda: _generate_rdp_rare_session(config, user, dept, internal_host_ip, device_info)),
+        ("new_admin_behavior",     4, lambda: _generate_new_admin_behavior(config, user, dept, internal_host_ip, device_info)),
         ("ssh_over_https",         3, lambda: _generate_ssh_over_https(config, user, dept, internal_host_ip, device_info)),
         ("smb_new_host_lateral",   4, lambda: _generate_smb_new_host_lateral(config, user, dept, internal_host_ip, device_info)),
         ("smb_rare_file_transfer", 3, lambda: _generate_smb_rare_file_transfer(config, user, dept, internal_host_ip, device_info)),
@@ -1842,12 +3119,16 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         ("vpn_brute_force",        6, lambda: _generate_vpn_brute_force(config, user, dept, internal_host_ip, device_info)),
         ("vpn_impossible_travel",  3, lambda: _generate_vpn_impossible_travel(config, user, dept, internal_host_ip, device_info)),
         ("vpn_tor_login",          3, lambda: _generate_vpn_tor_login(config, user, dept, internal_host_ip, device_info)),
+        ("vpn_new_country_login",  3, lambda: _generate_vpn_new_country_login(config, user, dept, internal_host_ip, device_info)),
         ("rare_external_rdp",      3, lambda: _generate_rare_external_rdp(config, user, dept, internal_host_ip, device_info)),
         ("rare_ssh",               3, lambda: _generate_rare_ssh(config, user, dept, internal_host_ip, device_info)),
         ("smtp_spray",             3, lambda: _generate_smtp_spray(config, user, dept, internal_host_ip, device_info)),
         ("smtp_large_exfil",       2, lambda: _generate_smtp_large_exfil(config, user, dept, internal_host_ip, device_info)),
         ("ftp_large_exfil",        2, lambda: _generate_ftp_large_exfil(config, user, dept, internal_host_ip, device_info)),
         ("ddns_connection",        3, lambda: _generate_ddns_connection(config, user, dept, internal_host_ip, device_info)),
+        ("large_download",         3, lambda: _generate_large_download(config, user, dept, internal_host_ip, device_info)),
+        ("reverse_ssh_tunnel",     2, lambda: _generate_reverse_ssh_tunnel(config, user, dept, internal_host_ip, device_info)),
+        ("web_c2_beacon",          4, lambda: _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info)),
     ]
     labels    = [t[0] for t in _threat_map]
     weights   = [t[1] for t in _threat_map]

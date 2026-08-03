@@ -83,8 +83,16 @@ def fetch_tor_exit_nodes():
         print(f"Successfully fetched {len(tor_nodes)} live Tor exit nodes.")
         return tor_nodes
     except requests.exceptions.RequestException as e:
-        print(f"WARNING: Could not fetch live Tor exit nodes: {e}")
-        print("         Falling back to the static list in config.json.")
+        # config.json no longer ships a static fallback list (it went stale — only 1 of
+        # 25 entries was still a real exit node). An empty list makes every Tor generator
+        # silently fall back to a random external IP while still labelling the event as
+        # Tor, so XSIAM's Tor detections stop firing with no other symptom.
+        print("=" * 78)
+        print(f"ERROR: Could not fetch live Tor exit nodes: {e}")
+        print("       There is NO static fallback in config.json — the Tor list is EMPTY.")
+        print("       Tor generators will emit ordinary external IPs labelled as Tor;")
+        print("       XSIAM Tor detections WILL NOT FIRE until this fetch succeeds.")
+        print("=" * 78)
         return None
 
 def load_modules():
@@ -849,6 +857,137 @@ def _strip_volatile(payload):
     payload = _TS_GENTIME_RE.sub('<GENTIME>', payload)
     payload = _TS_EPOCH_RE.sub('<EPOCH>', payload)
     return payload
+
+
+# ── Timestamp shifting (training capture-replay) ─────────────────────────────
+# The same locators used to BLANK timestamps are reused to SHIFT them by a fixed
+# delta: the training canonical is generated at a constant synthetic anchor time, then
+# replayed with every timestamp moved to the target window (bulk: now-4h..now; stream:
+# now..now+4h). Correctness invariant: _strip_volatile(shift(p, d)) == _strip_volatile(p)
+# — shifting must touch ONLY timestamps, never structure.
+
+def _shift_iso(s, delta):
+    try:
+        core = s
+        tz = ''
+        if core.endswith('Z'):
+            core, tz = core[:-1], 'Z'
+        elif len(core) >= 6 and core[-6] in '+-' and core[-3] == ':':
+            core, tz = core[:-6], core[-6:]
+        elif len(core) >= 5 and core[-5] in '+-':
+            core, tz = core[:-5], core[-5:]
+        has_ms = '.' in core
+        fmt = '%Y-%m-%dT%H:%M:%S' if 'T' in core else '%Y-%m-%d %H:%M:%S'
+        if has_ms:
+            fmt += '.%f'
+        dt = datetime.datetime.strptime(core, fmt) + datetime.timedelta(seconds=delta)
+        out = dt.strftime('%Y-%m-%dT%H:%M:%S' if 'T' in core else '%Y-%m-%d %H:%M:%S')
+        if has_ms:
+            out += '.' + f"{dt.microsecond:06d}"[:len(core.split('.')[1])]
+        return out + tz
+    except Exception:
+        return s
+
+
+def _shift_clf(s, delta):
+    try:
+        dt = datetime.datetime.strptime(s, '%d/%b/%Y:%H:%M:%S %z') + datetime.timedelta(seconds=delta)
+        return dt.strftime('%d/%b/%Y:%H:%M:%S %z')
+    except Exception:
+        return s
+
+
+def _shift_syslog(s, delta):
+    # BSD syslog has no year; anchor to a leap-safe reference year to compute the shift,
+    # then re-emit month/day/time (day space-padded, as RFC 3164).
+    try:
+        parts = s.split()
+        norm = f"{parts[0]} {int(parts[1]):02d} {parts[2]}"
+        dt = datetime.datetime.strptime(f"2024 {norm}", '%Y %b %d %H:%M:%S') + datetime.timedelta(seconds=delta)
+        return dt.strftime('%b %d %H:%M:%S')
+    except Exception:
+        return s
+
+
+def _shift_usdate(s, delta):
+    try:
+        dt = datetime.datetime.strptime(s, '%b %d, %Y, %I:%M:%S %p') + datetime.timedelta(seconds=delta)
+        return dt.strftime('%b %d, %Y, %I:%M:%S %p')
+    except Exception:
+        return s
+
+
+def _shift_gentime(s, delta):
+    try:
+        frac = ''
+        base = s[:-1]  # drop Z
+        if '.' in base:
+            base, frac = base.split('.', 1)
+            frac = '.' + frac
+        dt = datetime.datetime.strptime(base, '%Y%m%d%H%M%S') + datetime.timedelta(seconds=delta)
+        return dt.strftime('%Y%m%d%H%M%S') + frac + 'Z'
+    except Exception:
+        return s
+
+
+# Epoch shifts are the one ambiguous case: a bare 10-19 digit number could be a real epoch
+# OR a non-timestamp ID (Zscaler externalId, session IDs, byte counts). Shifting the wrong
+# one corrupts content. So epochs are shifted ONLY when they sit within EPOCH_SHIFT_MARGIN
+# of the known anchor — real event-times do, arbitrary IDs almost never.
+_EPOCH_SHIFT_MARGIN = 400 * 86400  # seconds
+
+
+def _shift_epoch(s, delta, anchor_epoch=None):
+    try:
+        digits = s.split('.')[0]
+        scale = {10: 1, 13: 1_000, 16: 1_000_000, 19: 1_000_000_000}.get(len(digits))
+        if scale is None:
+            return s
+        val = float(s) if '.' in s else int(s)
+        if anchor_epoch is not None and abs(val / scale - anchor_epoch) > _EPOCH_SHIFT_MARGIN:
+            return s  # not a timestamp near the anchor — leave it alone
+        shifted = val + delta * scale
+        if '.' in s:
+            return f"{shifted:.{len(s.split('.')[1])}f}"
+        return str(int(round(shifted)))
+    except Exception:
+        return s
+
+
+def shift_timestamps(payload, delta_seconds, anchor_epoch=None):
+    """Return *payload* with every recognized timestamp moved by delta_seconds. Handles
+    str and gzipped-bytes (S3) payloads; re-gzips bytes on the way out. `anchor_epoch`
+    (the canonical's base time) guards epoch shifting against non-timestamp IDs."""
+    if delta_seconds == 0:
+        return payload
+    was_bytes = isinstance(payload, (bytes, bytearray))
+    gz = False
+    if was_bytes:
+        if len(payload) >= 2 and payload[0] == 0x1f and payload[1] == 0x8b:
+            try:
+                payload = gzip.decompress(bytes(payload)); gz = True
+            except Exception:
+                return payload
+        try:
+            s = payload.decode('utf-8')
+        except Exception:
+            return payload
+    elif isinstance(payload, str):
+        s = payload
+    else:
+        return payload
+
+    s = _TS_ISO_RE.sub(lambda m: _shift_iso(m.group(0), delta_seconds), s)
+    s = _TS_CLF_RE.sub(lambda m: _shift_clf(m.group(0), delta_seconds), s)
+    s = _TS_SYSLOG_RE.sub(lambda m: _shift_syslog(m.group(0), delta_seconds), s)
+    s = _TS_USDATE_RE.sub(lambda m: _shift_usdate(m.group(0), delta_seconds), s)
+    s = _TS_GENTIME_RE.sub(lambda m: _shift_gentime(m.group(0), delta_seconds), s)
+    s = _TS_EPOCH_RE.sub(lambda m: _shift_epoch(m.group(0), delta_seconds, anchor_epoch), s)
+
+    if was_bytes:
+        out = s.encode('utf-8')
+        return gzip.compress(out) if gz else out
+    return s
 
 
 def process_and_send(log_content, module, config, event_name=None):
@@ -3587,7 +3726,7 @@ def main():
     CONFIG_FILE_PATH = 'config.json'
     config = {}
     try:
-        with open(CONFIG_FILE_PATH, 'r') as f:
+        with open(CONFIG_FILE_PATH, 'r', encoding='utf-8') as f:
             config_str = f.read()
 
         # Substitute PLACEHOLDER_* values from environment variables so that
