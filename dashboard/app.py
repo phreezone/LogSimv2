@@ -1591,13 +1591,37 @@ def _run_health_checks() -> dict:
                         "group": "AWS S3", "check": f"bucket '{aws_bucket}' accessible",
                         "status": "error", "detail": hb_msg,
                     })
-            test_key = f"logsim-healthcheck/{int(time.time())}.txt"
-            s3.put_object(Bucket=aws_bucket, Key=test_key, Body=b"logsim-healthcheck")
-            s3.delete_object(Bucket=aws_bucket, Key=test_key)
+            # The XSIAM S3 collector reads EVERY object in this bucket as a gzipped
+            # CloudTrail file, and the LogSim IAM user is deliberately write-only
+            # (no s3:DeleteObject), so a probe object CANNOT be cleaned up after the
+            # fact. A plain-text probe therefore sticks around forever and the
+            # collector retries it indefinitely:
+            #   "error creating gzip reader for file logsim-healthcheck/<epoch>.txt"
+            # Write a valid, empty CloudTrail envelope instead — it gunzips cleanly
+            # and yields zero events — under a FIXED key so repeated health checks
+            # overwrite one object rather than littering a new one each run.
+            import gzip as _gzip
+            test_key = "logsim-healthcheck/healthcheck.json.gz"
+            s3.put_object(
+                Bucket=aws_bucket, Key=test_key,
+                Body=_gzip.compress(json.dumps({"Records": []}).encode("utf-8")),
+                ContentEncoding="gzip", ContentType="application/json",
+            )
             results.append({
                 "group": "AWS S3", "check": "s3:PutObject permission",
-                "status": "ok", "detail": "write + delete succeeded",
+                "status": "ok", "detail": f"write succeeded ({test_key})",
             })
+            # Best-effort cleanup. Write-only credentials are the expected case, so a
+            # denial here is not a failure — the probe object is harmless and gets
+            # overwritten next run. Must not mask the PutObject result above.
+            try:
+                s3.delete_object(Bucket=aws_bucket, Key=test_key)
+            except Exception as del_exc:
+                results.append({
+                    "group": "AWS S3", "check": "s3:DeleteObject permission",
+                    "status": "warn",
+                    "detail": f"not granted — probe object left in place (harmless): {str(del_exc)[:120]}",
+                })
         except ImportError:
             results.append({
                 "group": "AWS S3", "check": "boto3 installed",
