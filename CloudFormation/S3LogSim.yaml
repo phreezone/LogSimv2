@@ -11,14 +11,35 @@ Parameters:
   ExternalId:
     Type: String
     Description: A unique secret string required by XSIAM to assume the IAM role. Generate a UUID for this value.
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: >
+      Days to keep simulated logs under AWSLogs/ before S3 expires them. The simulator
+      is write-only and never deletes what it uploads, so without this the bucket grows
+      without bound.
 
 Resources:
+  # Dead-letter queue. Without one, a notification the collector cannot process
+  # (e.g. an object that is not valid gzip) is retried forever and there is no
+  # visible signal that anything is stuck.
+  SQSDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Delete
+    Properties:
+      QueueName: !Sub "${BucketName}-sqs-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days, the SQS maximum
+
   # SQS Queue for S3 event notifications that XSIAM will poll
   SQSNotificationQueue:
     Type: AWS::SQS::Queue
     DeletionPolicy: Delete
     Properties:
       QueueName: !Sub "${BucketName}-sqs-queue"
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SQSDeadLetterQueue.Arn
+        maxReceiveCount: 5
 
   # Policy that allows the S3 bucket to send messages to the SQS queue
   SQSQueuePolicy:
@@ -45,8 +66,36 @@ Resources:
       BucketName: !Ref BucketName
       NotificationConfiguration:
         QueueConfigurations:
+          # Notify ONLY for objects under AWSLogs/ — the prefix both the CloudTrail
+          # and GuardDuty writers use. Without this filter every object created
+          # anywhere in the bucket is announced to XSIAM, which then tries to gunzip
+          # it as a CloudTrail file. That is how a plain-text health-check probe at
+          # logsim-healthcheck/<epoch>.txt entered the pipeline and stalled AWS
+          # ingestion for ~5 days (2026-08-02 to 2026-08-07). The filter makes stray
+          # objects structurally incapable of reaching the collector, independent of
+          # who holds which permissions.
           - Event: "s3:ObjectCreated:*"
             Queue: !GetAtt SQSNotificationQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: "AWSLogs/"
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireSimulatedLogs
+            Status: Enabled
+            Prefix: "AWSLogs/"
+            ExpirationInDays: !Ref LogRetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          # Server-side cleanup for the health-check probe. The simulator may not
+          # hold s3:DeleteObject in every deployment, so expiry cannot depend on the
+          # writer being able to remove its own object.
+          - Id: ExpireHealthCheckProbes
+            Status: Enabled
+            Prefix: "logsim-healthcheck/"
+            ExpirationInDays: 1
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -125,6 +174,12 @@ Outputs:
   SQSQueueURL:
     Description: The URL of the SQS queue for XSIAM configuration.
     Value: !Ref SQSNotificationQueue
+
+  SQSDeadLetterQueueURL:
+    Description: >
+      URL of the dead-letter queue. A non-zero depth here means the collector could
+      not process some notifications - check it first when ingestion looks stalled.
+    Value: !Ref SQSDeadLetterQueue
 
   XSIAMRoleARN:
     Description: The ARN of the IAM role for XSIAM to assume.

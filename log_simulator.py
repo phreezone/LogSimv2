@@ -390,7 +390,17 @@ _s3_batch_lock = threading.Lock()
 
 
 _s3_last_enqueue = [0.0]
+_s3_oldest_enqueue = [0.0]   # when the current batch started filling; 0 = empty
 _s3_flusher_started = [False]
+
+# Flush triggers. Idle alone is NOT enough: a module running at an interval shorter
+# than the idle threshold (the AWS module defaults to 1s) never goes quiet, so the
+# batch grew in memory forever and nothing was ever uploaded. Size and age caps
+# guarantee delivery under continuous load while keeping the batching behaviour that
+# lets a whole scenario ride one collector pull.
+_S3_FLUSH_IDLE_S = 4        # quiet period => end of a burst, flush what we have
+_S3_FLUSH_MAX_AGE_S = 30    # never let an event sit buffered longer than this
+_S3_FLUSH_MAX_EVENTS = 500  # cap batch size so one object stays reasonable
 
 
 def _ensure_s3_flusher():
@@ -405,15 +415,21 @@ def _ensure_s3_flusher():
 
     def _loop():
         while True:
-            time.sleep(2)
+            time.sleep(1)
             with _s3_batch_lock:
                 pending = sum(len(g["blobs"]) for g in _s3_batches.values())
-                idle = time.time() - _s3_last_enqueue[0]
-            if pending and idle >= 4:
+                now = time.time()
+                idle = now - _s3_last_enqueue[0]
+                age = (now - _s3_oldest_enqueue[0]) if _s3_oldest_enqueue[0] else 0.0
+            if pending and (idle >= _S3_FLUSH_IDLE_S
+                            or age >= _S3_FLUSH_MAX_AGE_S
+                            or pending >= _S3_FLUSH_MAX_EVENTS):
                 try:
                     flush_s3_batch()
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Never silent: a failure here means events were dropped, and
+                    # the symptom (nothing in S3) looks identical to not generating.
+                    _tprint(f"ERROR: S3 batch flush failed: {e}")
 
     threading.Thread(target=_loop, daemon=True, name="s3-batch-flusher").start()
 
@@ -427,6 +443,9 @@ def _enqueue_s3(content_bytes, module, config):
         grp["module"] = module
         grp["config"] = config
         _s3_last_enqueue[0] = time.time()
+        if not _s3_oldest_enqueue[0]:
+            # First blob of a new batch — starts the max-age clock.
+            _s3_oldest_enqueue[0] = _s3_last_enqueue[0]
     _ensure_s3_flusher()
 
 
@@ -438,12 +457,20 @@ def flush_s3_batch():
             return
         groups = list(_s3_batches.values())
         _s3_batches.clear()
+        _s3_oldest_enqueue[0] = 0.0   # batch drained; restart the max-age clock
 
     for grp in groups:
         module = grp.get("module")
         config = grp.get("config")
         blobs = grp.get("blobs", [])
-        if not module or not config or not blobs:
+        # `not config` would treat a valid-but-empty config dict as "no config" and
+        # drop the whole batch, which looks identical to the events never being
+        # generated. Test for absence explicitly, and never drop in silence.
+        if not module or config is None or not blobs:
+            if blobs:
+                _tprint(f"ERROR: dropping {len(blobs)} buffered S3 events for "
+                        f"module={getattr(module, 'NAME', module)!r} - missing "
+                        f"{'module' if not module else 'config'}")
             continue
         records = []
         for b in blobs:
