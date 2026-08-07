@@ -97,8 +97,11 @@ def main():
     seen = {}
     deadline = time.time() + args.wait_minutes * 60
     while time.time() < deadline:
+        # Must filter to AWS: cloud_audit_logs is shared with GCP, which pushes
+        # ~190k rows/48h on this tenant. An unfiltered 180-minute read blows the
+        # inline result limit and the query fails with a stream_id instead of rows.
         rows = c.xql_query(
-            'dataset = cloud_audit_logs '
+            'dataset = cloud_audit_logs | filter cloud_provider = "AWS" '
             '| fields _time, cloud_provider_event_id, operation_name_orig, '
             'identity_name, identity_type, identity_sub_type, referenced_resource',
             minutes_back=180, limit=3000)
