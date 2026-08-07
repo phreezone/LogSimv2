@@ -91,20 +91,26 @@ def main():
 
     all_ids = {i for ids in by_threat.values() for i in ids}
     c = XsiamClient()
+    uploaded_at = time.time()
 
     # --- wait for ingestion --------------------------------------------------
     log(f"waiting up to {args.wait_minutes}min for ingestion ...")
     seen = {}
-    deadline = time.time() + args.wait_minutes * 60
+    deadline = uploaded_at + args.wait_minutes * 60
     while time.time() < deadline:
-        # Must filter to AWS: cloud_audit_logs is shared with GCP, which pushes
-        # ~190k rows/48h on this tenant. An unfiltered 180-minute read blows the
-        # inline result limit and the query fails with a stream_id instead of rows.
+        # Read back only as far as this run. Filtering to AWS is necessary but not
+        # sufficient: cloud_audit_logs is shared with GCP, and once AWS ingestion is
+        # healthy the tenant alone produces enough rows that a fixed 180-minute
+        # window exceeds the inline result limit — the query then returns a
+        # stream_id instead of rows and the sweep dies for a reason that has nothing
+        # to do with ingestion. Scoping the window to the time since upload keeps it
+        # small no matter how long the sweep waits.
+        window = max(15, int((time.time() - uploaded_at) / 60) + 6)
         rows = c.xql_query(
             'dataset = cloud_audit_logs | filter cloud_provider = "AWS" '
             '| fields _time, cloud_provider_event_id, operation_name_orig, '
             'identity_name, identity_type, identity_sub_type, referenced_resource',
-            minutes_back=180, limit=3000)
+            minutes_back=window, limit=3000)
         seen = {r.get("cloud_provider_event_id"): r for r in rows
                 if r.get("cloud_provider_event_id") in all_ids}
         if len(seen) >= len(all_ids) * 0.9:
