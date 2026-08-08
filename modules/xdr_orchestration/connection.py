@@ -21,9 +21,11 @@
 # DryRun/no-box dev path works even when pywinrm isn't installed. A `stub`
 # transport returns a caller-supplied identity for offline development.
 #
-# Secrets convention (mirrors http_collectors, log_simulator.py:243): config.json
-# stores only the *names* of the .env vars; the actual credentials live in .env
-# and are resolved here via os.getenv(<name-from-config>).
+# Config convention: ALL deployment-specific values (target host, WinRM creds,
+# optional egress IP / tuning) live in .env under fixed variable names (see the
+# ENV_* constants on WorkstationConnection). config.json holds only structural
+# defaults and the dev-only stub identity, so an end user edits .env only and
+# never has to touch config.json.
 
 import os
 import re
@@ -136,51 +138,76 @@ class WorkstationConnection:
 
     # ---- construction --------------------------------------------------------
 
+    # Fixed .env variable names — the ONLY place a user configures the target.
+    # config.json never carries deployment-specific values (host/creds/IPs), so
+    # end users edit .env only and never touch config.json.
+    ENV_HOST      = "XDR_TARGET_HOST"          # box IP or hostname (required, live)
+    ENV_USER      = "XDR_TARGET_WINRM_USER"    # local admin username (required, live)
+    ENV_PASSWORD  = "XDR_TARGET_WINRM_PASSWORD"  # local admin password (required, live)
+    ENV_PORT      = "XDR_TARGET_WINRM_PORT"     # optional, default 5985
+    ENV_SCHEME    = "XDR_TARGET_WINRM_SCHEME"   # optional, default http
+    ENV_AUTH      = "XDR_TARGET_WINRM_AUTH"     # optional, default ntlm
+    ENV_TRANSPORT = "XDR_TARGET_TRANSPORT"      # optional, "winrm" (default) or "stub"
+    ENV_EGRESS_IP = "XDR_TARGET_EGRESS_IP"      # optional override (org NAT/public IP)
+    ENV_EMAIL_DOM = "XDR_EMAIL_DOMAIN"          # optional override (email domain)
+
     @classmethod
     def from_config(cls, config):
-        """Read the `xdr_orchestration.connection` block.
+        """Build the connection. All deployment-specific values come from .env via
+        the fixed ENV_* names above; config.json only supplies structural defaults
+        and the dev-only stub identity, so a user never has to edit config.json.
 
-        Expected shape (secrets are env-var *names*, not values):
-            "xdr_orchestration": {
-              "connection": {
-                "host": "10.0.0.50",
-                "transport": "winrm",              # or "stub" for no-box dev
-                "winrm": {
-                  "port": 5985, "scheme": "http", "auth": "ntlm",
-                  "user_env_var": "XDR_TARGET_WINRM_USER",
-                  "pass_env_var": "XDR_TARGET_WINRM_PASS"
-                },
-                "overrides": { "egress_ip": "203.0.113.10", "email_domain": "corp.example" },
-                "stub_identity": { ... }           # used only when transport=="stub"
-              }
-            }
+        .env (the only file users touch):
+            XDR_TARGET_HOST=192.168.0.60
+            XDR_TARGET_WINRM_USER=labadmin
+            XDR_TARGET_WINRM_PASSWORD=•••••
+            # optional: XDR_TARGET_WINRM_{PORT,SCHEME,AUTH}, XDR_TARGET_TRANSPORT=stub,
+            #           XDR_TARGET_EGRESS_IP, XDR_EMAIL_DOMAIN
+
+        config.json (optional `xdr_orchestration.connection` block, structural only):
+            { "transport": "winrm",              # env XDR_TARGET_TRANSPORT overrides
+              "stub_identity": { ... } }         # used only when transport=="stub"
         """
-        block = (config or {}).get("xdr_orchestration", {}).get("connection", {})
-        if not block:
-            raise ConnectionError(
-                "config.json has no xdr_orchestration.connection block — nothing to connect to.")
+        def _env(name):
+            v = os.getenv(name)
+            return v.strip() if v and v.strip() else None
 
-        transport = block.get("transport", "winrm")
-        host = block.get("host")
+        block = (config or {}).get("xdr_orchestration", {}).get("connection", {}) or {}
+
+        # Transport: env wins, then config default, then "winrm".
+        transport = (_env(cls.ENV_TRANSPORT) or block.get("transport") or "winrm").lower()
+
+        host = _env(cls.ENV_HOST)
         if transport != "stub" and not host:
             raise ConnectionError(
-                "xdr_orchestration.connection.host is required for a live (non-stub) transport.")
+                f"{cls.ENV_HOST} is not set in .env — set the target box's IP/hostname there "
+                "(config.json intentionally holds no target address).")
 
-        winrm = block.get("winrm", {})
-        user_env = winrm.get("user_env_var")
-        pass_env = winrm.get("pass_env_var")
-        username = os.getenv(user_env) if user_env else None
-        password = os.getenv(pass_env) if pass_env else None
+        # Structural WinRM settings: env first, then optional config defaults, then built-ins.
+        winrm_cfg = block.get("winrm", {})
+        port   = int(_env(cls.ENV_PORT)   or winrm_cfg.get("port")   or 5985)
+        scheme = _env(cls.ENV_SCHEME)     or winrm_cfg.get("scheme") or "http"
+        auth   = _env(cls.ENV_AUTH)       or winrm_cfg.get("auth")   or "ntlm"
+
+        username = _env(cls.ENV_USER)
+        password = _env(cls.ENV_PASSWORD)
+
+        # Optional identity overrides — env wins over any config block overrides.
+        overrides = dict(block.get("overrides", {}) or {})
+        if _env(cls.ENV_EGRESS_IP):
+            overrides["egress_ip"] = _env(cls.ENV_EGRESS_IP)
+        if _env(cls.ENV_EMAIL_DOM):
+            overrides["email_domain"] = _env(cls.ENV_EMAIL_DOM)
 
         return cls(
             host=host,
             transport=transport,
-            winrm_port=int(winrm.get("port", 5985)),
-            winrm_scheme=winrm.get("scheme", "http"),
+            winrm_port=port,
+            winrm_scheme=scheme,
             username=username,
             password=password,
-            transport_auth=winrm.get("auth", "ntlm"),
-            overrides=block.get("overrides", {}),
+            transport_auth=auth,
+            overrides=overrides,
             stub_identity=block.get("stub_identity"),
         )
 

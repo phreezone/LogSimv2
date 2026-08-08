@@ -217,6 +217,7 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 | Infoblox NIOS | Syslog (TCP) | 15 types | 11 types | [docs/modules/infoblox.md](docs/modules/infoblox.md) |
 | Proofpoint Email | HTTP Collector | 1 type (delivered email) | 11 types | [docs/modules/proofpoint.md](docs/modules/proofpoint.md) |
 | Google Workspace | HTTP Collector | *(not operational)* | *(not operational)* | [docs/modules/google-workspace.md](docs/modules/google-workspace.md) |
+| XDR Attack Orchestration | WinRM (real endpoint) + network transports | *(coordinator — real Atomic Red Team techniques on a live Cortex-agent box + synthetic network logs pinned to its identity)* | *Phase 1 — foundation validated; stories in progress* | [docs/modules/xdr-orchestration.md](docs/modules/xdr-orchestration.md) |
 
 **Totals:** 377 unique threat event types and 420+ benign event types across all modules.
 
