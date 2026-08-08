@@ -100,13 +100,19 @@ Preflight: RED — orchestrator will refuse to fire
 WinRM must be enabled and Atomic installed before preflight goes green. A console-generated **Kickstarter** will automate this (planned); until then:
 
 1. **Enable WinRM** — copy `docs/enable-winrm-on-box.ps1` to the box and run it **elevated**. It turns on WinRM, scopes the firewall rule to the LogSim console IP (edit `$ConsoleIP` — for a VMware VM use the VMnet host adapter IP), and sets `LocalAccountTokenFilterPolicy=1` so a local admin gets a full token remotely (needed for admin-level Atomic tests). It ships with rollback notes.
-2. **Install Atomic** — on the box, elevated:
-   ```powershell
-   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-   IEX (IWR 'https://raw.githubusercontent.com/redcanaryco/invoke-atomicredteam/master/install-atomicredteam.ps1' -UseBasicParsing)
-   Install-AtomicRedTeam -getAtomics -Force
-   ```
+2. **Install Atomic** — run `docs/install-atomic-on-box.ps1` (elevated on the box, or over WinRM from the console). It is **fully non-interactive**: it pre-installs the **NuGet provider**, **trusts PSGallery**, and pre-satisfies `powershell-yaml` so `Install-AtomicRedTeam` never stops on the "NuGet provider is required" / "Untrusted repository" approvals that otherwise block automation (and silently fail over WinRM). It then installs Invoke-AtomicRedTeam + the atomics and verifies `Invoke-AtomicTest` resolves. Idempotent.
+   > **Cortex will quarantine the drops** unless you first allow-list the Atomic paths (or set the endpoint's prevention profiles to Report mode) — see [Cortex prevention & Atomic drops](#cortex-prevention--atomic-drops) below.
 3. **Verify the Cortex agent** is installed and `cyserver` is Running.
+
+### Cortex prevention & Atomic drops
+
+Cortex XDR's malware/WildFire and Behavioral Threat Protection will flag or quarantine Atomic payloads as they land. To let the files drop **while preserving the endpoint alerts this module depends on**, prefer **Report (alert-only) mode over Disabled**:
+
+- **Path allow-list** (surgical) — in **Endpoints → Policy Management → Prevention → Profiles**, add the Atomic locations to the Malware profile allow-list: `C:\AtomicRedTeam\`, `C:\Users\<user>\AppData\Local\Temp\`, and the `...\WindowsPowerShell\Modules\invoke-atomicredteam\` path. Everything outside those paths still protects/alerts.
+- **Report-mode endpoint group** (for actual runs) — put the target in its own group with Malware / Exploit / BTP profiles set to **Report**, so techniques execute and real alerts still fire for XSIAM to correlate.
+- If a specific payload is quarantined by hash even with the path allow-list, add a **hash allow-list** entry or drop that technique from the story.
+
+> Fully disabling prevention removes the endpoint telemetry that is the whole point of this module. Automating this alert↔block flip via `/public_api` is the planned job of `xsiam_client.py` (verify the tenant's actual policy-API surface before coding against it).
 
 > **Lab-only, security-sensitive tooling.** Use a dedicated, authorized demo box. Curate techniques to non-destructive, cleanup-capable Atomics.
 
