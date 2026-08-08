@@ -16,3 +16,4 @@ lxml>=4.9
 requests-pkcs12>=1.16
 cryptography>=41.0
 freezegun>=1.5
+pywinrm>=0.5
