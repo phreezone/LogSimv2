@@ -26,10 +26,22 @@ from .connection import (
     PreflightCheck,
     ConnectionError,
 )
+from .executor import (
+    ExecResult,
+    ExecutorError,
+    WinRMAtomicExecutor,
+    DryRunExecutor,
+    build_executor,
+)
 
 __all__ = [
     "WorkstationConnection",
     "PreflightReport",
     "PreflightCheck",
     "ConnectionError",
+    "ExecResult",
+    "ExecutorError",
+    "WinRMAtomicExecutor",
+    "DryRunExecutor",
+    "build_executor",
 ]
