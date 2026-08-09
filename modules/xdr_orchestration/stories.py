@@ -50,6 +50,12 @@ class Story:
     # same host the Cortex agent reports (see reference_ip_user_binding). Off unless
     # the Infoblox module is present.
     anchor_dhcp: bool = True
+    # Identity anchor: emit a Windows 4624 type-3 network logon binding the box's
+    # IP<->user, so XSIAM can resolve IP-keyed network alerts (e.g. the DNS C2
+    # beacon, which lands with host_ip but NO_HOST/no user) to the same user the
+    # endpoint case is keyed on — the prerequisite for the network alert to merge
+    # into the endpoint incident. Requires the Windows Event Log module (WEC).
+    anchor_logon: bool = True
 
 
 # ── Reference story (P1) ──────────────────────────────────────────────────────
