@@ -204,6 +204,28 @@ def _get_user_and_device_info(config, user_override=None, session_context=None):
     return user, dept, ip, device_info
 
 
+def _identity_from_context(config, ctx):
+    """Build (user, dept, ip, device_info) directly from an orchestrator-pinned
+    identity in context — the REAL box user/hostname/IP — bypassing the random
+    identity maps (which don't contain a bring-your-own box user).
+
+    Used ONLY when context carries 'user' (an XDR-orchestrated event). Ambient
+    generation never takes this path, so its identities/format are unchanged. The
+    emitted fields (suser, devicehostname, deviceowner, cip) keep their normal
+    format — only the values are the real ones, so the synthetic web logs align
+    with the endpoint the Cortex agent reports."""
+    user     = ctx.get("user") or "unknown_user"
+    ip       = ctx.get("src_ip") or _get_random_internal_ip(config)
+    hostname = ctx.get("hostname") or f"{user}-desktop"
+    device_info = {
+        "hostname":   hostname,
+        "owner":      user,
+        "os_type":    ctx.get("os_type", "Windows"),
+        "os_version": ctx.get("os_version", "11"),
+    }
+    return user, ctx.get("department", "Unknown"), ip, device_info
+
+
 def _dns_precursor_event(config, user, dept, device_info, src_ip, domain=None,
                          event_time_ms=None):
     """Generate a DNS resolution NSSFWlog event that precedes a connection.
@@ -2457,13 +2479,18 @@ for _e in _DEFAULT_THREAT_EVENTS:
     _DISPLAY_TO_EVENT[_name]    = _key
     _DISPLAY_TO_EVENT[_key]     = _key      # also accept raw key for back-compat
 
-def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info):
+def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
+                            c2_domain_override=None):
     """Web-layer C2 beacon (nssweblog) — repeated small HTTP callbacks to a C2 host at a
     regular cadence. The web-proxy counterpart to the DNS C2 beacon: same host, same
     tempo, uncategorized destination, non-browser user-agent, tiny symmetric byte counts.
+
+    `c2_domain_override`: when supplied (orchestrated event pinning the same C2
+    domain the endpoint + DNS beacon use), callbacks target that host instead of a
+    random one. Log format is identical — only the destination host/URL change.
     """
     zscaler_conf = config.get('zscaler_config', {})
-    c2_domain = random.choice(zscaler_conf.get('c2_domains',
+    c2_domain = c2_domain_override or random.choice(zscaler_conf.get('c2_domains',
                 ["cdn-analytics-sync.com", "telemetry-edge-api.net", "update-check-svc.org", "cloud-metric-relay.io"]))
     # Use the shared helper, NOT a hand-rolled random /8. Picking a random host inside a
     # random octet range is the exact construction the "DO NOT FIX THIS BACK" note near
@@ -3051,14 +3078,26 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         return result
 
     if scenario_event and scenario_event in _NAMED_THREATS:
-        user, dept, internal_host_ip, device_info = _get_user_and_device_info(
-            config, session_context=session_context)
-        # Pin the source host from context so a scenario keys the web stage to one host.
-        _ctx_src = (context or {}).get("src_ip")
-        if _ctx_src:
-            internal_host_ip = _ctx_src
+        _ctx = context or {}
+        if _ctx.get("user"):
+            # Orchestrated (XDR-triggered) event: pin the REAL box identity so the
+            # web log carries the same user/host the Cortex agent reports.
+            user, dept, internal_host_ip, device_info = _identity_from_context(config, _ctx)
+        else:
+            user, dept, internal_host_ip, device_info = _get_user_and_device_info(
+                config, session_context=session_context)
+            # Pin the source host from context so a scenario keys the web stage to one host.
+            _ctx_src = _ctx.get("src_ip")
+            if _ctx_src:
+                internal_host_ip = _ctx_src
         if not internal_host_ip:
             internal_host_ip = _get_random_internal_ip(config)
+        # C2-style beacons may pin the destination domain so it matches the endpoint
+        # technique + the paired DNS beacon. Only web_c2_beacon honors it today.
+        _domain = _ctx.get("domain")
+        if scenario_event == "web_c2_beacon" and _domain:
+            return _generate_web_c2_beacon(config, user, dept, internal_host_ip,
+                                           device_info, c2_domain_override=_domain)
         return _NAMED_THREATS[scenario_event](config, user, dept, internal_host_ip, device_info)
 
     user, dept, internal_host_ip, device_info = _get_user_and_device_info(
