@@ -531,19 +531,24 @@ def _generate_benign_log(config, session_context=None):
 # Threat generators
 # ---------------------------------------------------------------------------
 
-def _generate_c2_beacon(config, client_ip=None, session_context=None):
+def _generate_c2_beacon(config, client_ip=None, session_context=None, domain=None):
     """
     Generates a C2 beacon: DNS query to a known-malicious domain → NXDOMAIN.
 
     Hunt signals: xdm.source.ip + xdm.target.hostname (known-bad) +
                   xdm.network.dns.dns_response_code = "NXDOMAIN"
                   Repeated queries to same bad domain from one source IP.
+
+    `domain`: when supplied (an orchestrated/XDR-triggered event pins the same C2
+    domain the endpoint technique uses), the beacon queries that domain instead of
+    a random malicious one. The log format is identical — only the queried name
+    changes. Ambient generation passes no domain, so its behavior is unchanged.
     """
     if client_ip is None:
         internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
         client_ip    = rand_ip_from_network(ip_network(internal_net))
 
-    domain  = random.choice(config.get('infoblox_threats', {}).get('malicious_domains', ["malware-distro-site.ru"]))
+    domain  = domain or random.choice(config.get('infoblox_threats', {}).get('malicious_domains', ["malware-distro-site.ru"]))
     beacons = random.randint(12, 18)   # rule fires on >=10 queries to one domain from one IP
     print(f"    - Infoblox Module simulating: C2 Beacon ({beacons} queries to {domain}) from {client_ip}")
     logs = []
@@ -1039,7 +1044,14 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         # Named threat dispatch via _SCENARIO_FUNCTIONS dict
         event = scenario_event.upper()
         if event in _SCENARIO_FUNCTIONS:
-            content = _SCENARIO_FUNCTIONS[event](config, src_ip, session_context)
+            # Orchestrated events may pin the C2 domain so the DNS beacon matches
+            # the domain the paired endpoint technique/network logs use. Only
+            # C2_BEACON honors it today; ambient generation passes no domain.
+            domain_override = ctx.get('domain')
+            if event == "C2_BEACON" and domain_override:
+                content = _generate_c2_beacon(config, src_ip, session_context, domain=domain_override)
+            else:
+                content = _SCENARIO_FUNCTIONS[event](config, src_ip, session_context)
             return (content, event)
 
         return None

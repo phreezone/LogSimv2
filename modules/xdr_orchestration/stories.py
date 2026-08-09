@@ -35,6 +35,7 @@ class Step:
     technique: dict                       # {"id","test_numbers","executor"?, "input_args"?}
     params: dict = field(default_factory=dict)      # shared per-step vars (dest/port/app/domain/url)
     network: List[NetworkEvent] = field(default_factory=list)
+    cleanup: bool = False                 # run the atomic's -Cleanup after the step (persistence etc.)
     pre_delay: float = 0.0
     post_delay: float = 2.0
 
@@ -54,22 +55,39 @@ class Story:
 # ── Reference story (P1) ──────────────────────────────────────────────────────
 
 def get_reference_story() -> Story:
-    """A short, safe, complete arc used to validate the stitch: recon on the real
-    endpoint + a synthetic DNS/web C2 beacon pinned to the same host identity.
+    """A coherent, safe kill-chain arc: real endpoint recon → C2 beacon → persistence
+    on the box, with synthetic DNS/web C2 logs pinned to the SAME discovered identity
+    (host, IP, AND user) so endpoint + network read as one incident.
 
-    Uses only T1082-1 (System Information Discovery) — benign, non-destructive,
-    cleanup-capable, and already proven to fire + land in xdr_data. The network
-    events reuse the known-good Infoblox/Zscaler beacon events from the beaconing
-    scenario, keyed to the discovered host so endpoint + network share identity."""
-    c2_domain = "cdn-sync-telemetry.net"     # single source of truth for this step
+    Every technique is non-destructive and cleanup-capable; the persistence step
+    runs -Cleanup so no artifact is left behind. Network events reuse the known-good
+    Infoblox/Zscaler beacon events, now carrying the real user + the step's C2 domain
+    (see the module identity/domain overrides), not module defaults."""
+    c2_domain = "cdn-sync-telemetry.net"     # single source of truth for the C2 step
     return Story(
         id="xdr_reference",
-        name="XDR Reference: real recon + aligned synthetic C2 beacon",
+        name="XDR Reference: real recon → C2 beacon → persistence + aligned synthetic C2",
         anchor_dhcp=True,
         steps=[
             Step(
-                narrative="Discovery — real System Information Discovery on the endpoint, "
-                          "paired with a synthetic DNS + web C2 beacon from the same host.",
+                narrative="Discovery — System Information Discovery (systeminfo / reg).",
+                technique={"id": "T1082", "test_numbers": "1", "executor": "winrm_atomic"},
+            ),
+            Step(
+                narrative="Discovery — System Network Configuration Discovery (ipconfig / arp / route).",
+                technique={"id": "T1016", "test_numbers": "1", "executor": "winrm_atomic"},
+            ),
+            Step(
+                narrative="Discovery — System Owner/User Discovery (whoami).",
+                technique={"id": "T1033", "test_numbers": "1", "executor": "winrm_atomic"},
+            ),
+            Step(
+                narrative="Discovery — Process Discovery (tasklist).",
+                technique={"id": "T1057", "test_numbers": "1", "executor": "winrm_atomic"},
+            ),
+            Step(
+                narrative="Command & Control — endpoint recon paired with a synthetic DNS + web "
+                          "C2 beacon to the same C2 domain, from the same host and user.",
                 technique={"id": "T1082", "test_numbers": "1", "executor": "winrm_atomic"},
                 params={"domain": c2_domain, "protocol": "https", "port": 443},
                 network=[
@@ -79,6 +97,11 @@ def get_reference_story() -> Story:
                                  context={"domain": c2_domain}, external=True),
                 ],
                 post_delay=2.0,
+            ),
+            Step(
+                narrative="Persistence — Registry Run Key (HKCU ...\\Run); cleaned up after.",
+                technique={"id": "T1547.001", "test_numbers": "1", "executor": "winrm_atomic"},
+                cleanup=True,
             ),
         ],
     )

@@ -121,18 +121,28 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
               f"{'OK' if r.ok else 'FAIL'} — {r.detail}")
         summary["results"].append(r.to_dict())
 
-        # 6b) Emit the aligned synthetic network events, pinned to identity.
+        # 6b) Emit the aligned synthetic network events, pinned to identity
+        #     (src_ip + hostname + the real user; egress IP for external modules).
         for ne in step.network:
             base = {"src_ip": egress_ip if ne.external else host_ip,
                     "hostname": host_name, "user": user}
             ctx = {**base, **ne.context}
             summary["emitted"] += _emit(all_modules, ne.module, ne.event, ctx, config, verbose)
 
+        # 6c) Cleanup the technique's artifacts (persistence etc.) so nothing is left
+        #     behind — the creation telemetry already fired during execute().
+        if step.cleanup:
+            cr = executor.cleanup(tech["id"], tech.get("test_numbers"), input_args=input_args)
+            print(f"    - cleanup {tech['id']}: {'OK' if cr.ok else 'FAIL'} — {cr.detail}")
+            summary["results"].append(cr.to_dict())
+
         if step.post_delay:
             time.sleep(step.post_delay)
 
-    summary["ok"] = all(res["ok"] for res in summary["results"]) if summary["results"] else True
-    print(f"\n[XDR] done — technique_ok={summary['ok']} synthetic_events_emitted={summary['emitted']}")
+    _execs = [res for res in summary["results"] if res["action"] == "execute"]
+    summary["ok"] = all(res["ok"] for res in _execs) if _execs else True
+    print(f"\n[XDR] done — technique_ok={summary['ok']} "
+          f"techniques={len(_execs)} synthetic_events_emitted={summary['emitted']}")
     return summary
 
 
