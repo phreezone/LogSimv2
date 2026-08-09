@@ -3722,8 +3722,20 @@ def get_scenarios():
             "name": "Identity Attack → Cloud (Okta MFA-fatigue + Tor login → AWS SAML federation → privesc → exfil) [identity-keyed]",
             "func": run_identity_attack_cloud_scenario
         },
+        # ── XDR attack orchestration (real Atomic on a Cortex-agent box + aligned synthetic net) ──
+        "24": {
+            "name": "XDR Orchestration — real endpoint recon (Atomic) + aligned synthetic DNS/web C2 [purple-team, requires target box]",
+            "func": _run_xdr_reference_story
+        },
     }
     return scenarios
+
+
+def _run_xdr_reference_story(all_modules, config):
+    """Thin adapter so get_scenarios stays import-light: the xdr_orchestration
+    package (and pywinrm) is imported only when this scenario is actually run."""
+    from modules.xdr_orchestration import run_reference_story
+    return run_reference_story(all_modules, config)
 
 
 def select_scenario_mode(all_modules, config):
