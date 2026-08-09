@@ -2480,7 +2480,7 @@ for _e in _DEFAULT_THREAT_EVENTS:
     _DISPLAY_TO_EVENT[_key]     = _key      # also accept raw key for back-compat
 
 def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
-                            c2_domain_override=None):
+                            c2_domain_override=None, exact_user=False):
     """Web-layer C2 beacon (nssweblog) — repeated small HTTP callbacks to a C2 host at a
     regular cadence. The web-proxy counterpart to the DNS C2 beacon: same host, same
     tempo, uncategorized destination, non-browser user-agent, tiny symmetric byte counts.
@@ -2528,6 +2528,10 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
             "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
             "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
             "cefSeverity": "5",
+            # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the
+            # web log's user matches the endpoint identity. Ambient events leave this
+            # unset and get the usual synthesized UPN.
+            "suser": user if exact_user else None,
             # walk backwards from now so the beacon train sits in the recent past at a
             # steady cadence rather than all arriving in the same millisecond
             "rt": base_ms - (n_beacons - 1 - _i) * interval
@@ -2748,7 +2752,11 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
 
     common_map = {
         "rt": rt,
-        "suser": user if '@' in user else f"{user}@examplecorp.com",
+        # Ambient events synthesize a UPN (user@examplecorp.com). Orchestrated
+        # (XDR-triggered) events set fields['suser'] to the EXACT box username so it
+        # matches the endpoint identity XSIAM stores (which does no user
+        # normalization) — no fake email domain appended.
+        "suser": fields.get("suser") or (user if '@' in user else f"{user}@examplecorp.com"),
         "externalId": str(random.randint(1000000, 9999999999)),
         # Lowercase `devicehostname` is the key the Zscaler modeling rule reads, not
         # CEF-standard deviceHostName. The nssweblog block maps it to
@@ -3093,11 +3101,13 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         if not internal_host_ip:
             internal_host_ip = _get_random_internal_ip(config)
         # C2-style beacons may pin the destination domain so it matches the endpoint
-        # technique + the paired DNS beacon. Only web_c2_beacon honors it today.
+        # technique + the paired DNS beacon, and pin the exact box user (no UPN
+        # suffix). Only web_c2_beacon honors these today.
         _domain = _ctx.get("domain")
-        if scenario_event == "web_c2_beacon" and _domain:
-            return _generate_web_c2_beacon(config, user, dept, internal_host_ip,
-                                           device_info, c2_domain_override=_domain)
+        _exact_user = bool(_ctx.get("user"))
+        if scenario_event == "web_c2_beacon" and (_domain or _exact_user):
+            return _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
+                                           c2_domain_override=_domain, exact_user=_exact_user)
         return _NAMED_THREATS[scenario_event](config, user, dept, internal_host_ip, device_info)
 
     user, dept, internal_host_ip, device_info = _get_user_and_device_info(
