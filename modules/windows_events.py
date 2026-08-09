@@ -1698,9 +1698,15 @@ def _render_event_xml(event: dict) -> str:
 def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
                 workstation_override=None, ip_override=None,
                 target_logon_id=None, logon_guid=None, ts=None,
-                elevated=False) -> dict:
-    """4624 – An account was successfully logged on (emitted by the endpoint)."""
-    domain = _get_domain(config)
+                elevated=False, domain_override=None) -> dict:
+    """4624 – An account was successfully logged on (emitted by the endpoint).
+
+    `domain_override`: TargetDomainName to use instead of the config AD domain.
+    For a LOCAL (non-domain) box account, the logon "domain" is the computer's own
+    name — pass it so the synthetic identity matches how XSIAM resolves that local
+    account (netbios = the host), which the IP<->user binding needs to line up with
+    the endpoint case."""
+    domain = domain_override or _get_domain(config)
     computer = _fqdn(workstation_override or user_info["hostname"], config)
     ip = ip_override if ip_override is not None else user_info.get("ip") or "-"
     port = str(random.randint(49152, 65535))
@@ -7172,7 +7178,19 @@ def _generate_scenario_event(scenario_event, config, context):
     """
     session_context = (context or {}).get("session_context")
     user = None
-    if context and context.get("user_identity"):
+    # Direct pinned identity (XDR-orchestrated events): a bring-your-own box user
+    # that is NOT in session_context. Build the user dict straight from context so
+    # the event carries the EXACT box identity (e.g. a 4624 type-3 IP<->user
+    # binding), never a random session user. Only taken when 'user' is a string and
+    # no session-based 'user_identity' was given, so existing scenarios/ambient
+    # generation are unaffected.
+    if context and context.get("user") and not context.get("user_identity"):
+        user = {
+            "username": context["user"],
+            "hostname": context.get("hostname") or context.get("computer") or "WORKSTATION",
+            "ip": context.get("src_ip"),
+        }
+    if user is None and context and context.get("user_identity"):
         user = get_user_by_name(session_context, context["user_identity"])
     if user is None:
         user = _pick_windows_user(session_context)
@@ -7186,7 +7204,16 @@ def _generate_scenario_event(scenario_event, config, context):
         # Type-3 network logon carrying an explicit source IP — used as an IP↔user
         # binding so IP-keyed detections (DNS/SMB) can join to resolve the user.
         _bind_ip = (context or {}).get("src_ip") or user.get("ip")
-        return json.dumps(_build_4624(user, config, logon_type=3, ip_override=_bind_ip)), "network_logon"
+        # For an orchestrated pinned identity on a LOCAL (non-domain) box, set the
+        # logon domain to the box's own name so the identity matches the endpoint's
+        # local account (XSIAM applies no user normalization across domains).
+        _dom = None
+        if (context or {}).get("user") and not (context or {}).get("user_identity"):
+            _dom = ((user.get("hostname") or "").split(".")[0] or None)
+            if _dom:
+                _dom = _dom.upper()
+        return json.dumps(_build_4624(user, config, logon_type=3, ip_override=_bind_ip,
+                                      domain_override=_dom)), "network_logon"
     if ev in ("SERVICE_INSTALL", "IMPLANT_SERVICE"):
         # 4697 – a service was installed on the victim host (malware persistence).
         _host = (context or {}).get("hostname") or user.get("hostname")

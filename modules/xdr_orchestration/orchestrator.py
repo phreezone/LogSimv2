@@ -99,11 +99,20 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
     print(f"[XDR] executor={executor.name}  identity: user={user} host={host_name} "
           f"ip={host_ip} egress={egress_ip}")
 
-    # 5) Identity anchor — bind the synthetic network IP to the real host/user.
+    # 5) Identity anchors — bind the synthetic network IP to the real host/user so
+    #    IP-keyed network alerts resolve to the same identity the endpoint case uses.
     if story.anchor_dhcp:
+        # IP <-> host (DHCP lease).
         summary["emitted"] += _emit(
             all_modules, "Infoblox NIOS", "DHCP_ACK",
             {"src_ip": host_ip, "client_mac": host_mac, "hostname": host_name},
+            config, verbose)
+        time.sleep(1)
+    if story.anchor_logon:
+        # IP <-> user (4624 type-3 network logon): "user logged on from host_ip".
+        summary["emitted"] += _emit(
+            all_modules, "Windows Event Log", "NETWORK_LOGON",
+            {"user": user, "hostname": host_name, "src_ip": host_ip},
             config, verbose)
         time.sleep(1)
 
