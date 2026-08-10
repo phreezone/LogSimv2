@@ -1056,6 +1056,126 @@ def api_get_run(run_id: str):
     return jsonify(view)
 
 
+# ── XDR attack orchestration (dedicated console tab) ──────────────────────────
+# Real Atomic techniques on a live Cortex-agent box + identity-aligned synthetic
+# network logs, stitched into one XSIAM incident. Isolated from the module/scenario
+# surfaces so small purple-team runs are easy to identify and trigger.
+_ATTACK_SUMMARIES = {}          # run_id -> orchestrator run summary (technique results)
+_ATTACK_READINESS = {}          # hostname -> last kickstarter phone-home payload
+
+
+def _console_lan_ip():
+    """Best-effort primary LAN IP of the console (the WinRM client the box scopes
+    its firewall to). Uses a UDP socket to find the outbound interface; no packet
+    is actually sent."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return "127.0.0.1"
+
+
+@app.get("/api/attack/health")
+def api_attack_health():
+    """Run the orchestrator preflight and return the per-check report + the
+    discovered identity the run will carry (fail-closed gate for the tab)."""
+    try:
+        from modules.xdr_orchestration import WorkstationConnection, ConnectionError as _CE
+        conn = WorkstationConnection.from_config(CONFIG)
+        report = conn.preflight(force=True)
+        return jsonify(report.to_dict())
+    except Exception as e:
+        # A config error (no block / no host) is a clear RED, not a 500.
+        return jsonify({"ok": False, "checks": [
+            {"name": "connection", "status": "FAIL", "detail": str(e)}], "identity": None}), 200
+
+
+@app.get("/api/attack/stories")
+def api_attack_stories():
+    from modules.xdr_orchestration import list_stories
+    return jsonify(list_stories())
+
+
+@app.post("/api/attack/run")
+def api_attack_run():
+    """Start a story run (small purple-team run). Body: {story_id, dry_run?}.
+    Returns a run_id; poll /api/scenarios/runs/<id> (emitted manifest) and
+    /api/attack/runs/<id> (technique results)."""
+    body = request.get_json(silent=True) or {}
+    story_id = body.get("story_id") or "xdr_quick"
+    dry_run = bool(body.get("dry_run", False))
+    from modules.xdr_orchestration import get_story
+    story = get_story(story_id)
+    if not story:
+        return jsonify({"error": f"Unknown story '{story_id}'"}), 404
+
+    cfg = copy.deepcopy(CONFIG)
+    modules = {name: state.module for name, state in MODULE_STATES.items()}
+    run_id = _new_run(f"attack:{story_id}", story.name)
+
+    def _func(mods, c):
+        from modules.xdr_orchestration import run_story_id
+        _ATTACK_SUMMARIES[run_id] = run_story_id(mods, c, story_id, dry_run=dry_run)
+
+    t = threading.Thread(target=_run_scenario_and_flush, args=(_func, modules, cfg, run_id),
+                         daemon=True, name=f"attack-{story_id}-{run_id[:8]}")
+    t.start()
+    return jsonify({"started": True, "story": story.name, "story_id": story_id,
+                    "dry_run": dry_run, "run_id": run_id}), 202
+
+
+@app.get("/api/attack/runs/<run_id>")
+def api_attack_run_result(run_id: str):
+    """Run view (status/emitted manifest) + the orchestrator summary (technique
+    results, discovered identity) once available."""
+    with _RUNS_LOCK:
+        rec = _RUNS.get(run_id)
+        view = _run_view(rec) if rec else None
+    if not view:
+        return jsonify({"error": f"Run '{run_id}' not found"}), 404
+    view["attack"] = _ATTACK_SUMMARIES.get(run_id)
+    return jsonify(view)
+
+
+@app.get("/api/attack/kickstarter")
+def api_attack_kickstarter():
+    """Return the console-generated PowerShell one-shot that turns a bare box into
+    a preflight-green target (WinRM scoped to this console + unattended Atomic +
+    agent check + phone-home). Downloadable .ps1."""
+    from modules.xdr_orchestration import render_kickstarter, all_technique_ids
+    console_ip = request.args.get("console_ip") or _console_lan_ip()
+    # Prefer an explicit override, else the URL the browser reached us on.
+    console_url = request.args.get("console_url") or request.host_url.rstrip("/")
+    ps = render_kickstarter(console_url=console_url, console_ip=console_ip,
+                            token=_API_KEY or "", technique_ids=all_technique_ids())
+    resp = make_response(ps)
+    resp.headers["Content-Type"] = "text/plain; charset=utf-8"
+    resp.headers["Content-Disposition"] = "attachment; filename=logsim-kickstarter.ps1"
+    return resp
+
+
+@app.post("/api/attack/register")
+def api_attack_register():
+    """Phone-home endpoint the Kickstarter POSTs readiness to. Records the box's
+    self-check so the console can reflect it. Authenticated by the shared token
+    like every other /api route."""
+    body = request.get_json(silent=True) or {}
+    host = str(body.get("hostname") or "unknown")
+    _ATTACK_READINESS[host] = {**body, "received_at": time.time()}
+    return jsonify({"ok": True, "recorded": host})
+
+
+@app.get("/api/attack/register")
+def api_attack_registrations():
+    """List boxes that have phoned home readiness (for the console health tile)."""
+    return jsonify(list(_ATTACK_READINESS.values()))
+
+
 # ── Training Mode (deterministic Bulk stage / Live stream) ────────────────────
 # Single-flight: one training run at a time, and never concurrent with manual module
 # generation — the engine seeds the global RNG and (for bulk) freezes the clock, so a
@@ -1924,6 +2044,13 @@ def _register_v1_aliases():
         ("/api/v1/metrics",                   "api_metrics",         ["GET"]),
         ("/api/v1/threat_levels",             "api_threat_levels",   ["GET"]),
         ("/api/v1/timeline",                  "api_timeline",        ["GET"]),
+        # XDR attack orchestration (purple-team console tab)
+        ("/api/v1/attack/health",             "api_attack_health",       ["GET"]),
+        ("/api/v1/attack/stories",            "api_attack_stories",      ["GET"]),
+        ("/api/v1/attack/run",                "api_attack_run",          ["POST"]),
+        ("/api/v1/attack/runs/<run_id>",      "api_attack_run_result",   ["GET"]),
+        ("/api/v1/attack/kickstarter",        "api_attack_kickstarter",  ["GET"]),
+        ("/api/v1/attack/register",           "api_attack_register",     ["POST"]),
     ]
     view_funcs = app.view_functions
     for rule, endpoint_name, methods in aliases:

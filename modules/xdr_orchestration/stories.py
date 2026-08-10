@@ -60,59 +60,116 @@ class Story:
 
 # ── Reference story (P1) ──────────────────────────────────────────────────────
 
-def get_reference_story() -> Story:
-    """A coherent, safe kill-chain arc: real endpoint recon → C2 beacon → persistence
-    on the box, with synthetic DNS/web C2 logs pinned to the SAME discovered identity
-    (host, IP, AND user) so endpoint + network read as one incident.
+def _wa(tid, tn="1"):
+    """Shorthand for a winrm_atomic technique step spec."""
+    return {"id": tid, "test_numbers": tn, "executor": "winrm_atomic"}
 
-    Every technique is non-destructive and cleanup-capable; the persistence step
-    runs -Cleanup so no artifact is left behind. Network events reuse the known-good
-    Infoblox/Zscaler beacon events, now carrying the real user + the step's C2 domain
-    (see the module identity/domain overrides), not module defaults."""
+
+def get_reference_story() -> Story:
+    """The full kill-chain arc: a broad real-endpoint recon sweep → C2 beacon (DNS +
+    DNS-tunnel + web) → collection → persistence (two techniques), with synthetic
+    network logs pinned to the SAME discovered identity (host, IP, user) so endpoint
+    + network read as one incident.
+
+    Every technique is non-destructive and cleanup-capable; persistence steps run
+    -Cleanup so no artifact is left behind. This is the richest event mix — use the
+    'quick' story for fast isolated runs."""
     c2_domain = "cdn-sync-telemetry.net"     # single source of truth for the C2 step
     return Story(
         id="xdr_reference",
-        name="XDR Reference: real recon → C2 beacon → persistence + aligned synthetic C2",
-        anchor_dhcp=True,
+        name="XDR Full Kill-Chain: recon sweep → C2 (DNS/tunnel/web) → persistence x2",
+        anchor_dhcp=True, anchor_logon=True,
         steps=[
+            # ── Discovery sweep (TA0007) — many distinct endpoint detections ──────
+            Step("Discovery — System Information (systeminfo / reg).", _wa("T1082")),
+            Step("Discovery — System Network Configuration (ipconfig / arp / route).", _wa("T1016")),
+            Step("Discovery — System Owner/User (whoami).", _wa("T1033")),
+            Step("Discovery — Process Discovery (tasklist).", _wa("T1057")),
+            Step("Discovery — System Network Connections (netstat).", _wa("T1049")),
+            Step("Discovery — Local Account enumeration (net user).", _wa("T1087.001")),
+            Step("Discovery — Security Software Discovery (find AV/EDR).", _wa("T1518.001")),
+            # ── Command & Control (TA0011) — real recon + aligned synthetic C2 ────
             Step(
-                narrative="Discovery — System Information Discovery (systeminfo / reg).",
-                technique={"id": "T1082", "test_numbers": "1", "executor": "winrm_atomic"},
-            ),
-            Step(
-                narrative="Discovery — System Network Configuration Discovery (ipconfig / arp / route).",
-                technique={"id": "T1016", "test_numbers": "1", "executor": "winrm_atomic"},
-            ),
-            Step(
-                narrative="Discovery — System Owner/User Discovery (whoami).",
-                technique={"id": "T1033", "test_numbers": "1", "executor": "winrm_atomic"},
-            ),
-            Step(
-                narrative="Discovery — Process Discovery (tasklist).",
-                technique={"id": "T1057", "test_numbers": "1", "executor": "winrm_atomic"},
-            ),
-            Step(
-                narrative="Command & Control — endpoint recon paired with a synthetic DNS + web "
-                          "C2 beacon to the same C2 domain, from the same host and user.",
-                technique={"id": "T1082", "test_numbers": "1", "executor": "winrm_atomic"},
+                "Command & Control — endpoint activity paired with a synthetic DNS beacon, "
+                "DNS tunnel, and web C2 to the same domain, from the same host and user.",
+                _wa("T1082"),
                 params={"domain": c2_domain, "protocol": "https", "port": 443},
                 network=[
-                    NetworkEvent("Infoblox NIOS", "C2_BEACON",
-                                 context={"domain": c2_domain}),
+                    NetworkEvent("Infoblox NIOS", "C2_BEACON", context={"domain": c2_domain}),
+                    NetworkEvent("Infoblox NIOS", "DNS_TUNNEL"),
                     NetworkEvent("Zscaler Web Gateway", "web_c2_beacon",
                                  context={"domain": c2_domain}, external=True),
                 ],
                 post_delay=2.0,
             ),
+            # ── Persistence (TA0003) — two techniques, both cleaned up ───────────
+            Step("Persistence — Registry Run Key (HKCU ...\\Run); cleaned up after.",
+                 _wa("T1547.001"), cleanup=True),
+            Step("Persistence — Scheduled Task (schtasks); cleaned up after.",
+                 _wa("T1053.005"), cleanup=True),
+        ],
+    )
+
+
+def get_quick_story() -> Story:
+    """A short, fast arc for small isolated runs from the console: one recon
+    technique + a single identity-aligned DNS/web C2 beacon. Minimal footprint,
+    exercises the full endpoint→network→stitch path end to end."""
+    c2_domain = "sync-metrics-cdn.net"
+    return Story(
+        id="xdr_quick",
+        name="XDR Quick: recon + aligned C2 beacon (fast, small run)",
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery — System Owner/User (whoami).", _wa("T1033")),
             Step(
-                narrative="Persistence — Registry Run Key (HKCU ...\\Run); cleaned up after.",
-                technique={"id": "T1547.001", "test_numbers": "1", "executor": "winrm_atomic"},
-                cleanup=True,
+                "Command & Control — recon + synthetic DNS + web C2 beacon, same host/user.",
+                _wa("T1082"),
+                params={"domain": c2_domain},
+                network=[
+                    NetworkEvent("Infoblox NIOS", "C2_BEACON", context={"domain": c2_domain}),
+                    NetworkEvent("Zscaler Web Gateway", "web_c2_beacon",
+                                 context={"domain": c2_domain}, external=True),
+                ],
             ),
         ],
     )
 
 
+# ── Registry ──────────────────────────────────────────────────────────────────
+
+_STORY_BUILDERS = {
+    "xdr_quick":     get_quick_story,
+    "xdr_reference": get_reference_story,
+}
+
+
+def list_stories() -> list:
+    """[{id, name, steps, techniques}] for the console story picker."""
+    out = []
+    for sid, build in _STORY_BUILDERS.items():
+        s = build()
+        out.append({
+            "id": s.id,
+            "name": s.name,
+            "steps": len(s.steps),
+            "techniques": [st.technique["id"] for st in s.steps],
+        })
+    return out
+
+
+def all_technique_ids() -> list:
+    """Every distinct technique id across all stories — used by the Kickstarter to
+    install exactly the prereqs any story might need."""
+    ids = []
+    for build in _STORY_BUILDERS.values():
+        for st in build().steps:
+            if st.technique["id"] not in ids:
+                ids.append(st.technique["id"])
+    return ids
+
+
 def get_story(story_id: str) -> Optional[Story]:
-    """Resolve a story by id. P1 has one; Phase 2 externalizes these to files."""
-    return {get_reference_story().id: get_reference_story()}.get(story_id)
+    """Resolve a story by id (defaults handled by the caller)."""
+    build = _STORY_BUILDERS.get(story_id)
+    return build() if build else None

@@ -199,6 +199,9 @@
     }
     .tab-btn.active { background: var(--surface2); border-color: var(--border); color: var(--text); }
     .tab-btn:hover:not(.active) { color: var(--text); }
+    /* XDR Attack tab — distinct so purple-team runs are easy to spot/isolate. */
+    .tab-btn.xdr-tab { color: #f0a5b8; border-color: rgba(248,81,73,.35); font-weight: 600; }
+    .tab-btn.xdr-tab.active { background: rgba(248,81,73,.12); border-color: rgba(248,81,73,.55); color: #ff8095; }
     .tab-content { display: none; }
     .tab-content.active { display: block; }
 
@@ -423,6 +426,7 @@
   </div>
 
   <nav class="tab-nav">
+    <button class="tab-btn xdr-tab" data-tab="xdr" onclick="switchTab('xdr')">⚔ XDR Attack</button>
     <button class="tab-btn active" data-tab="modules" onclick="switchTab('modules')">Modules</button>
     <button class="tab-btn" data-tab="threats" onclick="switchTab('threats')">Threats &amp; Scenarios</button>
     <button class="tab-btn" data-tab="schedule" onclick="switchTab('schedule')">Schedule</button>
@@ -463,6 +467,56 @@
 <div id="baduser-banner" class="baduser-banner"></div>
 
 <main>
+
+<!-- ── XDR Attack tab ──────────────────────────────────────────────────────── -->
+<div id="tab-xdr" class="tab-content">
+  <div style="max-width:960px;">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+      <div>
+        <h2 style="margin:0 0 2px;">⚔ XDR Attack Orchestration</h2>
+        <div style="color:var(--text-muted);font-size:13px;">Real Atomic techniques on the Cortex-agent box + identity-aligned synthetic network logs → one XSIAM incident.</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="xdrKickstarter()">⬇ Generate workstation installer</button>
+        <button class="btn btn-ghost btn-sm" onclick="xdrHealth()">↻ Re-check preflight</button>
+      </div>
+    </div>
+
+    <!-- Preflight / health -->
+    <div class="metrics-table-wrap" style="margin-top:16px;padding:14px 16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <strong>Preflight</strong>
+        <span id="xdr-preflight-badge" style="font-weight:700;">…</span>
+      </div>
+      <div id="xdr-preflight-checks" style="margin-top:10px;font-size:13px;"></div>
+      <div id="xdr-identity" style="margin-top:10px;font-size:13px;color:var(--text-muted);"></div>
+    </div>
+
+    <!-- Run a story -->
+    <div class="metrics-table-wrap" style="margin-top:16px;padding:14px 16px;">
+      <strong>Run a story</strong>
+      <div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap;">
+        <select id="xdr-story-select" style="min-width:340px;padding:6px 10px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+          <option value="">loading…</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
+          <input type="checkbox" id="xdr-dryrun"> Dry-run (no techniques fired; synthetic logs only)
+        </label>
+        <button class="btn btn-sm" id="xdr-run-btn" onclick="xdrRun()">▶ Run story</button>
+      </div>
+      <div id="xdr-story-techs" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>
+    </div>
+
+    <!-- Result -->
+    <div id="xdr-result" class="metrics-table-wrap" style="margin-top:16px;padding:14px 16px;display:none;">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <strong>Run result</strong>
+        <span id="xdr-result-status" style="font-weight:700;"></span>
+      </div>
+      <div id="xdr-result-body" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+  </div>
+</div>
 
 <!-- ── Modules tab ─────────────────────────────────────────────────────────── -->
 <div id="tab-modules" class="tab-content active">
@@ -1338,6 +1392,126 @@
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
     document.querySelectorAll('.tab-content').forEach(el => el.classList.toggle('active', el.id === `tab-${tab}`));
     if (tab === 'health') runHealthCheck();
+    if (tab === 'xdr') xdrInit();
+  }
+
+  // ── XDR Attack tab ─────────────────────────────────────────────────────────
+  let _xdrStoriesLoaded = false;
+  function xdrInit() {
+    xdrHealth();
+    if (!_xdrStoriesLoaded) { xdrLoadStories(); _xdrStoriesLoaded = true; }
+  }
+
+  async function xdrHealth() {
+    const badge = document.getElementById('xdr-preflight-badge');
+    const checksEl = document.getElementById('xdr-preflight-checks');
+    const idEl = document.getElementById('xdr-identity');
+    badge.textContent = 'checking…'; badge.style.color = 'var(--text-muted)';
+    checksEl.innerHTML = ''; idEl.textContent = '';
+    try {
+      const r = await api('/api/attack/health');
+      badge.textContent = r.ok ? 'GREEN — ready to fire' : 'RED — will refuse to fire';
+      badge.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+      checksEl.innerHTML = (r.checks || []).map(c => {
+        const col = c.status === 'PASS' ? 'var(--green)' : (c.status === 'FAIL' ? 'var(--red)' : 'var(--text-muted)');
+        const mark = c.status === 'PASS' ? '✓' : (c.status === 'FAIL' ? '✗' : '–');
+        return `<div style="margin:3px 0;"><span style="color:${col};font-weight:700;">${mark} ${escHtml(c.name)}</span>`
+             + `<span style="color:var(--text-muted);"> — ${escHtml(c.detail || c.status)}</span></div>`;
+      }).join('');
+      const i = r.identity;
+      idEl.innerHTML = i ? `Synthetic logs will carry: <strong>user=${escHtml(i.username)}</strong> `
+             + `<strong>host=${escHtml(i.hostname)}</strong> <strong>ip=${escHtml(i.ip)}</strong>`
+             + (i.egress_ip ? ` egress=${escHtml(i.egress_ip)}` : '') : '';
+    } catch (e) {
+      badge.textContent = 'error'; badge.style.color = 'var(--red)';
+      checksEl.textContent = e.message;
+    }
+  }
+
+  async function xdrLoadStories() {
+    const sel = document.getElementById('xdr-story-select');
+    try {
+      const stories = await api('/api/attack/stories');
+      sel.innerHTML = stories.map(s => `<option value="${escHtml(s.id)}">${escHtml(s.name)} (${s.steps} steps)</option>`).join('');
+      sel.onchange = () => {
+        const s = stories.find(x => x.id === sel.value);
+        document.getElementById('xdr-story-techs').textContent =
+          s ? 'Techniques: ' + s.techniques.join(', ') : '';
+      };
+      sel.onchange();
+    } catch (e) { sel.innerHTML = `<option>Error: ${escHtml(e.message)}</option>`; }
+  }
+
+  async function xdrRun() {
+    const story_id = document.getElementById('xdr-story-select').value;
+    const dry_run = document.getElementById('xdr-dryrun').checked;
+    const btn = document.getElementById('xdr-run-btn');
+    const resWrap = document.getElementById('xdr-result');
+    const statusEl = document.getElementById('xdr-result-status');
+    const bodyEl = document.getElementById('xdr-result-body');
+    if (!story_id) return;
+    btn.disabled = true; resWrap.style.display = 'block';
+    statusEl.textContent = 'starting…'; statusEl.style.color = 'var(--text-muted)';
+    bodyEl.innerHTML = '';
+    try {
+      const start = await api('/api/attack/run', 'POST', { story_id, dry_run });
+      statusEl.textContent = 'running…';
+      const runId = start.run_id;
+      let done = false, tries = 0;
+      while (!done && tries++ < 120) {
+        await new Promise(r => setTimeout(r, 2000));
+        const v = await api(`/api/attack/runs/${encodeURIComponent(runId)}`);
+        if (v.status === 'done' || v.status === 'error') {
+          done = true;
+          xdrRenderResult(v);
+        }
+      }
+      if (!done) { statusEl.textContent = 'timed out (still running)'; statusEl.style.color = 'var(--yellow)'; }
+    } catch (e) {
+      statusEl.textContent = 'error'; statusEl.style.color = 'var(--red)';
+      bodyEl.textContent = e.message;
+    } finally { btn.disabled = false; }
+  }
+
+  function xdrRenderResult(v) {
+    const statusEl = document.getElementById('xdr-result-status');
+    const bodyEl = document.getElementById('xdr-result-body');
+    const a = v.attack || {};
+    const ok = v.status === 'done' && a.ok !== false && !a.aborted;
+    statusEl.textContent = a.aborted ? 'ABORTED' : (v.status === 'error' ? 'ERROR' : (ok ? 'DONE' : 'DONE (with failures)'));
+    statusEl.style.color = a.aborted || v.status === 'error' ? 'var(--red)' : (ok ? 'var(--green)' : 'var(--yellow)');
+    let html = '';
+    if (a.aborted) html += `<div style="color:var(--red);">${escHtml(a.aborted)}</div>`;
+    if (a.identity) html += `<div style="color:var(--text-muted);margin-bottom:8px;">Identity: `
+        + `user=${escHtml(a.identity.username)} host=${escHtml(a.identity.hostname)} ip=${escHtml(a.identity.ip)}</div>`;
+    const execs = (a.results || []).filter(r => r.action === 'execute');
+    if (execs.length) {
+      html += '<div style="margin-bottom:6px;"><strong>Techniques</strong></div>';
+      html += execs.map(r => {
+        const col = r.ok ? 'var(--green)' : 'var(--red)';
+        return `<div style="margin:2px 0;"><span style="color:${col};font-weight:700;">${r.ok ? '✓' : '✗'} ${escHtml(r.technique_id)}</span>`
+             + ` <span style="color:var(--text-muted);">${escHtml(r.detail || '')}</span></div>`;
+      }).join('');
+    }
+    const emitted = v.emitted || (v.emitted_total != null ? v.emitted_total : null);
+    html += `<div style="margin-top:8px;color:var(--text-muted);">Synthetic network events emitted: <strong>${a.emitted != null ? a.emitted : '—'}</strong></div>`;
+    bodyEl.innerHTML = html;
+  }
+
+  async function xdrKickstarter() {
+    // Download the console-generated .ps1 (token rides via query since <a> can't set headers).
+    let url = '/api/attack/kickstarter';
+    if (API_KEY) url += (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(API_KEY);
+    try {
+      const headers = {}; if (API_KEY) headers['X-API-Key'] = API_KEY;
+      const r = await fetch('/api/attack/kickstarter', { headers });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const blob = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'logsim-kickstarter.ps1';
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (e) { alert('Kickstarter download failed: ' + e.message); }
   }
 
   // ── Threats tab — fire individual threat ──────────────────────────────────

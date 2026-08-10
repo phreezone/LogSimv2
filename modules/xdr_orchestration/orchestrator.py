@@ -17,7 +17,7 @@ from typing import Optional
 
 from .connection import WorkstationConnection, ConnectionError
 from .executor import build_executor
-from .stories import Story, get_reference_story
+from .stories import Story, get_reference_story, get_story
 
 
 def _emit(all_modules, module_key, event, context, config, verbose=True):
@@ -158,7 +158,19 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
 # ── Scenario entry (registered in get_scenarios) ──────────────────────────────
 
 def run_reference_story(all_modules, config):
-    """Scenario-registry entry point: run the P1 reference story against the
+    """Scenario-registry entry point: run the full reference story against the
     configured target. Signature matches every other scenario func(all_modules,
     config). Dry-run is auto-selected when transport='stub'."""
     return run_story(all_modules, config, get_reference_story())
+
+
+def run_quick_story(all_modules, config):
+    """Scenario-registry entry point: run the short 'quick' story (small run)."""
+    return run_story(all_modules, config, get_story("xdr_quick"))
+
+
+def run_story_id(all_modules, config, story_id, *, dry_run=None):
+    """Run a story by id (used by the console /api/attack/run route). Falls back to
+    the reference story when the id is unknown."""
+    story = get_story(story_id) or get_reference_story()
+    return run_story(all_modules, config, story, dry_run=dry_run)
