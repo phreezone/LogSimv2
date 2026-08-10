@@ -422,11 +422,15 @@ def _format_firepower_cef(config, fields, cef_name):
     fields.setdefault('rt', fields.get('start') or now_ms)
 
     # AD domain-qualify bare usernames so XSIAM Identity can stitch
-    # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com)
-    for _ufield in ("suser", "duser"):
-        _uval = fields.get(_ufield)
-        if _uval and "\\" not in _uval and "@" not in _uval:
-            fields[_ufield] = f"EXAMPLECORP\\{_uval}"
+    # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com).
+    # Orchestrated events set _no_user_qualify to keep the EXACT box user (e.g. a
+    # local account "eric"), which XSIAM normalizes to the same identity the endpoint
+    # case uses — qualifying it to a fictional AD domain would break that stitch.
+    if not fields.pop('_no_user_qualify', False):
+        for _ufield in ("suser", "duser"):
+            _uval = fields.get(_ufield)
+            if _uval and "\\" not in _uval and "@" not in _uval:
+                fields[_ufield] = f"EXAMPLECORP\\{_uval}"
 
     timestamp  = datetime.fromtimestamp(fields['rt'] / 1000, timezone.utc).strftime('%b %d %H:%M:%S')
     cef_header = f"CEF:0|Cisco|Firepower|6.0|{sig_id}|{cef_name}|{cef_sev}|"
@@ -3505,6 +3509,44 @@ def generate_log(config, scenario=None, threat_level="Realistic",
                 "start": start_ms, "end": end_ms,
             })
             return _format_firepower_cef(config, fields, "CONNECTION STATISTICS")
+
+        if scenario_event == "C2_EGRESS":
+            # Orchestrated workstation → external C2 egress carrying the pinned box
+            # identity (suser/shost/src), so it stitches to the endpoint case. Prefer
+            # the pinned identity; only fall back to a session user when unpinned.
+            print("    - Firepower Module simulating: C2 egress (workstation -> external)")
+            user  = context.get('user')
+            src_ip = context.get('src_ip')
+            shost = context.get('hostname')
+            if not (user and src_ip):
+                _u, _ip, _sh = _get_user_and_ip(config, session_context)
+                user, src_ip, shost = user or _u, src_ip or _ip, shost or _sh
+            domain = context.get('domain') or f"sync-{random.randint(100,999)}.telemetry-cdn.net"
+            dst_ip = context.get('dst_ip') or _random_external_ip()
+            port   = int(context.get('port', 443))
+            app    = "SSL" if port == 443 else "HTTP"
+            logs = []
+            for _ in range(random.randint(10, 16)):     # beacon cadence
+                start_ms, end_ms = _conn_timing(random.randint(200, 2_000))
+                fields = _base_fields(config, src_ip, user, shost)
+                fields.update({
+                    "_no_user_qualify": True,   # keep the exact box user (bare) for the stitch
+                    "_sig_id": SIG_IDS["CONNECTION"],
+                    "act": "Allow", "app": app,
+                    "dst": dst_ip, "dpt": port, "dhost": domain,
+                    "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
+                    "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
+                    "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
+                    "cs6": "Suspicious",         "cs6Label": "URLReputation",
+                    "cefSeverity": "3",
+                    "bytesOut": random.randint(200, 900), "bytesIn": random.randint(120, 400),
+                    "outcome": "SUCCESS", "reason": "Traffic Allowed", "requestMethod": "GET",
+                    "msg": f"Recurring outbound to uncommon domain {domain}",
+                    "start": start_ms, "end": end_ms,
+                })
+                logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
+            return logs
+
         # Named threat from dashboard — dispatch to the specific event
         return _generate_threat_log(config, session_context, forced_event=scenario_event)
 

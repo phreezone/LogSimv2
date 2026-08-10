@@ -562,11 +562,13 @@ def _format_fortinet_cef(config, logid, log_type, subtype, log_level, extensions
     merged = {**base, **extensions_dict}
 
     # AD domain-qualify bare usernames so XSIAM Identity can stitch
-    # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com)
-    for _ufield in ("suser", "duser", "FTNTFGTxauthuser"):
-        _uval = merged.get(_ufield)
-        if _uval and "\\" not in _uval and "@" not in _uval:
-            merged[_ufield] = f"EXAMPLECORP\\{_uval}"
+    # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com).
+    # Orchestrated events set _no_user_qualify to keep the EXACT box user (bare).
+    if not merged.pop('_no_user_qualify', False):
+        for _ufield in ("suser", "duser", "FTNTFGTxauthuser"):
+            _uval = merged.get(_ufield)
+            if _uval and "\\" not in _uval and "@" not in _uval:
+                merged[_ufield] = f"EXAMPLECORP\\{_uval}"
 
     ext_string = " ".join(
         f"{k}={_cef_escape(v)}" for k, v in merged.items() if v is not None
@@ -3557,8 +3559,41 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
             )
         return _generate_scenario_log(config, scenario if isinstance(scenario, dict) else {})
 
-    # Named threat from dashboard — dispatch to the specific event
     if scenario_event:
+        ctx = context or {}
+        if scenario_event == "C2_EGRESS":
+            # Workstation → external C2 egress carrying the pinned box identity
+            # (suser/shost/src), so it stitches to the endpoint case.
+            print("    - Fortinet Module simulating: C2 egress (workstation -> external)")
+            user  = ctx.get('user')
+            src_ip = ctx.get('src_ip')
+            shost = ctx.get('hostname')
+            if not (user and src_ip):
+                ui = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
+                if ui:
+                    user, src_ip, shost = user or ui['username'], src_ip or ui['ip'], shost or ui['hostname']
+                else:
+                    src_ip = src_ip or rand_ip_from_network(ip_network(random.choice(config.get('internal_networks', ['192.168.1.0/24']))))
+            user = user or 'unknown'
+            domain = ctx.get('domain') or f"sync-{random.randint(100,999)}.telemetry-cdn.net"
+            dst_ip = ctx.get('dst_ip') or _random_external_ip()
+            port   = int(ctx.get('port', 443))
+            logs = []
+            for _ in range(random.randint(10, 16)):     # beacon cadence
+                fields = _base_traffic_fields(config, src_ip, shost, user, dst_ip, domain,
+                                              "6", port, "accept", duration_s=random.randint(1, 30))
+                fields.update({
+                    "_no_user_qualify": True,   # keep the exact box user (bare) for the stitch
+                    "app": "HTTPS",
+                    "request": "/api/v1/checkin", "FTNTFGThttpmethod": "GET", "FTNTFGThttpcode": "200",
+                    "requestClientApplication": random.choice(["python-requests/2.31.0", "Go-http-client/1.1", "curl/8.4.0"]),
+                    "FTNTFGTapp": "HTTPS.BROWSER", "FTNTFGTappcat": "Web.Client",
+                    "out": random.randint(200, 900), "in": random.randint(120, 400),
+                    "msg": f"Recurring outbound to uncommon domain {domain}",
+                })
+                logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields))
+            return logs
+        # Named threat from dashboard — dispatch to the specific event
         return _generate_threat_log(config, session_context, forced_event=scenario_event)
 
     if benign_only:

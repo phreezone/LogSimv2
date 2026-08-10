@@ -132,9 +132,10 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
 
         # 6b) Emit the aligned synthetic network events, pinned to identity
         #     (src_ip + hostname + the real user; egress IP for external modules).
+        #     `ip` mirrors `src_ip` for modules that read `ip` (e.g. Okta client IP).
         for ne in step.network:
-            base = {"src_ip": egress_ip if ne.external else host_ip,
-                    "hostname": host_name, "user": user}
+            _ip = egress_ip if ne.external else host_ip
+            base = {"src_ip": _ip, "ip": _ip, "hostname": host_name, "user": user}
             ctx = {**base, **ne.context}
             summary["emitted"] += _emit(all_modules, ne.module, ne.event, ctx, config, verbose)
 

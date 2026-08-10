@@ -456,10 +456,13 @@ def _format_checkpoint_cef(config, extensions_dict, device_product=None, event_t
 
     # AD domain-qualify bare usernames so XSIAM Identity can stitch
     # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com)
-    for _ufield in ("suser", "duser"):
-        _uval = ext.get(_ufield)
-        if _uval and "\\" not in _uval and "@" not in _uval:
-            ext[_ufield] = f"EXAMPLECORP\\{_uval}"
+    # Orchestrated events set _no_user_qualify to keep the EXACT box user (bare) so
+    # it matches the endpoint case identity; ambient events AD-qualify as before.
+    if not ext.pop('_no_user_qualify', False):
+        for _ufield in ("suser", "duser"):
+            _uval = ext.get(_ufield)
+            if _uval and "\\" not in _uval and "@" not in _uval:
+                ext[_ufield] = f"EXAMPLECORP\\{_uval}"
 
     extension_string = " ".join(
         f"{key}={_cef_escape(value)}" for key, value in ext.items() if value is not None
@@ -2677,11 +2680,14 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     if scenario_event:
         ctx    = context or {}
         src_ip = ctx.get('src_ip')
-        user   = ctx.get('user', 'unknown')
-        shost  = None
-        if src_ip:
+        # Prefer an orchestrator-pinned identity (real box user/host) over the
+        # IP-based lookup, so orchestrated events carry the exact box user for the
+        # stitch. Only look up by IP when no user was pinned.
+        user   = ctx.get('user')
+        shost  = ctx.get('hostname')
+        if src_ip and not user:
             user, shost = _get_user_and_host_info(config, src_ip)
-        else:
+        elif not src_ip:
             user_info = get_random_user(session_context, preferred_device_type='workstation') if session_context else None
             if user_info:
                 src_ip = user_info['ip']
@@ -2690,6 +2696,8 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
             else:
                 internal_nets = config.get('internal_networks', ['192.168.1.0/24'])
                 src_ip = rand_ip_from_network(ip_network(random.choice(internal_nets)))
+        if not user:
+            user = 'unknown'
 
         if scenario_event == "THREAT_BLOCK":
             print(f"    - Check Point Module simulating: THREAT_BLOCK URL block from {src_ip}")
@@ -2725,6 +2733,34 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
             print(f"    - Check Point Module simulating: LARGE_EGRESS upload from {src_ip}")
             result = _simulate_large_upload(config, src_ip, user, shost)
             return (result, "LARGE_EGRESS")
+
+        elif scenario_event == "C2_EGRESS":
+            # Workstation → external C2 egress carrying the pinned box identity
+            # (suser/shost/src), so it stitches to the endpoint case.
+            print(f"    - Check Point Module simulating: C2 egress from {src_ip}")
+            domain = ctx.get('domain') or f"sync-{random.randint(100,999)}.telemetry-cdn.net"
+            dst_ip = ctx.get('dst_ip') or _random_external_ip()
+            port   = int(ctx.get('port', 443))
+            logs = []
+            for _ in range(random.randint(10, 16)):     # beacon cadence
+                ext = {
+                    "_no_user_qualify": True,   # keep the exact box user (bare) for the stitch
+                    "name": domain, "severity": "2", "act": "Accept",
+                    "src": src_ip, "dst": dst_ip,
+                    "spt": random.randint(49152, 65535), "dpt": port, "proto": "6",
+                    "suser": user, "shost": shost, "dhost": domain,
+                    "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
+                    "deviceDirection": "1",
+                    "cs1": "Allow_Outbound_Web", "cs1Label": "Application Rule Name",
+                    "cs2": "Allow_Outbound_Web", "cs2Label": "Rule Name",
+                    "cs5": "Uncategorized",      "cs5Label": "Matched Category",
+                    "cp_severity": "Low", "blade": "Application Control",
+                    "request": f"https://{domain}/api/v1/checkin", "requestMethod": "GET",
+                    "duration": "1", "reason": "Application Control", "ifname": "eth0",
+                    "msg": f"Recurring outbound to uncommon domain {domain}",
+                }
+                logs.append(_format_checkpoint_cef(config, ext, device_product="Application Control"))
+            return (logs, "C2_EGRESS")
 
         # Named threat from dashboard — dispatch to the specific event
         return _generate_threat_log(config, session_context, forced_event=scenario_event)

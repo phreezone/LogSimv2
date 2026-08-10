@@ -99,6 +99,11 @@ def get_reference_story() -> Story:
                     NetworkEvent("Infoblox NIOS", "DNS_TUNNEL"),
                     NetworkEvent("Zscaler Web Gateway", "web_c2_beacon",
                                  context={"domain": c2_domain}, external=True),
+                    # Perimeter firewall egress — whichever vendor is onboarded logs the
+                    # same beacon from the box, carrying the bare box user (stitches).
+                    NetworkEvent("Cisco Firepower", "C2_EGRESS", context={"domain": c2_domain}),
+                    NetworkEvent("Check Point Firewall", "C2_EGRESS", context={"domain": c2_domain}),
+                    NetworkEvent("Fortinet FortiGate", "C2_EGRESS", context={"domain": c2_domain}),
                 ],
                 post_delay=2.0,
             ),
