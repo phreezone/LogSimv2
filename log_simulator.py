@@ -3724,8 +3724,12 @@ def get_scenarios():
         },
         # ── XDR attack orchestration (real Atomic on a Cortex-agent box + aligned synthetic net) ──
         "24": {
-            "name": "XDR Orchestration — real endpoint recon (Atomic) + aligned synthetic DNS/web C2 [purple-team, requires target box]",
+            "name": "XDR Orchestration — FULL kill-chain: recon sweep → C2 (DNS/tunnel/web) → persistence x2 [purple-team, requires target box]",
             "func": _run_xdr_reference_story
+        },
+        "25": {
+            "name": "XDR Orchestration — QUICK: recon + aligned C2 beacon (fast, small run) [purple-team, requires target box]",
+            "func": _run_xdr_quick_story
         },
     }
     return scenarios
@@ -3736,6 +3740,12 @@ def _run_xdr_reference_story(all_modules, config):
     package (and pywinrm) is imported only when this scenario is actually run."""
     from modules.xdr_orchestration import run_reference_story
     return run_reference_story(all_modules, config)
+
+
+def _run_xdr_quick_story(all_modules, config):
+    """QUICK XDR story — short, small-footprint purple-team run."""
+    from modules.xdr_orchestration import run_quick_story
+    return run_quick_story(all_modules, config)
 
 
 def select_scenario_mode(all_modules, config):

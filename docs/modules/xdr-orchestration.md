@@ -124,6 +124,27 @@ Cortex XDR's malware/WildFire and Behavioral Threat Protection will flag or quar
 
 ---
 
+## Console (dedicated "⚔ XDR Attack" tab)
+
+The dashboard has its own top-level **⚔ XDR Attack** tab (styled distinctly so purple-team runs are easy to spot and isolate). It surfaces:
+
+- **Preflight** — live per-check pass/fail and the discovered `user`/`host`/`ip` the run will carry (fail-closed gate). Backed by `GET /api/v1/attack/health`.
+- **Run a story** — pick a story, optional **dry-run** (no techniques fired; synthetic logs only), and fire a small isolated run. Backed by `POST /api/v1/attack/run` → poll `GET /api/v1/attack/runs/<id>` for technique results + emitted manifest.
+- **Generate workstation installer** — downloads the Kickstarter `.ps1` (`GET /api/v1/attack/kickstarter`).
+
+Stories (also registered as CLI scenarios 24/25):
+
+| id | Scenario | Arc |
+|---|---|---|
+| `xdr_quick` | 25 | recon (T1033) + one aligned DNS/web C2 beacon — fast, small footprint |
+| `xdr_reference` | 24 | full kill-chain: 7-technique discovery sweep (T1082/T1016/T1033/T1057/T1049/T1087.001/T1518.001) → C2 (DNS beacon + DNS tunnel + web C2) → persistence ×2 (T1547.001 Run key + T1053.005 Scheduled Task), both cleaned up |
+
+Every technique is non-destructive and cleanup-capable.
+
+## The Kickstarter (console-generated one-shot installer)
+
+`modules/xdr_orchestration/kickstarter.py` renders a self-contained PowerShell script from the running console's own values (its IP/URL, a scoped token, and exactly the atomics the stories need). Download it from the tab's **Generate workstation installer** button or `GET /api/v1/attack/kickstarter`. Run it **elevated** on a bare box and it: enables WinRM (firewall scoped to the console IP + `LocalAccountTokenFilterPolicy`), installs Invoke-AtomicRedTeam + the story prereqs **unattended** (NuGet/PSGallery/powershell-yaml pre-satisfied), verifies the Cortex agent, self-checks (mirrors preflight), and phones home readiness to `/api/v1/attack/register`. Idempotent; ships with `-Uninstall`. Lab-only, watermarked.
+
 ## Roadmap
 
 - **Phase 1 (in progress):** `connection.py` ✅ → `executor.py` (WinRMAtomic + DryRun) → one reference story → `orchestrator.py`; `/api/v1/attack/*` routes.
