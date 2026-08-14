@@ -3731,6 +3731,10 @@ def get_scenarios():
             "name": "XDR Orchestration — QUICK: recon + aligned C2 beacon (fast, small run) [purple-team, requires target box]",
             "func": _run_xdr_quick_story
         },
+        "26": {
+            "name": "XDR Orchestration — CREDENTIAL THEFT: LOLBin ingress → LSASS dump → creds-in-files → evasion → staging → HTTP exfil [purple-team, requires target box]",
+            "func": _run_xdr_intrusion_story
+        },
     }
     return scenarios
 
@@ -3746,6 +3750,13 @@ def _run_xdr_quick_story(all_modules, config):
     """QUICK XDR story — short, small-footprint purple-team run."""
     from modules.xdr_orchestration import run_quick_story
     return run_quick_story(all_modules, config)
+
+
+def _run_xdr_intrusion_story(all_modules, config):
+    """CREDENTIAL-THEFT XDR story — a different endpoint tactic spread (credential
+    access / defense evasion / staging / exfil) so XDR sees more than discovery."""
+    from modules.xdr_orchestration import run_intrusion_story
+    return run_intrusion_story(all_modules, config)
 
 
 def select_scenario_mode(all_modules, config):
