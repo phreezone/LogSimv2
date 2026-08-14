@@ -17,7 +17,7 @@ from typing import Optional
 
 from .connection import WorkstationConnection, ConnectionError
 from .executor import build_executor
-from .stories import Story, get_reference_story, get_story
+from .stories import Story, get_reference_story, get_intrusion_story, get_story
 
 
 def _emit(all_modules, module_key, event, context, config, verbose=True):
@@ -125,6 +125,11 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
         # 6a) Fire the real technique.
         tech = step.technique
         input_args = tech.get("input_args") or step.params.get("input_args")
+        # Some tests need a target file/tool staged first (e.g. file deletion).
+        if step.prereqs:
+            pr = executor.get_prereqs(tech["id"], tech.get("test_numbers"))
+            print(f"    - prereqs {tech['id']}: {'OK' if pr.ok else 'FAIL'} — {pr.detail}")
+            summary["results"].append(pr.to_dict())
         r = executor.execute(tech["id"], tech.get("test_numbers"), input_args=input_args)
         print(f"    - technique {tech['id']} test {tech.get('test_numbers')}: "
               f"{'OK' if r.ok else 'FAIL'} — {r.detail}")
@@ -168,6 +173,13 @@ def run_reference_story(all_modules, config):
 def run_quick_story(all_modules, config):
     """Scenario-registry entry point: run the short 'quick' story (small run)."""
     return run_story(all_modules, config, get_story("xdr_quick"))
+
+
+def run_intrusion_story(all_modules, config):
+    """Scenario-registry entry point: run the credential-theft 'smash-and-grab'
+    story — a different tactic spread (credential access / evasion / staging /
+    exfil) so XDR sees more than discovery noise."""
+    return run_story(all_modules, config, get_intrusion_story())
 
 
 def run_story_id(all_modules, config, story_id, *, dry_run=None):

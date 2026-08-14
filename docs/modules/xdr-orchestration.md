@@ -132,14 +132,15 @@ The dashboard has its own top-level **⚔ XDR Attack** tab (styled distinctly so
 - **Run a story** — pick a story, optional **dry-run** (no techniques fired; synthetic logs only), and fire a small isolated run. Backed by `POST /api/v1/attack/run` → poll `GET /api/v1/attack/runs/<id>` for technique results + emitted manifest.
 - **Generate workstation installer** — downloads the Kickstarter `.ps1` (`GET /api/v1/attack/kickstarter`).
 
-Stories (also registered as CLI scenarios 24/25):
+Stories (also registered as CLI scenarios 24/25/26):
 
 | id | Scenario | Arc |
 |---|---|---|
 | `xdr_quick` | 25 | recon (T1033) + one aligned DNS/web C2 beacon — fast, small footprint |
 | `xdr_reference` | 24 | full kill-chain: 7-technique discovery sweep (T1082/T1016/T1033/T1057/T1049/T1087.001/T1518.001) → C2 (DNS beacon + DNS tunnel + web C2) → persistence ×2 (T1547.001 Run key + T1053.005 Scheduled Task), both cleaned up |
+| `xdr_intrusion` | 26 | credential-theft "smash-and-grab" — deliberately AVOIDS discovery to broaden XDR's detection view: LOLBin ingress (T1105-13 MpCmdRun) → OS credential dumping (T1003.001-2 comsvcs LSASS MiniDump) → credentials-in-files (T1552.001-4 findstr) → indicator removal (T1070.004-6 file deletion) → local data staging (T1074.001-3 Compress-Archive) → HTTP exfil (T1048.003-4), with aligned web download / web-exfil / DNS-tunnel / perimeter-firewall egress |
 
-Every technique is non-destructive and cleanup-capable.
+Every technique is non-destructive and cleanup-capable (test numbers validated live via `-ShowDetails`). The `xdr_intrusion` story uses the `Step.prereqs` hook to stage a technique's target (e.g. the file T1070.004 deletes) with `-GetPrereqs` before firing.
 
 ## The Kickstarter (console-generated one-shot installer)
 

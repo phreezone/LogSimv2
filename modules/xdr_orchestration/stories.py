@@ -35,6 +35,8 @@ class Step:
     technique: dict                       # {"id","test_numbers","executor"?, "input_args"?}
     params: dict = field(default_factory=dict)      # shared per-step vars (dest/port/app/domain/url)
     network: List[NetworkEvent] = field(default_factory=list)
+    prereqs: bool = False                 # run the atomic's -GetPrereqs before firing (tests that
+                                          # need a target file/tool staged first, e.g. file deletion)
     cleanup: bool = False                 # run the atomic's -Cleanup after the step (persistence etc.)
     pre_delay: float = 0.0
     post_delay: float = 2.0
@@ -141,11 +143,88 @@ def get_quick_story() -> Story:
     )
 
 
+# ── Credential-theft story (P2) ───────────────────────────────────────────────
+
+def get_intrusion_story() -> Story:
+    """A hands-on-keyboard 'smash-and-grab' arc that deliberately AVOIDS the
+    recon-heavy techniques of the reference story, so the Cortex agent produces a
+    completely different set of endpoint detections: LOLBin ingress → OS credential
+    dumping (LSASS) → credentials-in-files → indicator removal → local data staging
+    → exfiltration over HTTP. This broadens XDR's view from 'discovery noise' to the
+    high-severity credential-theft/exfil detections that anchor real incidents.
+
+    Every test is validated non-destructive against the live box (2026-08-14):
+      • T1105-13   MpCmdRun.exe LOLBin download   (cmd; cleanup deletes temp file)
+      • T1003.001-2 comsvcs.dll LSASS MiniDump     (ps, elevated; cleanup deletes dmp)
+      • T1552.001-4 findstr passwords in files     (ps; read-only)
+      • T1070.004-6 file deletion / indicator removal (ps; prereq creates the target)
+      • T1074.001-3 Compress-Archive data staging  (ps; cleanup deletes the zip)
+      • T1048.003-4 exfil over HTTP                (ps; POSTs to the C2 domain)
+
+    Network artifacts are pinned to the same discovered identity so the download and
+    exfil beats stitch into the endpoint incident: a large web download on ingress,
+    and web-exfil + DNS-tunnel + perimeter-firewall egress on exfil.
+    """
+    exfil_domain = "sync-backup-store.net"     # single source of truth for the exfil step
+    return Story(
+        id="xdr_intrusion",
+        name="XDR Credential-Theft: LOLBin ingress → LSASS dump → creds-in-files → "
+             "evasion → staging → HTTP exfil",
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            # ── Execution / Ingress Tool Transfer (TA0011/TA0002) ────────────────
+            Step(
+                "Ingress Tool Transfer — a Living-off-the-Land download via Windows "
+                "Defender's own MpCmdRun.exe, paired with a synthetic large web "
+                "download from the same host.",
+                _wa("T1105", "13"),
+                network=[
+                    NetworkEvent("Zscaler Web Gateway", "large_download", external=True),
+                ],
+            ),
+            # ── Credential Access (TA0006) — the high-severity core ──────────────
+            Step("OS Credential Dumping — dump LSASS memory via comsvcs.dll MiniDump "
+                 "(native rundll32); the dump file is cleaned up after.",
+                 _wa("T1003.001", "2"), cleanup=True),
+            Step("Unsecured Credentials — search local files for passwords with findstr.",
+                 _wa("T1552.001", "4")),
+            # ── Defense Evasion (TA0005) — anti-forensics ────────────────────────
+            Step("Indicator Removal — delete a file from disk (prereq stages the "
+                 "target file first so the deletion is self-contained).",
+                 _wa("T1070.004", "6"), prereqs=True),
+            # ── Collection / Local Data Staging (TA0009) ─────────────────────────
+            Step("Data Staged — archive collected data into a zip in the temp folder "
+                 "for later exfiltration; the staged archive is cleaned up after.",
+                 _wa("T1074.001", "3"), cleanup=True),
+            # ── Exfiltration (TA0010) — real endpoint POST + aligned synthetic net ─
+            Step(
+                "Exfiltration Over Alternative Protocol — the endpoint POSTs data over "
+                "HTTP to the exfil domain, paired with a synthetic web upload, DNS "
+                "tunnel, and perimeter-firewall egress from the same host and user.",
+                _wa("T1048.003", "4"),
+                params={"domain": exfil_domain, "protocol": "https", "port": 443,
+                        "input_args": {"input_file": r"C:\Windows\win.ini",
+                                       "ip_address": f"http://{exfil_domain}/upload"}},
+                network=[
+                    NetworkEvent("Zscaler Web Gateway", "data_exfil",
+                                 context={"domain": exfil_domain}, external=True),
+                    NetworkEvent("Infoblox NIOS", "DNS_TUNNEL"),
+                    NetworkEvent("Cisco Firepower", "C2_EGRESS", context={"domain": exfil_domain}),
+                    NetworkEvent("Check Point Firewall", "C2_EGRESS", context={"domain": exfil_domain}),
+                    NetworkEvent("Fortinet FortiGate", "C2_EGRESS", context={"domain": exfil_domain}),
+                ],
+                post_delay=2.0,
+            ),
+        ],
+    )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 _STORY_BUILDERS = {
     "xdr_quick":     get_quick_story,
     "xdr_reference": get_reference_story,
+    "xdr_intrusion": get_intrusion_story,
 }
 
 
