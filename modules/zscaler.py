@@ -227,7 +227,7 @@ def _identity_from_context(config, ctx):
 
 
 def _dns_precursor_event(config, user, dept, device_info, src_ip, domain=None,
-                         event_time_ms=None):
+                         event_time_ms=None, exact_user=False):
     """Generate a DNS resolution NSSFWlog event that precedes a connection.
 
     Returns a single CEF string representing the UDP/53 query that must
@@ -250,7 +250,7 @@ def _dns_precursor_event(config, user, dept, device_info, src_ip, domain=None,
                      "United States", "1",
                      random.randint(64, 512), random.randint(32, 128),
                      dst_fqdn=domain, event_time_ms=event_time_ms,
-                     duration_ms=random.randint(1, 500))
+                     duration_ms=random.randint(1, 500), exact_user=exact_user)
 
 
 # ---------------------------------------------------------------------------
@@ -826,13 +826,24 @@ def _exfil_destination(config, kind="upload"):
     return domain, dest_ip, f"https://{domain}{path}"
 
 
-def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, device_info):
+def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, device_info,
+                                     exact_user=False, domain_override=None):
     """Large file upload to cloud storage — data exfiltration (ALLOWED).
 
     Returns [DNS precursor, NSSFWlog TCP/443 allowed, NSSWeblog allowed].
+
+    `domain_override` / `exact_user`: orchestrated (XDR) events pin the exfil
+    destination domain and the exact box user so the web log, the paired firewall
+    C2_EGRESS, and the endpoint technique all agree on one destination/identity.
+    Ambient/standalone callers pass neither and behave exactly as before.
     """
     zscaler_conf = config.get('zscaler_config', {})
     _exfil_domain, dest_ip, _exfil_url = _exfil_destination(config, "upload")
+    # Pin the exfil domain when orchestrated; overriding it here also flows into the
+    # DNS precursor and NSSFWlog sub-events below, which reuse `_exfil_domain`.
+    if domain_override:
+        _exfil_domain = domain_override
+        _exfil_url = f"https://{domain_override}/upload"
     exfil_dest = {"url": _exfil_url, "domain": _exfil_domain}
     # 300 MB - 700 MB. "Large Upload (HTTPS)" has fired 85 times for Check Point and never
     # for Zscaler; max xdm.source.sent_bytes on port 443 was 105 MB for
@@ -846,7 +857,7 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
     # Log 1: DNS precursor — carries the resolved domain so the host/domain association
     # exists for rare-domain detectors (it previously resolved nothing).
     logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip,
-                                    domain=_exfil_domain))
+                                    domain=_exfil_domain, exact_user=exact_user))
     # Log 2: NSSFWlog — TCP/443 allowed connection (large upload)
     logs.append(_fw_event(config, user, dept, device_info,
                           internal_host_ip, dest_ip, 443, "6",
@@ -864,7 +875,8 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
                           ack_bytes, file_size_bytes,
                           dst_fqdn=_exfil_domain,
                           duration_ms=random.randint(300_000, 1_200_000),
-                          url_category="Online Storage and Backup"))
+                          url_category="Online Storage and Backup",
+                          exact_user=exact_user))
     # Log 3: NSSWeblog — web proxy event
     fields = {
         "action": "Allowed",
@@ -885,6 +897,9 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "7",
+        # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the web
+        # log's user matches the endpoint identity; ambient events synthesize a UPN.
+        "suser": user if exact_user else None,
     }
     logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
     return logs
@@ -1097,7 +1112,8 @@ def _port_service(port):
 def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
               action, rule, nwsvc, threat_cat, threat_name, dest_country, sev,
               bytes_in=0, bytes_out=60, event_time_ms=None, src_country=None,
-              dst_fqdn=None, duration_ms=None, url_category=None, nwapp=None):
+              dst_fqdn=None, duration_ms=None, url_category=None, nwapp=None,
+              exact_user=False):
     """Build a single nssfwlog CEF event — used by all firewall scenario generators.
 
     event_time_ms: optional ms-epoch to back-date the event (sets CEF rt -> XSIAM _time);
@@ -1157,6 +1173,10 @@ def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
         "destinationTranslatedAddress": dst_ip,
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cdfqdn": dst_fqdn,
+        # Orchestrated (XDR) events pin the EXACT box user (no @examplecorp.com) so the
+        # firewall log's user matches the endpoint identity; ambient events leave this
+        # unset and get the usual synthesized UPN.
+        "suser": user if exact_user else None,
     }
     if event_time_ms is not None:
         fields["rt"] = event_time_ms
@@ -2543,23 +2563,33 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
 
 # Module-level dispatch map for named-threat mode.
 # Functions accept (config, user, dept, internal_host_ip, device_info).
-def _generate_large_download(config, user, dept, internal_host_ip, device_info):
+def _generate_large_download(config, user, dept, internal_host_ip, device_info,
+                             exact_user=False, domain_override=None):
     """Large INBOUND web transfer — 'Large Download' volume anomaly. The proxy
     counterpart to data_exfil: huge bytesin (download) / small bytesout (request).
-    Returns [DNS precursor, NSSFWlog TCP/443 allow, NSSWeblog allow]."""
+    Returns [DNS precursor, NSSFWlog TCP/443 allow, NSSWeblog allow].
+
+    `domain_override` / `exact_user`: orchestrated (XDR) events pin the download
+    source domain and the exact box user; ambient/standalone callers pass neither
+    and behave exactly as before."""
     print("    - Zscaler Module simulating: Large Download (inbound volume anomaly)")
     zscaler_conf = config.get('zscaler_config', {})
     # `download_destinations` is not present in config, so this silently fell back to the
     # 2-entry upload list and downloads resolved to the SAME hosts as uploads. Draw from
     # the download half of the shared pool instead — see _exfil_destination().
     _dl_domain, dest_ip, _dl_url = _exfil_destination(config, "download")
+    # Pin the source domain when orchestrated; flows into the DNS precursor and NSSFWlog
+    # sub-events below, which reuse `_dl_domain`.
+    if domain_override:
+        _dl_domain = domain_override
+        _dl_url = f"https://{domain_override}/download"
     dl_dest        = {"url": _dl_url, "domain": _dl_domain}
     download_bytes = random.randint(524_288_000, 4_294_967_296)  # 500 MB - 4 GB
     req_bytes      = random.randint(200, 2000)
     filename, filetype = _pick_upload_file(random.choice(["archive", "document"]))
 
     logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip,
-                                domain=_dl_domain)]
+                                domain=_dl_domain, exact_user=exact_user)]
     # NSSFWlog — bytes_in = download (large), bytes_out = request (small)
     logs.append(_fw_event(config, user, dept, device_info,
                           internal_host_ip, dest_ip, 443, "6",
@@ -2569,7 +2599,8 @@ def _generate_large_download(config, user, dept, internal_host_ip, device_info):
                           download_bytes, req_bytes,
                           dst_fqdn=_dl_domain,
                           duration_ms=random.randint(300_000, 1_200_000),
-                          url_category="Online Storage and Backup"))
+                          url_category="Online Storage and Backup",
+                          exact_user=exact_user))
     fields = {
         "action": "Allowed",
         "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
@@ -2588,6 +2619,9 @@ def _generate_large_download(config, user, dept, internal_host_ip, device_info):
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "5",
+        # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the web
+        # log's user matches the endpoint identity; ambient events synthesize a UPN.
+        "suser": user if exact_user else None,
     }
     logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
     return logs
@@ -3100,14 +3134,23 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
                 internal_host_ip = _ctx_src
         if not internal_host_ip:
             internal_host_ip = _get_random_internal_ip(config)
-        # C2-style beacons may pin the destination domain so it matches the endpoint
-        # technique + the paired DNS beacon, and pin the exact box user (no UPN
-        # suffix). Only web_c2_beacon honors these today.
+        # Orchestrated events may pin the destination domain so it matches the endpoint
+        # technique + the paired DNS/firewall events, and pin the exact box user (no UPN
+        # suffix) so the web log's identity matches the endpoint. web_c2_beacon, data_exfil
+        # and large_download all honor these; other named threats keep their defaults.
         _domain = _ctx.get("domain")
         _exact_user = bool(_ctx.get("user"))
-        if scenario_event == "web_c2_beacon" and (_domain or _exact_user):
-            return _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
-                                           c2_domain_override=_domain, exact_user=_exact_user)
+        if _domain or _exact_user:
+            if scenario_event == "web_c2_beacon":
+                return _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
+                                               c2_domain_override=_domain, exact_user=_exact_user)
+            if scenario_event == "data_exfil":
+                return _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip,
+                                                        device_info, exact_user=_exact_user,
+                                                        domain_override=_domain)
+            if scenario_event == "large_download":
+                return _generate_large_download(config, user, dept, internal_host_ip, device_info,
+                                                exact_user=_exact_user, domain_override=_domain)
         return _NAMED_THREATS[scenario_event](config, user, dept, internal_host_ip, device_info)
 
     user, dept, internal_host_ip, device_info = _get_user_and_device_info(

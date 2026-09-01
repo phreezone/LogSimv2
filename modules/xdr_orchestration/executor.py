@@ -105,12 +105,20 @@ class WinRMAtomicExecutor:
 
     name = "winrm_atomic"
 
-    def __init__(self, connection, atomic_psd1: Optional[str] = None, default_timeout: int = 300):
+    def __init__(self, connection, atomic_psd1: Optional[str] = None, default_timeout: int = 300,
+                 delivery: str = "file"):
         self.connection = connection
         self.atomic_psd1 = atomic_psd1 or getattr(
             connection, "ATOMIC_PSD1",
             r"C:\AtomicRedTeam\invoke-atomicredteam\Invoke-AtomicRedTeam.psd1")
         self.default_timeout = default_timeout
+        # Delivery transport for the technique itself:
+        #   "file"    — drop a .ps1 and run `powershell -File` (connection.run_ps_file).
+        #               Avoids the `-EncodedCommand` signature that trips high-volume
+        #               "Script Engine Activity" delivery-noise alerts and fragments
+        #               the endpoint incident. Falls back to encoded on staging failure.
+        #   "encoded" — pywinrm's `powershell -EncodedCommand` (connection.run_ps).
+        self.delivery = delivery
 
     # -- invocation plumbing ---------------------------------------------------
 
@@ -128,7 +136,17 @@ class WinRMAtomicExecutor:
         started = time.time()
         script = self._wrap(atomic_args)
         try:
-            rc, out, err = self.connection.run_ps(script, timeout=self.default_timeout)
+            if self.delivery == "file" and hasattr(self.connection, "run_ps_file"):
+                try:
+                    rc, out, err = self.connection.run_ps_file(
+                        script, timeout=self.default_timeout)
+                except Exception:
+                    # Staging (echo/certutil) failed — fall back to the encoded
+                    # transport so the run still fires rather than aborting.
+                    rc, out, err = self.connection.run_ps(
+                        script, timeout=self.default_timeout)
+            else:
+                rc, out, err = self.connection.run_ps(script, timeout=self.default_timeout)
         except Exception as e:
             # Channel-level failure — cannot even attempt the action.
             raise ExecutorError(
