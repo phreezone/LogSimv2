@@ -27,10 +27,12 @@
 # defaults and the dev-only stub identity, so an end user edits .env only and
 # never has to touch config.json.
 
+import base64
 import os
 import re
 import socket
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -272,6 +274,69 @@ class WorkstationConnection:
         out = (result.std_out or b"").decode("utf-8", "replace").strip()
         err = (result.std_err or b"").decode("utf-8", "replace").strip()
         return rc, out, err
+
+    # Where run_ps_file stages its transient .ps1 (world-writable, no env
+    # expansion needed so every step routes through a plain `cmd /c`).
+    STAGE_DIR = r"C:\Users\Public"
+
+    def run_ps_file(self, script, timeout=None):
+        """Run a PowerShell snippet by DROPPING IT AS A .ps1 ON THE BOX and
+        invoking it with `powershell -File`, instead of pywinrm's default
+        `powershell -EncodedCommand` (what run_ps does).
+
+        Why: the encoded-command transport itself trips Cortex "Script Engine
+        Activity" / "suspicious base64-encoded commands" on EVERY delivery — a
+        delivery-mechanism artifact unrelated to the technique. That high-volume
+        alert burst fragments the endpoint incident (observed: scenario 26 split
+        into two cases, one a pure delivery-noise satellite). A file invocation
+        removes the encoded-command signature so the run coalesces into one case
+        and the case reflects technique behaviour, not the harness.
+
+        Mechanism (no PowerShell in the drop path — all steps go through cmd.exe
+        so nothing here re-introduces an encoded-command delivery):
+          1. base64 the script in Python (base64 is cmd-echo-safe: no & | < > ^ % ").
+          2. echo it to a .b64 on the box in <=6000-char chunks (cmd line limit).
+          3. `certutil -decode` the .b64 -> .ps1 (certutil tolerates the embedded
+             CRLFs the chunked echoes leave in the base64 stream).
+          4. `powershell -File script.ps1` — the actual, non-encoded execution.
+          5. delete both files.
+
+        Returns (rc, stdout, stderr) from step 4, same contract as run_ps. Raises
+        ConnectionError only on a channel-level failure. A staging failure (echo
+        or certutil) raises Executor_-visible ConnectionError so the caller can
+        fall back to run_ps."""
+        token = uuid.uuid4().hex[:12]
+        b64path = rf"{self.STAGE_DIR}\xdr_{token}.b64"
+        ps1path = rf"{self.STAGE_DIR}\xdr_{token}.ps1"
+        b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
+
+        try:
+            CHUNK = 6000
+            for idx in range(0, len(b64), CHUNK):
+                chunk = b64[idx:idx + CHUNK]
+                redir = ">" if idx == 0 else ">>"
+                rc, out, err = self.run_cmd("cmd", ["/c", f"echo {chunk}{redir}{b64path}"])
+                if rc != 0:
+                    raise ConnectionError(
+                        f"run_ps_file: staging chunk write failed (rc={rc}): {err or out}")
+
+            rc, out, err = self.run_cmd(
+                "cmd", ["/c", f'certutil -f -decode "{b64path}" "{ps1path}"'])
+            if rc != 0:
+                raise ConnectionError(
+                    f"run_ps_file: certutil decode failed (rc={rc}): {err or out}")
+
+            rc, out, err = self.run_cmd(
+                "cmd", ["/c",
+                        f'powershell.exe -NonInteractive -NoProfile '
+                        f'-ExecutionPolicy Bypass -File "{ps1path}"'])
+            return rc, out, err
+        finally:
+            # Best-effort cleanup; never mask the execution result.
+            try:
+                self.run_cmd("cmd", ["/c", f'del /f /q "{b64path}" "{ps1path}"'])
+            except Exception:
+                pass
 
     # ---- identity discovery --------------------------------------------------
 
