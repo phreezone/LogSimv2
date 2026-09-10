@@ -4122,7 +4122,7 @@
     "transport": "http",
     "collector_id": "proofpoint_collector",
     "internal_domain": "examplecorp.com",
-    "cluster_id": "pharmtech_hosted",
+    "cluster_id": "examplecorp_hosted",
     "campaign_ids": [
       "CMP-2024-001",
       "CMP-2024-002",

@@ -245,7 +245,20 @@ def _make_guid():
             f"{random.randint(0x100000000000, 0xFFFFFFFFFFFF):012X}}}")
 
 
-def _make_message_id(local_part="user", domain="mail.examplecorp.com"):
+def _make_message_id(local_part="user", domain=None, sender=None):
+    """Build a Message-ID.
+
+    The Message-ID is issued by the SENDING MTA, so for inbound external mail it
+    carries the sender's domain -- not the receiving organisation's.  Pass either
+    an explicit `domain` or the full `sender` address to derive it from.  A
+    sender-domain mismatch here is exactly what a header-anomaly rule looks for,
+    so getting it wrong on every message trains the wrong intuition.
+    """
+    if domain is None:
+        if sender and "@" in sender:
+            domain = f"mail.{sender.split('@', 1)[1]}"
+        else:
+            domain = "mail.examplecorp.com"
     rand = random.randint(100000000, 999999999)
     return f"<{rand}.JavaMail.{local_part}@{domain}>"
 
@@ -302,7 +315,9 @@ def _internal_domain(config):
 
 
 def _cluster_id(config):
-    return _cf(config).get("cluster_id", "pharmtech_hosted")
+    # Default is a tenant-shaped name; "pharmtech_hosted" is the sample value from
+    # Proofpoint's own API documentation and should not ship as our cluster.
+    return _cf(config).get("cluster_id", "examplecorp_hosted")
 
 
 def _campaign_id(config):
@@ -320,7 +335,90 @@ def _benign_sender(config):
     return f"{local}@{domain}"
 
 
-def _threat_sender(config):
+# Brand-impersonation lures: the sender and the subject have to name the SAME
+# brand.  Real campaigns build one pretext end to end; sampling a sender pool and
+# a subject pool independently produced Geek Squad billing scams from
+# hr@hr-notification.co.
+_THEMED_LURES = {
+    "microsoft": (
+        ["security@micros0ft-support.com", "alert@microsoft365-security.info",
+         "no-reply@office-update-required.com"],
+        ["Your Microsoft 365 account requires verification",
+         "Microsoft Support: Your computer is at risk",
+         "Microsoft 365: Unusual sign-in activity detected",
+         "Action Required: Your Microsoft password expires today"],
+    ),
+    "docusign": (
+        ["no-reply@docusign-notify.net", "files@shared-document.link"],
+        ["Your DocuSign document is waiting",
+         "DocuSign: Completed - Please review and sign",
+         "Secure File Share: Invoice-{num}.pdf"],
+    ),
+    "sharepoint": (
+        ["info@sharepoint-online.net", "alert@onedrive-share.xyz"],
+        ["SharePoint: {name} shared a document with you",
+         "Your shared file is ready to view",
+         "OneDrive: {name} shared 'Q4-Budget.xlsx' with you"],
+    ),
+    "hr_payroll": (
+        ["hr@hr-notification.co", "payroll@payroll-update.net"],
+        ["HR: Important payroll update required",
+         "Payroll: Action needed before your next deposit",
+         "HR: Updated employee handbook - acknowledgement required"],
+    ),
+    "helpdesk": (
+        ["helpdesk@secure-login-portal.xyz", "support@it-helpdesk-support.net",
+         "noreply@verify-identity.click"],
+        ["IT Support: Password Expiration Notice",
+         "Action Required: Confirm your email address",
+         "URGENT: Your account will be suspended in 24 hours",
+         "Important security notice for your account"],
+    ),
+    "billing": (
+        ["billing@invoice-delivery.info", "support@account-security-alert.com"],
+        ["Secure File Share: Invoice-{num}.pdf",
+         "Payment Confirmation - Document Attached",
+         "Re: Wire Transfer Approval Needed - Urgent"],
+    ),
+    "zoom": (
+        ["meeting@zoom-meeting-invite.com"],
+        ["Zoom: Meeting Recording Available",
+         "You have (1) pending message in your mailbox",
+         "Voicemail from unknown caller (+1-{num})"],
+    ),
+}
+
+# Consumer-brand callback/TOAD scams: throwaway support domains, never the
+# corporate-impersonation domains above.
+_CALLBACK_LURES = {
+    "Norton":     "norton-billing-support.com",
+    "McAfee":     "mcafee-subscription-desk.com",
+    "Amazon":     "amzn-order-support.info",
+    "Microsoft":  "windows-defender-alert.net",
+    "IRS":        "irs-payment-notice.org",
+    "Geek Squad": "geeksquad-renewal-desk.com",
+    "PayPal":     "paypal-billing-notice.net",
+}
+
+
+def _themed_lure(config):
+    """Return (sender, subject) drawn from the SAME brand theme."""
+    theme = random.choice(list(_THEMED_LURES))
+    senders, subjects = _THEMED_LURES[theme]
+    configured = _cf(config).get("threat_senders", [])
+    pool = [x for x in senders if not configured or x in configured] or senders
+    return random.choice(pool), _format_subject(random.choice(subjects))
+
+
+def _threat_sender(config, theme=None):
+    """Pick a threat sender.
+
+    `theme` selects a brand-consistent sender when the caller has already chosen a
+    themed subject; without it the historical random pick is kept for generators
+    whose subjects are brand-neutral.
+    """
+    if theme and theme in _THEMED_LURES:
+        return random.choice(_THEMED_LURES[theme][0])
     senders = _cf(config).get("threat_senders", [])
     if senders:
         return random.choice(senders)
@@ -425,7 +523,7 @@ def _base_message(config, recipients, guid, sender, sender_ip, subject):
         "_log_type":          "message-delivered",  # caller overrides
         "GUID":               guid,
         "QID":                f"r{random.choice('abcdefghijklmnopqrstuvwxyz')}{random.randint(1,9)}{random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ')}{random.randint(10000,99999)}",
-        "messageID":          _make_message_id(local),
+        "messageID":          _make_message_id(local, sender=sender),
         "messageTime":        _now_iso(),
         "recipient":          recipients,
         "toAddresses":        recipients,
@@ -518,9 +616,8 @@ def _generate_phishing_url(config, session_context=None):
     all_emails  = _get_all_emails(config, session_context)
     recipients  = _pick_recipients(all_emails, count=random.randint(1, 2))
     guid        = _make_guid()
-    sender      = _threat_sender(config)
+    sender, subject = _themed_lure(config)
     sender_ip   = _random_external_ip()
-    subject     = _format_subject(random.choice(_PHISHING_SUBJECTS))
     camp_id     = _campaign_id(config)
 
     url          = _malicious_url(config)
@@ -559,9 +656,8 @@ def _generate_malware_attachment(config, session_context=None):
     all_emails  = _get_all_emails(config, session_context)
     recipients  = _pick_recipients(all_emails, count=random.randint(1, 3))
     guid        = _make_guid()
-    sender      = _threat_sender(config)
+    sender, subject = _themed_lure(config)
     sender_ip   = _random_external_ip()
-    subject     = _format_subject(random.choice(_PHISHING_SUBJECTS))
     camp_id     = _campaign_id(config)
 
     tmpl = random.choice(_MALICIOUS_ATTACHMENT_TEMPLATES)
@@ -673,7 +769,19 @@ def _generate_bec_impostor(config, session_context=None):
 
     msg["classification"] = "IMPOSTOR"
     msg["threatStatus"]   = "active"
-    _strip_none_threat_fields(msg)  # BEC has no URL/threatID
+    # TAP raises impostor detections as a threat, so the message carries a
+    # threatsInfoMap entry.  threatType is "messageText" -- BEC has no URL or
+    # attachment payload, the message body itself is the threat.
+    _bec_threat_id = hashlib.sha256(f"{guid}{sender}".encode()).hexdigest()
+    msg["threatsInfoMap"] = _make_threats_info_map(
+        classification="IMPOSTOR",
+        threat_id=_bec_threat_id,
+        threat_type="messageText",
+        guid=guid,
+        campaign_id=_campaign_id(config),
+    )
+    msg["threatID"] = _bec_threat_id
+    _strip_none_threat_fields(msg)  # BEC has no URL
     return json.dumps(msg, default=str)
 
 
@@ -778,16 +886,20 @@ def _generate_callback_phishing(config, session_context=None):
     all_emails = _get_all_emails(config, session_context)
     recipients  = _pick_recipients(all_emails, count=random.randint(1, 3))
     guid        = _make_guid()
-    sender      = _threat_sender(config)
+    # Brand first: the sender domain and the subject must name the same brand.
+    brand       = random.choice(list(_CALLBACK_LURES))
+    sender      = f"{random.choice(['billing', 'support', 'no-reply', 'renewal'])}@{_CALLBACK_LURES[brand]}"
     sender_ip   = _random_external_ip()
-    subject     = random.choice([
-        "Your Norton subscription has been renewed - Call to cancel",
-        "McAfee Security Alert: Unauthorized access detected",
-        f"Amazon: Suspicious purchase $499 - Call +1-888-{random.randint(100,999)}-{random.randint(1000,9999)}",
-        "Microsoft Support: Your computer is at risk",
-        "IRS Notice: Overdue tax payment - Call immediately",
-        f"Geek Squad: Auto-renewal of $399 - Call +1-855-{random.randint(100,999)}-{random.randint(1000,9999)}",
-    ])
+    _callback_no = f"+1-{random.choice(['888', '855', '866', '877'])}-{random.randint(100,999)}-{random.randint(1000,9999)}"
+    subject     = {
+        "Norton":     f"Your Norton subscription has been renewed - Call {_callback_no} to cancel",
+        "McAfee":     "McAfee Security Alert: Unauthorized access detected",
+        "Amazon":     f"Amazon: Suspicious purchase $499 - Call {_callback_no}",
+        "Microsoft":  "Microsoft Support: Your computer is at risk",
+        "IRS":        f"IRS Notice: Overdue tax payment - Call {_callback_no} immediately",
+        "Geek Squad": f"Geek Squad: Auto-renewal of $399 - Call {_callback_no}",
+        "PayPal":     f"PayPal: Payment of $749.99 authorised - Call {_callback_no} to dispute",
+    }[brand]
 
     msg = _base_message(config, recipients, guid, sender, sender_ip, subject)
     msg["_log_type"]          = "message-blocked"
@@ -841,7 +953,7 @@ def _generate_click_blocked(config, session_context=None, guid_override=None,
     event = {
         "_log_type":      "click-blocked",
         "GUID":           guid,
-        "messageID":      _make_message_id(recipient_email.split("@")[0]),
+        "messageID":      _make_message_id(_sender.split("@")[0], sender=_sender),
         "clickTime":      _now_iso(),
         "clickIP":        click_ip,
         "userAgent":      random.choice(_BROWSER_UA),
@@ -910,7 +1022,7 @@ def _generate_click_permitted(config, session_context=None, guid_override=None,
     event = {
         "_log_type":      "click-permitted",
         "GUID":           guid,
-        "messageID":      _make_message_id(recipient_email.split("@")[0]),
+        "messageID":      _make_message_id(_sender.split("@")[0], sender=_sender),
         "clickTime":      _click_t,
         "clickIP":        click_ip,
         "userAgent":      random.choice(_BROWSER_UA),

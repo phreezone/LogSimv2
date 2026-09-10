@@ -220,6 +220,20 @@ def _format_duration(seconds):
     return f"{h:01d}:{m:02d}:{s:02d}"
 
 
+def _format_vpn_duration(seconds):
+    """VPN session duration for %ASA-4-113019: `Hh:MMm:SSs`.
+
+    113019 is the one message that carries unit suffixes -- real ASA output reads
+    `Duration: 0h:21m:47s`, not the bare `0:21:47` used by connection teardowns
+    (302014/302016), which _format_duration above still serves.  The
+    CiscoASA_1_4.xif regex treats the h/m/s suffixes as optional, so this parses
+    identically while matching Cisco's documented format.
+    """
+    h, rem = divmod(int(seconds), 3600)
+    m, s   = divmod(rem, 60)
+    return f"{h:01d}h:{m:02d}m:{s:02d}s"
+
+
 def _random_external_ip():
     """Public (non-RFC-1918) IP from the shared ambient external-traffic pool.
 
@@ -559,7 +573,7 @@ def _generate_anyconnect_vpn_log(config, user=None, public_ip=None, session_cont
         message = (
             f"%ASA-4-113019: Group = {group_name}, Username = {_vpn_user(user)}, IP = {public_ip}, "
             f"Session disconnected. Session Type: {session_type}, "
-            f"Duration: {_format_duration(duration)}, "
+            f"Duration: {_format_vpn_duration(duration)}, "
             f"Bytes xmt: {random.randint(5000, 1000000)}, "
             f"Bytes rcv: {random.randint(10000, 5000000)}, Reason: User Requested"
         )
@@ -1931,7 +1945,7 @@ def _simulate_vpn_data_exfil(config, session_context=None):
         _generate_full_syslog_message(config,
             f"%ASA-4-113019: Group = {group_name}, Username = {_vpn_user(user)}, IP = {public_ip}, "
             f"Session disconnected. Session Type: {session_type}, "
-            f"Duration: {_format_duration(duration)}, "
+            f"Duration: {_format_vpn_duration(duration)}, "
             f"Bytes xmt: {bytes_xmt}, Bytes rcv: {bytes_rcv}, Reason: User Requested", now),
     ]
 

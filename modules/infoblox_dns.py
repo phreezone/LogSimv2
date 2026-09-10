@@ -711,8 +711,14 @@ def _generate_dhcp_starvation(config, client_ip=None, session_context=None):
     print(f"    - Infoblox Module simulating: DHCP Starvation ({count} spoofed DISCOVERs)")
     logs = []
     for _ in range(count):
-        # Fully random MAC — no organisational OUI prefix (starvation signal)
-        mac  = f"{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
+        # Randomised MAC with no organisational OUI — that IS the starvation
+        # signal.  The first octet is masked to locally-administered UNICAST
+        # ((b & 0xFE) | 0x02): a random octet sets the multicast bit half the
+        # time, and a multicast source address is invalid in a DHCP chaddr, so
+        # it would be dropped rather than logged.  This is what Yersinia and
+        # dhcpstarv actually put on the wire.
+        _first = (random.randint(0, 255) & 0xFE) | 0x02
+        mac  = ":".join([f"{_first:02x}"] + [f"{random.randint(0,255):02x}" for _ in range(5)])
         txid = hex(random.randint(0, 2**32))
         log  = _build_dhcp_log(config, "DHCPDISCOVER", "255.255.255.255", mac, "UNKNOWN", txid, relay_ip)
         if log:
