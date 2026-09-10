@@ -136,7 +136,9 @@ def _build_error_log_line(config, source_ip, level, error_code, message):
     pid = random.randint(1000, 9999)
     tid = random.randint(140000000000, 140999999999)  # realistic Linux pthread_t range
 
-    syslog_header = f"{_syslog_pri(config)}{datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')} {hostname} httpd[{pid}]:"
+    # PRI severity follows this line's Apache LogLevel, as a real mod_syslog frame does.
+    syslog_header = (f"{_syslog_pri(config, level)}"
+                     f"{datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')} {hostname} httpd[{pid}]:")
     # severity1 regex: ]:\s*\[([^\]]+)\]  — matches ]: [level]
     # pid regex:       \[\w+\s(\d+)\:     — matches [pid NNN:tid
     # tid regex:       tid\s(\d+)         — matches tid NNN
@@ -215,20 +217,48 @@ def _is_attack_tool_ua(ua):
     return any(tok in low for tok in _ATTACK_TOOL_UA_TOKENS)
 
 
-def _syslog_pri(config):
-    """Leading <PRI> for Apache syslog lines, or "" when disabled.
+# Apache LogLevel names map onto syslog severities of the same name; Apache logs
+# to syslog through mod_syslog (ErrorLog syslog:<facility>) or, for the access
+# log, by piping to logger(1), and either way the severity travels in the PRI.
+# https://httpd.apache.org/docs/2.4/logs.html
+_SYSLOG_SEVERITY = {
+    "emerg": 0, "alert": 1, "crit": 2, "error": 3,
+    "warn":  4, "notice": 5, "info":  6, "debug": 7,
+}
 
-    Apache logging via syslog emits facility local1 by default (`ErrorLog
-    syslog:local1`); local1.notice = 17*8 + 5 = 141.  Off by default: the XSIAM
-    v1.3 ApacheWebServer modeling rule extracts observer_name from the leading
-    "timestamp hostname" pair, and apache_httpd_raw is currently parsing cleanly
-    without a PRI.  Set apache_config.emit_syslog_pri = true to turn it on, then
-    confirm xdm.source.ipv4 and observer_name still populate before keeping it.
+# Apache's ErrorLog syslog default facility is local7 (23), not local1 -- the
+# local1 form only appears when an admin writes `ErrorLog syslog:local1`.
+_DEFAULT_FACILITY = 23      # local7
+
+
+def _syslog_pri(config, level="info"):
+    """Leading <PRI> for Apache syslog lines, or "" when explicitly disabled.
+
+    On by default.  The XSIAM ApacheWebServer pack's own documented ingestion is
+    `CustomLog "|/usr/bin/logger -t httpd -p <facility>.<priority>" combined`, and
+    piping through logger(1) is exactly what produces a PRI -- so the vendor's
+    documented path emits one, and a line without it is the divergence.  Every
+    other syslog module in this project (Infoblox, ASA, FortiGate) already emits
+    a PRI over the same Broker VM syslog transport and parses cleanly, which is
+    the practical confirmation that the collector consumes the PRI as RFC3164
+    framing rather than passing it through to the parsing rule.
+
+    Severity tracks the Apache LogLevel of the line rather than being a constant:
+    the error log carries notice/warn/error/crit per message, and a real syslog
+    frame reports that severity in the PRI.  Access-log lines are informational.
+
+    Set apache_config.emit_syslog_pri = false to switch it off; syslog_facility
+    (default 23 / local7) and syslog_pri (a hard override) are also honoured.
     """
     conf = config.get(CONFIG_KEY, {})
-    if not conf.get("emit_syslog_pri", False):
+    if not conf.get("emit_syslog_pri", True):
         return ""
-    return f"<{conf.get('syslog_pri', 141)}>"
+    override = conf.get("syslog_pri")
+    if override is not None:
+        return f"<{override}>"
+    facility = conf.get("syslog_facility", _DEFAULT_FACILITY)
+    severity = _SYSLOG_SEVERITY.get(str(level).lower(), 6)
+    return f"<{facility * 8 + severity}>"
 
 
 def _get_user_agent(config, event_type="benign"):
