@@ -278,6 +278,10 @@ def get_random_vpn_ip_ctx(config):
         "domain":   p["domain"],
         "country":  p["country"],
         "is_proxy": True,
+        # Vendors that categorise anonymizers report the service type, not just a
+        # generic proxy bit (Okta: debugContext.debugData.proxyType and
+        # request.ipChain[].ipDetails.ipServiceCategories.type).
+        "proxy_type": "vpn",
     }
 
 
@@ -295,18 +299,27 @@ def get_random_anon_ip_ctx(config):
         node = random.choice(tor_nodes)
         if isinstance(node, dict):
             ip      = node.get("ip", "185.220.101.1")
-            country = node.get("country", "Unknown")
+            country = node.get("country")
+            # Onionoo-enriched nodes carry the exit's real hosting AS.  Prefer it:
+            # a GeoIP-backed vendor resolves an exit node to its hosting provider
+            # ("FranTech Solutions", "netcup GmbH"), never to a literal
+            # "TOR Exit Node" / AS0, which no provider would ever return.
+            isp = node.get("isp")
+            asn = node.get("asn")
         else:
-            ip, country = str(node), "Unknown"
+            ip, country, isp, asn = str(node), None, None, None
+        if country in ("Unknown", ""):
+            country = None
         return {
             "ip":       ip,
             "city":     None,
             "state":    None,
-            "isp":      "TOR Exit Node",
-            "asn":      0,
+            "isp":      isp,
+            "asn":      asn,
             "domain":   None,
             "country":  country,
             "is_proxy": True,
+            "proxy_type": "tor",
         }
     return get_random_vpn_ip_ctx(config)
 
