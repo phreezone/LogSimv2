@@ -78,9 +78,21 @@ def fetch_tor_exit_nodes():
         response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
         
         ips = response.text.strip().splitlines()
-        tor_nodes = [{"ip": ip, "country": "Unknown"} for ip in ips]
-        
+        tor_nodes = [{"ip": ip.strip()} for ip in ips if ip.strip()]
+
+        # The bulk list is IPs only.  Onionoo supplies the country and hosting AS
+        # that a GeoIP-backed vendor would report for an exit node, so events do
+        # not go out with country="Unknown" and a null ISP/ASN.
+        from modules.tor_enrichment import enrich_tor_nodes
+        tor_nodes, geo_stats = enrich_tor_nodes(tor_nodes)
+
         print(f"Successfully fetched {len(tor_nodes)} live Tor exit nodes.")
+        if geo_stats["onionoo"]:
+            print(f"  Onionoo enriched {geo_stats['resolved']}/{geo_stats['total']} "
+                  f"({geo_stats['join_rate']}%) with country + AS.")
+        else:
+            print("  WARNING: Onionoo enrichment unavailable — Tor events will carry a "
+                  "null country and no ASN.")
         return tor_nodes
     except requests.exceptions.RequestException as e:
         # config.json no longer ships a static fallback list (it went stale — only 1 of

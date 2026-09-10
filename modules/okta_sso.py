@@ -93,20 +93,81 @@ def _stable_user_id(username):
     return "00u" + "".join(chars)
 
 # ISO-3166-1 alpha-2 → full country name (as Okta geographicalContext returns it)
-_COUNTRY_NAMES = {
-    "US": "United States",  "GB": "United Kingdom", "CA": "Canada",
-    "AU": "Australia",      "DE": "Germany",         "FR": "France",
-    "JP": "Japan",          "CN": "China",           "RU": "Russia",
-    "IN": "India",          "BR": "Brazil",          "NL": "Netherlands",
-    "SE": "Sweden",         "IT": "Italy",           "ES": "Spain",
-    "CH": "Switzerland",    "CZ": "Czech Republic",  "FI": "Finland",
-    "KR": "South Korea",    "KP": "North Korea",     "RO": "Romania",
-    "AR": "Argentina",      "IR": "Iran",            "NG": "Nigeria",
-    "PH": "Philippines",    "UA": "Ukraine",         "VN": "Vietnam",
-    "ZA": "South Africa",   "MX": "Mexico",          "SG": "Singapore",
-    "HK": "Hong Kong",      "PK": "Pakistan",        "EG": "Egypt",
-    "SA": "Saudi Arabia",   "TH": "Thailand",        "ID": "Indonesia",
+# ISO-3166-1 alpha-2 -> (display name, centroid lat, centroid lon).
+# Single source of truth for both _COUNTRY_NAMES and _COUNTRY_CENTROIDS: Okta
+# reports a full country name AND a lat/lon that agrees with it, so the two must
+# never drift apart.  The config references 125 country codes; the previous
+# hand-rolled names map covered ~33, so _country_name() returned bare ISO codes
+# ("PL") where Okta always returns a full name ("Poland").
+_COUNTRY_DATA = {
+    "AD": ("Andorra",            42.5462,   1.6016), "AE": ("United Arab Emirates", 23.4241,  53.8478),
+    "AL": ("Albania",            41.1533,  20.1683), "AM": ("Armenia",              40.0691,  45.0382),
+    "AR": ("Argentina",         -38.4161, -63.6167), "AT": ("Austria",              47.5162,  14.5501),
+    "AU": ("Australia",         -25.2744, 133.7751), "AZ": ("Azerbaijan",           40.1431,  47.5769),
+    "BA": ("Bosnia and Herzegovina", 43.9159, 17.6791), "BE": ("Belgium",           50.5039,   4.4699),
+    "BG": ("Bulgaria",           42.7339,  25.4858), "BO": ("Bolivia",             -16.2902, -63.5887),
+    "BR": ("Brazil",            -14.2350, -51.9253), "BW": ("Botswana",            -22.3285,  24.6849),
+    "BY": ("Belarus",            53.7098,  27.9534), "CA": ("Canada",               56.1304,-106.3468),
+    "CH": ("Switzerland",        46.8182,   8.2275), "CI": ("Ivory Coast",           7.5400,  -5.5471),
+    "CK": ("Cook Islands",      -21.2367,-159.7777), "CL": ("Chile",               -35.6751, -71.5430),
+    "CM": ("Cameroon",            7.3697,  12.3547), "CN": ("China",                35.8617, 104.1954),
+    "CO": ("Colombia",            4.5709, -74.2973), "CR": ("Costa Rica",            9.7489, -83.7534),
+    "CU": ("Cuba",               21.5218, -77.7812), "CY": ("Cyprus",               35.1264,  33.4299),
+    "CZ": ("Czech Republic",     49.8175,  15.4730), "DE": ("Germany",              51.1657,  10.4515),
+    "DK": ("Denmark",            56.2639,   9.5018), "DZ": ("Algeria",              28.0339,   1.6596),
+    "EE": ("Estonia",            58.5953,  25.0136), "EG": ("Egypt",                26.8206,  30.8025),
+    "ER": ("Eritrea",            15.1794,  39.7823), "ES": ("Spain",                40.4637,  -3.7492),
+    "ET": ("Ethiopia",            9.1450,  40.4897), "FI": ("Finland",              61.9241,  25.7482),
+    "FJ": ("Fiji",              -17.7134, 178.0650), "FR": ("France",               46.2276,   2.2137),
+    "GA": ("Gabon",              -0.8037,  11.6094), "GB": ("United Kingdom",       55.3781,  -3.4360),
+    "GE": ("Georgia",            42.3154,  43.3569), "GH": ("Ghana",                 7.9465,  -1.0232),
+    "GR": ("Greece",             39.0742,  21.8243), "GU": ("Guam",                 13.4443, 144.7937),
+    "HK": ("Hong Kong",          22.3193, 114.1694), "HR": ("Croatia",              45.1000,  15.2000),
+    "HT": ("Haiti",              18.9712, -72.2852), "HU": ("Hungary",              47.1625,  19.5033),
+    "ID": ("Indonesia",          -0.7893, 113.9213), "IE": ("Ireland",              53.4129,  -8.2439),
+    "IL": ("Israel",             31.0461,  34.8516), "IN": ("India",                20.5937,  78.9629),
+    "IR": ("Iran",               32.4279,  53.6880), "IS": ("Iceland",              64.9631, -19.0208),
+    "IT": ("Italy",              41.8719,  12.5674), "JO": ("Jordan",               30.5852,  36.2384),
+    "JP": ("Japan",              36.2048, 138.2529), "KE": ("Kenya",                -0.0236,  37.9062),
+    "KG": ("Kyrgyzstan",         41.2044,  74.7661), "KH": ("Cambodia",             12.5657, 104.9910),
+    "KP": ("North Korea",        40.3399, 127.5101), "KR": ("South Korea",          35.9078, 127.7669),
+    "KW": ("Kuwait",             29.3117,  47.4818), "KZ": ("Kazakhstan",           48.0196,  66.9237),
+    "LB": ("Lebanon",            33.8547,  35.8623), "LK": ("Sri Lanka",             7.8731,  80.7718),
+    "LR": ("Liberia",             6.4281,  -9.4295), "LT": ("Lithuania",            55.1694,  23.8813),
+    "LU": ("Luxembourg",         49.8153,   6.1296), "LV": ("Latvia",               56.8796,  24.6032),
+    "MA": ("Morocco",            31.7917,  -7.0926), "MD": ("Moldova",              47.4116,  28.3699),
+    "ME": ("Montenegro",         42.7087,  19.3744), "MG": ("Madagascar",          -18.7669,  46.8691),
+    "ML": ("Mali",               17.5707,  -3.9962), "MN": ("Mongolia",             46.8625, 103.8467),
+    "MR": ("Mauritania",         21.0079, -10.9408), "MT": ("Malta",                35.9375,  14.3754),
+    "MX": ("Mexico",             23.6345,-102.5528), "MY": ("Malaysia",              4.2105, 101.9758),
+    "MZ": ("Mozambique",        -18.6657,  35.5296), "NA": ("Namibia",             -22.9576,  18.4904),
+    "NE": ("Niger",              17.6078,   8.0817), "NG": ("Nigeria",               9.0820,   8.6753),
+    "NL": ("Netherlands",        52.1326,   5.2913), "NO": ("Norway",               60.4720,   8.4689),
+    "NP": ("Nepal",              28.3949,  84.1240), "NZ": ("New Zealand",         -40.9006, 174.8860),
+    "OM": ("Oman",               21.4735,  55.9754), "PA": ("Panama",                8.5380, -80.7821),
+    "PE": ("Peru",               -9.1900, -75.0152), "PG": ("Papua New Guinea",     -6.3150, 143.9555),
+    "PH": ("Philippines",        12.8797, 121.7740), "PK": ("Pakistan",             30.3753,  69.3451),
+    "PL": ("Poland",             51.9194,  19.1451), "PT": ("Portugal",             39.3999,  -8.2245),
+    "PW": ("Palau",               7.5150, 134.5825), "QA": ("Qatar",                25.3548,  51.1839),
+    "RO": ("Romania",            45.9432,  24.9668), "RS": ("Serbia",               44.0165,  21.0059),
+    "RU": ("Russia",             61.5240, 105.3188), "RW": ("Rwanda",               -1.9403,  29.8739),
+    "SA": ("Saudi Arabia",       23.8859,  45.0792), "SB": ("Solomon Islands",      -9.6457, 160.1562),
+    "SE": ("Sweden",             60.1282,  18.6435), "SG": ("Singapore",             1.3521, 103.8198),
+    "SI": ("Slovenia",           46.1512,  14.9955), "SK": ("Slovakia",             48.6690,  19.6990),
+    "SN": ("Senegal",            14.4974, -14.4524), "SV": ("El Salvador",          13.7942, -88.8965),
+    "TH": ("Thailand",           15.8700, 100.9925), "TN": ("Tunisia",              33.8869,   9.5375),
+    "TR": ("Turkey",             38.9637,  35.2433), "TT": ("Trinidad and Tobago",  10.6918, -61.2225),
+    "TV": ("Tuvalu",             -7.1095, 177.6493), "TW": ("Taiwan",               23.6978, 120.9605),
+    "TZ": ("Tanzania",           -6.3690,  34.8888), "UA": ("Ukraine",              48.3794,  31.1656),
+    "UG": ("Uganda",              1.3733,  32.2903), "US": ("United States",        39.8283, -98.5795),
+    "UY": ("Uruguay",           -32.5228, -55.7658), "UZ": ("Uzbekistan",           41.3775,  64.5853),
+    "VE": ("Venezuela",           6.4238, -66.5897), "VN": ("Vietnam",              14.0583, 108.2772),
+    "ZA": ("South Africa",      -30.5595,  22.9375), "ZM": ("Zambia",              -13.1339,  27.8493),
+    "ZW": ("Zimbabwe",          -19.0154,  29.1549),
 }
+
+_COUNTRY_NAMES     = {k: v[0] for k, v in _COUNTRY_DATA.items()}
+_COUNTRY_CENTROIDS = {k: (v[1], v[2]) for k, v in _COUNTRY_DATA.items()}
 
 def _country_name(code):
     """Convert ISO-2 country code to full name. Falls back to code if unknown."""
@@ -162,12 +223,58 @@ _CITY_COORDS = {
     "Manila":       (14.5995, 120.9842),
     "Johannesburg": (-26.2041, 28.0473),
     "Kyiv":         (50.4504, 30.5245),
+    # Cities referenced by config benign_ingress_sources
+    "Melbourne":    (-37.8136, 144.9631),
+    "Montreal":     (45.5019, -73.5674),
+    "Munich":       (48.1351, 11.5820),
+    "Frankfurt":    (50.1109,  8.6821),
+    "Leeds":        (53.8008, -1.5491),
+    "St Louis":     (38.6270, -90.1994),
+    "Newark":       (40.7357, -74.1724),
+    # Cities referenced by _PROXY_HOPS (CDN / front-door ipChain entries)
+    "Redmond":      (47.6740, -122.1215),
+    "Ashburn":      (39.0438, -77.4874),
+    "Mountain View":(37.3861, -122.0839),
+}
+
+# Per-source enrichment for config `benign_ingress_sources`, keyed by the source
+# `name`.  The config carries only name/ip_range/country, so city, state, ISP and
+# ASN were all null on every Okta event; real Okta populates them for any public
+# source address.
+_SOURCE_ENRICHMENT = {
+    "Telstra Sydney":              ("Sydney",    "New South Wales", "Telstra Corporation",      1221),
+    "Optus Melbourne":             ("Melbourne", "Victoria",        "SingTel Optus",            7474),
+    "Rogers Toronto":              ("Toronto",   "Ontario",         "Rogers Communications",     812),
+    "Bell Canada Montreal":        ("Montreal",  "Quebec",          "Bell Canada",               577),
+    "Vodafone Kabel Munich":       ("Munich",    "Bavaria",         "Vodafone GmbH",           31334),
+    "Deutsche Telekom Frankfurt":  ("Frankfurt", "Hesse",           "Deutsche Telekom AG",      3320),
+    "BT Broadband London":         ("London",    "England",         "British Telecommunications", 2856),
+    "Sky Broadband Leeds":         ("Leeds",     "England",         "Sky UK Limited",           5607),
+    "Cox Phoenix AZ":              ("Phoenix",   "Arizona",         "Cox Communications",      22773),
+    "AT&T Dallas TX":              ("Dallas",    "Texas",           "AT&T Services",            7018),
+    "Comcast Cable Denver CO":     ("Denver",    "Colorado",        "Comcast Cable",            7922),
+    "Charter Spectrum St Louis MO":("St Louis",  "Missouri",        "Charter Communications",  20115),
+    "Verizon FiOS Newark NJ":      ("Newark",    "New Jersey",      "Verizon Business",          701),
 }
 
 
-def _city_geolocation(city_name):
+def _city_geolocation(city_name, country_code=None):
     """Return approximate (lat, lon) for a known city, with small jitter.
-    Falls back to random global coordinates for unknown cities."""
+
+    Falls back to the centroid of `country_code` (wider jitter) when the city is
+    unknown, and returns None when the country is unknown too.  It must never
+    return a coordinate outside the country named alongside it in
+    geographicalContext: Okta's own geolocation is always internally consistent,
+    and XSIAM geo-velocity / impossible-travel analytics measure the distance
+    between successive coordinates.
+
+    Returning None rather than (0, 0) for an unplaceable address is the point.
+    (0, 0) is a real coordinate in the Gulf of Guinea, so every such event landed
+    on the same spot and handed impossible-travel a huge, perfectly repeatable
+    distance from any genuine login -- worse than the random scatter it replaced.
+    Okta emits a null geolocation when its provider cannot place the address, so
+    null is both the accurate value and the inert one.
+    """
     base = _CITY_COORDS.get(city_name)
     if base:
         # Add ±0.05° jitter (~5 km) so coordinates look realistic but not identical
@@ -175,7 +282,26 @@ def _city_geolocation(city_name):
             round(base[0] + random.uniform(-0.05, 0.05), 4),
             round(base[1] + random.uniform(-0.05, 0.05), 4),
         )
-    return (round(random.uniform(-90, 90), 4), round(random.uniform(-180, 180), 4))
+    cc = str(country_code or "").upper()
+    if len(cc) != 2:
+        # Accept a full country name ("United States") as well as an ISO-2 code
+        cc = next((k for k, v in _COUNTRY_NAMES.items() if v.upper() == cc), cc)
+    centroid = _COUNTRY_CENTROIDS.get(cc)
+    if centroid:
+        # ±1.5° (~165 km) keeps the point inside all but the smallest countries
+        return (
+            round(centroid[0] + random.uniform(-1.5, 1.5), 4),
+            round(centroid[1] + random.uniform(-1.5, 1.5), 4),
+        )
+    return None
+
+
+def _geolocation_obj(city_name, country_code=None):
+    """geographicalContext.geolocation as Okta renders it: {lat, lon} or null."""
+    coords = _city_geolocation(city_name, country_code)
+    if coords is None:
+        return None
+    return {"lat": coords[0], "lon": coords[1]}
 
 # --- UTILITY ---
 
@@ -183,9 +309,25 @@ def _get_threat_interval(threat_level, config):
     return config.get("threat_generation_levels", {}).get(threat_level, 7200)
 
 
+# Source lists that are anonymizer pools rather than ordinary ingress ranges.
+# Their entries must never be dressed up as a corporate broadband source.
+_ANONYMIZER_SOURCE_LISTS = {"tor_exit_nodes": "tor"}
+
+
 def _get_random_ip_and_context(config, source_list_key="benign_ingress_sources"):
     source_list = config.get(source_list_key, [{}])
+    proxy_type = _ANONYMIZER_SOURCE_LISTS.get(source_list_key)
     if not source_list:
+        # The Tor list is live-fetched and ships EMPTY in config.json, so this
+        # branch is the normal path whenever the fetch has not run or failed.
+        # It used to hand back 203.0.113.1 -- an RFC 5737 documentation address --
+        # labelled New York / ExampleISP / AS65500, i.e. a "Tor" event that was
+        # neither Tor nor a plausible public source.  Degrade honestly instead:
+        # keep the anonymizer markers, claim no geo we do not have.
+        if proxy_type:
+            return {"ip": random_external_ip(), "city": None, "country": None,
+                    "state": None, "isp": None, "asn": None, "domain": None,
+                    "is_proxy": True, "proxy_type": proxy_type}
         return {"ip": "203.0.113.1", "city": "New York", "country": "US",
                 "state": "New York", "isp": "ExampleISP", "asn": 65500, "domain": "examplecorp.com", "is_proxy": False}
     source = random.choice(source_list)
@@ -199,7 +341,27 @@ def _get_random_ip_and_context(config, source_list_key="benign_ingress_sources")
     # Fallback if source entry had no ip/ip_range defined
     if not ip:
         ip = "203.0.113." + str(random.randint(1, 254))
-    return {"ip": ip, **source}
+    ctx = {"ip": ip, **source}
+    # Config sources carry only name/ip_range/country, so fill in the geo and
+    # network enrichment Okta reports for every public source address.
+    # Anonymizer pools are keyed by IP, not by a source `name`, and arrive
+    # already enriched (see modules.tor_enrichment) -- so a missed lookup here
+    # must leave their real country/ASN alone rather than blanking it.
+    city, state, isp, asn = _SOURCE_ENRICHMENT.get(
+        source.get("name", ""), (None, None, None, None))
+    for key, value in (("city", city), ("state", state), ("isp", isp), ("asn", asn)):
+        if ctx.get(key) is None and value is not None:
+            ctx[key] = value
+
+    if proxy_type:
+        ctx["is_proxy"]   = True
+        ctx["proxy_type"] = proxy_type
+        ctx.setdefault("domain", None)
+        # An unresolved exit node keeps a null country; "Unknown" is not a country
+        # and _country_name() would echo it verbatim into geographicalContext.
+        if ctx.get("country") in ("Unknown", ""):
+            ctx["country"] = None
+    return ctx
 
 
 def _get_random_user_info(config, session_context=None):
@@ -331,10 +493,19 @@ def _build_client(ip_context, config, interactive_only=False):
             "city":        ip_context.get("city"),
             "country":     _country_name(ip_context.get("country", "")),  # full name per Okta API
             "state":       ip_context.get("state"),
-            "postalCode":  None,
-            "geolocation": dict(zip(("lat", "lon"), _city_geolocation(ip_context.get("city")))),
+            "postalCode":  ip_context.get("postal_code"),
+            "geolocation": _geolocation_obj(
+                ip_context.get("city"), ip_context.get("country")),
         },
-        "zone": "null",  # Okta returns the string "null" when no named zone matches
+        # Verified against Okta's own documented sample event: the string "null",
+        # not JSON null, is what Okta returns when no named zone matches.
+        # https://developer.okta.com/docs/guides/event-hook-implementation/
+        "zone": "null",
+        # Private, stripped before serialisation by _assemble().  Carries the
+        # anonymizer markers (proxy type / operator) through to debugContext and
+        # request.ipChain, which is where Okta actually reports Tor -- without
+        # touching any of the 225 _assemble() call sites.
+        "_ipCtx": ip_context,
     }
 
 
@@ -390,20 +561,60 @@ _PROXY_HOPS = [
 ]
 
 
-def _build_request(client_block):
+# Okta's IP service categorisation, reported per ipChain entry under ipDetails.
+# `type` is what a Dynamic Zone / network-zone rule matches:
+#   request.ipChain.ipDetails.ipServiceCategories.type eq "Tor"
+# and the category name for Tor is ANONYMIZER_TOR.
+# https://help.okta.com/oie/en-us/content/topics/security/network/supported-ip-service-categories.htm
+_IP_SERVICE_CATEGORY = {
+    "tor":   ("Tor",   "ANONYMIZER_TOR",   "Tor"),
+    "vpn":   ("VPN",   "ANONYMIZER_VPN",   None),   # operator falls back to the ISP
+    "proxy": ("Proxy", "ANONYMIZER_PROXY", None),
+}
+
+
+def _ip_details(ip_context):
+    """ipDetails block for an anonymizer source, or None for an ordinary one.
+
+    Okta does NOT signal Tor through securityContext -- isProxy is the generic
+    proxy flag and says nothing about which service.  The specific signal lives
+    here and in debugContext.debugData.proxyType, so a Tor event that omits both
+    is indistinguishable from an ordinary login to any Okta-native detection.
+    """
+    ptype = (ip_context or {}).get("proxy_type")
+    entry = _IP_SERVICE_CATEGORY.get(str(ptype).lower()) if ptype else None
+    if not entry:
+        return None
+    type_name, category, operator = entry
+    return {
+        "ipServiceCategories": [{
+            "type":        type_name,
+            "category":    category,
+            "isAnonymous": True,
+            "operator":    operator or ip_context.get("isp"),
+        }]
+    }
+
+
+def _build_request(client_block, ip_context=None):
     geo = client_block.get("geographicalContext", {})
-    chain = [{
+    first = {
         "ip":  client_block.get("ipAddress"),
         "geographicalContext": {
             "city":       geo.get("city"),
             "country":    _country_name(geo.get("country", "")),  # full name
             "state":      geo.get("state"),
             "postalCode": geo.get("postalCode"),
-            "geolocation": geo.get("geolocation", {}),
+            "geolocation": geo.get("geolocation"),
         },
         "version": "V4",
         "source":  None,
-    }]
+    }
+    details = _ip_details(ip_context if ip_context is not None
+                          else client_block.get("_ipCtx"))
+    if details:
+        first["ipDetails"] = details
+    chain = [first]
     # ~20% of requests traverse a CDN/proxy — add a second ipChain entry
     if random.random() < 0.20:
         hop = random.choice(_PROXY_HOPS)
@@ -414,7 +625,7 @@ def _build_request(client_block):
                 "country": hop["country"],
                 "state":   None,
                 "postalCode": None,
-                "geolocation": dict(zip(("lat", "lon"), _city_geolocation(hop["city"]))),
+                "geolocation": _geolocation_obj(hop["city"], hop["country"]),
             },
             "version": "V4",
             "source":  hop["source"],
@@ -625,6 +836,34 @@ def _assemble(event_type, actor, client, outcome,
     if debug_context is None:
         debug_context = _build_debug_context()
 
+    # _build_client() stashes the source ip_context on the client block under a
+    # private key so the anonymizer markers reach the two places Okta actually
+    # reports them.  Read it, then serialise a copy without any private key --
+    # never mutate `client` itself, which multi-event sequences reuse across
+    # several _assemble() calls.
+    ip_ctx = client.get("_ipCtx") or {}
+    client = {k: v for k, v in client.items() if not k.startswith("_")}
+
+    # Okta reports the anonymizer type on the event itself.  Tor detections in the
+    # System Log are written against this field:
+    #   debugContext.debugData.proxyType eq "tor"
+    # https://support.okta.com/help/s/article/How-to-Search-For-TOR-Traffic-in-System-Logs
+    if debug_context and "debugData" in debug_context:
+        _dd = debug_context["debugData"]
+        proxy_type = ip_ctx.get("proxy_type")
+        if proxy_type and "proxyType" not in _dd:
+            _dd["proxyType"] = str(proxy_type)
+            # ThreatInsight flags anonymizer traffic as suspected.  The
+            # _AUTH_DEBUG_DEFAULTS value is the literal string "false", so match
+            # that type rather than introducing a JSON boolean here.
+            if "threatSuspected" in _dd:
+                _dd["threatSuspected"] = "true"
+        # Normalise however it was set -- several generators hardcode "TOR"/"VPN",
+        # but Okta's documented System Log query is proxyType eq "tor", so the
+        # lowercase form is the one a real detection matches.
+        if _dd.get("proxyType"):
+            _dd["proxyType"] = str(_dd["proxyType"]).lower()
+
     # Resolve legacyEventType from lookup; caller may override explicitly.
     if legacy_event_type is None:
         if event_type == "user.session.start":
@@ -663,7 +902,7 @@ def _assemble(event_type, actor, client, outcome,
         "outcome":          outcome,
         "target":           target or [],
         "device":           _build_device(client) if event_type in _DEVICE_EVENTS else None,
-        "request":          _build_request(client),
+        "request":          _build_request(client, ip_ctx),
         "transaction":      transaction if transaction is not None else (
             _build_transaction_oauth2() if any(event_type.startswith(p) for p in _OAUTH2_EVENT_PREFIXES) else
             _build_transaction_api() if any(event_type.startswith(p) for p in _API_TOKEN_EVENT_PREFIXES) else
@@ -2405,8 +2644,12 @@ def _generate_sso_suspicious_asn(config, user_info, session_context=None):
         {"asn": 60068,  "isp": "Datacamp Limited","domain": "datacamp.co.uk","is_proxy": True},
     ]
     asn_data = random.choice(suspicious_asns)
+    # proxy_type drives request.ipChain[].ipDetails.ipServiceCategories -- without
+    # it this generator set debugData.proxyType but shipped no service category,
+    # so a network-zone rule matching on ipServiceCategories.type saw nothing.
     ip_ctx   = {"ip": f"104.{random.randint(200,250)}.{random.randint(1,254)}.{random.randint(1,254)}",
-                "city": None, "country": "NL", "state": None, **asn_data}
+                "city": None, "country": "NL", "state": None,
+                "proxy_type": "vpn", **asn_data}
     actor  = _build_actor(user_info["username"], user_info["full_name"])
     client = _build_client(ip_ctx, config, interactive_only=False)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))

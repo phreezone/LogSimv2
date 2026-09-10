@@ -248,23 +248,36 @@ def _require_api_key():
 # external IPs while still labelling the event vpn_tor_login/tor_connection.  XSIAM
 # then has nothing to match and the Tor detections go quiet with no error anywhere.
 # That exact silent failure is why this is reported as a hard health ERROR.
-TOR_FETCH_STATE: dict = {"ok": False, "count": 0, "error": "not attempted"}
+TOR_FETCH_STATE: dict = {"ok": False, "count": 0, "error": "not attempted", "geo": {}}
 
 
 def _fetch_tor_exit_nodes() -> list[dict]:
     """Fetch the current Tor exit node list from the Tor Project bulk-exit URL.
-    Returns a list of {ip, country} dicts on success, or empty list on failure."""
+
+    Returns a list of {ip, country, asn, isp, is_proxy, proxy_type} dicts on
+    success, or empty list on failure.  The bulk list is IPs only; country/ASN
+    come from Onionoo (see modules.tor_enrichment) so Tor-sourced events carry
+    the real country and hosting AS a GeoIP-backed vendor would report.
+    """
     _TOR_BULK_URL = "https://check.torproject.org/torbulkexitlist"
     try:
         import urllib.request
         with urllib.request.urlopen(_TOR_BULK_URL, timeout=10) as resp:
             ips = resp.read().decode("utf-8").strip().splitlines()
-        nodes = [{"ip": ip.strip(), "country": "Unknown"} for ip in ips if ip.strip()]
+        nodes = [{"ip": ip.strip()} for ip in ips if ip.strip()]
+        from modules.tor_enrichment import enrich_tor_nodes
+        nodes, geo_stats = enrich_tor_nodes(nodes)
         print(f"[dashboard] Fetched {len(nodes)} live Tor exit nodes from torproject.org")
-        TOR_FETCH_STATE.update(ok=True, count=len(nodes), error=None)
+        if geo_stats["onionoo"]:
+            print(f"[dashboard] Onionoo enriched {geo_stats['resolved']}/{geo_stats['total']} "
+                  f"({geo_stats['join_rate']}%) with country + AS")
+        else:
+            print("[dashboard] WARNING: Onionoo enrichment unavailable — Tor events will "
+                  "carry a null country and no ASN (geolocation will be null, not 0,0).")
+        TOR_FETCH_STATE.update(ok=True, count=len(nodes), error=None, geo=geo_stats)
         return nodes
     except Exception as exc:
-        TOR_FETCH_STATE.update(ok=False, count=0, error=str(exc))
+        TOR_FETCH_STATE.update(ok=False, count=0, error=str(exc), geo={})
         print("=" * 78)
         print(f"[dashboard] ERROR: Could not fetch live Tor exit nodes ({exc}).")
         print("            config.json ships NO static fallback, so the Tor list is EMPTY.")
