@@ -48,6 +48,12 @@ last_threat_event_time = 0
 
 # GuardDuty numeric severity bands: 1-3.9 Low, 4-6.9 Medium, 7-8.9 High.
 # XSIAM modeling maps the numeric `severity` -> xdm.alert.severity.
+# GuardDuty numeric severity bands: Low 1.0-3.9, Medium 4.0-6.9, High 7.0-8.9.
+# Every `severity` below is the AWS-documented DEFAULT for that finding type --
+# see the GuardDuty IAM and S3 finding-type references.  Do not re-tune these to
+# taste: XSIAM maps GuardDuty severity straight through to alert severity, so a
+# value that disagrees with AWS makes a rule behave differently here than it
+# would against a real GuardDuty integration.
 _SEV_LOW, _SEV_MED, _SEV_HIGH = 2, 5, 8
 
 # Realistic remote-IP enrichment blocks GuardDuty attaches to a caller IP.
@@ -91,9 +97,10 @@ _FINDINGS = {
     },
     # ── Privilege escalation (scenario 1, 21, 23) ──
     "ADMIN_PRIVESC": {
-        "type": "PrivilegeEscalation:IAMUser/AdministrativePermissions",
-        "severity": _SEV_HIGH, "resource_kind": "access_key",
-        "title": "A user gained unusually high-level administrative permissions.",
+        "type": "PrivilegeEscalation:IAMUser/AnomalousBehavior",
+        "severity": _SEV_MED, "resource_kind": "access_key",   # AWS default: Medium
+        "title": "An API commonly used to obtain high-level permissions to an AWS environment "
+                 "was invoked in an anomalous way.",
         "description": "Principal {user} attempted to assign a highly permissive policy "
                        "(AdministratorAccess) to themselves, which is a common privilege-escalation "
                        "technique following a credential compromise.",
@@ -102,7 +109,7 @@ _FINDINGS = {
     # ── Defense evasion (scenario 1, 21) ──
     "CLOUDTRAIL_DISABLED": {
         "type": "Stealth:IAMUser/CloudTrailLoggingDisabled",
-        "severity": _SEV_HIGH, "resource_kind": "access_key",
+        "severity": _SEV_LOW, "resource_kind": "access_key",   # AWS default: Low
         "title": "AWS CloudTrail logging was disabled.",
         "description": "An AWS CloudTrail trail was disabled by principal {user} from IP {ip}. This can "
                        "be an attacker attempting to disable logging to cover their tracks.",
@@ -129,15 +136,15 @@ _FINDINGS = {
     # ── S3 exfil / impact (scenario 20, 21) ──
     "S3_EXFIL": {
         "type": "Exfiltration:S3/AnomalousBehavior",
-        "severity": _SEV_MED, "resource_kind": "s3",
+        "severity": _SEV_HIGH, "resource_kind": "s3",          # AWS default: High
         "title": "An IAM entity invoked S3 APIs in an anomalous way to retrieve data.",
         "description": "Principal {user} invoked S3 data-retrieval APIs (GetObject) in a manner that "
                        "deviates from its established baseline, from IP {ip}, consistent with data exfiltration.",
         "api": "GetObject", "service_name": "s3.amazonaws.com",
     },
     "S3_IMPACT": {
-        "type": "Impact:S3/AnomalousBehavior",
-        "severity": _SEV_HIGH, "resource_kind": "s3",
+        "type": "Impact:S3/AnomalousBehavior.Delete",
+        "severity": _SEV_HIGH, "resource_kind": "s3",          # AWS default: High
         "title": "An IAM entity invoked S3 APIs to tamper with or destroy data at scale.",
         "description": "Principal {user} invoked S3 write/delete APIs (PutObject/DeleteObjects) at a "
                        "volume and pattern that deviates from baseline, from IP {ip}, consistent with "
@@ -155,7 +162,7 @@ _FINDINGS = {
     # ── Low-severity recon (Mode-1 background) ──
     "RECON_IP": {
         "type": "Recon:IAMUser/MaliciousIPCaller.Custom",
-        "severity": _SEV_LOW, "resource_kind": "access_key",
+        "severity": _SEV_MED, "resource_kind": "access_key",   # AWS default: Medium
         "title": "Reconnaissance APIs were invoked from a suspicious IP.",
         "description": "Reconnaissance APIs commonly used to discover resources were invoked from IP "
                        "{ip}, which is included on a custom threat list.",

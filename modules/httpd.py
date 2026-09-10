@@ -93,7 +93,7 @@ def _build_access_log_line(config, source_ip, method, url, status_code,
     # Syslog header — triggers observer_name extraction in the v1.3 parser.
     # Single PID shared between syslog header and log body for consistency.
     pid = random.randint(1000, 9999)
-    syslog_header = f"{now.strftime('%b %d %H:%M:%S')} {server_name} httpd[{pid}]:"
+    syslog_header = f"{_syslog_pri(config)}{now.strftime('%b %d %H:%M:%S')} {server_name} httpd[{pid}]:"
 
     # Apache access log timestamp — CRITICAL: parser filter regex requires
     # [DD/MMM/YYYY:HH:MM:SS ±ZZZZ]
@@ -136,7 +136,7 @@ def _build_error_log_line(config, source_ip, level, error_code, message):
     pid = random.randint(1000, 9999)
     tid = random.randint(140000000000, 140999999999)  # realistic Linux pthread_t range
 
-    syslog_header = f"{datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')} {hostname} httpd[{pid}]:"
+    syslog_header = f"{_syslog_pri(config)}{datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')} {hostname} httpd[{pid}]:"
     # severity1 regex: ]:\s*\[([^\]]+)\]  — matches ]: [level]
     # pid regex:       \[\w+\s(\d+)\:     — matches [pid NNN:tid
     # tid regex:       tid\s(\d+)         — matches tid NNN
@@ -186,19 +186,72 @@ def _generate_routine_error_log(config):
 # USER AGENT SELECTION
 # =============================================================================
 
+# Substrings that mark a user-agent as offensive tooling.  Matched case-insensitively
+# against the configured pool.  Everything else -- Outlook, Zoom, Okta Mobile,
+# Slackbot, ServiceNow, Terraform, Boto3, aws-cli -- is legitimate non-browser
+# business traffic and must NOT be used to dress up an attack.
+_ATTACK_TOOL_UA_TOKENS = (
+    "nmap", "sqlmap", "nikto", "nuclei", "masscan", "dirbuster", "gobuster",
+    "wpscan", "hydra", "metasploit", "burp", "zgrab", "curl", "wget",
+    "python-requests", "go-http-client", "libwww-perl", "scanner", "cloudsploit",
+)
+
+# Scanner agents that ship with the module so threat traffic still looks like
+# tooling when the configured pool is thin on it.
+_BUILTIN_ATTACK_UA = [
+    "Mozilla/5.0 (compatible; Nuclei - Open-source project (github.com/projectdiscovery/nuclei))",
+    "sqlmap/1.7.6#stable (https://sqlmap.org)",
+    "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)",
+    "curl/8.1.2",
+    "python-requests/2.31.0",
+    "Nikto/2.5.0",
+    "gobuster/3.6",
+    "WPScan v3.8.24 (https://wpscan.com/wordpress-security-scanner)",
+]
+
+
+def _is_attack_tool_ua(ua):
+    low = ua.lower()
+    return any(tok in low for tok in _ATTACK_TOOL_UA_TOKENS)
+
+
+def _syslog_pri(config):
+    """Leading <PRI> for Apache syslog lines, or "" when disabled.
+
+    Apache logging via syslog emits facility local1 by default (`ErrorLog
+    syslog:local1`); local1.notice = 17*8 + 5 = 141.  Off by default: the XSIAM
+    v1.3 ApacheWebServer modeling rule extracts observer_name from the leading
+    "timestamp hostname" pair, and apache_httpd_raw is currently parsing cleanly
+    without a PRI.  Set apache_config.emit_syslog_pri = true to turn it on, then
+    confirm xdm.source.ipv4 and observer_name still populate before keeping it.
+    """
+    conf = config.get(CONFIG_KEY, {})
+    if not conf.get("emit_syslog_pri", False):
+        return ""
+    return f"<{conf.get('syslog_pri', 141)}>"
+
+
 def _get_user_agent(config, event_type="benign"):
-    """Selects a realistic user agent, heavily favouring browsers for benign traffic
-    and scanner/tool agents for threat traffic."""
+    """Selects a realistic user agent.
+
+    Benign traffic gets browsers; threat traffic gets scanner/exploit tooling.
+    Note the split is by explicit tool signature, NOT by absence of "Mozilla" --
+    plenty of scanners spoof a Mozilla token, and plenty of legitimate clients
+    (Outlook, Zoom, Okta Mobile) carry none.
+    """
     all_user_agents = config.get('user_agents', ["-"])
-    browser_agents = [ua for ua in all_user_agents if "Mozilla" in ua]
-    tool_agents    = [ua for ua in all_user_agents if "Mozilla" not in ua]
+    browser_agents = [ua for ua in all_user_agents
+                      if "Mozilla" in ua and not _is_attack_tool_ua(ua)]
+    tool_agents    = [ua for ua in all_user_agents if _is_attack_tool_ua(ua)]
+    tool_agents    = tool_agents + _BUILTIN_ATTACK_UA
 
     if event_type == "benign":
         return random.choice(browser_agents) if browser_agents else "-"
-    else:
-        if random.random() < 0.9 and tool_agents:
-            return random.choice(tool_agents)
-        return random.choice(browser_agents) if browser_agents else "-"
+    # Threat traffic: overwhelmingly tooling, with an occasional spoofed browser
+    # (real scanners do impersonate browsers to evade naive UA filters).
+    if random.random() < 0.9:
+        return random.choice(tool_agents)
+    return random.choice(browser_agents) if browser_agents else "-"
 
 
 # =============================================================================

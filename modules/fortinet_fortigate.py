@@ -487,6 +487,31 @@ def _ext_geo():
     return random.choice(_EXT_LOCATIONS)
 
 
+# Countries hosting the bulk of real Tor exit capacity, weighted roughly by share.
+_TOR_EXIT_COUNTRIES = [
+    ("Germany", 34), ("Netherlands", 16), ("United States", 14), ("France", 10),
+    ("Romania", 7), ("Finland", 6), ("Sweden", 5), ("Switzerland", 4),
+    ("Austria", 2), ("Luxembourg", 2),
+]
+
+
+def _tor_exit_country(tor_entry):
+    """Country to report for a Tor exit node.
+
+    Uses the country carried on the config entry when it is a real one; the live
+    torproject.org bulk list has no geo data and stamps "Unknown", so fall back to
+    a weighted pick from the countries that actually host exit capacity.  Never
+    returns "Reserved" -- a Tor exit is a public routable address, and FortiGate
+    reports "Reserved" only for RFC1918 and other reserved ranges.
+    """
+    if isinstance(tor_entry, dict):
+        c = (tor_entry.get("country") or "").strip()
+        if c and c.lower() not in ("unknown", "reserved", "na", "n/a"):
+            return c
+    names, weights = zip(*_TOR_EXIT_COUNTRIES)
+    return random.choices(names, weights=weights)[0]
+
+
 # Port → FortiGate service name mapping (real FortiGate service names)
 _PORT_SERVICE_MAP = {
     21: "FTP", 22: "SSH", 23: "TELNET", 25: "SMTP", 53: "DNS",
@@ -522,6 +547,16 @@ def _get_user_and_host_info(config, ip_address=None, session_context=None):
     return username or "unknown", hostname
 
 
+# FortiOS binds a severity level to each log ID.  Only IDs we are confident about
+# are pinned here; UTM log IDs legitimately vary and are left to the caller.
+#   0000000013 = LOG_ID_TRAFFIC_END_FORWARD  -> always "notice" (accept AND deny)
+#   1501054802 = DNS query                   -> always "information"
+_LOGID_CANONICAL_LEVEL = {
+    "0000000013": "notice",
+    "1501054802": "information",
+}
+
+
 def _format_fortinet_cef(config, logid, log_type, subtype, log_level, extensions_dict):
     """
     Formats a Fortinet FortiGate CEF syslog message.
@@ -529,6 +564,15 @@ def _format_fortinet_cef(config, logid, log_type, subtype, log_level, extensions
     CEF header:  CEF:0|Fortinet|Fortigate|v{version}|{logid}|{type}:{subtype} {action}|{severity}|
     Syslog wrap: <PRI>timestamp hostname  CEF:...
     """
+    # In FortiOS the severity level is bound to the log ID by the log definition,
+    # not chosen per event.  Pin the ones we emit so a threat generator cannot
+    # silently raise a traffic log to "warning" -- a real FortiGate marks bad
+    # traffic via the UTM / app-control log and crlevel/crscore, and leaves the
+    # forward-traffic log at its canonical level.
+    _canonical = _LOGID_CANONICAL_LEVEL.get(logid)
+    if _canonical:
+        log_level = _canonical
+
     forti_conf  = _get_config(config)
     serial      = forti_conf.get("serial_number", "FGVM08TM21000001")
     vdom        = forti_conf.get("vdom", "root")
@@ -574,7 +618,15 @@ def _format_fortinet_cef(config, logid, log_type, subtype, log_level, extensions
         f"{k}={_cef_escape(v)}" for k, v in merged.items() if v is not None
     )
 
-    syslog_ts = time.strftime("%b %d %H:%M:%S")
+    # UTC, to agree with the hardcoded FTNTFGTtz=+0000 and the UTC-epoch
+    # FTNTFGTeventtime below.  time.strftime() without a time tuple uses machine
+    # LOCAL time, which put the header hours away from the eventtime it claims.
+    _evt_ns = merged.get("FTNTFGTeventtime")
+    try:
+        _evt_epoch = int(_evt_ns) / 1_000_000_000 if _evt_ns else time.time()
+    except (TypeError, ValueError):
+        _evt_epoch = time.time()
+    syslog_ts = time.strftime("%b %d %H:%M:%S", time.gmtime(_evt_epoch))
     return f"<{_SYSLOG_PRI}>{syslog_ts} {fw_hostname} {cef_header}{ext_string}"
 
 
@@ -731,7 +783,7 @@ def _generate_inbound_block(config):
         "reason":                   "no-policy-match",
         "msg":                      f"Denied by implicit policy from {geo['country']}",
     }
-    return _format_fortinet_cef(config, "0000000014", "traffic", "forward", "notice", fields)
+    return _format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields)
 
 
 def _generate_webfilter_allow(config, src_ip, user, shost):
@@ -1668,7 +1720,7 @@ def _simulate_port_scan(config, src_ip, user, shost):
             "reason":                   "no-policy-match",
             "msg":                      f"Denied by forward policy check port {port}",
         }
-        logs.append(_format_fortinet_cef(config, "0000000014", "traffic", "forward", "warning", fields))
+        logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "warning", fields))
     # 1-2 successful connections on open ports — attacker finds live services
     open_ports = random.sample([22, 80, 443, 445, 3389], k=random.randint(1, 2))
     for port in open_ports:
@@ -2283,9 +2335,9 @@ def _simulate_lateral_movement(config, src_ip, user, shost):
         }
         logs.append(_format_fortinet_cef(
             config,
-            "0000000013" if act == "accept" else "0000000014",
+            "0000000013",
             "traffic", "forward",
-            "notice" if act == "accept" else "warning",
+            "notice",
             fields
         ))
     return logs
@@ -2372,11 +2424,13 @@ def _simulate_tor_connection(config, src_ip, user, shost):
     """DNS precursor + Tor connection — returns list."""
     print(f"    - Fortinet Module simulating: Tor connection from {src_ip}")
     tor_nodes  = config.get("tor_exit_nodes", [])
+    _tor_entry = None
     if tor_nodes:
         _tor_entry = random.choice(tor_nodes)
         tor_ip = _tor_entry.get("ip", _random_external_ip()) if isinstance(_tor_entry, dict) else _tor_entry
     else:
         tor_ip = _random_external_ip()
+    tor_country = _tor_exit_country(_tor_entry)
     tor_port  = random.choices([443, 9001, 9030], weights=[60, 30, 10])[0]
     duration_s = random.randint(60, 3600)
 
@@ -2384,7 +2438,7 @@ def _simulate_tor_connection(config, src_ip, user, shost):
 
     fields = _base_traffic_fields(
         config, src_ip, shost, user, tor_ip, None, "6", tor_port, "accept",
-        duration_s=duration_s, dst_country="Reserved"
+        duration_s=duration_s, dst_country=tor_country
     )
     fields.update({
         "out":              random.randint(10000, 100000),
@@ -2397,7 +2451,6 @@ def _simulate_tor_connection(config, src_ip, user, shost):
         "FTNTFGTappcat":    "Proxy",
         "FTNTFGTapprisk":   "critical",
         "FTNTFGTapplist":   _get_config(config).get("applist", "g-default"),
-        "FTNTFGTdstcountry": "Reserved",
         "msg":              f"Connection to Tor exit node {tor_ip}:{tor_port}",
     })
     logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "warning", fields))
@@ -2575,8 +2628,8 @@ def _simulate_rdp_lateral(config, src_ip, user, shost, session_context=None):
             "msg":                      f"RDP {act} from {src_ip} to {dst_ip}:3389",
         }
         return _format_fortinet_cef(config,
-            "0000000013" if ok else "0000000014",
-            "traffic", "forward", "notice" if ok else "warning", fields)
+            "0000000013",
+            "traffic", "forward", "notice", fields)
 
     logs = []
     for dst_ip in targets:
@@ -3290,7 +3343,7 @@ def _simulate_external_port_scan(config):
             "reason":                   "no-policy-match",
             "msg":                      f"Denied inbound scan to port {port}",
         }
-        logs.append(_format_fortinet_cef(config, "0000000014", "traffic", "forward", "warning", fields))
+        logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "warning", fields))
     return logs
 
 

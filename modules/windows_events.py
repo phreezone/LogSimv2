@@ -1187,17 +1187,25 @@ _SYNTH_DOMAIN_SID = "S-1-5-21-3457937927-2839227994-823803824"
 
 # Process names/paths keyed by logon type category.
 # Windows uses specific processes for each logon scenario.
+# The Security channel is written by LSASS, so its PID is what appears in
+# <Execution ProcessID> on every record, and in EventData ProcessId whenever the
+# logon-requesting process is LSASS itself. Pinned here so the two never
+# disagree, and so one PID never names two different executables (0x248
+# previously meant lsass.exe on the DC path and svchost.exe in this table).
+_LSASS_PID_HEX = "0x248"
+_LSASS_PID_DEC = str(int(_LSASS_PID_HEX, 16))     # 584
+
 _LOGON_PROCESSES_BY_TYPE = {
     "interactive": [("0x1d4", "C:\\Windows\\System32\\winlogon.exe"),
                     ("0xb44", "C:\\Windows\\System32\\svchost.exe")],
-    "service":     [("0x248", "C:\\Windows\\System32\\svchost.exe"),
+    "service":     [("0x2f8", "C:\\Windows\\System32\\svchost.exe"),
                     ("0x5f4", "C:\\Windows\\System32\\services.exe")],
-    "network":     [("0x34c", "C:\\Windows\\System32\\lsass.exe")],
+    "network":     [(_LSASS_PID_HEX, "C:\\Windows\\System32\\lsass.exe")],
     "unlock":      [("0x1d4", "C:\\Windows\\System32\\winlogon.exe")],
     "remote":      [("0x1d4", "C:\\Windows\\System32\\winlogon.exe")],
     "cached":      [("0x1d4", "C:\\Windows\\System32\\winlogon.exe")],
 }
-_LOGON_PROCESSES_DEFAULT = [("0x34c", "C:\\Windows\\System32\\lsass.exe")]
+_LOGON_PROCESSES_DEFAULT = [(_LSASS_PID_HEX, "C:\\Windows\\System32\\lsass.exe")]
 
 # LogonProcessName values Windows emits for various scenarios
 _LOGON_PROCESS_NAMES = {
@@ -1540,8 +1548,9 @@ def _build_event(event_id: int, computer: str, event_data: dict,
 
     ed_clean = {k: v for k, v in event_data.items() if v is not None}
 
-    proc_pid = str(random.randint(400, 9000))
-    proc_tid = str(random.randint(500, 15000))
+    # LSASS has one PID for the life of the boot; only the thread varies.
+    proc_pid = _LSASS_PID_DEC                      # stable: LSASS wrote this record
+    proc_tid = str(random.randint(500, 15000))     # varies: LSASS is multithreaded
 
     # The process that generates Security Auditing events is lsass.exe
     lsass_path = "C:\\Windows\\System32\\lsass.exe"
@@ -2839,7 +2848,7 @@ def _dc_logon_event(user_info, config, *, logon_type=3, auth_pkg=_KRB_PACKAGE,
         "TransmittedServices":       "-",
         "LmPackageName":             "-",
         "KeyLength":                 "0",
-        "ProcessId":                 "0x248",
+        "ProcessId":                 _LSASS_PID_HEX,
         "ProcessName":               "C:\\Windows\\System32\\lsass.exe",
         "IpAddress":                 ip if ip and ip != "-" else "-",
         "IpPort":                    str(random.randint(49152, 65535)),

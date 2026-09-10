@@ -465,7 +465,7 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
         "userAgent": user_agent_choice,                                   # -> xdm.source.user_agent
         "requestID": str(uuid.uuid4()),                                   # -> xdm.network.session_id
         "eventID": str(uuid.uuid4()),                                     # -> xdm.event.id
-        "readOnly": str(read_only).lower(),                               # CloudTrail uses string "true"/"false"
+        "readOnly": bool(read_only),                                      # CloudTrail emits a JSON boolean, NOT the string "true"/"false"
         "eventType": "AwsConsoleSignIn" if event_name == "ConsoleLogin" else "AwsApiCall", # -> xdm.event.original_event_type
         "managementEvent": management_event,                              # Set based on category
         "recipientAccountId": account_id,                                 # -> xdm.target.cloud.project_id (partially)
@@ -512,6 +512,18 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
         base_event["sourceIPAddress"] = invoker
 
     return base_event
+
+# Read-only CloudTrail events normally carry "responseElements": null.  The STS
+# AssumeRole family is the exception documented by AWS -- the call is read-only
+# but returns the issued credentials in responseElements, so those records
+# legitimately carry a body.
+_RESPONSE_ELEMENTS_ON_READONLY = {
+    "AssumeRole",
+    "AssumeRoleWithSAML",
+    "AssumeRoleWithWebIdentity",
+    "GetSessionToken",
+    "GetFederationToken",
+}
 
 # --- Event Template Functions ---
 
@@ -7392,6 +7404,21 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
                 evt[k] = v
         if not isinstance(evt.get("eventTime"), str):
             evt["eventTime"] = datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        # --- CloudTrail invariants (enforced last, after template update()) ---
+        # readOnly is a JSON boolean.  Templates that pre-date this may still set
+        # the string form, so coerce rather than trust.
+        _ro = evt.get("readOnly")
+        if isinstance(_ro, str):
+            _ro = _ro.strip().lower() == "true"
+            evt["readOnly"] = _ro
+
+        # Real CloudTrail sets responseElements to null for read-only calls; it
+        # only records a response body for calls that change state.  The STS
+        # AssumeRole family is the documented exception -- those are read-only and
+        # DO return responseElements (the issued credentials), so leave them be.
+        if _ro is True and evt.get("eventName") not in _RESPONSE_ELEMENTS_ON_READONLY:
+            evt["responseElements"] = None
         return evt
     # --- End _validate_event ---
 
