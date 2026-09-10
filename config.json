@@ -475,8 +475,8 @@
       },
       {
         "type": "IAMUser",
-        "name": "Omar.M\u00fcller",
-        "arn_suffix": "user/Omar.M\u00fcller"
+        "name": "Omar.Muller",
+        "arn_suffix": "user/Omar.Muller"
       },
       {
         "type": "IAMUser",
@@ -665,8 +665,8 @@
       },
       {
         "type": "IAMUser",
-        "name": "Monica.M\u00fcller",
-        "arn_suffix": "user/Monica.M\u00fcller"
+        "name": "Monica.Muller",
+        "arn_suffix": "user/Monica.Muller"
       },
       {
         "type": "IAMUser",
@@ -8281,12 +8281,12 @@
         }
       ]
     },
-    "o.m\u00fcller": {
-      "display_name": "Omar M\u00fcller",
+    "o.muller": {
+      "display_name": "Omar Muller",
       "department": "Marketing",
       "role": "Content Strategist",
-      "email": "o.m\u00fcller@examplecorp.com",
-      "aws_iam_user": "Omar.M\u00fcller",
+      "email": "o.muller@examplecorp.com",
+      "aws_iam_user": "Omar.Muller",
       "gcp_iam_user": null,
       "devices": [
         {
@@ -8300,8 +8300,8 @@
         },
         {
           "type": "mobile",
-          "device_id": "OM\u00dcLLER-IPHONE14",
-          "hostname": "OM\u00dcLLER-IPHONE14",
+          "device_id": "OMULLER-IPHONE14",
+          "hostname": "OMULLER-IPHONE14",
           "os_type": "iOS",
           "os_version": "17.4",
           "subnet": "10.10.50.0/24",
@@ -11342,12 +11342,12 @@
         }
       ]
     },
-    "m.m\u00fcller": {
-      "display_name": "Monica M\u00fcller",
+    "m.muller": {
+      "display_name": "Monica Muller",
       "department": "Security",
       "role": "Senior Security Engineer",
-      "email": "m.m\u00fcller@examplecorp.com",
-      "aws_iam_user": "Monica.M\u00fcller",
+      "email": "m.muller@examplecorp.com",
+      "aws_iam_user": "Monica.Muller",
       "gcp_iam_user": null,
       "devices": [
         {
@@ -14394,11 +14394,11 @@
         }
       ]
     },
-    "c.m\u00fcller": {
-      "display_name": "Celine M\u00fcller",
+    "c.muller": {
+      "display_name": "Celine Muller",
       "department": "Procurement",
       "role": "Vendor Manager",
-      "email": "c.m\u00fcller@examplecorp.com",
+      "email": "c.muller@examplecorp.com",
       "aws_iam_user": null,
       "gcp_iam_user": null,
       "devices": [
@@ -14413,8 +14413,8 @@
         },
         {
           "type": "mobile",
-          "device_id": "CM\u00dcLLER-IPHONE15",
-          "hostname": "CM\u00dcLLER-IPHONE15",
+          "device_id": "CMULLER-IPHONE15",
+          "hostname": "CMULLER-IPHONE15",
           "os_type": "iOS",
           "os_version": "17.4",
           "subnet": "10.10.50.0/24",
