@@ -2,7 +2,7 @@
 
 **Dataset:** `proofpoint_tap_raw`
 **Transport:** HTTP Collector (5 per-app collectors defined in `config.json`)
-**Format:** Proofpoint TAP SIEM API JSON (Admin SDK Reports API Activity resource)
+**Format:** Proofpoint TAP SIEM API JSON
 
 Simulates Proofpoint Targeted Attack Protection (TAP) email security events. The module generates JSON matching the official Proofpoint TAP SIEM API schema exactly, including the four `_log_type` values that match XSIAM alert rules. The `ProofpointTAPModelingRules_1_3.xif` XIF rule maps JSON fields to XDM.
 

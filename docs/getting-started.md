@@ -65,7 +65,7 @@ The key packages and what they support:
 | Package | Used by |
 |---|---|
 | `flask` | Dashboard web UI and REST API |
-| `requests` | HTTP Collector transport (Okta, Proofpoint, GCP, Google Workspace) |
+| `requests` | HTTP Collector transport (Okta, Proofpoint, GCP) |
 | `python-dotenv` | Loads `.env` secrets into the runtime environment |
 | `boto3` | AWS module — writes gzip-compressed CloudTrail JSON to S3 |
 | `google-cloud-pubsub` | GCP module — publishes LogEntry objects to Google Cloud Pub/Sub |

@@ -1388,100 +1388,6 @@ def _get_random_user_from_template(config, user_template):
             
     return final_identity
 
-def run_compromised_account_gdrive_exfil_scenario(modules, config):
-    """Generates a sequence of logs simulating data exfiltration from Google Drive."""
-    print("\n--- Running 'Compromised Account & G-Drive Exfil' Scenario ---")
-
-    gworkspace_module = modules.get("google_workspace")
-    okta_module = modules.get("okta")
-    asa_module = modules.get("cisco_asa")
-
-    if not gworkspace_module or not (okta_module or asa_module):
-        print("ERROR: This scenario requires the 'google_workspace' module and at least one of 'okta' or 'cisco_asa'.")
-        return
-        
-    attacker_ip = _fresh_attacker_ip()   # fresh per run — avoids source-IP alert suppression
-    compromised_user_short = 'c.lewis' 
-    compromised_user_email = f"{compromised_user_short}@{config.get('google_workspace_config', {}).get('domains', ['examplecorp.com'])[0]}"
-    sensitive_file = next((f for f in config.get('google_workspace_config',{}).get('drive_files', []) if f.get('sensitive')), None)
-    
-    if not sensitive_file:
-        print("ERROR: No sensitive files found in 'google_workspace_config' for this scenario.")
-        return
-
-    print(f"  - Attacker IP: {attacker_ip}")
-    print(f"  - Compromised User: {compromised_user_email}")
-    print(f"  - Target File: {sensitive_file['title']}")
-    
-    try:
-        if okta_module and hasattr(okta_module, 'generate_log'):
-            print("\n[STEP 1] Generating Okta login from suspicious IP...")
-            context = {'ip': attacker_ip, 'user': compromised_user_short, 'outcome': 'SUCCESS'}
-            okta_log = okta_module.generate_log(config, scenario_event="LOGIN", context=context)
-            
-            # UPDATED: Handle tuple return from Okta module
-            if isinstance(okta_log, tuple): 
-                log_content, event_name = okta_log
-            else: 
-                log_content, event_name = okta_log, None
-            process_and_send(log_content, okta_module, config, event_name)
-            time.sleep(1)
-
-        print("[STEP 2] Generating Google Workspace login from same IP...")
-        g_context = {'ip': attacker_ip, 'user_email': compromised_user_email}
-        gdrive_log_1 = gworkspace_module.generate_log(config, scenario_event="LOGIN_SUCCESS", context=g_context)
-        if isinstance(gdrive_log_1, tuple): 
-            log_content, event_name = gdrive_log_1
-        else: 
-            log_content, event_name = gdrive_log_1, None
-        process_and_send(log_content, gworkspace_module, config, event_name)
-        time.sleep(2)
-
-        print("[STEP 3] Generating Google Drive access to sensitive file...")
-        g_context.update({'file': sensitive_file})
-        gdrive_log_2 = gworkspace_module.generate_log(config, scenario_event="DRIVE_VIEW_SENSITIVE", context=g_context)
-        if isinstance(gdrive_log_2, tuple): 
-            log_content, event_name = gdrive_log_2
-        else: 
-            log_content, event_name = gdrive_log_2, None
-        process_and_send(log_content, gworkspace_module, config, event_name)
-        time.sleep(1)
-
-        print("[STEP 4] Generating Google Drive public sharing event...")
-        gdrive_log_3 = gworkspace_module.generate_log(config, scenario_event="DRIVE_PUBLIC_SHARE", context=g_context)
-        if isinstance(gdrive_log_3, tuple): 
-            log_content, event_name = gdrive_log_3
-        else: 
-            log_content, event_name = gdrive_log_3, None
-        process_and_send(log_content, gworkspace_module, config, event_name)
-        time.sleep(2)
-
-        print("[STEP 5] Generating Google Drive download event...")
-        gdrive_log_4 = gworkspace_module.generate_log(config, scenario_event="DRIVE_DOWNLOAD", context=g_context)
-        if isinstance(gdrive_log_4, tuple): 
-            log_content, event_name = gdrive_log_4
-        else: 
-            log_content, event_name = gdrive_log_4, None
-        process_and_send(log_content, gworkspace_module, config, event_name)
-        time.sleep(1)
-
-        if asa_module and hasattr(asa_module, 'generate_log'):
-            print("[STEP 6] Generating ASA log for large data egress...")
-            asa_context = {'src_ip': attacker_ip, 'bytes': random.randint(20000000, 50000000)}
-            asa_log = asa_module.generate_log(config, scenario_event="LARGE_EGRESS", context=asa_context)
-            if isinstance(asa_log, tuple):
-                log_content, event_name = asa_log
-            else: 
-                log_content, event_name = asa_log, None
-            process_and_send(log_content, asa_module, config, event_name)
-
-    except Exception as e:
-        print(f"\nAn error occurred during scenario execution: {e}")
-        import traceback
-        traceback.print_exc()
-
-    print("\n--- Scenario Complete ---")
-
 def _emit_guardduty(all_modules, config, context, finding_event):
     """Fire a corroborating Amazon GuardDuty finding on the SAME pivot/context as the
     CloudTrail step it backs up, if the 'AWS GuardDuty' module is loaded. Optional —
@@ -2989,7 +2895,7 @@ def run_domain_dominance_scenario(all_modules, config):
         return
 
     victim_user  = victim.get("username", victim_key)
-    default_dom  = (config.get("google_workspace_config", {}).get("domains") or ["examplecorp.com"])[0]
+    default_dom  = config.get("proofpoint_config", {}).get("internal_domain", "examplecorp.com")
     victim_email = victim.get("email") or f"{victim_user}@{default_dom}"
     victim_ip    = victim.get("ip")
     victim_host  = victim.get("hostname")
@@ -3612,8 +3518,6 @@ def get_scenarios():
     Module-level so both the CLI menu (select_scenario_mode) and the Web-UI
     training engine (modules/training_engine.py) resolve scenarios by the same id.
     """
-    # NOTE: Scenario "Compromised Account & Data Exfiltration via Google Drive" is disabled
-    # until the Google Workspace module is restored. The function remains in the codebase.
     scenarios = {
         # ── High-value multi-module scenarios (no Infoblox required) ──────────
         "1": {
