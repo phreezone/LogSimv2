@@ -117,13 +117,13 @@ This section defines *how* logs are sent. Each module uses one of four transport
 }
 ```
 
-**`http_collectors`** — required for HTTP-based modules (Okta, Proofpoint, Google Workspace). Each entry has four fields:
+**`http_collectors`** — required for HTTP-based modules (Okta, Proofpoint, GuardDuty, Windows Events). Each entry has four fields:
 - `url_env_var` — names the `.env` variable holding the XSIAM HTTP Collector endpoint URL for this collector
 - `auth_type_env_var` — names the `.env` variable holding the authentication type (e.g., `"api_key"`)
 - `api_key_env_var` — names the `.env` variable holding the API key for this collector
 - `content_type` — MIME type sent in the `Content-Type` header (always `"application/json"`)
 
-The dict key (e.g., `"okta_collector"`) is referenced by the module's `collector_id` setting. The five `google_*` collectors are used by the Google Workspace module, which is currently not operational.
+The dict key (e.g., `"okta_collector"`) is referenced by the module's `collector_id` setting.
 
 **`aws_config`** — required for the AWS module. Contains `transport: "s3"` and a `users_and_roles` array defining the simulated IAM identities used to generate CloudTrail events. All AWS credentials (access key, secret key, bucket name, region, account ID) live in `.env` — see [Getting Started](getting-started.md) for the full `.env` reference.
 

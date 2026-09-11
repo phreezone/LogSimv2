@@ -1583,10 +1583,6 @@ def api_schedule_clear():
 
 
 # ── Health / preflight checks ─────────────────────────────────────────────────
-_SKIP_COLLECTORS = {
-    "google_login_collector", "google_drive_collector", "google_admin_collector",
-    "google_user_accounts_collector", "google_token_collector",
-}
 
 # Health cache — populated by background monitor thread every 60 s
 _health_cache: dict = {}
@@ -1650,11 +1646,9 @@ def _run_health_checks() -> dict:
             ),
         })
 
-    # Per-collector env vars (skip Google Workspace)
+    # Per-collector env vars
     global_http_url = os.getenv("HTTP_COLLECTOR_URL", "")
     for cid, ccfg in CONFIG.get("http_collectors", {}).items():
-        if cid in _SKIP_COLLECTORS:
-            continue
         uvar = ccfg.get("url_env_var", "")
         kvar = ccfg.get("api_key_env_var", "")
         label = cid.replace("_collector", "").replace("_", " ").title()
@@ -1734,8 +1728,6 @@ def _run_health_checks() -> dict:
         _check_http_url(global_url, "HTTP_COLLECTOR_URL", "HTTP (global fallback)")
 
     for cid, ccfg in CONFIG.get("http_collectors", {}).items():
-        if cid in _SKIP_COLLECTORS:
-            continue
         uvar = ccfg.get("url_env_var", "")
         url = os.getenv(uvar, "") if uvar else ""
         label = cid.replace("_collector", "").replace("_", " ").title()
