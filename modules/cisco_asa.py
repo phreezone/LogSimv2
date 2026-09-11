@@ -187,9 +187,7 @@ def get_threat_names():
             for n in _DEFAULT_THREAT_NAMES]
 
 
-# ---------------------------------------------------------------------------
 # Internal helpers
-# ---------------------------------------------------------------------------
 
 def _get_asa_config(config):
     return config.get('cisco_asa_config', {})
@@ -351,9 +349,7 @@ def _dns_precursor(config, src_ip, user):
     )
 
 
-# ---------------------------------------------------------------------------
 # Session / connection generators
-# ---------------------------------------------------------------------------
 
 def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
                                   user, bytes_sent, bytes_received, duration_sec,
@@ -637,9 +633,7 @@ def _generate_aaa_auth_log(config, user=None, session_context=None):
     ]
 
 
-# ---------------------------------------------------------------------------
 # Benign event generators
-# ---------------------------------------------------------------------------
 
 def _simulate_benign_office_traffic(config, session_context=None):
     """
@@ -885,9 +879,7 @@ def _simulate_dhcp_log(config):
     return _generate_full_syslog_message(config, message)
 
 
-# ---------------------------------------------------------------------------
 # Threat event generators
-# ---------------------------------------------------------------------------
 
 def _simulate_large_upload_session(config, internal_host_ip, is_cumulative, session_context=None):
     """
@@ -1762,9 +1754,7 @@ def _simulate_failed_connections_burst(config, attacker_ip=None):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # XSIAM-firewall-analytics-aligned threat generators
-# ---------------------------------------------------------------------------
 # ASA native syslog does not log DNS query names, so DNS tunnelling and VPN
 # client-OS anomalies are NOT feasible here (no mappable field) and are omitted.
 
@@ -1813,11 +1803,9 @@ def _simulate_ldap_recon(config, internal_host_ip, session_context=None):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # Non-analytic events — genuine, XSIAM-parseable connection/session
 # patterns with NO built-in XSIAM analytic. Raw / XQL-hunt / custom-rule targets.
 # Every one emits only supported message IDs (302013-16 / 113039 / 113019 / 722051).
-# ---------------------------------------------------------------------------
 
 _MINING_PORTS    = [3333, 4444, 5555, 7777, 8888, 9999, 14444, 45700]
 _RARE_DEST_PORTS = [1080, 1337, 2222, 5222, 6667, 8443, 9001, 9050]
@@ -2128,9 +2116,7 @@ def _simulate_dc_smb_outbound(config, session_context=None):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # Main log generation entry point
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, threat_level="Realistic",
                  benign_only=False, context=None, scenario_event=None):

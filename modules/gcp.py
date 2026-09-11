@@ -15,9 +15,7 @@ CONFIG_KEY = "gcp_config"
 last_threat_event_time = 0
 
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 
 _GCP_REGIONS = [
     "us-central1", "us-east1", "us-east4", "us-west1", "us-west2",
@@ -150,12 +148,10 @@ _CORP_GROUP_PREFIXES = [
     "data-scientists", "sre-oncall", "contractors",
 ]
 
-# ---------------------------------------------------------------------------
 # Proto @type mapping for request/response bodies
 # Maps (service_name_fragment, method_keyword) → (request_@type, response_@type)
 # None means "no @type for that body" (e.g. response on a read may be empty).
 # The function _inject_proto_type uses the first match it finds.
-# ---------------------------------------------------------------------------
 _PROTO_TYPE_MAP = [
     # Compute
     ("compute", "instances.insert",     "type.googleapis.com/compute.instances.insert", "type.googleapis.com/compute.Operation"),
@@ -217,9 +213,7 @@ def _inject_proto_type(method_name, service_name, request_body, response_body):
             return  # first match wins
 
 
-# ---------------------------------------------------------------------------
 # Helper Functions
-# ---------------------------------------------------------------------------
 
 def _get_threat_interval(threat_level, config):
     """Returns seconds between threat events based on threat level."""
@@ -909,9 +903,7 @@ def _method_to_permission(method_name, service_name=""):
     return f"{service_name.split('.')[0]}.resources.get"
 
 
-# ---------------------------------------------------------------------------
 # Benign Event Generators
-# ---------------------------------------------------------------------------
 
 def _gen_gcs_list_objects(config, context=None):
     """Benign: List objects in a GCS bucket (data access)."""
@@ -1873,9 +1865,7 @@ def _gen_firestore_write(config, context=None):
     return [entry]
 
 
-# ---------------------------------------------------------------------------
 # Threat / Suspicious Event Generators
-# ---------------------------------------------------------------------------
 
 def _gen_disable_audit_logging(config, context=None):
     """
@@ -2650,9 +2640,7 @@ def _gen_cross_project_sa_grant(config, context=None):
     return [entry]
 
 
-# ---------------------------------------------------------------------------
 # New Threat Generators (Steps 5 + 8)
-# ---------------------------------------------------------------------------
 
 def _gen_kms_key_destroy(config, context=None):
     """
@@ -3317,9 +3305,7 @@ def _gen_vpc_peering_backdoor(config, context=None):
     return [entry]
 
 
-# ---------------------------------------------------------------------------
 # Vertex AI Threat Generators (Step 8)
-# ---------------------------------------------------------------------------
 
 def _gen_vertex_predict(config, context=None):
     """Benign: Call Vertex AI prediction endpoint."""
@@ -3728,9 +3714,7 @@ def _gen_vertex_disable_model_logging(config, context=None):
     return [entry]
 
 
-# ---------------------------------------------------------------------------
 # Additional Generators — Documentation-verified event types
-# ---------------------------------------------------------------------------
 
 def _gen_vpn_route_create(config, context=None):
     """
@@ -4924,10 +4908,8 @@ def _gen_gcs_bucket_delete(config, context=None):
     return [entry]
 
 
-# ---------------------------------------------------------------------------
 # New threat generators — GKE, Cloud Run, Cloud SQL, BigQuery, Artifact
 # Registry, IAM recon, KMS, Cloud Build, GCS lifecycle
-# ---------------------------------------------------------------------------
 
 def _gen_gke_privileged_pod_created(config, context=None):
     """
@@ -5888,9 +5870,7 @@ def _gen_budget_alert_delete(config, context=None):
     return [entry]
 
 
-# ---------------------------------------------------------------------------
 # Scenario Dictionaries
-# ---------------------------------------------------------------------------
 
 BENIGN_SCENARIOS = {
     _gen_gcs_list_objects:      20,
@@ -6128,9 +6108,7 @@ def get_threat_names():
     return list(SCENARIO_FUNCTIONS.keys())
 
 
-# ---------------------------------------------------------------------------
 # Main Module Function
-# ---------------------------------------------------------------------------
 
 last_threat_event_time = 0
 

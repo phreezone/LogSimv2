@@ -1330,9 +1330,7 @@ def _generate_mfa_bombing_sequence(config, user_info, session_context=None):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # NEW DETECTION GENERATORS — 19 additional XSIAM/XDR Okta detections
-# ---------------------------------------------------------------------------
 
 # --- USER LIFECYCLE ---
 
@@ -2115,9 +2113,7 @@ def _generate_app_assigned_to_user(config, user_info, session_context=None):
     )
 
 
-# ---------------------------------------------------------------------------
 # SSO-SPECIFIC DETECTION GENERATORS (26 new detections)
-# ---------------------------------------------------------------------------
 
 # Shared data for geo/ASN anomalies
 _HIGH_RISK_COUNTRIES = [
@@ -2989,9 +2985,7 @@ def _generate_disabled_user_sso(config, user_info, session_context=None):
     )
 
 
-# ===========================================================================
 # EXTENDED EVENT TYPE COVERAGE — 121 new event types from Okta docs CSV
-# ===========================================================================
 
 # Shared helpers for admin-initiated events
 def _admin_event(config, event_type, display_message, target=None, severity="INFO",
@@ -3111,9 +3105,7 @@ _OKTA_ADMIN_SCOPES   = [
 _AD_AGENT_NAMES = ["Okta AD Agent", "AD Connector", "Directory Sync Agent"]
 
 
-# ---------------------------------------------------------------------------
 # user.lifecycle — full lifecycle coverage
-# ---------------------------------------------------------------------------
 
 def _gen_user_lifecycle_create(config, user_info, session_context=None):
     return _user_event(config, user_info, "user.lifecycle.create",
@@ -3143,9 +3135,7 @@ def _gen_user_lifecycle_delete_completed(config, user_info, session_context=None
         severity="WARN", session_context=session_context)
 
 
-# ---------------------------------------------------------------------------
 # user.account — profile & privilege events
-# ---------------------------------------------------------------------------
 
 def _gen_user_account_update_profile(config, user_info, session_context=None):
     fields = random.choice(["firstName","lastName","email","title","department","mobilePhone","manager"])
@@ -3178,9 +3168,7 @@ def _gen_user_account_update_primary_email(config, user_info, session_context=No
         extra_debug={"newEmail": new_email}, session_context=session_context)
 
 
-# ---------------------------------------------------------------------------
 # user.session — session events
-# ---------------------------------------------------------------------------
 
 def _gen_user_session_end(config, user_info, session_context=None):
     return _user_event(config, user_info, "user.session.end",
@@ -3207,9 +3195,7 @@ def _gen_user_session_expire(config, user_info, session_context=None):
         "Expire user session", session_context=session_context)
 
 
-# ---------------------------------------------------------------------------
 # user.mfa — MFA factor management
-# ---------------------------------------------------------------------------
 
 def _gen_user_mfa_factor_deactivate(config, user_info, session_context=None):
     factor = random.choice(_AUTH_FACTORS)
@@ -3246,9 +3232,7 @@ def _gen_user_mfa_okta_verify(config, user_info, session_context=None):
         debug_context=_build_debug_context("OIE_OKTA_VERIFY_PUSH"))
 
 
-# ---------------------------------------------------------------------------
 # push / RADIUS / provisioning / extended auth — high-volume benign noise
-# ---------------------------------------------------------------------------
 
 def _gen_push_send_verify(config, user_info, session_context=None):
     """system.push.send_factor_verify_push — Okta sends a push to user's device.
@@ -3797,9 +3781,7 @@ def _gen_user_registration_create(config, user_info, session_context=None):
     )
 
 
-# ---------------------------------------------------------------------------
 # user.authentication — extended auth methods
-# ---------------------------------------------------------------------------
 
 def _gen_user_auth_via_idp(config, user_info, session_context=None):
     idp = random.choice(_IDP_NAMES)
@@ -3859,9 +3841,7 @@ def _gen_user_auth_via_social(config, user_info, session_context=None):
         target=_target_idp(provider))
 
 
-# ---------------------------------------------------------------------------
 # user.risk — risk level changes
-# ---------------------------------------------------------------------------
 
 def _gen_user_risk_change(config, user_info, session_context=None):
     old_level = random.choice(["LOW","MEDIUM","HIGH"])
@@ -3884,9 +3864,7 @@ def _gen_user_risk_detect(config, user_info, session_context=None):
                      "threatSuspected": "true"})
 
 
-# ---------------------------------------------------------------------------
 # group — lifecycle, privilege, app assignment
-# ---------------------------------------------------------------------------
 
 def _gen_group_lifecycle_create(config, user_info, session_context=None):
     name = random.choice(["Security Team","Contractors","Temp Access","Dev Team","Data Analysts"])
@@ -3931,9 +3909,7 @@ def _gen_group_app_assignment_remove(config, user_info, session_context=None):
         target=_target_group(name) + _target_app(app), severity="WARN", session_context=session_context)
 
 
-# ---------------------------------------------------------------------------
 # application.lifecycle & user_membership
-# ---------------------------------------------------------------------------
 
 def _gen_app_lifecycle(event_type, config, user_info, severity="INFO", session_context=None):
     app = _rand_app(config)
@@ -3994,9 +3970,7 @@ def _gen_application_policy_sign_on_deny(config, user_info, session_context=None
         target=_target_app(app))
 
 
-# ---------------------------------------------------------------------------
 # policy — lifecycle and rules
-# ---------------------------------------------------------------------------
 
 def _gen_policy_lifecycle(event_type, config, user_info, severity="INFO", session_context=None):
     name  = random.choice(_POLICY_NAMES)
@@ -4056,9 +4030,7 @@ def _gen_policy_entity_risk_action(config, user_info, session_context=None):
         extra_debug={"action": action, "riskLevel": random.choice(["MEDIUM","HIGH"])}, session_context=session_context)
 
 
-# ---------------------------------------------------------------------------
 # security — attacks, breach, session, trusted origins, authenticators
-# ---------------------------------------------------------------------------
 
 def _gen_security_attack_start(config, user_info, session_context=None):
     attack_types = ["CREDENTIAL_STUFFING","PASSWORD_SPRAY","BRUTE_FORCE","BOT_ACTIVITY"]
@@ -4153,9 +4125,7 @@ def _gen_security_authenticator_deactivate(config, user_info, session_context=No
         severity="WARN", session_context=session_context)
 
 
-# ---------------------------------------------------------------------------
 # zone — network zone management
-# ---------------------------------------------------------------------------
 
 def _gen_zone_event(event_type, config, user_info, severity="INFO", session_context=None):
     name = random.choice(_ZONE_NAMES)
@@ -4175,9 +4145,7 @@ def _gen_zone_make_blacklist(c, u, session_context=None):  return _gen_zone_even
 def _gen_zone_remove_blacklist(c, u, session_context=None):return _gen_zone_event("zone.remove_blacklist", c, u, session_context=session_context)
 
 
-# ---------------------------------------------------------------------------
 # system — API tokens, email, SMS, voice, IDP, org rate limits, log stream
-# ---------------------------------------------------------------------------
 
 def _gen_system_api_token_revoke(config, user_info, session_context=None):
     return _admin_event(config, "system.api_token.revoke",
@@ -4328,9 +4296,7 @@ def _gen_system_mfa_factor_deactivate(config, user_info, session_context=None):
         severity="WARN", session_context=session_context)
 
 
-# ---------------------------------------------------------------------------
 # app.oauth2 — token grants, revocations, OIDC sign-on, client management
-# ---------------------------------------------------------------------------
 
 def _oauth2_target(client_name):
     return [{"id": _app_instance_id(client_name), "type": "AppInstance",
@@ -4487,9 +4453,7 @@ def _gen_oauth2_consent_revoke(config, user_info, session_context=None):
         target=_oauth2_target(client))
 
 
-# ---------------------------------------------------------------------------
 # iam — roles and resource sets
-# ---------------------------------------------------------------------------
 
 def _gen_iam_role_create(config, user_info, session_context=None):
     role = f"Custom {random.choice(['Security','Compliance','Audit','Provisioning'])} Role"
@@ -4522,9 +4486,7 @@ def _gen_iam_resourceset_bindings_delete(config, user_info, session_context=None
         target=_build_target_user(target_user) + _target_role(role), session_context=session_context)
 
 
-# ---------------------------------------------------------------------------
 # device.lifecycle — full lifecycle coverage
-# ---------------------------------------------------------------------------
 
 def _device_target(os_type=None):
     os_choice = os_type or random.choice(["Windows","macOS","iOS","Android","ChromeOS"])
@@ -4555,9 +4517,7 @@ def _gen_device_user_remove(config, user_info, session_context=None):
         severity="WARN", session_context=session_context)
 
 
-# ---------------------------------------------------------------------------
 # app.access_request & app.generic
-# ---------------------------------------------------------------------------
 
 def _gen_app_access_request(config, user_info, session_context=None):
     app = _rand_app(config)
@@ -4595,9 +4555,7 @@ def _gen_app_unauth_access_attempt(config, user_info, session_context=None):
         target=_target_app(app))
 
 
-# ===========================================================================
 # CORRELATED THREAT SEQUENCES
-# ===========================================================================
 
 def _generate_rogue_admin_creation(config, user_info, session_context=None):
     """user.lifecycle.create + user.account.privilege.grant — rogue admin account."""
@@ -5671,9 +5629,7 @@ def _generate_lateral_sso_attempts(config, user_info, session_context=None):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # NEW THREAT SEQUENCES — cross-platform IDP attack patterns
-# ---------------------------------------------------------------------------
 
 def _generate_mfa_factor_enroll_attack(config, user_info, session_context=None):
     """

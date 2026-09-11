@@ -73,9 +73,7 @@ except ImportError:
     from session_utils import get_random_user, get_user_by_name, get_random_anon_ip_ctx
 
 
-# ---------------------------------------------------------------------------
 # Required module-level attributes (the auto-loader uses these)
-# ---------------------------------------------------------------------------
 
 NAME        = "Windows Event Log"
 DESCRIPTION = "Simulates Windows Security channel events (4624/4625/4634/4647/4648/4740/4768/4769/4771/4776) in NXLog-style JSON."
@@ -90,9 +88,7 @@ last_threat_event_time = 0
 _BUILD_EVENT_OS_SUBTYPE = "Windows 10"
 
 
-# ---------------------------------------------------------------------------
 # Static Windows reference data
-# ---------------------------------------------------------------------------
 
 _PROVIDER_NAME = "Microsoft-Windows-Security-Auditing"
 _PROVIDER_GUID = "{54849625-5478-4994-a5ba-3e3b0328c30d}"
@@ -1347,9 +1343,7 @@ _SPN_TO_SERVICE_ACCOUNT.update(
     {spn: acct for acct, spn in _KERBEROAST_SERVICE_ACCOUNTS})
 
 
-# ---------------------------------------------------------------------------
 # Per-process mutable state
-# ---------------------------------------------------------------------------
 
 # _OPEN_SESSIONS:  hostname → list of open session dicts
 #   { "logon_id":"0x...", "target_user_sid":"...", "target_user_name":"...",
@@ -1453,9 +1447,7 @@ def _iso_ts(t: float = None) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond:06d}000Z"
 
 
-# ---------------------------------------------------------------------------
 # Configuration helpers
-# ---------------------------------------------------------------------------
 
 def _cf(config):
     """Shorthand — read this module's block from config.json with safe defaults."""
@@ -1520,9 +1512,7 @@ def _get_threat_interval(threat_level, config):
     return levels.get(threat_level, 7200)
 
 
-# ---------------------------------------------------------------------------
 # Core event-record builder
-# ---------------------------------------------------------------------------
 
 def _build_event(event_id: int, computer: str, event_data: dict,
                  success: bool = True,
@@ -1610,9 +1600,7 @@ def _user_type(sid: str, username: str = "") -> str:
     return "User"
 
 
-# ---------------------------------------------------------------------------
 # Windows Event XML renderer (for WEC transport)
-# ---------------------------------------------------------------------------
 
 _EVENT_NS = "http://schemas.microsoft.com/win/2004/08/events/event"
 
@@ -1700,9 +1688,7 @@ def _render_event_xml(event: dict) -> str:
     return xml_str
 
 
-# ---------------------------------------------------------------------------
 # Per-EventID constructors
-# ---------------------------------------------------------------------------
 
 def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
                 workstation_override=None, ip_override=None,
@@ -3146,9 +3132,7 @@ def _build_4738(user_info, config, *, target_username, target_sid,
     return _build_event(4738, dc_host, event_data, success=True, ts=ts)
 
 
-# ---------------------------------------------------------------------------
 # Benign event generators
-# ---------------------------------------------------------------------------
 
 def _benign_interactive_logon(config, session_context):
     """User logs on interactively at their workstation (LogonType 2).
@@ -3403,9 +3387,7 @@ def _benign_password_typo(config, session_context):
                                   sub_status="0xC000006A"))
 
 
-# ---------------------------------------------------------------------------
 # Benign process creation (4688) — realistic user workstation activity
-# ---------------------------------------------------------------------------
 # Each entry: (process_path, parent_process, command_line_template, weight)
 # command_line_template may contain {doc} placeholder filled at runtime.
 
@@ -3544,9 +3526,7 @@ _BENIGN_PROCESS_TABLE = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Object access (4656/4663) and DC account administration (4725/4767)
-# ---------------------------------------------------------------------------
 # 4656/4663 only appear on objects carrying a SACL, so the benign baseline is
 # drawn from paths an org would realistically audit: finance, HR and legal
 # shares, plus the GPO/NETLOGON trees on SYSVOL.  Without this baseline the
@@ -3695,9 +3675,7 @@ def _benign_process_creation(config, session_context):
     return events
 
 
-# ---------------------------------------------------------------------------
 # DC-specific benign generators (baseline for UEBA)
-# ---------------------------------------------------------------------------
 
 _DC_SERVICE_ACCOUNTS = [
     ("SYSTEM",          _SID_SYSTEM,       5),
@@ -3936,9 +3914,7 @@ def _select_benign(config, session_context):
     return result
 
 
-# ---------------------------------------------------------------------------
 # Threat generators
-# ---------------------------------------------------------------------------
 #
 # Every threat generator returns a list of JSON strings so the transport
 # layer emits them all in one call.  Detection-completeness patterns follow
@@ -4339,10 +4315,8 @@ _BENIGN_WEIGHTS["lateral_movement"] = 3
 _BENIGN_GENERATORS["lateral_movement"] = _threat_lateral_movement_chain
 
 
-# ---------------------------------------------------------------------------
 # dMSA privilege escalation targets — privileged accounts whose privileges
 # the attacker inherits via msDS-ManagedAccountPrecededByLink
-# ---------------------------------------------------------------------------
 # These must be *accounts*. msDS-ManagedAccountPrecededByLink is a DN link to the
 # superseded user/computer object, so a group DN ("Domain Admins") can never be
 # superseded and leaves the detector with no identity to resolve.
@@ -6797,9 +6771,7 @@ def _threat_priv_cert_request(config, session_context):
     return events
 
 
-# ---------------------------------------------------------------------------
 # Tier 1 threat generators: account lifecycle detections
-# ---------------------------------------------------------------------------
 
 _SUSPICIOUS_ACCOUNT_PREFIXES = [
     "svc_", "tmp_", "test_", "backup_", "admin_", "sys_", "sql_",
@@ -7400,9 +7372,7 @@ def _select_threat(config, session_context):
     return (result, choice) if result is not None else (None, None)
 
 
-# ---------------------------------------------------------------------------
 # Scenario-event dispatch (used by log_simulator.py attack scenarios)
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_event(scenario_event, config, context):
     """Scenario events let the top-level orchestrator request a specific
@@ -7537,9 +7507,7 @@ def _generate_scenario_event(scenario_event, config, context):
     return None
 
 
-# ---------------------------------------------------------------------------
 # Entry point (called by log_simulator.py on every tick)
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, scenario_event=None,
                  threat_level="Realistic", benign_only=False, context=None):
@@ -7622,9 +7590,7 @@ def generate_log(config, scenario=None, scenario_event=None,
     return _select_benign(config, session_context)
 
 
-# ---------------------------------------------------------------------------
 # Per-host parallel generation (multi-threaded mode)
-# ---------------------------------------------------------------------------
 
 # NOTE: parallel_hosts mode does NOT use _BENIGN_WEIGHTS -- these two tables are
 # the live dispatch, and config.json ships parallel_hosts=true.  A generator added
@@ -7814,9 +7780,7 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
         ).start()
 
 
-# ---------------------------------------------------------------------------
 # Public API for Flask UI status
-# ---------------------------------------------------------------------------
 
 def get_worker_stats() -> dict:
     """Returns current parallel-mode worker stats for the Flask dashboard."""
