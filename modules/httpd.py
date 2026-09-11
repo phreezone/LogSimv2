@@ -261,6 +261,35 @@ def _syslog_pri(config, level="info"):
     return f"<{facility * 8 + severity}>"
 
 
+# The browser/tool split of config['user_agents'] is a pure function of that list,
+# so it is computed once and memoised rather than rebuilt per event.  It used to be
+# recomputed on every call -- two passes over the UA list, each running
+# _is_attack_tool_ua(), i.e. len(uas) * 2 * len(tokens) substring tests per event
+# (~1,250 with the shipped config).  That made _get_user_agent() cost ~153 us
+# against ~0.3 us memoised, and it is called for every Apache line, which is why
+# this module profiled ~180x slower per call than any other.
+# Keyed by id() + length so a mutated or swapped-in config list is not served a
+# stale partition (the dashboard can reload config without restarting).
+_UA_PARTITION_CACHE: dict = {}
+
+
+def _ua_pools(config):
+    """(browser_agents, tool_agents) for this config, computed once per UA list."""
+    all_user_agents = config.get('user_agents', ["-"])
+    key = (id(all_user_agents), len(all_user_agents))
+    cached = _UA_PARTITION_CACHE.get(key)
+    if cached is not None:
+        return cached
+    browser_agents = [ua for ua in all_user_agents
+                      if "Mozilla" in ua and not _is_attack_tool_ua(ua)]
+    tool_agents = [ua for ua in all_user_agents
+                   if _is_attack_tool_ua(ua)] + _BUILTIN_ATTACK_UA
+    pools = (browser_agents, tool_agents)
+    _UA_PARTITION_CACHE.clear()      # only ever holds the live config's partition
+    _UA_PARTITION_CACHE[key] = pools
+    return pools
+
+
 def _get_user_agent(config, event_type="benign"):
     """Selects a realistic user agent.
 
@@ -269,11 +298,7 @@ def _get_user_agent(config, event_type="benign"):
     plenty of scanners spoof a Mozilla token, and plenty of legitimate clients
     (Outlook, Zoom, Okta Mobile) carry none.
     """
-    all_user_agents = config.get('user_agents', ["-"])
-    browser_agents = [ua for ua in all_user_agents
-                      if "Mozilla" in ua and not _is_attack_tool_ua(ua)]
-    tool_agents    = [ua for ua in all_user_agents if _is_attack_tool_ua(ua)]
-    tool_agents    = tool_agents + _BUILTIN_ATTACK_UA
+    browser_agents, tool_agents = _ua_pools(config)
 
     if event_type == "benign":
         return random.choice(browser_agents) if browser_agents else "-"
