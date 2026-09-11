@@ -109,14 +109,20 @@ def _run_scenario_and_flush(func, modules, cfg, run_id=None):
             _update_run(run_id, status="error", error=str(e))
         raise
     finally:
+        # A failed final flush strands the whole batch in the in-memory buffer --
+        # the events are simply never delivered, and swallowing the reason here
+        # is what makes that look like "the tenant didn't ingest" rather than
+        # "the flush raised".  Runs once per scenario, so log it unconditionally.
         try:
             flush_s3_batch()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[flush] S3 batch flush FAILED — events not delivered: "
+                  f"{type(exc).__name__}: {exc}")
         try:
             _flush_wec_batch(cfg)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[flush] WEC batch flush FAILED — events not delivered: "
+                  f"{type(exc).__name__}: {exc}")
         if run_id and _RUNS.get(run_id, {}).get("status") != "error":
             _update_run(run_id, status="done", emitted=collector.manifest() if collector else None)
         elif run_id:
@@ -553,7 +559,7 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
                         try:
                             _SEND_QUEUE.put_nowait((msg, module, config, event_name))
                         except _queue.Full:
-                            pass
+                            _note_queue_drop()
 
         except Exception as exc:
             print(f"[bad-user][{module.NAME}] worker error: {exc}")
@@ -690,6 +696,50 @@ _SEND_WORKERS_LOCK = threading.Lock()
 # sustained events/sec (each now reuses pooled keep-alive HTTP connections). Tunable via env.
 _SEND_WORKER_COUNT = max(1, int(os.getenv("SEND_WORKERS", "8")))
 
+# Delivery failures used to be swallowed whole: a send that raised, or an event
+# dropped because the queue was full, produced no counter, no log and no health
+# signal.  Metrics are recorded by the module worker BEFORE the event reaches
+# this queue, so a silent drop also made the dashboard over-report what was
+# actually delivered.  These counters are surfaced by _run_health_checks().
+_DELIVERY_STATS = {
+    "send_failures": 0, "last_send_error": None, "last_send_error_ts": None,
+    "queue_drops":   0, "last_drop_ts": None,
+}
+_DELIVERY_LOCK = threading.Lock()
+_LAST_DELIVERY_WARN = {"send": 0.0, "drop": 0.0}
+_DELIVERY_WARN_EVERY_S = 30.0
+
+
+def _note_send_failure(exc):
+    """Count a failed send and warn at most once per _DELIVERY_WARN_EVERY_S."""
+    now = time.time()
+    with _DELIVERY_LOCK:
+        _DELIVERY_STATS["send_failures"] += 1
+        _DELIVERY_STATS["last_send_error"] = f"{type(exc).__name__}: {exc}"[:200]
+        _DELIVERY_STATS["last_send_error_ts"] = now
+        total = _DELIVERY_STATS["send_failures"]
+        due = now - _LAST_DELIVERY_WARN["send"] >= _DELIVERY_WARN_EVERY_S
+        if due:
+            _LAST_DELIVERY_WARN["send"] = now
+    if due:
+        print(f"[send] FAILED ({total} total): {type(exc).__name__}: {exc}")
+
+
+def _note_queue_drop():
+    """Count an event dropped because the send queue was saturated."""
+    now = time.time()
+    with _DELIVERY_LOCK:
+        _DELIVERY_STATS["queue_drops"] += 1
+        _DELIVERY_STATS["last_drop_ts"] = now
+        total = _DELIVERY_STATS["queue_drops"]
+        due = now - _LAST_DELIVERY_WARN["drop"] >= _DELIVERY_WARN_EVERY_S
+        if due:
+            _LAST_DELIVERY_WARN["drop"] = now
+    if due:
+        print(f"[send] queue saturated — {total} events dropped so far "
+              f"(qsize={_SEND_QUEUE.qsize()}/{_SEND_QUEUE.maxsize}); "
+              f"metrics over-report by this much")
+
 
 def _send_worker():
     """Background thread that pulls (msg, module, config, event_name) from the
@@ -700,10 +750,13 @@ def _send_worker():
             msg, module, config, event_name = _SEND_QUEUE.get()
             try:
                 process_and_send(msg, module, config, event_name)
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as exc:
+                _note_send_failure(exc)
+        except Exception as exc:
+            # The queue get itself failed -- keep the worker alive, but do not
+            # let the reason vanish.
+            _note_send_failure(exc)
+            time.sleep(0.5)
 
 
 def _ensure_send_workers(count=None):
@@ -770,7 +823,7 @@ def _module_worker(state: ModuleState, config: dict):
                         try:
                             _SEND_QUEUE.put_nowait((msg, state.module, config, event_name))
                         except _queue.Full:
-                            pass  # drop if send queue is backed up
+                            _note_queue_drop()
 
         except Exception as exc:
             state.status = "error"
@@ -1001,8 +1054,9 @@ def api_fire_threat(name: str):
         try:
             from log_simulator import _flush_wec_batch
             _flush_wec_batch(cfg)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[fire-threat] WEC flush FAILED — events not delivered: "
+                  f"{type(exc).__name__}: {exc}")
         return jsonify({"fired": True, "event": event_name, "log_count": len(valid)})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -1818,6 +1872,26 @@ def _run_health_checks() -> dict:
             "status": "skip", "detail": f"not set: {', '.join(missing)}" if missing else "skipped",
         })
 
+    # ── Delivery integrity ────────────────────────────────────────────────────
+    # Send failures and queue drops are counted rather than swallowed; surface
+    # them here so a silent delivery problem shows up as a health alert instead
+    # of as "the tenant isn't ingesting".
+    with _DELIVERY_LOCK:
+        fails = _DELIVERY_STATS["send_failures"]
+        drops = _DELIVERY_STATS["queue_drops"]
+        last_err = _DELIVERY_STATS["last_send_error"]
+    results.append({
+        "group": "Delivery", "check": "send failures",
+        "status": "error" if fails else "ok",
+        "detail": f"{fails} failed send(s); last: {last_err}" if fails else "none",
+    })
+    results.append({
+        "group": "Delivery", "check": "send queue drops",
+        "status": "warn" if drops else "ok",
+        "detail": (f"{drops} event(s) dropped — queue saturated; module metrics "
+                   f"over-report delivery by this much") if drops else "none",
+    })
+
     overall = ("error" if any(r["status"] == "error" for r in results)
                else "warn" if any(r["status"] == "warn" for r in results)
                else "ok")
@@ -1852,8 +1926,11 @@ def _health_monitor_tick():
                 _health_alerts.extend(alerts)
                 _health_cache = result
                 _health_ts = time.time()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Swallowing this means the health monitor can die quietly and every
+            # downstream check just looks "green" forever -- the same shape as the
+            # probe stall that went unnoticed for a day.
+            print(f"[health] monitor tick FAILED: {type(exc).__name__}: {exc}")
 
 
 # Start the background health monitor

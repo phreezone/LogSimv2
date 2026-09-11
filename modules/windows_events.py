@@ -1374,6 +1374,34 @@ _orchestrator_started = False
 _orchestrator_lock = threading.Lock()
 _workers_stop = threading.Event()
 
+# Worker threads used to swallow every exception, so a generator that raised on
+# every call simply produced nothing -- no log line, no counter, no clue.  These
+# run in a loop, so failures are counted and reported at most once per interval
+# per worker rather than on every tick.
+_worker_errors: dict = {}
+_WORKER_WARN_EVERY_S = 60.0
+
+
+def _note_worker_error(where, exc, dropped=False):
+    now = time.time()
+    with _STATE_LOCK:
+        rec = _worker_errors.setdefault(
+            where, {"count": 0, "drops": 0, "last_warn": 0.0, "last": None})
+        if dropped:
+            rec["drops"] += 1
+        else:
+            rec["count"] += 1
+        rec["last"] = f"{type(exc).__name__}: {exc}"[:200] if exc else "queue full"
+        due = now - rec["last_warn"] >= _WORKER_WARN_EVERY_S
+        if due:
+            rec["last_warn"] = now
+        count, drops, last = rec["count"], rec["drops"], rec["last"]
+    if due:
+        if dropped:
+            print(f"[windows:{where}] output queue full — {drops} event(s) dropped")
+        else:
+            print(f"[windows:{where}] generator error ({count} total): {last}")
+
 
 def reset_state():
     """Reset module-level mutable state to its initial values.
@@ -7655,9 +7683,9 @@ def _dc_worker(config, session_context, interval, stop_event):
                     stats["events_generated"] += 1
                 stats["last_event_time"] = time.time()
         except _queue_mod.Full:
-            pass
-        except Exception:
-            pass
+            _note_worker_error("dc", None, dropped=True)
+        except Exception as exc:
+            _note_worker_error("dc", exc)
         stop_event.wait(timeout=interval)
 
 
@@ -7680,9 +7708,9 @@ def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
                 stats["events_generated"] += 1
             stats["last_event_time"] = time.time()
         except _queue_mod.Full:
-            pass
-        except Exception:
-            pass
+            _note_worker_error(f"wks:{hostname}", None, dropped=True)
+        except Exception as exc:
+            _note_worker_error(f"wks:{hostname}", exc)
         stop_event.wait(timeout=interval)
 
 
@@ -7718,9 +7746,11 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
                             "timestamp": current_time,
                         })
                     except _queue_mod.Full:
+                        # Status queue is advisory (dashboard "threat fired"
+                        # badge); the events themselves already went out.
                         pass
-        except Exception:
-            pass
+        except Exception as exc:
+            _note_worker_error("threats", exc)
         stop_event.wait(timeout=interval)
 
 
