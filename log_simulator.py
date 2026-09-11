@@ -1664,7 +1664,6 @@ def run_phishing_kill_chain_scenario(modules, config):
     base_ctx = {"session_context": session_context}
 
     try:
-        # STEP 1 — Phishing email delivered (slipped past TAP)
         print("\n[STEP 1] Proofpoint: Phishing email delivered to victim mailbox...")
         pp_ctx = {**base_ctx, "target_email": victim_email,
                   "sender_ip": attacker_ip, "shared_guid": shared_guid}
@@ -1676,7 +1675,6 @@ def run_phishing_kill_chain_scenario(modules, config):
         process_and_send(log_content, pp_module, config, event_name)
         time.sleep(2)
 
-        # STEP 2 — Victim clicks the link (click-permitted: TAP allowed it at click time)
         print("[STEP 2] Proofpoint: Victim clicks malicious URL (click-permitted)...")
         click_ctx = {**base_ctx, "target_email": victim_email,
                      "sender_ip": attacker_ip, "shared_guid": shared_guid}
@@ -1894,7 +1892,6 @@ def run_insider_threat_scenario(modules, config):
             print("[STEP 1] Okta module not loaded — skipping.")
         time.sleep(2)
 
-        # STEP 2 — AWS: access cloud credentials
         print("[STEP 2] AWS: Insider accesses cloud credentials (Secrets Manager/SSM)...")
         aws_cred_ctx = {**base_ctx, "user_identity": aws_identity, "ip_address": insider_ip}
         result = aws_module.generate_log(config, scenario_event="CREDENTIAL_FILE_ACCESS", context=aws_cred_ctx)
@@ -1906,7 +1903,6 @@ def run_insider_threat_scenario(modules, config):
             process_and_send(log_content, aws_module, config, event_name)
         time.sleep(2)
 
-        # STEP 3 — AWS: disable Security Hub
         print("[STEP 3] AWS: Insider disables Security Hub (defense evasion)...")
         aws_evasion_ctx = {**base_ctx, "user_identity": aws_identity, "ip_address": insider_ip}
         result = aws_module.generate_log(config, scenario_event="DISABLE_SECURITY_HUB", context=aws_evasion_ctx)
@@ -1918,7 +1914,6 @@ def run_insider_threat_scenario(modules, config):
             process_and_send(log_content, aws_module, config, event_name)
         time.sleep(2)
 
-        # STEP 4 — AWS: stop Config recorder
         print("[STEP 4] AWS: Insider stops AWS Config recorder (defense evasion)...")
         result = aws_module.generate_log(config, scenario_event="STOP_CONFIG_RECORDER", context=aws_evasion_ctx)
         if isinstance(result, tuple):
@@ -2025,9 +2020,7 @@ def run_infoblox_single_threat(scenario_event_name, all_modules, config):
     print(f"  Sent {count} log(s) for {name}.")
 
 
-# ---------------------------------------------------------------------------
 # Scenario helpers
-# ---------------------------------------------------------------------------
 
 _FW_MODULE_NAMES = [
     "Cisco Firepower",
@@ -2128,13 +2121,11 @@ def run_dns_c2_killchain_scenario(all_modules, config):
     print(f"  Firewall modules: {fw_names}")
 
     try:
-        # STEP 1 — DHCP: victim device joins the network
         print("\n[STEP 1] Infoblox DHCP: Victim device gets IP lease...")
         dhcp_log, dhcp_name = infoblox_module.generate_dhcp_ack(config, victim_ip, victim_mac, victim_host)
         process_and_send(dhcp_log, infoblox_module, config, dhcp_name)
         time.sleep(1)
 
-        # STEP 2 — Benign DNS: device connectivity check (baseline)
         print("[STEP 2] Infoblox DNS: Normal connectivity check (baseline)...")
         benign_domain = random.choice(config.get('benign_domains', ['www.microsoft.com']))
         dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, benign_domain)
@@ -2155,7 +2146,6 @@ def run_dns_c2_killchain_scenario(all_modules, config):
             process_and_send(log_content, infoblox_module, config, event_name)
         time.sleep(1)
 
-        # STEP 4 — NXDOMAIN storm: DGA cycling (second domain set)
         print("[STEP 4] Infoblox DNS: DGA NXDOMAIN storm (implant cycling through C2 candidates)...")
         result = infoblox_module.generate_log(config, scenario_event="NXDOMAIN_STORM",
                                               context={**base_ctx, "src_ip": victim_ip})
@@ -2167,19 +2157,16 @@ def run_dns_c2_killchain_scenario(all_modules, config):
             process_and_send(log_content, infoblox_module, config, event_name)
         time.sleep(1)
 
-        # STEP 5 — ALL firewalls: Security Intel / URL block on second C2 domain
         print(f"[STEP 5] All firewall modules: Security Intel block on C2 domain...")
         _send_to_all_fw(fw_modules, "THREAT_BLOCK", config,
                         {**base_ctx, "src_ip": victim_ip}, "[STEP 5]")
         time.sleep(1)
 
-        # STEP 6 — DNS resolves: third C2 domain succeeds (new infra)
         print(f"[STEP 6] Infoblox DNS: Third C2 domain resolves (NOERROR) — {c2_domain_3}...")
         dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, c2_domain_3)
         process_and_send(dns_logs, infoblox_module, config, dns_name)
         time.sleep(1)
 
-        # STEP 7 — ALL firewalls: outbound connection to C2 IP allowed (not yet on blocklist)
         print(f"[STEP 7] All firewall modules: Outbound connection to C2 IP established...")
         _send_to_all_fw(fw_modules, "LARGE_EGRESS", config,
                         {**base_ctx, "src_ip": victim_ip}, "[STEP 7]")
@@ -2240,20 +2227,17 @@ def run_device_compromise_scenario(all_modules, config):
     print(f"  Firewall modules: {fw_names}")
 
     try:
-        # STEP 1 — DHCP: device joins network
         print("\n[STEP 1] Infoblox DHCP: Device joins network (DHCP ACK)...")
         dhcp_log, dhcp_name = infoblox_module.generate_dhcp_ack(config, victim_ip, victim_mac, victim_host)
         process_and_send(dhcp_log, infoblox_module, config, dhcp_name)
         time.sleep(1)
 
-        # STEP 2 — Benign DNS: normal activity baseline
         print("[STEP 2] Infoblox DNS: Normal web browsing DNS query (baseline)...")
         benign_domain = random.choice(config.get('benign_domains', ['www.office365.com']))
         dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, benign_domain)
         process_and_send(dns_logs, infoblox_module, config, dns_name)
         time.sleep(1)
 
-        # STEP 3 — ALL firewalls: normal outbound web browsing (benign baseline)
         print(f"[STEP 3] All firewall modules: Normal outbound web browsing (benign baseline)...")
         fw_ctx = {**base_ctx, "src_ip": victim_ip}
         if fw_modules:
@@ -2269,7 +2253,6 @@ def run_device_compromise_scenario(all_modules, config):
             print("[STEP 3] No network firewall modules loaded — skipping.")
         time.sleep(1)
 
-        # STEP 4 — RPZ NXDOMAIN: first C2 attempt blocked at DNS
         print("[STEP 4] Infoblox DNS: RPZ NXDOMAIN — first C2 attempt blocked at DNS...")
         result = infoblox_module.generate_log(config, scenario_event="RPZ_BLOCK",
                                               context={**base_ctx, "src_ip": victim_ip})
@@ -2281,20 +2264,17 @@ def run_device_compromise_scenario(all_modules, config):
             process_and_send(log_content, infoblox_module, config, event_name)
         time.sleep(1)
 
-        # STEP 5 — ALL firewalls: URL/Security Intel block on second C2 domain
         print(f"[STEP 5] All firewall modules: URL/Security Intel block — second C2 attempt...")
         _send_to_all_fw(fw_modules, "THREAT_BLOCK", config,
                         {**base_ctx, "src_ip": victim_ip}, "[STEP 5]")
         time.sleep(1)
 
-        # STEP 6 — DNS NOERROR: third C2 domain resolves (not yet on any blocklist)
         print("[STEP 6] Infoblox DNS: Third C2 domain resolves (NOERROR — new infra)...")
         c2_domain = f"c2-infra-{random.randint(1000,9999)}.net"
         dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, c2_domain)
         process_and_send(dns_logs, infoblox_module, config, dns_name)
         time.sleep(1)
 
-        # STEP 7 — Threat Protect: post-connection CEF DROP (BloxOne detects C2 category)
         print("[STEP 7] Infoblox Threat Protect: Post-connection C2 category detection (CEF DROP)...")
         result = infoblox_module.generate_log(config, scenario_event="THREAT_PROTECT",
                                               context={**base_ctx, "src_ip": victim_ip})
@@ -3079,13 +3059,11 @@ def run_domain_dominance_scenario(all_modules, config):
         else:
             print("[STEP 2] Infoblox module not loaded — skipping DNS recon.")
 
-        # STEP 3 — Credential access: Kerberoasting (RC4 service-ticket burst)
         print("[STEP 3] Windows: Kerberoasting — burst of service-ticket requests from the victim...")
         _emit(win_module.generate_log(config, scenario_event="MULTIPLE_SERVICE_TICKETS", context=win_ctx),
               win_module, "multiple_service_tickets")
         time.sleep(2)
 
-        # STEP 4 — Privilege escalation: DCSync
         print("[STEP 4] Windows: DCSync — directory replication rights abused...")
         _emit(win_module.generate_log(config, scenario_event="DCSYNC", context=win_ctx),
               win_module, "dcsync")
@@ -3303,21 +3281,18 @@ def run_server_breach_cloud_scenario(all_modules, config):
             process_and_send(content, module, config, name)
 
     try:
-        # STEP 1 — Recon: attacker sweeps the web server (404 burst).
         print("\n[STEP 1] Apache: attacker reconnaissance scan against the web server...")
         _emit(httpd_module.generate_log(config, scenario_event="recon_scan",
                                         context={"session_context": session_context, "src_ip": attacker_ip}),
               httpd_module, "recon_scan")
         time.sleep(2)
 
-        # STEP 2 — Web-shell upload (POST to an upload handler).
         print("[STEP 2] Apache: web-shell upload (POST to upload handler)...")
         _emit(httpd_module.generate_log(config, scenario_event="webshell_execution",
                                         context={"session_context": session_context, "src_ip": attacker_ip}),
               httpd_module, "webshell_execution")
         time.sleep(2)
 
-        # STEP 3 — Command execution via the web shell (SQL/cmd payloads).
         print("[STEP 3] Apache: command execution via web shell (malicious payloads)...")
         _emit(httpd_module.generate_log(config, scenario_event="malicious_payload",
                                         context={"session_context": session_context, "src_ip": attacker_ip}),
@@ -3583,32 +3558,27 @@ def run_identity_attack_cloud_scenario(all_modules, config):
             process_and_send(content, module, config, name)
 
     try:
-        # STEP 1 — MFA fatigue: attacker spams push prompts at the victim.
         print("\n[STEP 1] Okta: MFA-fatigue push bombing against the victim...")
         _emit(okta_module.generate_log(config, scenario_event="mfa_bombing", context=okta_ctx),
               okta_module, "mfa_bombing")
         time.sleep(2)
 
-        # STEP 2 — Account takeover: successful login from a Tor exit node.
         print("[STEP 2] Okta: account takeover — login from a Tor exit node...")
         _emit(okta_module.generate_log(config, scenario_event="tor_login", context=okta_ctx),
               okta_module, "tor_login")
         time.sleep(2)
 
-        # STEP 3 — Federation: the compromised identity assumes an AWS role via SAML.
         print("[STEP 3] AWS: AssumeRoleWithSAML — Okta identity federates into AWS...")
         _emit(aws_module.generate_log(config, scenario_event="ASSUME_ROLE_WITH_SAML", context=aws_ctx),
               aws_module, "ASSUME_ROLE_WITH_SAML")
         time.sleep(2)
 
-        # STEP 4 — Cloud privilege escalation.
         print("[STEP 4] AWS: privilege escalation — attach AdministratorAccess...")
         _emit(aws_module.generate_log(config, scenario_event="ATTACH_ADMIN_POLICY", context=aws_ctx),
               aws_module, "ATTACH_ADMIN_POLICY")
         _emit_guardduty(all_modules, config, aws_ctx, "GD_ADMIN_PRIVESC")
         time.sleep(2)
 
-        # STEP 5 — Cloud data exfiltration as the federated session.
         print("[STEP 5] AWS: bulk S3 read + exfil as the federated identity...")
         _emit(aws_module.generate_log(config, scenario_event="S3_READ_EXFIL_CHAIN", context=aws_ctx),
               aws_module, "S3_READ_EXFIL_CHAIN")

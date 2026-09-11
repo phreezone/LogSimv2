@@ -9,9 +9,7 @@ import hashlib
 from ipaddress import ip_address, ip_network
 
 
-# ---------------------------------------------------------------------------
 # Session builder – called once in log_simulator.py main()
-# ---------------------------------------------------------------------------
 
 def build_session_context(config):
     """
@@ -123,9 +121,7 @@ def _pick_ip(subnet_cidr):
         return '127.0.0.1'
 
 
-# ---------------------------------------------------------------------------
 # Per-call helpers – called inside each module's generate_log()
-# ---------------------------------------------------------------------------
 
 def get_random_user(session_context, preferred_device_type=None):
     """
@@ -234,9 +230,7 @@ def get_zscaler_device_info(user_info):
     }
 
 
-# ---------------------------------------------------------------------------
 # Anonymizer IP helpers – shared across all modules
-# ---------------------------------------------------------------------------
 
 # Fallback VPN provider pool used when config.json has no "vpn_providers" key.
 # Keep this in sync with the config.json "vpn_providers" array.
@@ -324,13 +318,9 @@ def get_random_anon_ip_ctx(config):
     return get_random_vpn_ip_ctx(config)
 
 
-# ---------------------------------------------------------------------------
 # UEBA behavioral helpers – shared across all firewall modules
-# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
 # Geographic source-IP policy
-# ---------------------------------------------------------------------------
 # DO NOT "FIX" THIS BACK to a wide random first-octet pool.
 #
 # The XSIAM analytic "First successful VPN access from a country in organization"
@@ -363,7 +353,6 @@ def get_random_anon_ip_ctx(config):
 #                                      deliberate "first access from a new country"
 #                                      event, one per day => 70-day recurrence,
 #                                      comfortably past the detector's 30-day window.
-# ---------------------------------------------------------------------------
 
 # Fallback home ranges, used when no config is threaded through to the caller.
 # These are the XSIAM-verified /24s that also populate config['benign_ingress_sources'].
@@ -422,10 +411,8 @@ def stable_vpn_ip(user, config=None):
     return ips[0] if random.random() < 0.80 else ips[1]
 
 
-# ---------------------------------------------------------------------------
 # Reserve-country VPN source IPs — drives the "First successful VPN access from
 # a country in organization" analytic.
-# ---------------------------------------------------------------------------
 
 def _novel_pool(config):
     return [e for e in (config or {}).get("vpn_novel_country_pool", []) if e.get("ip_range")]
@@ -466,9 +453,7 @@ def novel_country_vpn_ip(config, offset=0):
     return ip, entry.get("country"), entry.get("resolved_country"), entry.get("name")
 
 
-# ---------------------------------------------------------------------------
 # Tor exit nodes for VPN logins — country-filtered.
-# ---------------------------------------------------------------------------
 
 def tor_vpn_ips(config):
     """Live Tor exit-node IPs restricted to the genuine Tor-heavy countries.
@@ -508,9 +493,7 @@ def tor_vpn_ip(config, default=None):
     return random.choice(ips) if ips else default
 
 
-# ---------------------------------------------------------------------------
 # Ambient external ("rest of the internet") source IPs
-# ---------------------------------------------------------------------------
 # DO NOT "FIX" THIS BACK to `random.choice(first_octets) + 3 random octets`.
 #
 # Every module used to carry its own _random_external_ip() picking a random host
@@ -787,9 +770,7 @@ _DEFAULT_USER_AGENTS = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Internal helpers
-# ---------------------------------------------------------------------------
 
 def _select_device(devices, preferred_type):
     """Pick the best available device from the active_devices dict."""

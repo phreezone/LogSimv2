@@ -253,9 +253,7 @@ def _dns_precursor_event(config, user, dept, device_info, src_ip, domain=None,
                      duration_ms=random.randint(1, 500), exact_user=exact_user)
 
 
-# ---------------------------------------------------------------------------
 # BENIGN WEB GENERATORS
-# ---------------------------------------------------------------------------
 
 def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_info):
     """Allowed outbound web browsing (nssweblog)."""
@@ -295,9 +293,7 @@ def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_in
     return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
 
 
-# ---------------------------------------------------------------------------
 # BENIGN FIREWALL GENERATORS
-# ---------------------------------------------------------------------------
 
 def _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, device_info):
     """Allowed outbound TCP connection — normal workstation traffic (nssfwlog)."""
@@ -570,9 +566,7 @@ def _generate_benign_video_streaming(config, user, dept, internal_host_ip, devic
     return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
 
 
-# ---------------------------------------------------------------------------
 # BENIGN PROTOCOL BASELINE GENERATORS (UEBA)
-# ---------------------------------------------------------------------------
 
 def _generate_benign_smb_event(config, user, dept, internal_host_ip, device_info):
     """Internal SMB file-share access — baseline for SMB lateral movement alerts (nssfwlog)."""
@@ -720,9 +714,7 @@ def _generate_benign_ftp_event(config, user, dept, internal_host_ip, device_info
                      random.randint(200, 5_000))
 
 
-# ---------------------------------------------------------------------------
 # THREAT WEB GENERATORS
-# ---------------------------------------------------------------------------
 
 def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_info):
     """Blocked malicious web traffic — malware download or C2 callback.
@@ -1068,9 +1060,7 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # FIREWALL EVENT HELPER — shared by all nssfwlog generators
-# ---------------------------------------------------------------------------
 
 def _is_internal_ip(ip):
     """Return True if the IP string looks like a private/internal address."""
@@ -1183,9 +1173,7 @@ def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
     return _format_nss_log_as_cef(fields, user, dept, 'nssfwlog')
 
 
-# ---------------------------------------------------------------------------
 # THREAT FIREWALL GENERATORS — single-event
-# ---------------------------------------------------------------------------
 
 def _generate_threat_firewall_traffic(config, user, dept, internal_host_ip, device_info):
     """Outbound connection to a suspicious or TOR destination, blocked.
@@ -1333,9 +1321,7 @@ def _generate_ssh_over_https(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # THREAT FIREWALL GENERATORS — multi-event (return list)
-# ---------------------------------------------------------------------------
 
 def _generate_port_scan(config, user, dept, internal_host_ip, device_info):
     """Internal host probing many ports on an internal server (nssfwlog).
@@ -1485,9 +1471,7 @@ def _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # SMB THREAT GENERATORS — internal east-west SMB scenarios
-# ---------------------------------------------------------------------------
 
 def _generate_smb_new_host_lateral(config, user, dept, internal_host_ip, device_info):
     """SMB connections from one internal workstation to multiple unfamiliar internal hosts.
@@ -1734,9 +1718,7 @@ def _generate_smb_share_enumeration(config, user, dept, internal_host_ip, device
     return logs
 
 
-# ---------------------------------------------------------------------------
 # RARE-RDP peer bookkeeping — same idiom as the rare-SMB block above
-# ---------------------------------------------------------------------------
 # "rdprare::<src_ip>" -> peers this host has already reached on 3389. In memory only,
 # by design (single-session operation), and deliberately NOT seeded from hash(): CPython
 # salts str hashing per process, so a hash-derived "sticky" value re-rolls on restart.
@@ -1882,9 +1864,7 @@ def _generate_rdp_rare_session(config, user, dept, internal_host_ip, device_info
     return logs
 
 
-# ---------------------------------------------------------------------------
 # ADMINISTRATIVE-BEHAVIOUR ANALYTICS SUPPORT
-# ---------------------------------------------------------------------------
 # Destination ports the detector actually COUNTS as an administrative action. Measured
 # against the tenant: 22 and 69 count reliably, 512 was never counted on any feed and 992
 # counts on some feeds and not others. So 22/69 carry the budget and the other two are
@@ -2052,9 +2032,7 @@ def _generate_new_admin_behavior(config, user, dept, internal_host_ip, device_in
     return logs
 
 
-# ---------------------------------------------------------------------------
 # VPN / REMOTE ACCESS GENERATORS — Zscaler ZPA / RA-VPN via cloud firewall
-# ---------------------------------------------------------------------------
 
 def _generate_vpn_brute_force(config, user, dept, internal_host_ip, device_info):
     """External IP repeatedly failing VPN/ZPA authentication — brute force (nssfwlog).
@@ -2195,9 +2173,7 @@ def _generate_vpn_tor_login(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # RARE OUTBOUND SERVICE GENERATORS
-# ---------------------------------------------------------------------------
 
 def _generate_rare_external_rdp(config, user, dept, internal_host_ip, device_info):
     """Outbound RDP from internal workstation to a rare external IP.
@@ -2233,9 +2209,7 @@ def _generate_rare_ssh(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # SMTP / FTP EXFILTRATION GENERATORS
-# ---------------------------------------------------------------------------
 
 def _generate_smtp_spray(config, user, dept, internal_host_ip, device_info):
     """Compromised workstation acting as spam bot — direct SMTP to many external MX (nssfwlog).
@@ -2310,9 +2284,7 @@ def _generate_ftp_large_exfil(config, user, dept, internal_host_ip, device_info)
     return logs
 
 
-# ---------------------------------------------------------------------------
 # DDNS C2 GENERATOR
-# ---------------------------------------------------------------------------
 
 def _generate_ddns_connection(config, user, dept, internal_host_ip, device_info):
     """Internal workstation connecting to a known dynamic DNS domain (nssfwlog).
@@ -2763,9 +2735,7 @@ def get_threat_info():
     return result
 
 
-# ---------------------------------------------------------------------------
 # CEF FORMATTER (unchanged from original)
-# ---------------------------------------------------------------------------
 
 def _format_nss_log_as_cef(fields, user, dept, log_product):
     """Builds the final CEF log string for Zscaler NSS feeds.
@@ -3026,9 +2996,7 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
             f"{syslog_host} {cef_header}{extension_string}")
 
 
-# ---------------------------------------------------------------------------
 # SCENARIO SUPPORT
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_log(config, scenario):
     """Generates a scenario-driven threat log from an explicit scenario dict."""
@@ -3061,9 +3029,7 @@ def _generate_scenario_log(config, scenario):
     return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
 
 
-# ---------------------------------------------------------------------------
 # MAIN ENTRY POINT
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, threat_level="Realistic", benign_only=False, context=None, scenario_event=None):
     """Generates a Zscaler NSS CEF log with variable threat rates.

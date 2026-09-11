@@ -48,9 +48,7 @@ XSIAM_VENDOR = "Proofpoint"
 XSIAM_PRODUCT = "Tap"
 CONFIG_KEY = "proofpoint_config"
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 
 _FIRST_OCTETS = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 194, 212, 213]
 
@@ -214,9 +212,7 @@ _THREAT_WEIGHTS = {
 last_threat_event_time = 0
 
 
-# ---------------------------------------------------------------------------
 # Internal helpers
-# ---------------------------------------------------------------------------
 
 def _get_threat_interval(threat_level, config):
     if threat_level == "Benign Traffic Only":
@@ -560,9 +556,7 @@ def _base_message(config, recipients, guid, sender, sender_ip, subject):
     }
 
 
-# ---------------------------------------------------------------------------
 # Benign generators
-# ---------------------------------------------------------------------------
 
 def _generate_benign_delivered(config, session_context=None):
     """Standard business email delivered to mailbox."""
@@ -600,9 +594,7 @@ def _generate_benign_delivered(config, session_context=None):
     return json.dumps(msg, default=str)
 
 
-# ---------------------------------------------------------------------------
 # Threat generators
-# ---------------------------------------------------------------------------
 
 def _strip_none_threat_fields(msg):
     """Remove hunt fields that are None — keeps raw data clean for non-threat events."""
@@ -1121,9 +1113,7 @@ def _generate_phishing_campaign(config, session_context=None):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # Scenario event handlers (storytelling / kill-chain mode)
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_event(scenario_event, config, context):
     """Handle explicit scenario_event calls from log_simulator.py.
@@ -1214,9 +1204,7 @@ def _generate_scenario_event(scenario_event, config, context):
     return None, None
 
 
-# ---------------------------------------------------------------------------
 # Threat dispatcher
-# ---------------------------------------------------------------------------
 
 _THREAT_GENERATORS = {
     "phishing_url":        _generate_phishing_url,
@@ -1252,9 +1240,7 @@ def _select_threat(config, session_context):
     return (fn(config, session_context), threat_type)
 
 
-# ---------------------------------------------------------------------------
 # Main entry point
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, scenario_event=None, threat_level="Realistic",
                  benign_only=False, context=None):

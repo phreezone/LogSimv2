@@ -226,9 +226,7 @@ _URL_REP_BENIGN  = ["Trustworthy", "Low Risk", "Moderate Risk"]
 _URL_REP_SUSPECT = ["Suspicious", "High Risk"]
 
 
-# ---------------------------------------------------------------------------
 # Internal helpers
-# ---------------------------------------------------------------------------
 
 def _get_config(config):
     return config.get(CONFIG_KEY, {})
@@ -380,9 +378,7 @@ def _dns_precursor_log(config, src_ip, user, dest_hostname, shost=None):
     return _format_firepower_cef(config, fields, "CONNECTION STATISTICS")
 
 
-# ---------------------------------------------------------------------------
 # UEBA behaviour-consistency helpers
-# ---------------------------------------------------------------------------
 # XSIAM UEBA builds per-user profiles by observing repeated patterns.
 # These helpers ensure simulated users behave consistently across events
 # so that detections like "rare login location" or "unusual destination"
@@ -476,9 +472,7 @@ def _base_fields(config, src_ip, user, shost=None):
     return fields
 
 
-# ---------------------------------------------------------------------------
 # Benign event generators
-# ---------------------------------------------------------------------------
 
 def _generate_connection_event(config, src_ip, user, shost=None):
     """Standard outbound connection — web browsing (85%) or blocked suspicious port (15%).
@@ -1243,9 +1237,7 @@ def _generate_benign_log(config, session_context=None):
         return _format_firepower_cef(config, fields, cef_name)
 
 
-# ---------------------------------------------------------------------------
 # Threat event generators
-# ---------------------------------------------------------------------------
 
 def _generate_ips_event(config):
     """Inbound IPS event — external attacker targeting an internal server.
@@ -2356,9 +2348,7 @@ def _generate_dns_c2_beacon(config, src_ip, user, shost=None):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # VPN, SMTP, FTP, DDNS, App Control, Network Anomaly event generators
-# ---------------------------------------------------------------------------
 
 def _generate_vpn_brute_force(config, src_ip, user, shost=None):
     """VPN credential-stuffing attack — external IP repeatedly failing RA-VPN auth.
@@ -3026,9 +3016,7 @@ def _generate_network_anomaly(config):
     return fields, "INTRUSION EVENT"
 
 
-# ---------------------------------------------------------------------------
 # Scenario log generator
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_log(config, scenario, session_context=None):
     """Generates a log for a scripted storytelling / coordinated scenario."""
@@ -3107,9 +3095,7 @@ def _generate_scenario_log(config, scenario, session_context=None):
     return _format_firepower_cef(config, fields, cef_name)
 
 
-# ---------------------------------------------------------------------------
 # Threat dispatcher
-# ---------------------------------------------------------------------------
 
 _dns_tunnel_target_map: dict = {}   # src_ip -> stable (resolver, tunnel_domain) for DNS-tunnel recurrence
 
@@ -3414,9 +3400,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     return (_format_firepower_cef(config, fields, cef_name), chosen)
 
 
-# ---------------------------------------------------------------------------
 # Main entry point
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, threat_level="Realistic",
                  benign_only=False, context=None, scenario_event=None):

@@ -387,9 +387,7 @@ for gen, e in all_events:
 if not any('4648' in m for s, m in issues):
     print("  PASS")
 
-# =========================================================================
 # SUMMARY
-# =========================================================================
 print("\n" + "=" * 70)
 critical = [(s, m) for s, m in issues if s == 'CRITICAL']
 warnings = [(s, m) for s, m in issues if s == 'WARNING']

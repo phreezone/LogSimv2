@@ -28,12 +28,10 @@ def get_threat_names():
 
 last_threat_event_time = 0
 
-# ---------------------------------------------------------------------------
 # PRI values verified from real Infoblox NIOS production log captures:
 # facility 3 (daemon) × 8 + severity 6 (info)   = 30  — named, dhcpd
 # facility 3 (daemon) × 8 + severity 5 (notice) = 29  — httpd audit
 # threat-protect-log and RPZ use ISO timestamp + "daemon" keyword (no PRI number)
-# ---------------------------------------------------------------------------
 _DNS_PRI   = "<30>"   # daemon+info — verified from named log captures
 _DHCP_PRI  = "<30>"   # daemon+info — consistent across all dhcpd examples
 _AUDIT_PRI = "<29>"   # daemon+notice — verified from httpd audit log captures
@@ -58,9 +56,7 @@ _SRV_SERVICES = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Timestamp helpers
-# ---------------------------------------------------------------------------
 
 def _get_syslog_timestamp():
     """RFC 3164 syslog timestamp: 'Oct 11 22:14:15'"""
@@ -84,9 +80,7 @@ def _get_threat_interval(threat_level, config):
     return levels.get(threat_level, 86400 * 365)
 
 
-# ---------------------------------------------------------------------------
 # DNS log builders
-# ---------------------------------------------------------------------------
 
 def _build_dns_query_log(config, client_ip, domain, q_type="A", dns_server_ip=None):
     r"""
@@ -147,9 +141,7 @@ def _build_dns_response_log(config, client_ip, domain, q_type, rcode, response_r
     return f"{_DNS_PRI}{msg}"
 
 
-# ---------------------------------------------------------------------------
 # DHCP log builder
-# ---------------------------------------------------------------------------
 
 def _build_dhcp_log(config, msg_type, client_ip, client_mac, client_hostname, transaction_id, relay_ip=None):
     r"""
@@ -189,9 +181,7 @@ def _build_dhcp_log(config, msg_type, client_ip, client_mac, client_hostname, tr
     return msg
 
 
-# ---------------------------------------------------------------------------
 # Audit log builder
-# ---------------------------------------------------------------------------
 
 def _build_audit_log(config, event_type=None, via="GUI"):
     r"""
@@ -240,9 +230,7 @@ def _build_audit_log(config, event_type=None, via="GUI"):
     return f"{_AUDIT_PRI}{msg}"
 
 
-# ---------------------------------------------------------------------------
 # CEF threat log builders
-# ---------------------------------------------------------------------------
 
 def _build_threat_cef_log(config, client_ip, client_port, domain, threat_category, action="DROP", hit_count=1):
     """
@@ -302,9 +290,7 @@ def _build_rpz_cef_log(config, client_ip, domain, rpz_type="QNAME", rpz_action="
     return f"{iso_ts} daemon info rpz: {cef_header}{cef_ext}"
 
 
-# ---------------------------------------------------------------------------
 # DHCP client detail helper
-# ---------------------------------------------------------------------------
 
 def _get_random_dhcp_client_details(config, session_context=None):
     """Returns (client_ip, client_mac, client_hostname, transaction_id, relay_ip)."""
@@ -338,9 +324,7 @@ def _random_external_ip():
     return f"{random.choice(first_octets)}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
 
 
-# ---------------------------------------------------------------------------
 # Benign log generator
-# ---------------------------------------------------------------------------
 
 def _generate_benign_log(config, session_context=None):
     """
@@ -527,9 +511,7 @@ def _generate_benign_log(config, session_context=None):
     return None
 
 
-# ---------------------------------------------------------------------------
 # Threat generators
-# ---------------------------------------------------------------------------
 
 def _generate_c2_beacon(config, client_ip=None, session_context=None, domain=None):
     """
@@ -841,12 +823,10 @@ def _generate_ptr_sweep(config, client_ip=None, session_context=None):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # Scenario functions dict — single source of truth for named-event dispatch.
 # Keys are the exact strings returned by get_threat_names() and shown in the
 # dashboard "Fire Threat" dropdown.  All values share the signature
 # (config, client_ip=None, session_context=None).
-# ---------------------------------------------------------------------------
 
 _SCENARIO_FUNCTIONS = {
     "C2_BEACON":       _generate_c2_beacon,
@@ -863,9 +843,7 @@ _SCENARIO_FUNCTIONS = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Threat log dispatcher
-# ---------------------------------------------------------------------------
 
 def _generate_threat_log(config, session_context=None, forced_event=None):
     """Weighted threat dispatcher — pool pattern matching Firepower/ASA/Checkpoint.
@@ -932,9 +910,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     return (content, threat_type.upper())
 
 
-# ---------------------------------------------------------------------------
 # Legacy scenario log generator (dict-based — kept for backward compatibility)
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_log(config, scenario):
     """Generates a specific DNS event for a correlated scenario (legacy dict format)."""
@@ -956,9 +932,7 @@ def _generate_scenario_log(config, scenario):
         return _build_dns_query_log(config, client_ip, domain, q_type)
 
 
-# ---------------------------------------------------------------------------
 # Public cross-module API
-# ---------------------------------------------------------------------------
 
 def generate_dns_pair(config, client_ip, domain, q_type="A", dns_server_ip=None):
     """
@@ -1009,9 +983,7 @@ def generate_dhcp_ack(config, client_ip, client_mac, client_hostname):
     return (log, "DHCP_ACK")
 
 
-# ---------------------------------------------------------------------------
 # Main entry point
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, threat_level="Realistic",
                  benign_only=False, context=None, scenario_event=None):

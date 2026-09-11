@@ -67,9 +67,7 @@ def _ssl_pair():
     return version, cipher
 
 
-# =============================================================================
 # LOG BUILDERS
-# =============================================================================
 
 def _build_access_log_line(config, source_ip, method, url, status_code,
                             user_agent, referer, bytes_sent, username="-"):
@@ -154,9 +152,7 @@ def _build_error_log_line(config, source_ip, level, error_code, message):
     return " ".join(log_parts)
 
 
-# =============================================================================
 # ERROR CODE POOLS  (verified Apache AH codes)
-# =============================================================================
 
 _ROUTINE_ERROR_POOL = [
     ("notice", "AH00292", "Apache/2.4.62 (Unix) configured -- resuming normal operations"),
@@ -184,9 +180,7 @@ def _generate_routine_error_log(config):
     return _build_error_log_line(config, server_ip, level, error_code, message)
 
 
-# =============================================================================
 # USER AGENT SELECTION
-# =============================================================================
 
 # Substrings that mark a user-agent as offensive tooling.  Matched case-insensitively
 # against the configured pool.  Everything else -- Outlook, Zoom, Okta Mobile,
@@ -309,9 +303,7 @@ def _get_user_agent(config, event_type="benign"):
     return random.choice(browser_agents) if browser_agents else "-"
 
 
-# =============================================================================
 # THREAT CONSTANTS
-# =============================================================================
 
 # --- Existing attack payload constants ---
 
@@ -429,9 +421,7 @@ _EXFIL_ENDPOINTS = [
 ]
 
 
-# =============================================================================
 # BENIGN TRAFFIC CONSTANTS
-# =============================================================================
 
 # Search engine and social media crawler profiles: (user_agent, ip_prefix)
 # IPs are derived from well-known crawler ranges.
@@ -485,9 +475,7 @@ _CORS_ENDPOINTS = [
 ]
 
 
-# =============================================================================
 # BENIGN GENERATOR HELPERS
-# =============================================================================
 
 def _generate_health_check(config):
     """Generates a load-balancer or uptime-monitor health check request.
@@ -548,9 +536,7 @@ def _generate_crawler_request(config):
                                   ua, "-", bytes_sent)
 
 
-# =============================================================================
 # THREAT GENERATOR
-# =============================================================================
 
 def _generate_attack_burst(config, session_context=None, forced_type=None, src_ip=None):
     """Generates a burst of threat logs.
@@ -750,9 +736,7 @@ def _generate_attack_burst(config, session_context=None, forced_type=None, src_i
     return (logs, attack_type)
 
 
-# =============================================================================
 # SCENARIO LOG (coordinated simulator)
-# =============================================================================
 
 def _generate_scenario_log(config, scenario):
     """Generates a log for a correlated attack scenario from the orchestrator."""
@@ -766,9 +750,7 @@ def _generate_scenario_log(config, scenario):
         config, source_ip, "GET", url, status_code, user_agent, "-", bytes_sent)
 
 
-# =============================================================================
 # MAIN ENTRY POINT
-# =============================================================================
 
 def generate_log(config, scenario=None, threat_level="Realistic",
                  benign_only=False, context=None, scenario_event=None):

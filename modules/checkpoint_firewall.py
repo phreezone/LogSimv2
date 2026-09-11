@@ -150,9 +150,7 @@ def get_threat_info():
 last_threat_event_time = 0
 
 
-# ---------------------------------------------------------------------------
 # Administrative-behaviour analytics support
-# ---------------------------------------------------------------------------
 # Ports XSIAM's NDR lateral-movement analytics treats as an "administrative
 # action": remote shell, remote file transfer and remote console services.
 # Mapped to (service_id, app) so the parser derives a real app_id per session.
@@ -221,9 +219,7 @@ def _admin_port_sequence(count):
     return seq[:count]
 
 
-# ---------------------------------------------------------------------------
 # Check Point field generation helpers
-# ---------------------------------------------------------------------------
 
 def _generate_loguid():
     """Generate a Check Point-style loguid in the {0xhex,...} format used by R80+ gateways.
@@ -272,9 +268,7 @@ def _get_layer_uuid(hostname):
     return "{" + str(uuid.uuid5(_LAYER_NAMESPACE, hostname + "_Network")) + "}"
 
 
-# ---------------------------------------------------------------------------
 # Internal utilities
-# ---------------------------------------------------------------------------
 
 def _get_threat_interval(threat_level, config):
     """Gets the threat interval from the main config."""
@@ -472,9 +466,7 @@ def _format_checkpoint_cef(config, extensions_dict, device_product=None, event_t
     return f"<134>{timestamp} {hostname} CheckPoint: {cef_header}{extension_string}"
 
 
-# ---------------------------------------------------------------------------
 # Benign event generators
-# ---------------------------------------------------------------------------
 
 def _generate_benign_log(config, session_context=None):
     """Generates a variety of benign log types (traffic, dns, icmp)."""
@@ -770,9 +762,7 @@ def _generate_benign_log(config, session_context=None):
     return _format_checkpoint_cef(config, extensions)
 
 
-# ---------------------------------------------------------------------------
 # Threat / analytics event generators
-# ---------------------------------------------------------------------------
 
 def _simulate_large_upload(config, src_ip, user, shost):
     """DNS precursor + large outbound HTTPS upload.
@@ -2199,9 +2189,7 @@ def _simulate_app_control_block(config, src_ip, user, shost):
     return _format_checkpoint_cef(config, extensions, device_product="Application Control")
 
 
-# ---------------------------------------------------------------------------
 # Main threat dispatcher
-# ---------------------------------------------------------------------------
 
 _dns_tunnel_target_map: dict = {}   # src_ip -> stable (resolver_ip, tunnel_domain) for DNS-tunnel recurrence
 
@@ -2640,9 +2628,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     return (_format_checkpoint_cef(config, extensions, device_product="Identity Awareness"), display_name)
 
 
-# ---------------------------------------------------------------------------
 # Scenario log generator
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_log(config, scenario):
     """Generates a single log entry for a storytelling / scripted scenario."""
@@ -2667,9 +2653,7 @@ def _generate_scenario_log(config, scenario):
     return _format_checkpoint_cef(config, extensions)
 
 
-# ---------------------------------------------------------------------------
 # Main entry point
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, threat_level="Realistic", benign_only=False, context=None, scenario_event=None):
     """Main log generation function for Check Point."""

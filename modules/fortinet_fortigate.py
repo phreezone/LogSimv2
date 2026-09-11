@@ -77,9 +77,7 @@ except ImportError:
                                stable_vpn_ip, stable_mail_servers, weighted_destination,
                                        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 
-# ---------------------------------------------------------------------------
 # Module identity
-# ---------------------------------------------------------------------------
 NAME        = "Fortinet FortiGate"
 DESCRIPTION = "Simulates Fortinet FortiGate traffic, UTM, and event logs in CEF syslog format."
 XSIAM_PARSER = "fortinet_fortigate_raw"
@@ -200,9 +198,7 @@ def get_threat_info():
 
 last_threat_event_time = 0
 
-# ---------------------------------------------------------------------------
 # Static data constants
-# ---------------------------------------------------------------------------
 _FIRST_OCTETS = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 194, 212, 213]
 
 # Syslog PRI: facility local7 (23×8=184) + informational (6) = 190
@@ -381,9 +377,7 @@ def _admin_port_sequence(count):
     return seq[:count]
 
 
-# ---------------------------------------------------------------------------
 # Helper functions
-# ---------------------------------------------------------------------------
 
 def _cef_escape(v):
     """Escapes a CEF extension value per ArcSight CEF spec.
@@ -703,9 +697,7 @@ def _base_traffic_fields(config, src_ip, shost, user, dst_ip, dhost, proto, dpt,
     }
 
 
-# ---------------------------------------------------------------------------
 # Benign event generators
-# ---------------------------------------------------------------------------
 
 def _generate_traffic_forward(config, src_ip, user, shost):
     """Normal outbound web browsing — traffic:forward allow."""
@@ -1466,9 +1458,7 @@ def _generate_benign_log(config, session_context=None):
         return _generate_ssl_inspection(config, src_ip, user, shost)
 
 
-# ---------------------------------------------------------------------------
 # Threat event generators
-# ---------------------------------------------------------------------------
 
 def _simulate_ips_attack(config):
     """Inbound IPS signature trigger — utm:ips (external attacker → internal server)."""
@@ -3081,9 +3071,7 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # XSIAM-firewall-analytics-aligned threat generators
-# ---------------------------------------------------------------------------
 
 _dns_tunnel_target_map: dict = {}   # src_ip -> stable (resolver_ip, tunnel_domain) for DNS-tunnel recurrence
 
@@ -3372,9 +3360,7 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost):
     return _format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields)
 
 
-# ---------------------------------------------------------------------------
 # Threat log dispatcher
-# ---------------------------------------------------------------------------
 
 def _generate_threat_log(config, session_context=None, forced_event=None):
     """
@@ -3547,9 +3533,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_simulate_ips_attack(config), display_name)
 
 
-# ---------------------------------------------------------------------------
 # Scenario handler
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_log(config, scenario):
     """Generates a specific CEF log for an orchestrator scenario."""
@@ -3588,9 +3572,7 @@ def _generate_scenario_log(config, scenario):
         return _format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields)
 
 
-# ---------------------------------------------------------------------------
 # Main entry point
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, threat_level="Realistic", benign_only=False, context=None, scenario_event=None):
     """
