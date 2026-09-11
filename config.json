@@ -20246,34 +20246,7 @@
     "wec_machine_id": "logsim.examplecorp.local",
     "wec_batch_size": 20,
     "wec_batch_interval_ms": 1000,
-    "wec_heartbeat_interval_s": 900,
-    "event_mix": {
-      "benign": {
-        "interactive_logon": 18,
-        "network_share_logon": 28,
-        "workstation_unlock": 22,
-        "logoff": 10,
-        "service_logon": 6,
-        "scheduled_task_logon": 4,
-        "cached_logon": 2,
-        "rdp_logon": 3,
-        "ntlm_validation": 4,
-        "explicit_cred_runas": 1,
-        "password_typo": 2
-      },
-      "threat": {
-        "brute_force": 18,
-        "password_spray": 14,
-        "kerberoasting": 10,
-        "as_rep_roasting": 8,
-        "pass_the_hash": 9,
-        "rdp_bruteforce": 14,
-        "account_lockout": 10,
-        "explicit_credential_abuse": 6,
-        "offhours_admin_logon": 6,
-        "anomalous_workstation_logon": 5
-      }
-    }
+    "wec_heartbeat_interval_s": 900
   },
   "training_config": {
     "anchor_epoch": "2020-01-01T00:00:00Z",

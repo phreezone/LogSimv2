@@ -7630,6 +7630,16 @@ def generate_log(config, scenario=None, scenario_event=None,
 # the live dispatch, and config.json ships parallel_hosts=true.  A generator added
 # only to _BENIGN_WEIGHTS/_BENIGN_GENERATORS will never fire ambiently.  Keep all
 # three in step.
+#
+# The Windows event mix is deliberately code-only.  windows_events_config used to
+# carry an "event_mix" block, but these workers never consulted it, so its benign
+# weights were dead, and its threat keys named generators that no longer exist
+# (brute_force, password_spray, rdp_bruteforce, ...) so every lookup fell through
+# to the module default.  It was removed rather than repaired: the selectors below
+# already default cleanly when the key is absent (both test suites ship configs
+# with no event_mix and pass).  If you want config-tunable weights back, the
+# workers must read the override the way _select_benign/_select_threat do --
+# re-adding the config block alone will silently do nothing.
 _DC_BENIGN_GENS = {
     "dc_kerberos_traffic":  15,
     "dc_directory_service":  8,
