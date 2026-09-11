@@ -3544,6 +3544,112 @@ _BENIGN_PROCESS_TABLE = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Object access (4656/4663) and DC account administration (4725/4767)
+# ---------------------------------------------------------------------------
+# 4656/4663 only appear on objects carrying a SACL, so the benign baseline is
+# drawn from paths an org would realistically audit: finance, HR and legal
+# shares, plus the GPO/NETLOGON trees on SYSVOL.  Without this baseline the
+# threat-side LSASS handle access (T1003.001) has nothing to stand out against,
+# which is the whole point of emitting the benign side at all.
+_AUDITED_FILE_OBJECTS = [
+    ("\\\\FS-01\\Finance\\Budgets\\FY26_Forecast.xlsx",      "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE"),
+    ("\\\\FS-01\\Finance\\Payroll\\Q3_Payroll_Export.csv",   "C:\\Windows\\explorer.exe"),
+    ("\\\\FS-01\\HR\\Personnel\\Headcount_Plan.xlsx",        "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE"),
+    ("\\\\FS-01\\Legal\\Contracts\\MSA_Renewals_2026.docx",  "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE"),
+    ("\\\\FS-02\\Engineering\\Designs\\platform_roadmap.pdf","C:\\Program Files\\Adobe\\Acrobat DC\\Acrobat\\Acrobat.exe"),
+    ("C:\\Windows\\SYSVOL\\sysvol\\Policies\\{31B2F340-016D-11D2-945F-00C04FB984F9}\\GPT.INI",
+     "C:\\Windows\\System32\\svchost.exe"),
+]
+
+# Access masks as Windows reports them for the common file operations.
+_ACCESS_MASK_READ    = "0x120089"   # ReadData | ReadAttributes | ReadEA | ReadControl | Sync
+_ACCESS_MASK_WRITE   = "0x120116"   # WriteData | AppendData | WriteEA | WriteAttributes
+_ACCESS_MASK_DELETE  = "0x10000"    # DELETE
+
+# LSASS handle access: the access mask is what separates a credential dump from
+# ordinary process inspection.  0x1010 = PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
+# which is what a memory-dumping tool requests; 0x1fffff is full control.
+_LSASS_OBJECT_NAME = "\\Device\\HarddiskVolume2\\Windows\\System32\\lsass.exe"
+_CRED_DUMP_ACCESS  = ["0x1010", "0x1410", "0x1fffff"]
+_CRED_DUMP_TOOLS = [
+    ("C:\\Users\\Public\\procdump64.exe",       "procdump64.exe -accepteula -ma lsass.exe C:\\Users\\Public\\lsass.dmp"),
+    ("C:\\Windows\\Temp\\mimikatz.exe",         "mimikatz.exe \"privilege::debug\" \"sekurlsa::logonpasswords\" exit"),
+    ("C:\\Users\\Public\\rundll32.exe",         "rundll32.exe C:\\Windows\\System32\\comsvcs.dll, MiniDump 584 C:\\Windows\\Temp\\lsass.dmp full"),
+    ("C:\\Windows\\Temp\\nanodump.exe",         "nanodump.exe --write C:\\Windows\\Temp\\nano.dmp"),
+]
+
+# Accounts a helpdesk would routinely disable (offboarding) rather than delete.
+_OFFBOARD_ACCOUNT_SUFFIXES = ["_contractor", "_temp", "_intern", "_vendor", ""]
+
+
+def _benign_audited_file_access(config, session_context):
+    """Routine access to a SACL-audited file object: 4656 handle then 4663 access.
+
+    4663 always follows a 4656 on the same HandleId in real Windows -- the handle
+    must be opened before it can be read -- so both are emitted as a pair sharing
+    HandleId, ProcessId and SubjectLogonId.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    object_name, process_name = random.choice(_AUDITED_FILE_OBJECTS)
+    handle_id = "0x%x" % random.randint(0x100, 0xffff)
+    process_id = "0x%x" % random.randint(0x200, 0xffff)
+    logon_id = _new_logon_id()
+    # Reads dominate; writes happen but are the minority on a shared document.
+    write = random.random() < 0.25
+    t = time.time()
+
+    events = [json.dumps(_build_4656(
+        u, config, object_type="File", object_name=object_name,
+        process_name=process_name,
+        access_mask=_ACCESS_MASK_WRITE if write else _ACCESS_MASK_READ,
+        handle_id=handle_id, process_id=process_id, logon_id=logon_id, ts=t))]
+    events.append(json.dumps(_build_4663(
+        u, config, object_type="File", object_name=object_name,
+        process_name=process_name,
+        access_mask=_ACCESS_MASK_WRITE if write else _ACCESS_MASK_READ,
+        handle_id=handle_id, process_id=process_id, logon_id=logon_id,
+        ts=t + random.uniform(0.01, 0.20))))
+    return events
+
+
+def _benign_account_unlock(config, session_context):
+    """Helpdesk unlocks a locked-out account -- 4767, emitted by the DC.
+
+    This is the routine counterpart to the 4740 lockout the threat generators
+    produce: in a real domain most lockouts are a forgotten password and end
+    with an administrator unlocking the account minutes later.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    admin = {"username": random.choice(["svc_helpdesk", "helpdesk.admin", "Administrator"]),
+             "hostname": _get_dc_hostname(config)}
+    return json.dumps(_build_4767(admin, config, unlocked_by=admin["username"],
+                                  ts=time.time()))
+
+
+def _benign_account_disable(config, session_context):
+    """Offboarding: an administrator disables a departing user's account (4725).
+
+    Real offboarding disables an account and leaves it disabled for a retention
+    window rather than deleting it, so this is a standalone 4725 with no 4726.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    admin = {"username": random.choice(["svc_hr_sync", "helpdesk.admin", "Administrator"]),
+             "hostname": _get_dc_hostname(config)}
+    target = f"{u['username']}{random.choice(_OFFBOARD_ACCOUNT_SUFFIXES)}"
+    return json.dumps(_build_4725(admin, config,
+                                  target_username=target,
+                                  target_sid=_stable_user_sid(target),
+                                  ts=time.time()))
+
+
 def _benign_process_creation(config, session_context):
     """Emit 1-3 benign 4688 (process creation) + 4689 (exit) events for
     normal user workstation activity — Office, browsers, system utilities.
@@ -3781,6 +3887,12 @@ _BENIGN_WEIGHTS = {
     "dc_kerberos_traffic":   15,
     "dc_directory_service":   8,
     "dc_service_activity":   10,
+    # Object-access and DC account administration.  Audited-object access is
+    # common but not dominant (only SACL'd paths emit it); unlocks and disables
+    # are low-rate administrative events.
+    "audited_file_access":   12,
+    "account_unlock":         3,
+    "account_disable":        1,
     "process_creation":      30,
 }
 
@@ -3804,6 +3916,9 @@ _BENIGN_GENERATORS = {
     "dc_directory_service": _benign_dc_directory_service,
     "dc_service_activity":  _benign_dc_service_activity,
     "process_creation":     _benign_process_creation,
+    "audited_file_access":  _benign_audited_file_access,
+    "account_unlock":       _benign_account_unlock,
+    "account_disable":      _benign_account_disable,
 }
 
 
@@ -7030,6 +7145,108 @@ def _threat_password_never_expires(config, session_context):
     return events
 
 
+# Accounts an attacker disables to slow the response: the people and service
+# identities that would otherwise investigate or revoke their access.
+_SECURITY_STAFF_ACCOUNTS = [
+    "soc.analyst1", "soc.analyst2", "soc.oncall", "ir.lead",
+    "sec.engineer", "svc_edr_admin", "svc_backup", "svc_siem_forwarder",
+    "domain.audit", "helpdesk.admin",
+]
+
+
+def _threat_lsass_handle_access(config, session_context):
+    """Credential dumping via an LSASS handle (T1003.001).
+
+    Detection targets:
+      - "Handle to LSASS requested by a non-system process"
+      - "Credential dumping tool executed"
+
+    Sequence:
+      1. 4688 dumping tool launched
+      2. 4656 handle to lsass.exe requested with a memory-read access mask
+      3. 4663 the read actually performed on that handle
+      4. 4689 tool exit
+
+    This is what _build_4656's own docstring was written for.  The access mask
+    is the discriminator: ordinary tooling queries LSASS with 0x1000
+    (PROCESS_QUERY_LIMITED_INFORMATION), while a dumper needs PROCESS_VM_READ.
+    Object/process names are emitted exactly as the Security channel reports
+    them -- lsass.exe as a \\Device\\HarddiskVolume path, not a C:\\ path.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    tool_path, command_line = random.choice(_CRED_DUMP_TOOLS)
+    access_mask = random.choice(_CRED_DUMP_ACCESS)
+    handle_id = "0x%x" % random.randint(0x100, 0xffff)
+    process_id = "0x%x" % random.randint(0x200, 0xffff)
+    logon_id = _new_logon_id()
+    t = time.time()
+
+    events = [json.dumps(_build_4688(u, config, process_name=tool_path,
+                                     command_line=command_line,
+                                     logon_id=logon_id, ts=t))]
+    t += random.uniform(0.2, 1.2)
+    events.append(json.dumps(_build_4656(
+        u, config, object_type="Process", object_name=_LSASS_OBJECT_NAME,
+        process_name=tool_path, access_mask=access_mask,
+        handle_id=handle_id, process_id=process_id, logon_id=logon_id, ts=t)))
+    t += random.uniform(0.01, 0.15)
+    events.append(json.dumps(_build_4663(
+        u, config, object_type="Process", object_name=_LSASS_OBJECT_NAME,
+        process_name=tool_path, access_mask=access_mask,
+        handle_id=handle_id, process_id=process_id, logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 3.0)
+    events.append(json.dumps(_build_4689(u, config, process_name=tool_path,
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_account_access_removal(config, session_context):
+    """Attacker disables accounts to impede response (T1531).
+
+    Detection targets:
+      - "Multiple user accounts disabled in a short window"
+
+    Sequence:
+      1. 4688 process creation (net.exe / PowerShell)
+      2. 4725 account disabled -- several security/admin accounts in a burst
+      3. 4689 process exit
+
+    Disabling rather than deleting is the quieter variant: the accounts still
+    exist, so an operator glancing at AD sees nothing missing, but the responders
+    who own them cannot log in.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    tool = random.choice([
+        ("C:\\Windows\\System32\\net.exe", "net user {acct} /active:no /domain"),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         "powershell.exe -c \"Disable-ADAccount -Identity {acct}\""),
+    ])
+    targets = random.sample(_SECURITY_STAFF_ACCOUNTS,
+                            k=min(random.randint(4, 7), len(_SECURITY_STAFF_ACCOUNTS)))
+    logon_id = _new_logon_id()
+    t = time.time()
+
+    events = [json.dumps(_build_4688(u, config, process_name=tool[0],
+                                     command_line=tool[1].format(acct=targets[0]),
+                                     logon_id=logon_id, ts=t))]
+    for acct in targets:
+        t += random.uniform(0.4, 2.0)
+        events.append(json.dumps(_build_4725(u, config,
+                                             target_username=acct,
+                                             target_sid=_stable_user_sid(acct),
+                                             logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 3.0)
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
 def _threat_default_account_enabled(config, session_context):
     """Default local account (Administrator, Guest, DefaultAccount) is enabled.
 
@@ -7129,6 +7346,10 @@ _THREAT_WEIGHTS = {
     "wip_sensitive_password_reset": 4,
     "wip_password_never_expires":  3,
     "default_account_enabled":     3,
+    # LSASS handle access is a high-signal credential-dumping path, so it is
+    # weighted with the other privilege-abuse threats rather than rarely.
+    "lsass_handle_access":         5,
+    "account_access_removal":      3,
 }
 
 _THREAT_GENERATORS = {
@@ -7157,6 +7378,8 @@ _THREAT_GENERATORS = {
     "wip_sensitive_password_reset":     _threat_sensitive_password_reset,
     "wip_password_never_expires":       _threat_password_never_expires,
     "default_account_enabled":          _threat_default_account_enabled,
+    "lsass_handle_access":              _threat_lsass_handle_access,
+    "account_access_removal":           _threat_account_access_removal,
 }
 
 
@@ -7247,6 +7470,37 @@ def _generate_scenario_event(scenario_event, config, context):
         return json.dumps(_build_4740(user, config, source_workstation=user["hostname"])), "lockout"
     if ev == "KERBEROS_TGT":
         return json.dumps(_build_4768(user, config)), "kerberos_tgt"
+    if ev == "ACCOUNT_UNLOCK":
+        return json.dumps(_build_4767(user, config,
+                                      unlocked_by=user["username"])), "account_unlock"
+    if ev == "ACCOUNT_DISABLE":
+        target = (context or {}).get("target_user") or user["username"]
+        return json.dumps(_build_4725(user, config, target_username=target,
+                                      target_sid=_stable_user_sid(target))), "account_disable"
+    if ev in ("OBJECT_ACCESS", "AUDITED_FILE_ACCESS"):
+        # Scenario callers may pin the object; otherwise use the audited pool.
+        obj = (context or {}).get("object_name")
+        proc = (context or {}).get("process_name")
+        if not obj:
+            obj, default_proc = random.choice(_AUDITED_FILE_OBJECTS)
+            proc = proc or default_proc
+        proc = proc or "C:\\Windows\\explorer.exe"
+        handle_id = "0x%x" % random.randint(0x100, 0xffff)
+        process_id = "0x%x" % random.randint(0x200, 0xffff)
+        logon_id = _new_logon_id()
+        t = time.time()
+        return ([json.dumps(_build_4656(user, config, object_type="File",
+                                        object_name=obj, process_name=proc,
+                                        access_mask=_ACCESS_MASK_READ,
+                                        handle_id=handle_id, process_id=process_id,
+                                        logon_id=logon_id, ts=t)),
+                 json.dumps(_build_4663(user, config, object_type="File",
+                                        object_name=obj, process_name=proc,
+                                        access_mask=_ACCESS_MASK_READ,
+                                        handle_id=handle_id, process_id=process_id,
+                                        logon_id=logon_id,
+                                        ts=t + random.uniform(0.01, 0.2)))],
+                "object_access")
     # Dispatch to named threat generators
     _threat_dispatch = {
         "WIP_AS_REP_ROASTING":             _threat_as_rep_roasting,
@@ -7274,6 +7528,8 @@ def _generate_scenario_event(scenario_event, config, context):
         "WIP_SENSITIVE_PASSWORD_RESET":     _threat_sensitive_password_reset,
         "WIP_PASSWORD_NEVER_EXPIRES":       _threat_password_never_expires,
         "DEFAULT_ACCOUNT_ENABLED":          _threat_default_account_enabled,
+        "LSASS_HANDLE_ACCESS":              _threat_lsass_handle_access,
+        "ACCOUNT_ACCESS_REMOVAL":           _threat_account_access_removal,
     }
     if ev in _threat_dispatch:
         result = _threat_dispatch[ev](config, session_context)
@@ -7370,11 +7626,18 @@ def generate_log(config, scenario=None, scenario_event=None,
 # Per-host parallel generation (multi-threaded mode)
 # ---------------------------------------------------------------------------
 
+# NOTE: parallel_hosts mode does NOT use _BENIGN_WEIGHTS -- these two tables are
+# the live dispatch, and config.json ships parallel_hosts=true.  A generator added
+# only to _BENIGN_WEIGHTS/_BENIGN_GENERATORS will never fire ambiently.  Keep all
+# three in step.
 _DC_BENIGN_GENS = {
     "dc_kerberos_traffic":  15,
     "dc_directory_service":  8,
     "dc_service_activity":  10,
     "dc_self_logon":         8,
+    # 4767 / 4725 are DC-emitted account-administration events.
+    "account_unlock":        3,
+    "account_disable":       1,
 }
 
 _WKS_BENIGN_GENS = {
@@ -7394,6 +7657,8 @@ _WKS_BENIGN_GENS = {
     "password_typo":         2,
     "process_creation":     30,
     "lateral_movement":      3,
+    # 4656/4663 on SACL'd file objects -- workstation-side, via the file share.
+    "audited_file_access":  12,
 }
 
 
