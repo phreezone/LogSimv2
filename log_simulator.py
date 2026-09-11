@@ -1041,8 +1041,10 @@ def process_and_send(log_content, module, config, event_name=None):
     if _rc is not None:
         try:
             _rc.record(getattr(module, 'NAME', '?'), event_name, log_content)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Run-manifest bookkeeping only -- must never block the send, but a
+            # persistent failure means the emitted manifest is wrong.
+            _tprint(f"[run-collector] record failed: {type(exc).__name__}: {exc}")
     if _dry_run:
         return
     if _bulk_collector is not None:
@@ -3417,10 +3419,13 @@ def run_cloud_ransomware_scenario(all_modules, config):
         traceback.print_exc()
     finally:
         # Deliver the batched CloudTrail objects as one S3 upload per run.
+        # If this raises, every event of the run is stranded in the in-memory
+        # buffer and never reaches the tenant -- do not swallow the reason.
         try:
             flush_s3_batch()
-        except Exception:
-            pass
+        except Exception as exc:
+            _tprint(f"[flush] S3 batch flush FAILED — scenario events not "
+                    f"delivered: {type(exc).__name__}: {exc}")
 
     print("\n--- Cloud Ransomware Scenario Complete ---")
     print(f"  Chain: brute force → admin policy → stop CloudTrail → disable S3 logging → exfil → encrypt+ransom.")
@@ -3591,8 +3596,9 @@ def run_identity_attack_cloud_scenario(all_modules, config):
     finally:
         try:
             flush_s3_batch()
-        except Exception:
-            pass
+        except Exception as exc:
+            _tprint(f"[flush] S3 batch flush FAILED — scenario events not "
+                    f"delivered: {type(exc).__name__}: {exc}")
 
     print("\n--- Identity Attack → Cloud Scenario Complete ---")
     print(f"  Spine: Okta user '{victim_user}' → AWS SAML roleSessionName '{victim_user}'.")
