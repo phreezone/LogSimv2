@@ -54,21 +54,6 @@ def _tprint(*args, **kwargs):
     with _print_lock:
         print(*args, **kwargs)
 
-def _prepare_event_context(shared_session=None):
-    ctx = {
-        'user_identity': None,
-        'target_user': None,
-        'ip_address': None,
-        'aws_region': None
-    }
-    if isinstance(shared_session, dict):
-        # overlay known session values (ip, user_identity, aws_region)
-        for k in ('user_identity','target_user','ip_address','aws_region'):
-            if k in shared_session and shared_session[k] is not None:
-                ctx[k] = shared_session[k]
-    return ctx
-
-
 def fetch_tor_exit_nodes():
     """Fetches the current list of Tor exit node IP addresses."""
     url = "https://check.torproject.org/torbulkexitlist"

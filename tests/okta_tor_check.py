@@ -21,7 +21,6 @@ Needs network for the live Tor list; skips (exit 0) if it cannot be reached.
 
 import collections
 import json
-import math
 import os
 import random
 import sys
@@ -46,11 +45,14 @@ def check(name, cond, detail=""):
 
 
 def haversine(a, b):
-    (la1, lo1), (la2, lo2) = a, b
-    p = math.pi / 180
-    h = (0.5 - math.cos((la2 - la1) * p) / 2
-         + math.cos(la1 * p) * math.cos(la2 * p) * (1 - math.cos((lo2 - lo1) * p)) / 2)
-    return 12742 * math.asin(math.sqrt(h))
+    """Great-circle km between (lat, lon) pairs.
+
+    Delegates to the module's own _get_location_distance() rather than carrying a
+    second copy of the formula -- if the module's geo maths is wrong, this test
+    should be wrong the same way and say so.
+    """
+    return okta._get_location_distance({"lat": a[0], "lon": a[1]},
+                                       {"lat": b[0], "lon": b[1]})
 
 
 def flatten(x):
