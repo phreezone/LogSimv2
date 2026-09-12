@@ -55,11 +55,11 @@ from ipaddress import ip_network, AddressValueError
 
 try:
     from modules.session_utils import (get_random_user, rand_ip_from_network,
-        stable_vpn_ip, stable_mail_servers, weighted_destination,
+        stable_vpn_ip, stable_mail_servers, weighted_destination, get_user_agent,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 except ImportError:
     from session_utils import (get_random_user, rand_ip_from_network,
-        stable_vpn_ip, stable_mail_servers, weighted_destination,
+        stable_vpn_ip, stable_mail_servers, weighted_destination, get_user_agent,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 
 NAME        = "Cisco Firepower"
@@ -311,6 +311,16 @@ def _conn_timing(duration_ms=None):
 # Realistic domains for the configured egress destinations. Real FTD logs the URL
 # (eStreamer clientUrl -> CEF `request` -> xdm.network.http.url) on web traffic and
 # the queried domain (dnsQuery -> CEF `destinationDnsDomain`) on DNS traffic.
+# An IPS hit is exploit tooling by definition, so it keeps a scanner/CLI agent
+# rather than a browser -- this is the one UA in the module that should NOT be a
+# user's sticky fingerprint.
+_IPS_TOOL_USER_AGENTS = [
+    "python-requests/2.31.0", "curl/8.1.2", "Go-http-client/1.1",
+    "sqlmap/1.7.6#stable (https://sqlmap.org)",
+    "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)",
+    "Nikto/2.5.0", "gobuster/3.6",
+]
+
 _DEST_DOMAINS = {
     "Google DNS": "dns.google",                     "Cloudflare DNS": "one.one.one.one",
     "Microsoft Office 365": "outlook.office365.com", "AWS S3 us-east-1": "s3.us-east-1.amazonaws.com",
@@ -585,7 +595,7 @@ def _generate_internal_smb_event(config, src_ip, user, shost=None):
     return fields, "CONNECTION STATISTICS"
 
 
-def _generate_user_to_app_server_event(config, src_ip, user, shost=None):
+def _generate_user_to_app_server_event(config, src_ip, user, shost=None, session_context=None):
     """Internal user → application server HTTPS session."""
     app_servers = config.get('internal_servers', [])
     if not app_servers:
@@ -613,9 +623,7 @@ def _generate_user_to_app_server_event(config, src_ip, user, shost=None):
         "bytesIn":  random.randint(5_000, 25_000),
         "outcome": "SUCCESS", "reason": "Traffic Allowed",
         "requestMethod":           "GET",
-        "requestClientApplication": random.choice(
-            config.get('user_agents', ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)"])
-        ),
+        "requestClientApplication": get_user_agent(session_context, user),
         "msg":   "Internal HTTPS connection to application server allowed",
         "start": start_ms, "end": end_ms,
     })
@@ -1172,7 +1180,7 @@ def _generate_benign_log(config, session_context=None):
 
     elif roll < 0.70:  # 10% — internal app tier chain
         logs = []
-        fields, cef_name = _generate_user_to_app_server_event(config, src_ip, user, shost)
+        fields, cef_name = _generate_user_to_app_server_event(config, src_ip, user, shost, session_context)
         if fields:
             app_ip = fields.get('dst', src_ip)
             logs.append(_format_firepower_cef(config, fields, cef_name))
@@ -1292,9 +1300,7 @@ def _generate_ips_event(config):
         "bytesOut": random.randint(200, 5_000),   # attacker's exploit payload
         "bytesIn":  random.randint(100, 1_000),  # partial response before IPS block
         "outcome": "FAILURE", "reason": "Intrusion Policy Violation",
-        "requestClientApplication": random.choice(
-            config.get('user_agents', ["python-requests/2.28.0", "curl/7.88.1"])
-        ),
+        "requestClientApplication": random.choice(_IPS_TOOL_USER_AGENTS),
         "msg":   f"Intrusion Event: {rule_name} - {category}",
         "start": start_ms, "end": end_ms,
     })
@@ -1406,7 +1412,7 @@ def _generate_file_malware_event(config, src_ip, user, shost=None):
     return logs
 
 
-def _generate_large_file_upload_event(config, src_ip, user, shost=None):
+def _generate_large_file_upload_event(config, src_ip, user, shost=None, session_context=None):
     """Large outbound data transfer to a file-sharing service — potential exfiltration.
 
     Conversation-complete: DNS resolution of the file-sharing domain
@@ -1452,9 +1458,7 @@ def _generate_large_file_upload_event(config, src_ip, user, shost=None):
         "dhost": upload_host,
         "request": upload_url,
         "requestMethod": random.choice(["POST", "PUT"]),
-        "requestClientApplication": random.choice(
-            config.get('user_agents', ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)"])
-        ),
+        "requestClientApplication": get_user_agent(session_context, user),
         "cs1": _ac_policy(config),             "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_Web",           "cs2Label": "fwRule",
         "cs5": "File Sharing",                 "cs5Label": "secIntelCategory",
@@ -1469,7 +1473,7 @@ def _generate_large_file_upload_event(config, src_ip, user, shost=None):
     return logs
 
 
-def _generate_url_filtering_event(config, src_ip, user, shost=None):
+def _generate_url_filtering_event(config, src_ip, user, shost=None, session_context=None):
     """URL category block — internal user requesting a prohibited domain/category.
 
     Hunt fields: dhost (blocked domain), requestMethod (GET), cs6 (URL reputation),
@@ -1501,9 +1505,7 @@ def _generate_url_filtering_event(config, src_ip, user, shost=None):
         "dhost": domain,
         "request": f"https://{domain}/",
         "requestMethod": "GET",
-        "requestClientApplication": random.choice(
-            config.get('user_agents', ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)"])
-        ),
+        "requestClientApplication": get_user_agent(session_context, user),
         "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
         "cs2": "Block_URL_Categories", "cs2Label": "fwRule",
         "cs5": cat,                    "cs5Label": "secIntelCategory",
@@ -3111,7 +3113,7 @@ def _b32_chunk(n):
     return "".join(random.choice("abcdefghijklmnopqrstuvwxyz234567") for _ in range(n))
 
 
-def _generate_large_download(config, src_ip, user, shost=None):
+def _generate_large_download(config, src_ip, user, shost=None, session_context=None):
     """DNS precursor + large INBOUND transfer — 'Large Download' volume anomaly.
     Flips the byte direction of large_file_upload (huge bytesIn / small bytesOut).
     Returns list of CEF log strings (multi-event)."""
@@ -3132,8 +3134,7 @@ def _generate_large_download(config, src_ip, user, shost=None):
         "dst": dest_ip, "dpt": 443, "dhost": dl_host,
         "request": f"https://{dl_host}/download/{random.randint(100_000, 999_999)}",
         "requestMethod": "GET",
-        "requestClientApplication": random.choice(
-            config.get('user_agents', ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)"])),
+        "requestClientApplication": get_user_agent(session_context, user),
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
         "cs5": "File Sharing",       "cs5Label": "secIntelCategory",
@@ -3351,7 +3352,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     elif chosen == 'malware':
         return (_generate_file_malware_event(config, src_ip, user, shost), chosen)
     elif chosen == 'large_file_upload':
-        return (_generate_large_file_upload_event(config, src_ip, user, shost), chosen)
+        return (_generate_large_file_upload_event(config, src_ip, user, shost, session_context), chosen)
     elif chosen == 'ssh_over_https':
         return (_generate_ssh_over_https_event(config, src_ip, user, shost), chosen)
     elif chosen == 'smtp_large_exfil':
@@ -3359,7 +3360,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     elif chosen == 'ftp_large_exfil':
         return (_generate_ftp_large_exfil(config, src_ip, user, shost), chosen)
     elif chosen == 'large_download':
-        return (_generate_large_download(config, src_ip, user, shost), chosen)
+        return (_generate_large_download(config, src_ip, user, shost, session_context), chosen)
     elif chosen == 'dns_tunneling':
         return (_generate_dns_tunneling(config, src_ip, user, shost), chosen)
     elif chosen == 'reverse_ssh_tunnel':
@@ -3377,7 +3378,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     elif chosen == 'ips':
         fields, cef_name = _generate_ips_event(config)
     elif chosen == 'url_filtering':
-        fields, cef_name = _generate_url_filtering_event(config, src_ip, user, shost)
+        fields, cef_name = _generate_url_filtering_event(config, src_ip, user, shost, session_context)
     elif chosen == 'security_intel':
         fields, cef_name = _generate_security_intel_event(config, src_ip, user, shost)
     elif chosen == 'workstation_smb':

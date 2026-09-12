@@ -9,11 +9,11 @@ from datetime import datetime, timedelta, timezone
 import uuid
 from ipaddress import ip_network
 try:
-    from modules.session_utils import (get_random_user, get_user_by_name, rand_ip_from_network,
+    from modules.session_utils import (get_random_user, weighted_dns_domain, get_user_by_name, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 except ImportError:
-    from session_utils import (get_random_user, get_user_by_name, rand_ip_from_network,
+    from session_utils import (get_random_user, weighted_dns_domain, get_user_by_name, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 
@@ -533,7 +533,9 @@ def _generate_benign_log(config, session_context=None):
             "act": "Accept",
             "src": src_ip, "dst": "8.8.8.8", "spt": random.randint(49152, 65535), "dpt": 53, "proto": "17",
             "suser": user, "shost": shost, "dhost": "dns.google",
-            "dns_query": random.choice(config.get('benign_domains', ['example.com'])),
+            # Per-user domain affinity, same basis as the Infoblox DNS path, so a
+            # user's query profile is consistent across both DNS sources.
+            "dns_query": weighted_dns_domain(user, config.get('benign_domains', ['example.com'])),
             "dns_type": "A",
             "cs1": "Allow_DNS", "cs1Label": "Rule Name",
             "deviceDirection": "1",
