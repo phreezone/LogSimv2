@@ -183,16 +183,6 @@ def get_user_by_name(session_context, username, preferred_device_type=None):
     }
 
 
-def get_all_active_ips(session_context):
-    """Return every active IP across all users (useful for server-side lookups)."""
-    ips = []
-    for profile in session_context.values():
-        for device in profile.get('active_devices', {}).values():
-            if device.get('ip'):
-                ips.append(device['ip'])
-    return ips
-
-
 def get_all_emails(session_context):
     """Return every user's email address."""
     return [p.get('email') for p in session_context.values() if p.get('email')]
@@ -670,13 +660,23 @@ _DEFAULT_BENIGN_DOMAINS = [
 
 _USER_DOMAIN_WEIGHTS = {}
 
+# Zipf exponent for per-user domain affinity.  Calibrated against the shipped
+# ~26-domain benign pool to land the documented 60/25/15 split; it was 1.5, which
+# produced 70/19/11 -- too concentrated, leaving the tail too thin to be a useful
+# "rare domain" baseline.  Measured at 1.20: top5 60.7%, mid10 24.6%, tail 14.7%.
+_DNS_ZIPF_ALPHA = 1.20
+
+
 def weighted_dns_domain(user, domains=None):
     """Pick a DNS domain with per-user affinity.
 
-    Each user has a stable top-5 most-queried domains (60% of queries),
-    a mid-tier of ~10 domains (25%), and the rest as tail (15%).
+    Each user has a stable top-5 most-queried domains (~60% of queries),
+    a mid-tier of ~10 domains (~25%), and the rest as tail (~15%).
     This creates the domain-frequency baselines UEBA needs for
     'Rare Domain' / 'New Domain' detections.
+
+    `user` only needs to be a stable string -- a username where one is known,
+    otherwise the client IP -- so each client keeps a consistent profile.
     """
     if domains is None:
         domains = _DEFAULT_BENIGN_DOMAINS
@@ -688,7 +688,7 @@ def weighted_dns_domain(user, domains=None):
         weights = []
         for i in range(n):
             pos = (i - offset) % n
-            weights.append(1.0 / (1 + pos) ** 1.5)  # steeper than destination affinity
+            weights.append(1.0 / (1 + pos) ** _DNS_ZIPF_ALPHA)
         _USER_DOMAIN_WEIGHTS[cache_key] = weights
     if random.random() < 0.85:
         return random.choices(domains, weights=_USER_DOMAIN_WEIGHTS[cache_key], k=1)[0]
@@ -752,11 +752,6 @@ def get_user_agent(session_context, username, device_type=None):
     # Deterministic fallback
     digest = hashlib.sha256(f"{username}:ua".encode()).digest()
     return _DEFAULT_USER_AGENTS[digest[0] % len(_DEFAULT_USER_AGENTS)]
-
-
-def pick_ephemeral_port():
-    """Pick a random ephemeral source port (49152-65535)."""
-    return random.randint(49152, 65535)
 
 
 # Default user-agent pool (used when config has no 'user_agents' key)

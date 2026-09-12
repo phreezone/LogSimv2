@@ -499,11 +499,6 @@ def _get_random_kms_key(config, keyring):
     return random.choice(keys) if keys else "default-key"
 
 
-def _get_random_artifact_registry(config):
-    registries = config.get(CONFIG_KEY, {}).get('artifact_registries', [])
-    return random.choice(registries) if registries else f"us-central1-docker.pkg.dev/{_get_project_id(config)}/app-images"
-
-
 def _get_random_spanner_instance(config):
     instances = config.get(CONFIG_KEY, {}).get('spanner_instances', [])
     return random.choice(instances) if instances else "prod-ledger"
@@ -517,11 +512,6 @@ def _get_random_cloud_armor_policy(config):
 def _get_random_vertex_endpoint(config):
     endpoints = config.get(CONFIG_KEY, {}).get('vertex_ai_endpoints', [])
     return random.choice(endpoints) if endpoints else f"projects/{_get_project_id(config)}/locations/us-central1/endpoints/1234567890"
-
-
-def _get_random_vertex_index_endpoint(config):
-    endpoints = config.get(CONFIG_KEY, {}).get('vertex_ai_index_endpoints', [])
-    return random.choice(endpoints) if endpoints else f"projects/{_get_project_id(config)}/locations/us-central1/indexEndpoints/9876543210"
 
 
 def _get_random_gemini_model(config):

@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from ipaddress import ip_network, IPv4Address
 
 try:
-    from modules.session_utils import get_random_user, rand_ip_from_network
+    from modules.session_utils import get_random_user, rand_ip_from_network, weighted_dns_domain
 except ImportError:
-    from session_utils import get_random_user, rand_ip_from_network
+    from session_utils import get_random_user, rand_ip_from_network, weighted_dns_domain
 
 NAME = "Infoblox NIOS"
 DESCRIPTION = "Simulates Infoblox DNS, DHCP, Audit, RPZ, and Threat Protect logs in raw syslog/CEF format."
@@ -351,21 +351,35 @@ def _generate_benign_log(config, session_context=None):
 
     log_type = random.choices(population=population, weights=weights, k=1)[0]
 
-    internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
-    client_ip    = rand_ip_from_network(ip_network(internal_net))
     benign_domains = config.get('benign_domains', ["www.google.com", "microsoft.com", "office365.com"])
+
+    # Bind the query to a real session user where one is available: it makes the
+    # DNS log attributable to an identity, and gives weighted_dns_domain() a
+    # stable key so each user keeps a consistent domain profile.  Without this
+    # every client drew uniformly from the whole pool, so there was no
+    # domain-frequency baseline for "rare domain" style detections to work from.
+    # internal_net is also used by the PTR branch below, so define it either way.
+    internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
+    _user = (get_random_user(session_context, preferred_device_type='workstation')
+             if session_context else None)
+    if _user and _user.get("ip"):
+        client_ip = _user["ip"]
+        dns_key   = _user["username"]
+    else:
+        client_ip = rand_ip_from_network(ip_network(internal_net))
+        dns_key   = client_ip             # still stable per client
 
     # ---- DNS variants ----
 
     if log_type == "dns_a":
-        domain     = random.choice(benign_domains)
+        domain     = weighted_dns_domain(dns_key, benign_domains)
         query_log  = _build_dns_query_log(config, client_ip, domain, "A")
         resp_rr    = [f"{domain} 60 IN A {_random_external_ip()}"]
         resp_log   = _build_dns_response_log(config, client_ip, domain, "A", "NOERROR", resp_rr)
         return [query_log, resp_log]
 
     elif log_type == "dns_aaaa":
-        domain    = random.choice(benign_domains)
+        domain    = weighted_dns_domain(dns_key, benign_domains)
         query_log = _build_dns_query_log(config, client_ip, domain, "AAAA")
         resp_rr   = [f"{domain} 60 IN AAAA 2001:4860:4860::8888"]
         resp_log  = _build_dns_response_log(config, client_ip, domain, "AAAA", "NOERROR", resp_rr)
@@ -373,7 +387,7 @@ def _generate_benign_log(config, session_context=None):
 
     elif log_type == "dns_cname":
         # A query resolving via CNAME chain (CDN alias)
-        domain      = random.choice(benign_domains)
+        domain      = weighted_dns_domain(dns_key, benign_domains)
         cdn_suffix  = random.choice(_CDN_DOMAINS)
         cdn_alias   = f"d{random.randint(1000,9999)}.{cdn_suffix}"
         final_ip    = _random_external_ip()
@@ -386,7 +400,7 @@ def _generate_benign_log(config, session_context=None):
         return [query_log, resp_log]
 
     elif log_type == "dns_mx":
-        domain    = random.choice(benign_domains)
+        domain    = weighted_dns_domain(dns_key, benign_domains)
         mx_host   = f"mail.{domain}"
         query_log = _build_dns_query_log(config, client_ip, domain, "MX")
         resp_rr   = [f"{domain} 3600 IN MX 10 {mx_host}"]
@@ -395,7 +409,7 @@ def _generate_benign_log(config, session_context=None):
 
     elif log_type == "dns_txt":
         # SPF or DKIM TXT lookup — baseline for TXT storm anomaly detection
-        domain    = random.choice(benign_domains)
+        domain    = weighted_dns_domain(dns_key, benign_domains)
         query_log = _build_dns_query_log(config, client_ip, domain, "TXT")
         spf_val   = f'"v=spf1 include:_spf.google.com include:spf.protection.outlook.com -all"'
         resp_rr   = [f"{domain} 3600 IN TXT {spf_val}"]
@@ -489,7 +503,7 @@ def _generate_benign_log(config, session_context=None):
         # Legitimate NXDOMAIN — typo, deprecated hostname, or decommissioned service.
         # Establishes the 2-6% baseline NXDOMAIN rate that makes storm anomaly detectable.
         stale_prefixes = ['legacy', 'deprecated', 'old', 'test', 'dev', 'stg', 'intranet', 'portal']
-        domain    = f"{random.choice(stale_prefixes)}.{random.choice(benign_domains)}"
+        domain    = f"{random.choice(stale_prefixes)}.{weighted_dns_domain(dns_key, benign_domains)}"
         query_log = _build_dns_query_log(config, client_ip, domain, "A")
         resp_log  = _build_dns_response_log(config, client_ip, domain, "A", "NXDOMAIN", response_records=[" "])
         return [query_log, resp_log]

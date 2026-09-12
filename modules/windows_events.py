@@ -3596,7 +3596,6 @@ _AUDITED_FILE_OBJECTS = [
 # Access masks as Windows reports them for the common file operations.
 _ACCESS_MASK_READ    = "0x120089"   # ReadData | ReadAttributes | ReadEA | ReadControl | Sync
 _ACCESS_MASK_WRITE   = "0x120116"   # WriteData | AppendData | WriteEA | WriteAttributes
-_ACCESS_MASK_DELETE  = "0x10000"    # DELETE
 
 # LSASS handle access: the access mask is what separates a credential dump from
 # ordinary process inspection.  0x1010 = PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
