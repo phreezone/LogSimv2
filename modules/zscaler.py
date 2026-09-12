@@ -10,11 +10,13 @@ import hashlib
 try:
     from modules.session_utils import (get_random_user, get_user_by_name,
         get_zscaler_device_info, rand_ip_from_network,
+        get_user_agent, get_byte_volume_band,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name,
         get_zscaler_device_info, rand_ip_from_network,
+        get_user_agent, get_byte_volume_band,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
 
@@ -189,7 +191,8 @@ def _get_user_and_device_info(config, user_override=None, session_context=None):
     if not user_ip_map:
         return ("unknown_user", "Unknown", _get_random_internal_ip(config),
                 {"hostname": "unknown-host", "owner": "unknown_owner",
-                 "os_type": "Windows", "os_version": "11"})
+                 "os_type": "Windows", "os_version": "11",
+                 "user_agent": get_user_agent(None, "unknown_user")})
     user = (user_override if user_override and user_override in user_ip_map
             else random.choice(list(user_ip_map.keys())))
     ip = user_ip_map.get(user) or _get_random_internal_ip(config)
@@ -200,6 +203,7 @@ def _get_user_and_device_info(config, user_override=None, session_context=None):
         "owner":      d.get('owner',      user),
         "os_type":    d.get('os_type',    'Windows'),
         "os_version": d.get('os_version', '11'),
+        "user_agent": get_user_agent(None, user),
     }
     return user, dept, ip, device_info
 
@@ -222,6 +226,7 @@ def _identity_from_context(config, ctx):
         "owner":      user,
         "os_type":    ctx.get("os_type", "Windows"),
         "os_version": ctx.get("os_version", "11"),
+        "user_agent": get_user_agent(None, user),
     }
     return user, ctx.get("department", "Unknown"), ip, device_info
 
@@ -278,14 +283,18 @@ def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_in
         "urlclass":   "Business and Productivity",
         "riskscore":  str(random.randint(1, 20)),
         "responsecode": "200", "reason": "Allowed", "reqmethod": "GET",
-        "useragent":  random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent":  (device_info.get('user_agent') or get_user_agent(None, user)),
         "appname":    app_details.get('name'), "appclass": app_details.get('class'),
         "contenttype": "text/html",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": f"https://www.{domain}/", "ehost": domain,
         "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
-        "bytesin": random.randint(5000, 50000), "bytesout": random.randint(500, 5000),
+        # Per-user volume band: light/medium/heavy users keep a consistent daily
+        # profile across the run, so a spike stands out against that user's own
+        # baseline rather than against one flat range shared by everyone.
+        "bytesin": random.randint(*get_byte_volume_band(user)),
+        "bytesout": random.randint(500, 5000),
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "2",
@@ -325,7 +334,11 @@ def _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, devi
         "threatcat": None, "threatname": None,
         "destCountry": destination.get("country", "United States"),
         "srcCountry": "United States",
-        "bytesin": random.randint(5000, 50000), "bytesout": random.randint(500, 5000),
+        # Per-user volume band: light/medium/heavy users keep a consistent daily
+        # profile across the run, so a spike stands out against that user's own
+        # baseline rather than against one flat range shared by everyone.
+        "bytesin": random.randint(*get_byte_volume_band(user)),
+        "bytesout": random.randint(500, 5000),
         "nwsvc": _port_service(dest_port) or (_cfg_svc if _cfg_svc in _PORT_SERVICE.values() else None),
         # The config's service_types ("Web Browsing", "PackageManagement",
         # "ZoomMeeting", "Email") are APPLICATIONS, not services — the vendor sample
@@ -441,7 +454,7 @@ def _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_in
         "responsecode": random.choice(["200", "201", "204"]),
         "reason":      "Allowed",
         "reqmethod":   method,
-        "useragent":   random.choice(config.get('user_agents', ["Microsoft OneDrive/22.0"])),
+        "useragent":   (device_info.get('user_agent') or get_user_agent(None, user)),
         "appname":     "Cloud Storage",
         "appclass":    "Web",
         "contenttype": "application/octet-stream",
@@ -545,7 +558,7 @@ def _generate_benign_video_streaming(config, user, dept, internal_host_ip, devic
         "responsecode": "200",
         "reason":      "Allowed",
         "reqmethod":   "GET",
-        "useragent":   random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent":   (device_info.get('user_agent') or get_user_agent(None, user)),
         "appname":     url_cat,
         "appclass":    "Web",
         "contenttype": content_type,
@@ -753,7 +766,7 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
         "threatscore": str(random.randint(75, 100)),
         "malwareclass": malware_details.get('class'), "malwaretype": malware_details.get('type'),
         "reqmethod": "GET",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "contenttype": "application/octet-stream",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
@@ -876,7 +889,7 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
         "urlclass": "Business and Productivity",
         "riskscore": str(random.randint(40, 70)),
         "responsecode": "201", "reason": "Allowed", "reqmethod": "POST",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "appname": "File Transfer", "appclass": "General", "contenttype": "application/zip",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
@@ -940,7 +953,7 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
         "urlclass": "Business and Productivity",
         "riskscore": str(random.randint(45, 75)),
         "responsecode": "403", "reason": "DLP Block", "reqmethod": "POST",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "contenttype": "application/zip",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
@@ -992,7 +1005,7 @@ def _generate_cloud_app_control_event(config, user, dept, internal_host_ip, devi
         "reason": f"Cloud App Control: {app.get('name', 'Unknown App')}",
         "reqmethod": "GET", "appname": app.get('name'), "appclass": app.get('class'),
         "contenttype": "text/html",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"https://{app.get('name', 'app').lower()}.com",
@@ -1043,7 +1056,7 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
         "filesize": threat.get('filesize', random.randint(20_000, 8_000_000)),
         "reqmethod": "GET",
         "contenttype": "application/octet-stream",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"http://download.unsafe-storage.com/{filename}",
@@ -2363,7 +2376,7 @@ def _generate_ddns_connection(config, user, dept, internal_host_ip, device_info)
             "urlclass":    "Business and Productivity",
             "riskscore":   str(random.randint(45, 80)),
             "responsecode": "200", "reason": "Allowed", "reqmethod": "POST",
-            "useragent":   random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+            "useragent":   (device_info.get('user_agent') or get_user_agent(None, user)),
             "appname":     "General Browsing", "appclass": "Web",
             "contenttype": "application/octet-stream",
             "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
@@ -2579,7 +2592,7 @@ def _generate_large_download(config, user, dept, internal_host_ip, device_info,
         "urlclass": "Business and Productivity",
         "riskscore": str(random.randint(30, 60)),
         "responsecode": "200", "reason": "Allowed", "reqmethod": "GET",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "appname": "File Transfer", "appclass": "General", "contenttype": "application/octet-stream",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
