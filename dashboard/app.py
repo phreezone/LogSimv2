@@ -1584,6 +1584,129 @@ def api_schedule_clear():
 
 # ── Health / preflight checks ─────────────────────────────────────────────────
 
+# Windows parallel-mode telemetry.  windows_events collects per-worker counters
+# and a threat-fired notification queue but nothing consumed them, so during a
+# parallel run there was no visibility into the DC / workstation / threat workers
+# at all.  This is that consumer.
+#
+# Threat history comes from get_recent_threats(), which is non-destructive.
+# NOT get_status_events(): that drains the queue generate_log() uses to label its
+# returned batch with the threat that fired, so reading it here would steal the
+# label and under-count threats in the module metrics.
+_WEC_STALE_AFTER_S = 300.0
+# Workers tick on an interval and there is one per workstation (hundreds), so for
+# the first minutes of a run plenty legitimately have not fired yet.  Flagging
+# those as "silent" would warn on every startup, so the check is suppressed until
+# the orchestrator has been up this long.  Tracked here because windows_events
+# records only a started flag, not a start time.
+_WEC_SILENT_GRACE_S = 180.0
+_WEC_ACTIVE_SINCE = {"ts": None}
+
+
+def _wec_module():
+    """The loaded windows_events module, found by capability not by name."""
+    return next((m for m in MODULES.values() if hasattr(m, "get_worker_stats")), None)
+
+
+def _wec_worker_checks():
+    """Health rows for Windows parallel-mode workers. Empty list if N/A."""
+    mod = _wec_module()
+    if mod is None:
+        return []
+    try:
+        stats = mod.get_worker_stats()
+    except Exception as exc:
+        return [{"group": "Windows WEC Workers", "check": "worker stats",
+                 "status": "error", "detail": f"{type(exc).__name__}: {exc}"}]
+
+    active = bool(stats.get("parallel_active"))
+    depth = stats.get("queue_depth", 0)
+    workers = {k: v for k, v in stats.items()
+               if k not in ("queue_depth", "parallel_active") and isinstance(v, dict)}
+
+    if not active:
+        _WEC_ACTIVE_SINCE["ts"] = None
+        return [{"group": "Windows WEC Workers", "check": "parallel mode",
+                 "status": "skip",
+                 "detail": "not running (parallel_hosts off, or module not started)"}]
+
+    if _WEC_ACTIVE_SINCE["ts"] is None:
+        _WEC_ACTIVE_SINCE["ts"] = time.time()
+    uptime = time.time() - _WEC_ACTIVE_SINCE["ts"]
+
+    out = [{"group": "Windows WEC Workers", "check": "parallel mode",
+            "status": "ok",
+            "detail": f"active {int(uptime)}s — {len(workers)} worker(s)"}]
+
+    now = time.time()
+    total = sum(w.get("events_generated", 0) for w in workers.values())
+    # A worker that has never produced is different from one that has gone quiet:
+    # the first usually means its generator raises, the second a stalled thread.
+    never = sorted(k for k, w in workers.items() if not w.get("events_generated"))
+    stale = sorted(k for k, w in workers.items()
+                   if w.get("events_generated")
+                   and now - w.get("last_event_time", 0) > _WEC_STALE_AFTER_S)
+    out.append({
+        "group": "Windows WEC Workers", "check": "events generated",
+        "status": "warn" if not total else "ok",
+        "detail": f"{total} event(s) across {len(workers)} worker(s)"
+                  if total else "no worker has produced an event yet",
+    })
+    if never and uptime >= _WEC_SILENT_GRACE_S:
+        out.append({"group": "Windows WEC Workers", "check": "silent workers",
+                    "status": "warn",
+                    "detail": f"{len(never)} produced nothing in {int(uptime)}s: "
+                              f"{', '.join(never[:4])}" + (" …" if len(never) > 4 else "")})
+    elif never:
+        out.append({"group": "Windows WEC Workers", "check": "silent workers",
+                    "status": "ok",
+                    "detail": f"{len(never)} not yet fired — within "
+                              f"{int(_WEC_SILENT_GRACE_S)}s startup grace"})
+    if stale:
+        out.append({"group": "Windows WEC Workers", "check": "stalled workers",
+                    "status": "warn",
+                    "detail": f"{len(stale)} idle >{int(_WEC_STALE_AFTER_S)}s: "
+                              f"{', '.join(stale[:4])}" + (" …" if len(stale) > 4 else "")})
+
+    # Output queue backs up when generation outpaces the drain in generate_log().
+    cap = getattr(getattr(mod, "_output_queue", None), "maxsize", 0) or 1000
+    pct = int(100 * depth / cap) if cap else 0
+    out.append({
+        "group": "Windows WEC Workers", "check": "output queue",
+        "status": "warn" if pct >= 70 else "ok",
+        "detail": f"{depth}/{cap} ({pct}%)",
+    })
+
+    # Generator failures and dropped events, counted by _note_worker_error().
+    errs = getattr(mod, "_worker_errors", {}) or {}
+    n_err = sum(v.get("count", 0) for v in errs.values())
+    n_drop = sum(v.get("drops", 0) for v in errs.values())
+    if n_err or n_drop:
+        worst = max(errs.items(), key=lambda kv: kv[1].get("count", 0))
+        out.append({"group": "Windows WEC Workers", "check": "worker errors",
+                    "status": "error" if n_err else "warn",
+                    "detail": f"{n_err} generator error(s), {n_drop} dropped; "
+                              f"worst {worst[0]}: {worst[1].get('last')}"})
+    else:
+        out.append({"group": "Windows WEC Workers", "check": "worker errors",
+                    "status": "ok", "detail": "none"})
+
+    threats = stats.get("threats", {})
+    last_fired = threats.get("last_fired")
+    try:
+        recent = [e.get("name") for e in mod.get_recent_threats(3) if e.get("name")]
+    except Exception:
+        recent = []
+    out.append({
+        "group": "Windows WEC Workers", "check": "threats fired",
+        "status": "ok",
+        "detail": (f"{threats.get('events_generated', 0)} event(s); last: {last_fired}"
+                   + (f" | recent: {', '.join(reversed(recent))}" if recent else ""))
+        if last_fired else "none yet",
+    })
+    return out
+
+
 # Health cache — populated by background monitor thread every 60 s
 _health_cache: dict = {}
 _health_ts: float = 0.0
@@ -1863,6 +1986,9 @@ def _run_health_checks() -> dict:
             "group": "GCP Pub/Sub", "check": "credentials present",
             "status": "skip", "detail": f"not set: {', '.join(missing)}" if missing else "skipped",
         })
+
+    # ── Windows parallel-mode workers ─────────────────────────────────────────
+    results.extend(_wec_worker_checks())
 
     # ── Delivery integrity ────────────────────────────────────────────────────
     # Send failures and queue drops are counted rather than swallowed; surface

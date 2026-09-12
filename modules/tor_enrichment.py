@@ -75,8 +75,15 @@ def fetch_onionoo_exit_map(timeout=30):
         # are keyed uppercase.  Deliberately NOT using Onionoo's `country_name`:
         # it says "United States of America" where Okta says "United States", so
         # the ISO code is joined against the existing per-module country table.
+        # Onionoo uses "??" when it cannot place a relay.  Passing that through
+        # would put the literal string "??" in geographicalContext.country, which
+        # no GeoIP-backed vendor would ever emit -- treat it as unknown so the
+        # geolocation guard renders a null coordinate instead.
+        cc = (relay.get("country") or "").upper()
+        if len(cc) != 2 or not cc.isalpha():
+            cc = None
         info = {
-            "country": (relay.get("country") or "").upper() or None,
+            "country": cc,
             "asn":     asn,
             "isp":     relay.get("as_name") or None,
         }
@@ -112,7 +119,9 @@ def enrich_tor_nodes(nodes, timeout=30, onionoo_map=None):
         info = onionoo_map.get(node.get("ip"))
         if info:
             resolved += 1
-            node["country"] = info["country"]
+            # Normalise here too: callers may supply their own map.
+            cc = (info.get("country") or "")
+            node["country"] = cc.upper() if len(cc) == 2 and cc.isalpha() else None
             node["asn"]     = info["asn"]
             node["isp"]     = info["isp"]
         else:

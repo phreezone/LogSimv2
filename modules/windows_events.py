@@ -58,6 +58,7 @@ import json
 import uuid
 import hashlib
 import threading
+import collections
 import queue as _queue_mod
 from datetime import datetime, timezone, timedelta
 
@@ -1381,26 +1382,48 @@ _workers_stop = threading.Event()
 _worker_errors: dict = {}
 _WORKER_WARN_EVERY_S = 60.0
 
+# _status_queue is drained by generate_log() itself, which uses it to label the
+# batch it returns with the threat that fired.  Anything else reading that queue
+# steals the label and the threat is under-counted, so observers get this
+# non-destructive ring instead (see get_recent_threats / get_status_events).
+_recent_threats: collections.deque = collections.deque(maxlen=25)
+
+
+# Rate limiting is GLOBAL per kind, not per worker.  There is one worker per
+# workstation -- hundreds of them -- so a per-worker window meant a saturated
+# output queue printed once per worker and buried the console.  Counts stay
+# per-worker (the health check reports the worst offender); only the printing
+# is aggregated.
+_worker_warn_last = {"error": 0.0, "drop": 0.0}
+
 
 def _note_worker_error(where, exc, dropped=False):
     now = time.time()
+    kind = "drop" if dropped else "error"
     with _STATE_LOCK:
         rec = _worker_errors.setdefault(
-            where, {"count": 0, "drops": 0, "last_warn": 0.0, "last": None})
+            where, {"count": 0, "drops": 0, "last": None})
         if dropped:
             rec["drops"] += 1
         else:
             rec["count"] += 1
-        rec["last"] = f"{type(exc).__name__}: {exc}"[:200] if exc else "queue full"
-        due = now - rec["last_warn"] >= _WORKER_WARN_EVERY_S
+            rec["last"] = f"{type(exc).__name__}: {exc}"[:200]
+        due = now - _worker_warn_last[kind] >= _WORKER_WARN_EVERY_S
         if due:
-            rec["last_warn"] = now
-        count, drops, last = rec["count"], rec["drops"], rec["last"]
+            _worker_warn_last[kind] = now
+        tot_err = sum(v["count"] for v in _worker_errors.values())
+        tot_drop = sum(v["drops"] for v in _worker_errors.values())
+        n_workers = sum(1 for v in _worker_errors.values()
+                        if (v["drops"] if dropped else v["count"]))
+        last = rec["last"]
     if due:
         if dropped:
-            print(f"[windows:{where}] output queue full — {drops} event(s) dropped")
+            print(f"[windows] output queue saturated — {tot_drop} event(s) dropped "
+                  f"across {n_workers} worker(s); generation is outpacing the drain "
+                  f"in generate_log()")
         else:
-            print(f"[windows:{where}] generator error ({count} total): {last}")
+            print(f"[windows] generator errors — {tot_err} across {n_workers} "
+                  f"worker(s); latest {where}: {last}")
 
 
 def reset_state():
@@ -7738,6 +7761,10 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
                         stats["events_generated"] += 1
                     stats["last_event_time"] = time.time()
                     stats["last_fired"] = threat_name
+                    with _STATE_LOCK:
+                        _recent_threats.append({"name": threat_name,
+                                                "event_count": len(items),
+                                                "timestamp": current_time})
                     try:
                         _status_queue.put_nowait({
                             "type": "threat_fired",
@@ -7821,8 +7848,24 @@ def get_worker_stats() -> dict:
     }
 
 
+def get_recent_threats(max_items: int = 10) -> list:
+    """Most-recent threats fired, newest last.  Non-destructive.
+
+    Use this for dashboards/telemetry.  get_status_events() below drains the
+    queue generate_log() depends on and must not be used for observation.
+    """
+    with _STATE_LOCK:
+        return list(_recent_threats)[-max_items:]
+
+
 def get_status_events(max_items: int = 20) -> list:
-    """Drain status queue for Flask UI (threat-fired notifications, etc.)."""
+    """Drain status queue for Flask UI (threat-fired notifications, etc.).
+
+    WARNING: destructive, and generate_log() already drains this queue to label
+    its returned batch with the threat that fired.  Calling this concurrently
+    steals that label and the threat is under-counted.  Prefer
+    get_recent_threats().
+    """
     events = []
     try:
         while len(events) < max_items:
