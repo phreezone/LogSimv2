@@ -64,9 +64,10 @@ def build_session_context(config):
         for dtype, dev in active_devices.items():
             # Deterministic UA from hash of username+device_type so it's stable
             # across restarts with the same config (but still looks random).
+            # Drawn only from agents an end-user device would actually send.
+            pool = enduser_agents(user_agents, dtype)
             digest = hashlib.sha256(f"{username}:{dtype}".encode()).digest()
-            ua_idx = digest[0] % len(user_agents)
-            dev['user_agent'] = user_agents[ua_idx]
+            dev['user_agent'] = pool[digest[0] % len(pool)]
 
         # Derive the convenience primary_* shortcuts from the first primary device
         first_primary = primary_devices[0] if primary_devices else None
@@ -162,6 +163,7 @@ def get_user_by_name(session_context, username, preferred_device_type=None):
             'hostname':     profile.get('primary_hostname'),
             'os_type':      profile.get('primary_os_type'),
             'os_version':   profile.get('primary_os_version'),
+            'user_agent':   profile.get('primary_user_agent'),
             'device_type':  None,
             'department':   profile.get('department'),
             'email':        profile.get('email'),
@@ -175,6 +177,7 @@ def get_user_by_name(session_context, username, preferred_device_type=None):
         'hostname':     device.get('hostname'),
         'os_type':      device.get('os_type'),
         'os_version':   device.get('os_version'),
+        'user_agent':   device.get('user_agent'),
         'device_type':  device.get('type'),
         'department':   profile.get('department'),
         'email':        profile.get('email'),
@@ -217,6 +220,9 @@ def get_zscaler_device_info(user_info):
         'owner':      user_info.get('display_name', user_info.get('username', 'Unknown')),
         'os_type':    user_info.get('os_type', 'Windows'),
         'os_version': user_info.get('os_version', '11'),
+        # Sticky per-device browser fingerprint; modules should emit this rather
+        # than re-rolling a UA per event.
+        'user_agent': user_info.get('user_agent'),
     }
 
 
@@ -755,6 +761,55 @@ def get_user_agent(session_context, username, device_type=None):
 
 
 # Default user-agent pool (used when config has no 'user_agents' key)
+# A device's sticky fingerprint must be something an end user's device would
+# actually send.  config['user_agents'] is a mixed pool -- 15 browsers alongside
+# SDK/CLI clients and, critically, scanner tooling (sqlmap, Nmap, Cloudsploit,
+# "AWS Security Scanner").  Assigning those at random meant a legitimate
+# workstation could be permanently fingerprinted as sqlmap, which poisons the
+# very UA baseline these helpers exist to build.
+_NON_ENDUSER_UA_TOKENS = (
+    # scanners / offensive tooling
+    "sqlmap", "nmap", "nikto", "gobuster", "wpscan", "security scanner",
+    "cloudsploit", "scan agent",
+    # SDKs, CLIs and automation
+    "curl/", "python-requests", "boto3", "aws-cli", "go-http-client",
+    "java/", "terraform", "postmanruntime", "mid server", "-http-client",
+    # crawlers and bots -- a laptop permanently fingerprinted as Googlebot is
+    # the same defect as one fingerprinted as sqlmap
+    "googlebot", "bingbot", "slurp", "duckduckbot", "yandexbot", "baiduspider",
+    "crawler", "spider", "slackbot", "bot/",
+)
+_MOBILE_UA_TOKENS = ("iphone", "android", "ipad", "mobile")
+
+
+def _is_enduser_ua(ua):
+    low = ua.lower()
+    return not any(tok in low for tok in _NON_ENDUSER_UA_TOKENS)
+
+
+def enduser_agents(pool, device_type=None):
+    """Subset of `pool` plausible as a sticky BROWSER fingerprint for this device.
+
+    Deliberately narrower than "things an end user might send".  This value is
+    the device's identity on ordinary web traffic, so it has to be a browser --
+    "Zoom SDK/5.16.0 (Mac)" is a real end-user agent but incoherent on a
+    text/html GET of a news site.  Single-purpose app traffic (OneDrive, Zoom,
+    CryptoAPI) is emitted by the generators that model those apps, which set
+    their own agent.
+
+    Falls back progressively so a narrow or unusual pool never yields nothing.
+    """
+    usable = [u for u in pool if _is_enduser_ua(u)] or list(pool)
+    browsers = [u for u in usable if "mozilla" in u.lower()] or usable
+    if device_type and device_type.split("_")[0] in ("mobile", "phone", "tablet"):
+        mobile = [u for u in browsers
+                  if any(t in u.lower() for t in _MOBILE_UA_TOKENS)]
+        return mobile or browsers
+    desktop = [u for u in browsers
+               if not any(t in u.lower() for t in ("iphone", "android", "ipad"))]
+    return desktop or browsers
+
+
 _DEFAULT_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
