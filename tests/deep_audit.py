@@ -99,8 +99,13 @@ if not any('event_result' in m for s, m in issues):
     print("  PASS")
 
 # CHECK 6: time_created ISO 8601 ending with Z
-print("\nCHECK 6: time_created format YYYY-MM-DDTHH:MM:SS.mmmZ")
-tc_pattern = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$')
+# Windows SystemTime carries 100ns precision: 7 fractional digits, or 9 with two
+# trailing zeros -- Microsoft's own sample XML shows both (".8853919Z" and
+# ".079785200Z" on the 4768/4624 pages). Never 3; the content pack's ".123Z" is an
+# illustrative schema example. The pack's parser reads it with %E*S, which takes
+# any precision, so the check is for Windows fidelity, not parser acceptance.
+print("\nCHECK 6: time_created format YYYY-MM-DDTHH:MM:SS.fffffff[00]Z (Windows SystemTime)")
+tc_pattern = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.(\d{7}|\d{9})Z$')
 bad_tc = None
 for gen, e in all_events:
     tc = e.get('time_created', '')
