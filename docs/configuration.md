@@ -117,7 +117,7 @@ This section defines *how* logs are sent. Each module uses one of four transport
 }
 ```
 
-**`http_collectors`** — required for HTTP-based modules (Okta, Proofpoint, GuardDuty, Windows Events). Each entry has four fields:
+**`http_collectors`** — required for HTTP-based modules (Okta, Proofpoint, Windows Events). Each entry has four fields:
 - `url_env_var` — names the `.env` variable holding the XSIAM HTTP Collector endpoint URL for this collector
 - `auth_type_env_var` — names the `.env` variable holding the authentication type (e.g., `"api_key"`)
 - `api_key_env_var` — names the `.env` variable holding the API key for this collector

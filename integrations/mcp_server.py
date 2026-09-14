@@ -126,7 +126,7 @@ def list_modules() -> list:
 @mcp.tool()
 def start_module(name: str, threat_level: Optional[str] = None,
                  event_interval: Optional[float] = None) -> dict:
-    """Start continuous log generation for a module (e.g. "Cisco ASA", "AWS GuardDuty").
+    """Start continuous log generation for a module (e.g. "Cisco ASA", "Okta SSO").
 
     threat_level: one of the configured levels (e.g. "Realistic", "Elevated", "High");
     omit to keep the module's current level. event_interval: seconds between events (optional).

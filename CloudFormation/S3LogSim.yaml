@@ -66,8 +66,8 @@ Resources:
       BucketName: !Ref BucketName
       NotificationConfiguration:
         QueueConfigurations:
-          # Notify ONLY for objects under AWSLogs/ — the prefix both the CloudTrail
-          # and GuardDuty writers use. Without this filter every object created
+          # Notify ONLY for objects under AWSLogs/ — the prefix the CloudTrail
+          # writer uses. Without this filter every object created
           # anywhere in the bucket is announced to XSIAM, which then tries to gunzip
           # it as a CloudTrail file. That is how a plain-text health-check probe at
           # logsim-healthcheck/<epoch>.txt entered the pipeline and stalled AWS
