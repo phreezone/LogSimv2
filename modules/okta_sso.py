@@ -164,14 +164,90 @@ _COUNTRY_DATA = {
     "VE": ("Venezuela",           6.4238, -66.5897), "VN": ("Vietnam",              14.0583, 108.2772),
     "ZA": ("South Africa",      -30.5595,  22.9375), "ZM": ("Zambia",              -13.1339,  27.8493),
     "ZW": ("Zimbabwe",          -19.0154,  29.1549),
+    # Remaining ISO 3166-1 countries and territories, from Google's canonical
+    # countries list (the source the entries above match).  The live Tor exit list
+    # changes daily and routinely includes countries outside the original set --
+    # Seychelles and Bangladesh on 2026-09-14 -- and an unlisted country produced
+    # a country with no geolocation, which Okta never emits.  Names are current
+    # short names (North Macedonia, Eswatini, Cabo Verde), not the list's legacy ones.
+    "AF": ("Afghanistan",             33.9391,   67.7100), "AG": ("Antigua and Barbuda",     17.0608,  -61.7964),
+    "AI": ("Anguilla",                18.2206,  -63.0686), "AO": ("Angola",                 -11.2027,   17.8739),
+    "AQ": ("Antarctica",             -75.2510,   -0.0714), "AS": ("American Samoa",         -14.2710, -170.1322),
+    "AW": ("Aruba",                   12.5211,  -69.9683), "BB": ("Barbados",                13.1939,  -59.5432),
+    "BD": ("Bangladesh",              23.6850,   90.3563), "BF": ("Burkina Faso",            12.2383,   -1.5616),
+    "BH": ("Bahrain",                 25.9304,   50.6378), "BI": ("Burundi",                 -3.3731,   29.9189),
+    "BJ": ("Benin",                    9.3077,    2.3158), "BM": ("Bermuda",                 32.3214,  -64.7574),
+    "BN": ("Brunei",                   4.5353,  114.7277), "BS": ("Bahamas",                 25.0343,  -77.3963),
+    "BT": ("Bhutan",                  27.5142,   90.4336), "BV": ("Bouvet Island",          -54.4232,    3.4132),
+    "BZ": ("Belize",                  17.1899,  -88.4976), "CC": ("Cocos (Keeling) Islands", -12.1642,   96.8710),
+    "CD": ("Democratic Republic of the Congo",  -4.0383,   21.7587), "CF": ("Central African Republic",   6.6111,   20.9394),
+    "CG": ("Republic of the Congo",   -0.2280,   15.8277), "CV": ("Cabo Verde",              16.0021,  -24.0132),
+    "CX": ("Christmas Island",       -10.4475,  105.6904), "DJ": ("Djibouti",                11.8251,   42.5903),
+    "DM": ("Dominica",                15.4150,  -61.3710), "DO": ("Dominican Republic",      18.7357,  -70.1627),
+    "EC": ("Ecuador",                 -1.8312,  -78.1834), "EH": ("Western Sahara",          24.2155,  -12.8858),
+    "FK": ("Falkland Islands",       -51.7963,  -59.5236), "FM": ("Micronesia",               7.4256,  150.5508),
+    "FO": ("Faroe Islands",           61.8926,   -6.9118), "GD": ("Grenada",                 12.2628,  -61.6042),
+    "GF": ("French Guiana",            3.9339,  -53.1258), "GG": ("Guernsey",                49.4657,   -2.5853),
+    "GI": ("Gibraltar",               36.1377,   -5.3454), "GL": ("Greenland",               71.7069,  -42.6043),
+    "GM": ("Gambia",                  13.4432,  -15.3101), "GN": ("Guinea",                   9.9456,   -9.6966),
+    "GP": ("Guadeloupe",              16.9960,  -62.0676), "GQ": ("Equatorial Guinea",        1.6508,   10.2679),
+    "GS": ("South Georgia and the South Sandwich Islands", -54.4296,  -36.5879), "GT": ("Guatemala",               15.7835,  -90.2308),
+    "GW": ("Guinea-Bissau",           11.8037,  -15.1804), "GY": ("Guyana",                   4.8604,  -58.9302),
+    "HM": ("Heard Island and McDonald Islands", -53.0818,   73.5042), "HN": ("Honduras",                15.2000,  -86.2419),
+    "IM": ("Isle of Man",             54.2361,   -4.5481), "IO": ("British Indian Ocean Territory",  -6.3432,   71.8765),
+    "IQ": ("Iraq",                    33.2232,   43.6793), "JE": ("Jersey",                  49.2144,   -2.1313),
+    "JM": ("Jamaica",                 18.1096,  -77.2975), "KI": ("Kiribati",                -3.3704, -168.7340),
+    "KM": ("Comoros",                -11.8750,   43.8722), "KN": ("Saint Kitts and Nevis",   17.3578,  -62.7830),
+    "KY": ("Cayman Islands",          19.5135,  -80.5670), "LA": ("Laos",                    19.8563,  102.4955),
+    "LC": ("Saint Lucia",             13.9094,  -60.9789), "LI": ("Liechtenstein",           47.1660,    9.5554),
+    "LS": ("Lesotho",                -29.6100,   28.2336), "LY": ("Libya",                   26.3351,   17.2283),
+    "MC": ("Monaco",                  43.7503,    7.4128), "MH": ("Marshall Islands",         7.1315,  171.1845),
+    "MK": ("North Macedonia",         41.6086,   21.7453), "MM": ("Myanmar",                 21.9140,   95.9562),
+    "MO": ("Macau",                   22.1987,  113.5439), "MP": ("Northern Mariana Islands",  17.3308,  145.3847),
+    "MQ": ("Martinique",              14.6415,  -61.0242), "MS": ("Montserrat",              16.7425,  -62.1874),
+    "MU": ("Mauritius",              -20.3484,   57.5522), "MV": ("Maldives",                 3.2028,   73.2207),
+    "MW": ("Malawi",                 -13.2543,   34.3015), "NC": ("New Caledonia",          -20.9043,  165.6180),
+    "NF": ("Norfolk Island",         -29.0408,  167.9547), "NI": ("Nicaragua",               12.8654,  -85.2072),
+    "NR": ("Nauru",                   -0.5228,  166.9315), "NU": ("Niue",                   -19.0544, -169.8672),
+    "PF": ("French Polynesia",       -17.6797, -149.4068), "PM": ("Saint Pierre and Miquelon",  46.9419,  -56.2711),
+    "PN": ("Pitcairn Islands",       -24.7036, -127.4393), "PR": ("Puerto Rico",             18.2208,  -66.5901),
+    "PS": ("Palestine",               31.9522,   35.2332), "PY": ("Paraguay",               -23.4425,  -58.4438),
+    "RE": ("Réunion",                -21.1151,   55.5364), "SC": ("Seychelles",              -4.6796,   55.4920),
+    "SD": ("Sudan",                   12.8628,   30.2176), "SH": ("Saint Helena",           -24.1435,  -10.0307),
+    "SJ": ("Svalbard and Jan Mayen",  77.5536,   23.6703), "SL": ("Sierra Leone",             8.4606,  -11.7799),
+    "SM": ("San Marino",              43.9424,   12.4578), "SO": ("Somalia",                  5.1521,   46.1996),
+    "SR": ("Suriname",                 3.9193,  -56.0278), "ST": ("São Tomé and Príncipe",    0.1864,    6.6131),
+    "SY": ("Syria",                   34.8021,   38.9968), "SZ": ("Eswatini",               -26.5225,   31.4659),
+    "TC": ("Turks and Caicos Islands",  21.6940,  -71.7979), "TD": ("Chad",                    15.4542,   18.7322),
+    "TF": ("French Southern Territories", -49.2804,   69.3486), "TG": ("Togo",                     8.6195,    0.8248),
+    "TJ": ("Tajikistan",              38.8610,   71.2761), "TK": ("Tokelau",                 -8.9674, -171.8559),
+    "TL": ("Timor-Leste",             -8.8742,  125.7275), "TM": ("Turkmenistan",            38.9697,   59.5563),
+    "TO": ("Tonga",                  -21.1790, -175.1982), "VA": ("Vatican City",            41.9029,   12.4534),
+    "VC": ("Saint Vincent and the Grenadines",  12.9843,  -61.2872), "VG": ("British Virgin Islands",  18.4207,  -64.6400),
+    "VI": ("U.S. Virgin Islands",     18.3358,  -64.8963), "VU": ("Vanuatu",                -15.3767,  166.9592),
+    "WF": ("Wallis and Futuna",      -13.7688, -177.1561), "WS": ("Samoa",                  -13.7590, -172.1046),
+    "XK": ("Kosovo",                  42.6026,   20.9030), "YE": ("Yemen",                   15.5527,   48.5164),
+    "YT": ("Mayotte",                -12.8275,   45.1662),
 }
 
 _COUNTRY_NAMES     = {k: v[0] for k, v in _COUNTRY_DATA.items()}
 _COUNTRY_CENTROIDS = {k: (v[1], v[2]) for k, v in _COUNTRY_DATA.items()}
 
 def _country_name(code):
-    """Convert ISO-2 country code to full name. Falls back to code if unknown."""
-    return _COUNTRY_NAMES.get(str(code).upper(), code)
+    """Convert an ISO-2 country code to Okta's full country name.
+
+    A value that is already a full name ("United States", as the proxy hops carry)
+    passes through.  An unrecognised bare ISO code becomes None: Okta never emits
+    a bare code, and _city_geolocation() cannot place one either, so a null
+    country keeps geographicalContext internally consistent with its null
+    geolocation instead of pairing "BD" with no coordinates.
+    """
+    name = _COUNTRY_NAMES.get(str(code).upper())
+    if name:
+        return name
+    if isinstance(code, str) and len(code) == 2 and code.isalpha():
+        return None
+    return code
 
 # Approximate lat/lon for cities appearing in ip_context data so geolocation
 # coordinates match the city field instead of being random global values.

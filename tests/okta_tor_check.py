@@ -82,6 +82,14 @@ def main():
     # observed within hours. The floor is set to catch enrichment actually
     # breaking (which lands near 0%), not normal churn.
     check("onionoo join rate >=75%", stats["join_rate"] >= 75.0, f"{stats['join_rate']}%")
+    # The exit list changes daily. Every country in TODAY's list must be one Okta can
+    # name and place -- asserted over the whole list, because 150 seeded draws can
+    # miss the 1 node in 1,224 that sits in a country the table lacks (Bangladesh
+    # and Seychelles did exactly that on 2026-09-14).
+    unplaceable = sorted({str(n["country"]).upper() for n in nodes if n.get("country")}
+                         - set(okta._COUNTRY_CENTROIDS))
+    check("every live exit country is named and placeable", not unplaceable,
+          str(unplaceable))
 
     # --- Tor-path events ----------------------------------------------------
     random.seed(1234)
