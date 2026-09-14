@@ -60,3 +60,6 @@ training_cache/
 
 # Detector-loop ledger (test output, regenerated per run)
 tests/detector_ledger.json
+
+# Tranco long-tail domain corpus cache (fetched at startup, see modules/domain_corpus.py)
+domain_cache/

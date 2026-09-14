@@ -3709,6 +3709,10 @@ def main():
     if live_tor_nodes:
         config['tor_exit_nodes'] = live_tor_nodes
 
+    # --- Long-tail domain corpus for rare benign DNS / web destinations ---
+    from modules import domain_corpus
+    domain_corpus.load(config)
+
     all_modules = load_modules()
 
     if not all_modules:

@@ -311,6 +311,15 @@ if _live_tor:
 if not CONFIG.get("_static_tor_exit_nodes"):
     CONFIG["_static_tor_exit_nodes"] = copy.deepcopy(CONFIG.get("tor_exit_nodes", []))
 
+# ── Long-tail domain corpus ───────────────────────────────────────────────────
+# Real registrable domains (Tranco) for the rare tail of benign DNS and web
+# traffic, so "rare" comes from cardinality rather than a weight on a 26-entry
+# pool that UEBA eventually learns as normal. Loaded once per process, so
+# Training runs in this process all draw from the same tail. Soft-fails to the
+# config pool; /api/health reports it.
+from modules import domain_corpus
+domain_corpus.load(CONFIG)
+
 THREAT_LEVELS = list(CONFIG.get("threat_generation_levels", {
     "Benign Traffic Only": 86400,
     "Realistic": 7200,
@@ -1766,6 +1775,36 @@ def _run_health_checks() -> dict:
                 "config.json has no static fallback. Tor generators will emit "
                 "ordinary external IPs labelled as Tor; XSIAM Tor detections will "
                 "NOT fire. Restart once connectivity to check.torproject.org is back."
+            ),
+        })
+
+    # ── Long-tail domain corpus ───────────────────────────────────────────────
+    # A warning, not an error: without it events are still correct, but the rare
+    # tail shrinks to the config pool and UEBA eventually learns those as normal.
+    _dc = domain_corpus.CORPUS_STATE
+    if _dc.get("ok"):
+        _stale = _dc.get("source") == "stale-cache"
+        results.append({
+            "group": "Threat Intel",
+            "check": "Long-tail domain corpus loaded",
+            "status": "warn" if _stale else "ok",
+            "detail": (
+                f"Tranco {_dc.get('list_id')}"
+                f"{' (pinned)' if _dc.get('pinned') else ''}: "
+                f"{_dc.get('dns', 0):,} DNS / {_dc.get('web', 0):,} web tail domains, "
+                f"{_dc.get('tail_share', 0):.0%} of benign lookups"
+                + (" — STALE cache, live fetch failed" if _stale else "")
+            ),
+        })
+    else:
+        results.append({
+            "group": "Threat Intel",
+            "check": "Long-tail domain corpus loaded",
+            "status": "warn",
+            "detail": (
+                f"unavailable ({_dc.get('error')}) — rare domains fall back to the "
+                "config pool, which UEBA will learn as normal over a long run. "
+                "Restart once tranco-list.eu is reachable."
             ),
         })
 

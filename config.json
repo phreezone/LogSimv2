@@ -20197,5 +20197,15 @@
   "user_behavior": {
     "_comment": "department_affinity biases destination/domain/volume choice toward each user's department so peer-group analytics has a signal. It is a weighting offset, never a partition: 0.0 = pure per-user (previous behaviour), 1.0 = a department shares one centre. Every destination stays reachable at any setting.",
     "department_affinity": 0.6
+  },
+  "domain_corpus": {
+    "_comment": "Real long-tail domains (Tranco top-1M, pay-level) for the rare tail of benign DNS (Infoblox, Check Point) and web (Zscaler) traffic. A small config pool only makes a domain rarely picked; over a long run UEBA learns it as normal. Rarity needs cardinality. benign_domains stays the per-user head. tail_share = fraction of benign lookups drawn from the tail. Ranks tail_start_rank..tail_end_rank are used; filter_unsafe drops adult/gambling/warez. Cached under domain_cache/ (gitignored) and refreshed after cache_ttl_hours at startup. Set pinned_list_id (e.g. \"GQNVK\") for the same tail across restarts. Offline: falls back to the config pool, /api/health warns.",
+    "enabled": true,
+    "tail_start_rank": 20000,
+    "tail_end_rank": 500000,
+    "tail_share": 0.05,
+    "filter_unsafe": true,
+    "cache_ttl_hours": 24,
+    "pinned_list_id": null
   }
 }
