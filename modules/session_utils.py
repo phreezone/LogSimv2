@@ -29,6 +29,17 @@ def build_session_context(config):
     """
     session_context = {}
 
+    # Department registry + affinity strength, so the weighting helpers can bias
+    # by department without every call site having to pass one.
+    global _DEPT_AFFINITY_STRENGTH
+    _DEPT_AFFINITY_STRENGTH = float(
+        config.get('user_behavior', {}).get('department_affinity',
+                                            _DEPT_AFFINITY_STRENGTH))
+    _USER_DEPARTMENT.clear()
+    for _u, _p in config.get('user_profiles', {}).items():
+        if _p.get('department'):
+            _USER_DEPARTMENT[_norm_user(_u)] = _p['department']
+
     for username, profile in config.get('user_profiles', {}).items():
         devices = profile.get('devices', [])
         primary_devices   = [d for d in devices if d.get('is_primary')]
@@ -602,6 +613,90 @@ def stable_mail_servers(user):
 
 _USER_DEST_WEIGHTS = {}
 
+# ── Departmental affinity ─────────────────────────────────────────────────────
+# XSIAM already knows each user's department (pulled from the simulated AD), but
+# knowing the label buys nothing if Finance and Engineering browse identically --
+# a peer-group analytic has nothing to find. These helpers give departments
+# distinct behavioural centroids while keeping per-user variation around them.
+#
+# It is a WEIGHTING OFFSET, never a partition: a Finance user hitting github
+# becomes rare, not impossible. Rare is the signal UEBA wants; impossible is a
+# different dataset, and it would also silently change which existing rules fire.
+#
+# Populated by build_session_context() so the affinity helpers can look a
+# department up from the username alone -- no call-site changes anywhere.
+_USER_DEPARTMENT: dict = {}
+# 0.0 reproduces the previous pure per-user behaviour exactly; 1.0 clusters a
+# department tightly. Set via config['user_behavior']['department_affinity'].
+_DEPT_AFFINITY_STRENGTH = 0.6
+
+
+def _norm_user(user):
+    """Bare lowercase account name from any of the forms modules emit.
+
+    Zscaler sends a UPN, the firewalls send a backslash-qualified DOMAIN name,
+    Windows sends the bare name -- all three must resolve to one department.
+    """
+    if not user:
+        return ""
+    u = str(user).strip()
+    if "\\" in u:
+        u = u.rsplit("\\", 1)[-1]
+    if "@" in u:
+        u = u.split("@", 1)[0]
+    return u.lower()
+
+
+def department_of(user):
+    """Department for a username in any form, or None if unknown."""
+    return _USER_DEPARTMENT.get(_norm_user(user))
+
+
+def _affinity_offset(user, n, salt=""):
+    """Rotation offset into an n-item pool, biased toward the user's department.
+
+    With no department known (or strength 0) this is the original per-user
+    rotation, so behaviour is unchanged for anything outside a session context.
+    Otherwise the department fixes the centre and the user jitters around it;
+    the jitter window shrinks as strength rises.
+    """
+    user_off = hashlib.sha256(f"{user}:{salt}".encode()).digest()[0] % n
+    dept = department_of(user)
+    strength = _DEPT_AFFINITY_STRENGTH
+    if not dept or strength <= 0 or n < 4:
+        return user_off
+    strength = min(1.0, float(strength))
+    dept_off = hashlib.sha256(f"dept:{dept}:{salt}".encode()).digest()[0] % n
+    # Jitter window around the department centre, as a fraction of the pool.
+    # Quadratic falloff: a linear one leaves the window covering most of the
+    # circle at mid strengths (0.6 gave +/-10 of 26 -- measured 1.01x separation,
+    # i.e. no clustering at all). Squared gives +/-2 at 0.6, which separates
+    # while still leaving every position reachable.
+    #   strength 0.0 -> span n/2 (full circle, identical to per-user behaviour)
+    #   strength 1.0 -> span 0   (whole department shares one centre)
+    span = int(round((n / 2.0) * (1.0 - strength) ** 2))
+    jitter = (user_off % (2 * span + 1)) - span
+    return (dept_off + jitter) % n
+
+
+# Some entries in the benign destination pool are deliberately rare ("Rare RDP
+# Target (External)").  The affinity rotation is arbitrary, so without this it
+# could seat one at the head of a user's -- or now a whole department's -- curve,
+# which inverts the point of having it.  Rare entries are pinned to the tail.
+_RARE_DEST_TOKENS = ("rare", "unusual", "suspicious", "anomalous")
+
+
+def _is_rare_destination(dest):
+    if isinstance(dest, dict):
+        if dest.get("rare"):
+            return True
+        label = str(dest.get("name", ""))
+    else:
+        label = str(dest)
+    low = label.lower()
+    return any(t in low for t in _RARE_DEST_TOKENS)
+
+
 def weighted_destination(user, destinations):
     """Pick a destination with per-user Zipf-like affinity.
 
@@ -615,12 +710,16 @@ def weighted_destination(user, destinations):
     n = len(destinations)
     cache_key = (user, n)
     if cache_key not in _USER_DEST_WEIGHTS:
-        digest = hashlib.sha256(user.encode()).digest()
-        offset = digest[0] % n
+        offset = _affinity_offset(user, n, "dest")
         weights = []
         for i in range(n):
             pos = (i - offset) % n
             weights.append(1.0 / (1 + pos))
+        # Keep deliberately-rare destinations rare whatever the rotation says.
+        tail = 1.0 / (1 + n)
+        for i, d in enumerate(destinations):
+            if _is_rare_destination(d):
+                weights[i] = tail
         _USER_DEST_WEIGHTS[cache_key] = weights
     if random.random() < 0.70:
         return random.choices(destinations, weights=_USER_DEST_WEIGHTS[cache_key], k=1)[0]
@@ -639,9 +738,10 @@ def get_byte_volume_band(user):
     each event should draw from this band to build a consistent volume profile.
     """
     if user not in _USER_BYTE_BANDS:
-        digest = hashlib.sha256(user.encode()).digest()
-        # 3 tiers: light (40%), medium (40%), heavy (20%)
-        tier = digest[0] % 10
+        # Department shifts the centre of the tier distribution (an engineering
+        # team really does move more bytes than legal), the user still varies
+        # around it -- so a heavy user in a light department stays possible.
+        tier = _affinity_offset(user, 10, "bytes")
         if tier < 4:        # light
             lo, hi = 5_000, 50_000
         elif tier < 8:      # medium
@@ -689,8 +789,7 @@ def weighted_dns_domain(user, domains=None):
     n = len(domains)
     cache_key = (user, "dns", n)
     if cache_key not in _USER_DOMAIN_WEIGHTS:
-        digest = hashlib.sha256(f"{user}:dns".encode()).digest()
-        offset = digest[0] % n
+        offset = _affinity_offset(user, n, "dns")
         weights = []
         for i in range(n):
             pos = (i - offset) % n

@@ -20193,5 +20193,9 @@
       "key_id_env_var": "XSIAM_API_KEY_ID",
       "key_env_var": "XSIAM_API_KEY"
     }
+  },
+  "user_behavior": {
+    "_comment": "department_affinity biases destination/domain/volume choice toward each user's department so peer-group analytics has a signal. It is a weighting offset, never a partition: 0.0 = pure per-user (previous behaviour), 1.0 = a department shares one centre. Every destination stays reachable at any setting.",
+    "department_affinity": 0.6
   }
 }
