@@ -766,6 +766,31 @@ _DEFAULT_BENIGN_DOMAINS = [
 
 _USER_DOMAIN_WEIGHTS = {}
 
+
+def long_tail_domain(view="dns"):
+    """A real long-tail domain for this draw, or None to use the curated pool.
+
+    A ~26-entry pool can make a domain rarely *picked*, never *rare*: over a long
+    run every entry is seen thousands of times and UEBA learns it as normal.
+    domain_corpus supplies hundreds of thousands of real registrable domains, so
+    a tail draw is effectively never repeated. `view` is "dns" (resolver-
+    realistic) or "web" (browsing destinations only).
+
+    Consumes no randomness when the corpus is not loaded, so offline runs draw
+    exactly the stream they did before the corpus existed.
+    """
+    try:
+        from modules import domain_corpus
+    except ImportError:
+        import domain_corpus
+    share = domain_corpus.TAIL_SHARE
+    if share <= 0 or not domain_corpus.available():
+        return None
+    if random.random() >= share:
+        return None
+    return domain_corpus.tail_domain(view)
+
+
 # Zipf exponent for per-user domain affinity.  Calibrated against the shipped
 # ~26-domain benign pool to land the documented 60/25/15 split; it was 1.5, which
 # produced 70/19/11 -- too concentrated, leaving the tail too thin to be a useful
@@ -795,6 +820,9 @@ def weighted_dns_domain(user, domains=None):
             pos = (i - offset) % n
             weights.append(1.0 / (1 + pos) ** _DNS_ZIPF_ALPHA)
         _USER_DOMAIN_WEIGHTS[cache_key] = weights
+    tail = long_tail_domain("dns")
+    if tail:
+        return tail
     if random.random() < 0.85:
         return random.choices(domains, weights=_USER_DOMAIN_WEIGHTS[cache_key], k=1)[0]
     return random.choice(domains)

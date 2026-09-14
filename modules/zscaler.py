@@ -12,13 +12,13 @@ try:
         get_zscaler_device_info, rand_ip_from_network,
         get_user_agent, get_byte_volume_band,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, long_tail_domain)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name,
         get_zscaler_device_info, rand_ip_from_network,
         get_user_agent, get_byte_volume_band,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, long_tail_domain)
 
 def _cef_escape(value):
     """Encode an NSS extension value the way a real Zscaler feed does.
@@ -276,6 +276,13 @@ def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_in
             dest_ip = "8.8.8.1"
     domain = destination.get("name", "example.com").replace(" ", "").lower()
     app_details = random.choice(zscaler_conf.get('app_details', [{"name": "General Browsing", "class": "Web"}]))
+    # A slice of browsing goes to a real long-tail site (modules/domain_corpus.py),
+    # so rare destinations stay rare over a long run. Such a site is no named SaaS
+    # app, so it must not inherit "Slack" / "Microsoft Office 365" from the pool.
+    tail = long_tail_domain("web")
+    if tail:
+        domain, dest_ip = tail, random_external_ip(config)
+        app_details = {"name": "General Browsing", "class": "Web"}
     fields = {
         "action": "Allowed",
         "urlcat":     random.choice(zscaler_conf.get('benign_url_categories', ["Technology"])),
