@@ -6,6 +6,7 @@
 
 import random
 import hashlib
+import string
 from ipaddress import ip_address, ip_network
 
 
@@ -826,6 +827,129 @@ def weighted_dns_domain(user, domains=None):
     if random.random() < 0.85:
         return random.choices(domains, weights=_USER_DOMAIN_WEIGHTS[cache_key], k=1)[0]
     return random.choice(domains)
+
+
+# Exfiltration destinations
+
+# Fraction of exfil destinations drawn from the long-tail corpus rather than the
+# curated file-sharing pool. Deliberately NOT domain_corpus.TAIL_SHARE (5%):
+# that share is calibrated for BENIGN browsing, where the tail is a thin rare
+# slice under a dominant head that must stay dominant. Exfil is the opposite
+# problem -- the event is already rare, so 5% of it is a handful of draws per run,
+# too few to baseline a "large upload to a never-seen host" rule against.
+_EXFIL_TAIL_SHARE = 0.30
+
+_TOKEN_ALPHABET = string.ascii_letters + string.digits
+
+# Per-object URL shapes. A real anonymous-sharing link is unique per upload
+# (pastebin.com/raw/xK9mQ2Lp, mega.nz/file/<id>#<key>), so a fixed "/upload" path
+# collapses every exfil event in a run onto one URL and leaves a URL-cardinality
+# detector nothing to key on. Token lengths follow each service's real format.
+_EXFIL_URL_SHAPES = {
+    "pastebin.com":     ("/raw/", 8, ""),
+    "gist.github.com":  ("/", 32, ""),
+    "mega.nz":          ("/file/", 8, "#"),
+    "mega.io":          ("/file/", 8, "#"),
+    "anonfiles.com":    ("/", 9, ""),
+    "gofile.io":        ("/d/", 6, ""),
+    "dropbox.com":      ("/s/", 15, ""),
+    "box.com":          ("/s/", 32, ""),
+    "wetransfer.com":   ("/downloads/", 32, ""),
+    "drive.google.com": ("/file/d/", 33, "/view"),
+    "mediafire.com":    ("/file/", 15, ""),
+    "sendspace.com":    ("/file/", 6, ""),
+    "transfernow.net":  ("/dl/", 16, ""),
+    "filetransfer.io":  ("/data-package/", 8, ""),
+    "jumpshare.com":    ("/v/", 16, ""),
+    "filemail.com":     ("/d/", 16, ""),
+}
+
+
+def _exfil_token(length):
+    return "".join(random.choices(_TOKEN_ALPHABET, k=length))
+
+
+def exfil_url(domain, kind="upload"):
+    """A per-object URL for an exfil destination, in that service's real shape."""
+    shape = _EXFIL_URL_SHAPES.get(domain)
+    if not shape:
+        base = "/download/" if kind == "download" else "/upload/"
+        return f"https://{domain}{base}{_exfil_token(12)}"
+    prefix, length, suffix = shape
+    # MEGA's fragment is the decryption key, not a path segment -- it is what makes
+    # a mega.nz link self-contained, and it is 22 chars where the file id is 8.
+    if suffix == "#":
+        suffix += _exfil_token(22)
+    return f"https://{domain}{prefix}{_exfil_token(length)}{suffix}"
+
+
+def exfil_destination(config, kind="upload"):
+    """Pick an exfiltration destination: (domain, ip, url, is_tail).
+
+    Two archetypes, because "unusual destination" means two different things and
+    detections key on them differently:
+
+      curated (is_tail False) -- pastebin.com, mega.nz, anonfiles.com and friends
+        from config['exfiltration_destinations']. The domain is famous; the
+        anomaly is that a corporate user pushed 400 MB to it. Low domain
+        cardinality is CORRECT here -- the real pastebin.com is always
+        pastebin.com -- so detections key on URL category, volume, and the user's
+        own baseline. `kind` selects entries whose curated "direction" admits it.
+
+      tail (is_tail True) -- a domain from the long-tail corpus that nothing else
+        in the run resolves. Detections key on rare/new-domain + outbound volume,
+        which is how attacker-controlled and compromised-site exfil actually
+        looks. Without it every exfil event lands on one of ~12 curated domains,
+        and a "large upload to a never-before-seen host" rule has no true positive
+        to learn from.
+
+    A tail hit is NOT a named SaaS app, so a caller that labels its output must
+    branch on is_tail rather than hardcoding "Online Storage" / "File Transfer";
+    mislabelling a random registrable domain as cloud storage is what would make
+    the event untrainable.
+
+    Consumes no randomness on the tail gate when the corpus is unavailable, so an
+    offline run still picks the destination it would have picked before.
+    """
+    share = (config.get("domain_corpus") or {}).get("exfil_tail_share",
+                                                    _EXFIL_TAIL_SHARE)
+    if share > 0:
+        try:
+            from modules import domain_corpus
+        except ImportError:
+            import domain_corpus
+        if domain_corpus.available() and random.random() < share:
+            tail = domain_corpus.tail_domain("web")
+            if tail:
+                return (tail, random_external_ip(config),
+                        exfil_url(tail, kind), True)
+
+    dests = config.get('exfiltration_destinations') or []
+    if not dests:
+        return ("drive.google.com", random_external_ip(config),
+                exfil_url("drive.google.com", kind), False)
+    # Direction is a curated per-entry property defaulting to "both", because
+    # that is what almost every entry genuinely is: you upload a file and someone
+    # downloads it. It replaced a bare alphabetical split of the pool
+    # (sorted()[:12] downloads, [12:] uploads), which was arbitrary -- it left
+    # anonfiles, gist, gofile, dropbox, drive.google and box, all prime exfil
+    # upload targets, permanently unreachable for an upload, and pastebin
+    # reachable only by luck of the alphabet. The split also bought nothing:
+    # checkpoint_firewall, fortinet_fortigate and cisco_asa all draw both
+    # directions from the whole pool, so no host was upload-only across the
+    # dataset anyway.
+    pool   = [d for d in dests if d.get('direction', 'both') in (kind, 'both')]
+    entry  = random.choice(pool or dests)
+    domain = entry.get('domain') or 'drive.google.com'
+    # Some pool entries are wildcard patterns (e.g. "*.digitaloceanspaces.com"). A
+    # real log carries a concrete FQDN, never a wildcard, so substitute a label.
+    if domain.startswith('*.'):
+        domain = random.choice(["files", "cdn", "assets", "static", "data"]) + domain[1:]
+    try:
+        dest_ip = rand_ip_from_network(ip_network(entry.get('ip_range'), strict=False))
+    except Exception:
+        dest_ip = random_external_ip(config)
+    return domain, dest_ip, exfil_url(domain, kind), False
 
 
 def reset_caches():

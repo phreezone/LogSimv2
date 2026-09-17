@@ -171,6 +171,138 @@ def zscaler_web(cfg):
           all(not f["sip"].startswith(("10.", "192.168.", "172.")) for f in tail))
 
 
+def _capture_zscaler(cfg, generator, n):
+    """Run a Zscaler generator n times, returning its NSSWeblog field dicts.
+
+    These generators emit a DNS precursor and an NSSFWlog alongside the web log
+    and all three go through _format_nss_log_as_cef, so keep only the web ones.
+    """
+    captured = []
+    orig = zs._format_nss_log_as_cef
+    zs._format_nss_log_as_cef = lambda fields, *a, **k: captured.append(fields) or ""
+    try:
+        dev = {"hostname": "WKS-1", "owner": "a.tucker", "os_type": "Windows",
+               "os_version": "10", "user_agent": "Mozilla/5.0"}
+        for _ in range(n):
+            generator(cfg, "a.tucker", "Finance", "10.0.0.5", dev)
+    finally:
+        zs._format_nss_log_as_cef = orig
+    return [f for f in captured if "ehost" in f]
+
+
+def exfil_tail(cfg):
+    """Large uploads must reach BOTH archetypes: the curated file-sharing sites
+    (pastebin/mega/wetransfer -- famous domain, anomalous volume) and the long
+    tail (a host nothing else in the run resolves). Losing either one silently
+    removes a whole class of detection content from the training data."""
+    print("exfil destinations")
+    curated = {(d.get("domain") or "") for d in cfg["exfiltration_destinations"]}
+    share_cfg = cfg["domain_corpus"]["exfil_tail_share"]
+
+    def is_curated(host):
+        # Wildcard entries ("*.digitaloceanspaces.com") reach the log as a
+        # concrete FQDN, so an exact-membership test would miscount them as tail.
+        return host in curated or any(
+            d.startswith("*.") and host.endswith(d[1:]) for d in curated)
+
+    fields = _capture_zscaler(cfg, zs._generate_data_exfil_web_traffic, 6000)
+    tail = [f for f in fields if not is_curated(f["ehost"])]
+    hit  = [f for f in fields if is_curated(f["ehost"])]
+    share = len(tail) / len(fields)
+    check("exfil tail share ~= configured", abs(share - share_cfg) < 0.02,
+          f"{share:.2%} vs {share_cfg:.0%}")
+    check("curated file-sharing sites still dominate", len(hit) > len(tail),
+          f"{len(hit):,} curated vs {len(tail):,} tail")
+
+    # The user-visible guarantee: uploads still go to pastebin and friends.
+    # Direction is curated per entry and defaults to "both" -- it used to be an
+    # alphabetical split that left anonfiles, gist, gofile, dropbox, drive.google
+    # and box unreachable for uploads.
+    upload_pool = {(d.get("domain") or "") for d in cfg["exfiltration_destinations"]
+                   if d.get("direction", "both") in ("upload", "both")}
+    seen = {f["ehost"] for f in hit}
+    missed = {d for d in upload_pool
+              if not (d in seen or (d.startswith("*.")
+                                    and any(h.endswith(d[1:]) for h in seen)))}
+    check("every curated upload destination still receives uploads",
+          not missed, sorted(missed))
+    check("pastebin specifically still receives uploads", "pastebin.com" in seen)
+    check("the formerly unreachable upload targets are reachable",
+          {"anonfiles.com", "gist.github.com", "gofile.io", "dropbox.com",
+           "drive.google.com", "box.com"} <= seen,
+          sorted({"anonfiles.com", "gist.github.com", "gofile.io", "dropbox.com",
+                  "drive.google.com", "box.com"} - seen))
+
+    counts = collections.Counter(f["ehost"] for f in tail)
+    repeated = sum(c for c in counts.values() if c > 1) / max(1, len(tail))
+    check("exfil tail hosts essentially never repeat", repeated < 0.02,
+          f"{len(counts):,} distinct of {len(tail):,}; {repeated:.2%} in repeats")
+    check("no unsafe domain reached an exfil upload",
+          not any(dc._UNSAFE_RE.search(f["ehost"]) for f in tail))
+    check("exfil tail hosts come from the web view (no infra)",
+          not any(dc._INFRA_RE.search(f["ehost"]) for f in tail))
+
+    # A tail host is not a named SaaS app. Mislabelling it as cloud storage makes
+    # the event fire the wrong detection and hide from the right one.
+    check("tail exfil is labelled uncategorised, not Online Storage",
+          all(f["urlcat"] == "Miscellaneous or Unknown"
+              and f["appname"] == "General Browsing" for f in tail))
+    check("curated exfil keeps its Online Storage labelling",
+          all(f["urlcat"] == "Online Storage"
+              and f["appname"] == "File Transfer" for f in hit))
+    check("tail exfil still carries the large upload volume",
+          all(f["bytesout"] > 300_000_000 for f in tail))
+
+    # Per-object URLs: a fixed "/upload" collapses every exfil event onto one URL.
+    urls = [f["eurl"] for f in fields]
+    check("exfil URLs are unique per event",
+          len(set(urls)) / len(urls) > 0.99, f"{len(set(urls)):,} of {len(urls):,}")
+    pastebin = [u for u in urls if u.startswith("https://pastebin.com/")]
+    check("service URL shapes are realistic",
+          bool(pastebin) and all(u.startswith("https://pastebin.com/raw/")
+                                 for u in pastebin), pastebin[:1])
+
+    # Downloads honour the curated direction tag. Uploads and downloads now
+    # OVERLAP by design -- a host you upload to is a host someone downloads from,
+    # and the firewall modules already drew both directions from the whole pool.
+    upload_only = {(d.get("domain") or "") for d in cfg["exfiltration_destinations"]
+                   if d.get("direction", "both") == "upload"}
+    dl = _capture_zscaler(cfg, zs._generate_large_download, 3000)
+    dl_hosts = {f["ehost"] for f in dl if is_curated(f["ehost"])}
+    check("upload-only destinations never serve a download",
+          not dl_hosts & upload_only, sorted(dl_hosts & upload_only))
+    eligible = {d for d in curated if d not in upload_only}
+    covered = {d for d in eligible
+               if d in dl_hosts or (d.startswith("*.")
+                                    and any(h.endswith(d[1:]) for h in dl_hosts))}
+    check("both-direction destinations do serve downloads",
+          covered == eligible, f"missing {sorted(eligible - covered)}")
+
+    # DLP blocks share the picker, so they inherit both archetypes too.
+    dlp = _capture_zscaler(cfg, zs._generate_dlp_web_traffic, 2000)
+    dlp_tail = [f for f in dlp if not is_curated(f["ehost"])]
+    check("DLP blocks reach the tail as well",
+          bool(dlp_tail) and all(f["urlcat"] == "Miscellaneous or Unknown"
+                                 for f in dlp_tail), f"{len(dlp_tail):,} tail blocks")
+
+
+def exfil_fallback_consumes_no_randomness(cfg):
+    """With no corpus the tail gate must not draw a random number, so an offline
+    run picks the same curated destination it would have picked before."""
+    print("exfil fallback")
+    dc.load({"domain_corpus": {"enabled": False}})
+    random.seed(11)
+    a = [su.exfil_destination(cfg, "upload")[0] for _ in range(200)]
+    random.seed(11)
+    b = [su.exfil_destination({**cfg, "domain_corpus": {"exfil_tail_share": 0}},
+                              "upload")[0] for _ in range(200)]
+    check("no corpus -> every draw is curated",
+          all(not t for t in [su.exfil_destination(cfg, "upload")[3]
+                              for _ in range(200)]))
+    check("tail gate draws no random numbers when unavailable", a == b)
+    dc.load(cfg)
+
+
 def determinism(cfg):
     print("determinism")
     su.build_session_context(cfg)
@@ -189,6 +321,8 @@ def main():
     if live_and_cache(cfg):
         rarity(cfg)
         zscaler_web(cfg)
+        exfil_tail(cfg)
+        exfil_fallback_consumes_no_randomness(cfg)
         determinism(cfg)
     print(f"\n{len(_checks) - len(_fails)}/{len(_checks)} checks passed")
     if _fails:

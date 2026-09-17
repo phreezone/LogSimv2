@@ -2420,9 +2420,11 @@
       "domain": "anonfiles.com"
     },
     {
+      "_comment_direction": "direction is the curated upload/download role of an entry and defaults to 'both', which is what almost every entry here genuinely is: you upload a file and someone downloads it, that is the product. Only tag an entry when one direction is not credible. It replaced an arbitrary alphabetical split of this list (sorted()[:12] were downloads, [12:] uploads) that left anonfiles, gist, gofile, dropbox, drive.google and box permanently unreachable for uploads. Pastebin and GitHub Gist are text-sized, so a multi-GB download from them is not credible; everything else stays 'both'.",
       "name": "Pastebin",
       "ip_range": "104.20.208.0/20",
-      "domain": "pastebin.com"
+      "domain": "pastebin.com",
+      "direction": "upload"
     },
     {
       "name": "Sendspace",
@@ -2512,7 +2514,8 @@
     {
       "name": "GitHub Gist",
       "ip_range": "140.82.112.0/20",
-      "domain": "gist.github.com"
+      "domain": "gist.github.com",
+      "direction": "upload"
     },
     {
       "name": "DigitalOcean Spaces",
@@ -20194,6 +20197,8 @@
     "tail_start_rank": 20000,
     "tail_end_rank": 500000,
     "tail_share": 0.05,
+    "_comment_exfil_tail_share": "Fraction of EXFIL destinations (Zscaler data_exfil, dlp_threat, large_download) drawn from the tail instead of exfiltration_destinations. Separate from tail_share because the two model different anomalies: a curated hit is a famous file-sharing site (pastebin/mega/anonfiles) where the anomaly is that a corporate user pushed 400MB to it, and low domain cardinality is correct; a tail hit is a host nothing else in the run resolves, which is how attacker-controlled and compromised-site exfil looks. Uploads to the curated file-sharing pool stay dominant at 0.30. Tail hits are labelled Miscellaneous or Unknown / General Browsing, never Online Storage / File Transfer. Set 0 to disable.",
+    "exfil_tail_share": 0.30,
     "filter_unsafe": true,
     "cache_ttl_hours": 24,
     "pinned_list_id": null

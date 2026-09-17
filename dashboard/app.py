@@ -1792,7 +1792,9 @@ def _run_health_checks() -> dict:
                 f"Tranco {_dc.get('list_id')}"
                 f"{' (pinned)' if _dc.get('pinned') else ''}: "
                 f"{_dc.get('dns', 0):,} DNS / {_dc.get('web', 0):,} web tail domains, "
-                f"{_dc.get('tail_share', 0):.0%} of benign lookups"
+                f"{_dc.get('tail_share', 0):.0%} of benign lookups, "
+                f"{(CONFIG.get('domain_corpus') or {}).get('exfil_tail_share', 0.30):.0%}"
+                " of exfil destinations"
                 + (" — STALE cache, live fetch failed" if _stale else "")
             ),
         })
@@ -1803,8 +1805,9 @@ def _run_health_checks() -> dict:
             "status": "warn",
             "detail": (
                 f"unavailable ({_dc.get('error')}) — rare domains fall back to the "
-                "config pool, which UEBA will learn as normal over a long run. "
-                "Restart once tranco-list.eu is reachable."
+                "config pool, which UEBA will learn as normal over a long run, and "
+                "every exfil upload lands on a curated file-sharing site instead of "
+                "a never-seen host. Restart once tranco-list.eu is reachable."
             ),
         })
 
