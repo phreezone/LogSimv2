@@ -1085,7 +1085,10 @@ def _generate_phishing_campaign(config, session_context=None):
     sender_ip  = _random_external_ip()
     camp_id    = _campaign_id(config)
     subject    = _format_subject(random.choice(_PHISHING_SUBJECTS))
-    count      = random.randint(4, 10)
+    # Lower bound is 5, not 4: the "High Volume of Blocked Emails from a Single IP"
+    # rule needs >= 5 blocked messages sharing a senderIP, so a 4-message campaign
+    # emitted a burst that could never reach the threshold — 1 campaign in 7 wasted.
+    count      = random.randint(5, 12)
 
     url         = _malicious_url(config)
     threat_sha, _ = _generate_hashes()

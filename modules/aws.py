@@ -7375,7 +7375,20 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
 
     # Determine event name for return tuple — use scenario key if available
     _func_to_key = {fn: k for k, fn in SCENARIO_FUNCTIONS.items()}
-    event_name_for_return = scenario_event if scenario_event else _func_to_key.get(chosen_func, getattr(chosen_func, "__name__", "unknown_generator"))
+    if scenario_event:
+        # Explicitly requested one-shot: report the name that was asked for.
+        event_name_for_return = scenario_event
+    elif chosen_func in BENIGN_SCENARIOS:
+        # An ambient baseline draw is NOT a threat, even when the same generator is
+        # also registered in SCENARIO_FUNCTIONS so it can be fired one-shot by name.
+        # Reverse-mapping it here gave every baseline firing a named-threat label, and
+        # the dashboard counts any name in get_threat_names() as a threat
+        # (dashboard/app.py record_log). _generate_assume_role_with_saml is an SSO
+        # login baseline at weight 6/350 of the benign pool: it alone reported 1,182
+        # of 1,188 AWS "threats", hiding that only ~6 real threats had fired.
+        event_name_for_return = getattr(chosen_func, "__name__", "unknown_generator")
+    else:
+        event_name_for_return = _func_to_key.get(chosen_func, getattr(chosen_func, "__name__", "unknown_generator"))
 
     logger.info("Generated events from: %s (count=%d)", event_name_for_return, len(events))
 
