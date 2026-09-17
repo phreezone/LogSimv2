@@ -12,13 +12,15 @@ try:
         get_zscaler_device_info, rand_ip_from_network,
         get_user_agent, get_byte_volume_band,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, long_tail_domain)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, long_tail_domain,
+        exfil_destination, exfil_url)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name,
         get_zscaler_device_info, rand_ip_from_network,
         get_user_agent, get_byte_volume_band,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, long_tail_domain)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, long_tail_domain,
+        exfil_destination, exfil_url)
 
 def _cef_escape(value):
     """Encode an NSS extension value the way a real Zscaler feed does.
@@ -794,9 +796,10 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
 
 
 def _exfil_destination(config, kind="upload"):
-    """Pick a cloud-storage destination from the SHARED 25-entry pool.
+    """Pick an exfil destination from the SHARED 25-entry pool or the long tail.
 
-    Returns (domain, ip, url).
+    Returns (domain, ip, url, is_tail) — see session_utils.exfil_destination() for
+    the two archetypes and why `is_tail` must drive the URL-category labelling.
 
     Every upload/DLP/download generator here used to hardcode
     `dest_ip = f"104.18.30.{random.randint(1, 254)}"` and draw its domain from
@@ -810,32 +813,42 @@ def _exfil_destination(config, kind="upload"):
     205.196.121.147, 162.125.40.246, 154.53.224.128). A detector keying on "rare
     destination" cannot treat 166 addresses in a single /24 as rare, and cannot tell
     upload traffic from download traffic when both resolve into the same block.
-
-    Uploads and downloads draw from disjoint halves of the pool so the two directions
-    are distinguishable as destinations.
     """
-    dests = config.get('exfiltration_destinations') or []
-    if not dests:
+    if not config.get('exfiltration_destinations'):
         zc = config.get('zscaler_config', {})
         entry = random.choice(zc.get('exfil_destinations')
                              or [{"domain": "drive.google.com"}])
         domain = entry.get('domain', 'drive.google.com')
-        return domain, _random_external_ip(), entry.get('url') or f"https://{domain}/upload"
-    ordered = sorted(dests, key=lambda d: d.get('domain') or '')
-    half    = max(1, len(ordered) // 2)
-    pool    = ordered[:half] if kind == "download" else ordered[half:]
-    entry   = random.choice(pool or ordered)
-    domain  = entry.get('domain') or 'drive.google.com'
-    # Some pool entries are wildcard patterns (e.g. "*.digitaloceanspaces.com"). A real log
-    # carries a concrete FQDN, never a wildcard, so substitute a plausible label.
-    if domain.startswith('*.'):
-        domain = random.choice(["files", "cdn", "assets", "static", "data"]) + domain[1:]
-    try:
-        dest_ip = rand_ip_from_network(ip_network(entry.get('ip_range'), strict=False))
-    except Exception:
-        dest_ip = _random_external_ip()
-    path = "/download" if kind == "download" else "/upload"
-    return domain, dest_ip, f"https://{domain}{path}"
+        return (domain, _random_external_ip(),
+                entry.get('url') or f"https://{domain}/upload", False)
+    return exfil_destination(config, kind)
+
+
+def _exfil_url_category(is_tail):
+    """NSSFWlog url_category for an exfil destination.
+
+    A long-tail host is a registrable domain the proxy has no classification for,
+    so it must NOT inherit "Online Storage and Backup" from the curated pool: a
+    detection that keys on the cloud-storage category would then fire on it for
+    the wrong reason, and one that keys on an uncategorised destination would
+    never see it at all. "Miscellaneous or Unknown" is Zscaler's real label for
+    exactly this.
+    """
+    return "Miscellaneous or Unknown" if is_tail else "Online Storage and Backup"
+
+
+def _exfil_web_categories(is_tail):
+    """NSSWeblog category/app labels for an exfil destination — see
+    _exfil_url_category(). A tail host is no named SaaS app, so it is General
+    Browsing rather than "File Transfer"; the anomaly is the byte volume against
+    an uncategorised, never-before-resolved destination, not the app name."""
+    if is_tail:
+        return {"urlcat": "Miscellaneous or Unknown", "urlsupercat": "Miscellaneous",
+                "urlclass": "General Surfing",
+                "appname": "General Browsing", "appclass": "Web"}
+    return {"urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
+            "urlclass": "Business and Productivity",
+            "appname": "File Transfer", "appclass": "General"}
 
 
 def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, device_info,
@@ -850,12 +863,15 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
     Ambient/standalone callers pass neither and behave exactly as before.
     """
     zscaler_conf = config.get('zscaler_config', {})
-    _exfil_domain, dest_ip, _exfil_url = _exfil_destination(config, "upload")
+    _exfil_domain, dest_ip, _exfil_url, _is_tail = _exfil_destination(config, "upload")
     # Pin the exfil domain when orchestrated; overriding it here also flows into the
     # DNS precursor and NSSFWlog sub-events below, which reuse `_exfil_domain`.
+    # An orchestrated domain is chosen by the story, so it is labelled as a curated
+    # destination rather than as an uncategorised long-tail host.
     if domain_override:
         _exfil_domain = domain_override
-        _exfil_url = f"https://{domain_override}/upload"
+        _exfil_url = exfil_url(domain_override, "upload")
+        _is_tail = False
     exfil_dest = {"url": _exfil_url, "domain": _exfil_domain}
     # 300 MB - 700 MB. "Large Upload (HTTPS)" has fired 85 times for Check Point and never
     # for Zscaler; max xdm.source.sent_bytes on port 443 was 105 MB for
@@ -887,17 +903,19 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
                           ack_bytes, file_size_bytes,
                           dst_fqdn=_exfil_domain,
                           duration_ms=random.randint(300_000, 1_200_000),
-                          url_category="Online Storage and Backup",
+                          url_category=_exfil_url_category(_is_tail),
                           exact_user=exact_user))
     # Log 3: NSSWeblog — web proxy event
+    _cat = _exfil_web_categories(_is_tail)
     fields = {
         "action": "Allowed",
-        "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
-        "urlclass": "Business and Productivity",
+        "urlcat": _cat["urlcat"], "urlsupercat": _cat["urlsupercat"],
+        "urlclass": _cat["urlclass"],
         "riskscore": str(random.randint(40, 70)),
         "responsecode": "201", "reason": "Allowed", "reqmethod": "POST",
         "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
-        "appname": "File Transfer", "appclass": "General", "contenttype": "application/zip",
+        "appname": _cat["appname"], "appclass": _cat["appclass"],
+        "contenttype": "application/zip",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": exfil_dest.get('url'), "ehost": exfil_dest.get('domain'),
@@ -933,7 +951,7 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
         return None
     dictionary = random.choice(dicts)
     rule       = random.choice(dlp_conf.get('rules', ["DLP-Default-Rule"]))
-    _exfil_domain, dest_ip, _exfil_url = _exfil_destination(config, "upload")
+    _exfil_domain, dest_ip, _exfil_url, _is_tail = _exfil_destination(config, "upload")
     exfil_dest = {"url": _exfil_url, "domain": _exfil_domain}
     upload_bytes = random.randint(1000, 50000)
     ack_bytes = random.randint(100, 500)
@@ -952,12 +970,13 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
                           "Unknown", "6",
                           ack_bytes, upload_bytes,
                           dst_fqdn=_exfil_domain,
-                          url_category="Online Storage and Backup"))
+                          url_category=_exfil_url_category(_is_tail)))
     # Log 3: NSSWeblog — DLP block with engine details
+    _cat = _exfil_web_categories(_is_tail)
     fields = {
         "action": "Blocked",
-        "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
-        "urlclass": "Business and Productivity",
+        "urlcat": _cat["urlcat"], "urlsupercat": _cat["urlsupercat"],
+        "urlclass": _cat["urlclass"],
         "riskscore": str(random.randint(45, 75)),
         "responsecode": "403", "reason": "DLP Block", "reqmethod": "POST",
         "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
@@ -2569,12 +2588,13 @@ def _generate_large_download(config, user, dept, internal_host_ip, device_info,
     # `download_destinations` is not present in config, so this silently fell back to the
     # 2-entry upload list and downloads resolved to the SAME hosts as uploads. Draw from
     # the download half of the shared pool instead — see _exfil_destination().
-    _dl_domain, dest_ip, _dl_url = _exfil_destination(config, "download")
+    _dl_domain, dest_ip, _dl_url, _is_tail = _exfil_destination(config, "download")
     # Pin the source domain when orchestrated; flows into the DNS precursor and NSSFWlog
     # sub-events below, which reuse `_dl_domain`.
     if domain_override:
         _dl_domain = domain_override
-        _dl_url = f"https://{domain_override}/download"
+        _dl_url = exfil_url(domain_override, "download")
+        _is_tail = False
     dl_dest        = {"url": _dl_url, "domain": _dl_domain}
     download_bytes = random.randint(524_288_000, 4_294_967_296)  # 500 MB - 4 GB
     req_bytes      = random.randint(200, 2000)
@@ -2591,16 +2611,18 @@ def _generate_large_download(config, user, dept, internal_host_ip, device_info,
                           download_bytes, req_bytes,
                           dst_fqdn=_dl_domain,
                           duration_ms=random.randint(300_000, 1_200_000),
-                          url_category="Online Storage and Backup",
+                          url_category=_exfil_url_category(_is_tail),
                           exact_user=exact_user))
+    _cat = _exfil_web_categories(_is_tail)
     fields = {
         "action": "Allowed",
-        "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
-        "urlclass": "Business and Productivity",
+        "urlcat": _cat["urlcat"], "urlsupercat": _cat["urlsupercat"],
+        "urlclass": _cat["urlclass"],
         "riskscore": str(random.randint(30, 60)),
         "responsecode": "200", "reason": "Allowed", "reqmethod": "GET",
         "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
-        "appname": "File Transfer", "appclass": "General", "contenttype": "application/octet-stream",
+        "appname": _cat["appname"], "appclass": _cat["appclass"],
+        "contenttype": "application/octet-stream",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": dl_dest.get('url'), "ehost": dl_dest.get('domain'),
