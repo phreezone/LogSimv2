@@ -198,3 +198,18 @@ Normal operational traffic establishing a clean baseline across all major GCP se
 ### Pub/Sub Infrastructure
 
 * **`PUBSUB_SUBSCRIPTION_DELETE`** / **`PUBSUB_TOPIC_DELETE`** — See Pub/Sub section above.
+
+## Generated Identifiers
+
+Project IDs, service-account emails and numeric IDs are composed by
+`modules/cloud_ids.py` — see [value-cardinality.md](../value-cardinality.md).
+
+- `gcp_config.service_accounts` grows from **5 to 60** at startup. Five service accounts
+  for an entire estate was the tightest pool in the project.
+- Numeric IDs follow GCP's shapes: 21 digits for a service-account unique ID, 19 for a GCE
+  instance ID, never with a leading zero.
+- **`roles/iam.serviceAccountUser` was missing** from the admin-role pool entirely. It is
+  the classic impersonation-escalation path, and the "IAM Privilege Escalation via
+  SetIamPolicy" rule matches it, so that branch of the rule had never fired.
+
+Your GCP project ID is read from `.env` and is never generated.
