@@ -74,13 +74,13 @@ The orchestrator refuses to fire any technique unless `WorkstationConnection.pre
 
 ```bash
 # Live box (reads .env):
-python tests/xdr_preflight_check.py
+python _local_validation/xdr_preflight_check.py
 
 # No-box dev (uses config.json stub_identity):
-python tests/xdr_preflight_check.py --stub
+python _local_validation/xdr_preflight_check.py --stub
 
 # Machine-readable:
-python tests/xdr_preflight_check.py --json
+python _local_validation/xdr_preflight_check.py --json
 ```
 
 Exit code is `0` only when preflight is GREEN, so the harness doubles as a gate. Example live output:

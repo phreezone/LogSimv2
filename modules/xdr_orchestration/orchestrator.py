@@ -45,13 +45,81 @@ def _emit(all_modules, module_key, event, context, config, verbose=True):
     return 0
 
 
+def _resolve_prior_incidents(identity, verbose=True):
+    """Best-effort: resolve prior OPEN XSIAM incidents for the box identity so the
+    upcoming run's fresh case is the only grouping target for its network alerts.
+
+    XSIAM folds a correlation (network) alert into any open incident sharing its
+    user/host entity. With several stale box-cases open, a run's network alerts can
+    group into an OLDER case while its endpoint alerts form a NEW one — splitting the
+    story. Resolving the priors makes the stitch deterministic (this automates the
+    manual case-closing that was the difference between a stitched and a split run).
+
+    NEVER fatal: any failure (no XSIAM creds, API error) logs and returns 0 so the
+    run proceeds. Only ever targets incidents matching the box user/host; uses the
+    reversible `resolved_security_testing` status. Returns the count resolved.
+    """
+    user = identity.get("username")
+    host = identity.get("hostname")
+    try:
+        from integrations.xsiam_client import XsiamClient, XsiamError
+    except Exception as e:
+        if verbose:
+            print(f"[XDR] cleanup skipped — XSIAM client unavailable: {e}")
+        return 0
+    try:
+        client = XsiamClient()
+    except Exception as e:
+        if verbose:
+            print(f"[XDR] cleanup skipped — no XSIAM API credentials: {e}")
+        return 0
+    try:
+        # Match on user OR host: query each and union by incident_id so a case keyed
+        # on only one of the two entities is still caught.
+        found = {}
+        for kw in ({"user": user} if user else {}), ({"host": host} if host else {}):
+            if not kw:
+                continue
+            for inc in client.get_open_incidents(minutes_back=1440, **kw):
+                found[inc.get("incident_id")] = inc
+    except XsiamError as e:
+        if verbose:
+            print(f"[XDR] cleanup skipped — could not list incidents: {e}")
+        return 0
+    if not found:
+        if verbose:
+            print(f"[XDR] cleanup — no prior open incidents for user={user} host={host}")
+        return 0
+    resolved = 0
+    for inc_id, inc in found.items():
+        try:
+            client.resolve_incident(
+                inc_id,
+                comment=f"LogSim XDR pre-run cleanup: resolving prior open box-case so "
+                        f"this run's network alerts stitch into a single fresh incident.")
+            resolved += 1
+            if verbose:
+                print(f"[XDR] cleanup — resolved prior incident {inc_id} "
+                      f"(alerts={inc.get('alert_count')}, users={inc.get('users')})")
+        except XsiamError as e:
+            print(f"[XDR] cleanup — FAILED to resolve incident {inc_id}: {e}")
+    return resolved
+
+
 def run_story(all_modules, config, story: Optional[Story] = None, *,
               connection: Optional[WorkstationConnection] = None,
-              dry_run: Optional[bool] = None, verbose: bool = True) -> dict:
+              dry_run: Optional[bool] = None, verbose: bool = True,
+              cleanup_prior_incidents: bool = False) -> dict:
     """Run one story. Returns a summary dict {ok, identity, steps:[...], emitted, results}.
 
     Fail-closed on preflight. `dry_run` forces the DryRun executor (no technique
     fires); by default a stub-transport connection implies dry-run.
+
+    `cleanup_prior_incidents` (default OFF): when True, resolve prior OPEN XSIAM
+    incidents for the box identity before firing, so this run's network alerts and
+    endpoint alerts reliably coalesce into a single fresh incident (see
+    _resolve_prior_incidents). Best-effort — never aborts the run. Opt-in because it
+    closes incidents on the tenant.
     """
     story = story or get_reference_story()
     summary = {"story": story.name, "ok": False, "identity": None,
@@ -98,6 +166,11 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
     executor = build_executor(connection, dry_run=dry_run)
     print(f"[XDR] executor={executor.name}  identity: user={user} host={host_name} "
           f"ip={host_ip} egress={egress_ip}")
+
+    # 4.5) Optional pre-run incident cleanup (opt-in) — resolve prior open box-cases
+    #      so this run's network + endpoint alerts stitch into ONE fresh incident.
+    if cleanup_prior_incidents:
+        summary["cleanup_resolved"] = _resolve_prior_incidents(identity, verbose=verbose)
 
     # 5) Identity anchors — bind the synthetic network IP to the real host/user so
     #    IP-keyed network alerts resolve to the same identity the endpoint case uses.
@@ -182,8 +255,10 @@ def run_intrusion_story(all_modules, config):
     return run_story(all_modules, config, get_intrusion_story())
 
 
-def run_story_id(all_modules, config, story_id, *, dry_run=None):
+def run_story_id(all_modules, config, story_id, *, dry_run=None,
+                 cleanup_prior_incidents=False):
     """Run a story by id (used by the console /api/attack/run route). Falls back to
     the reference story when the id is unknown."""
     story = get_story(story_id) or get_reference_story()
-    return run_story(all_modules, config, story, dry_run=dry_run)
+    return run_story(all_modules, config, story, dry_run=dry_run,
+                     cleanup_prior_incidents=cleanup_prior_incidents)
