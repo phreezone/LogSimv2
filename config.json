@@ -1611,7 +1611,7 @@
         },
         {
           "event": "port_scan",
-          "weight": 1
+          "weight": 5
         },
         {
           "event": "ssh_proxy_attack",
@@ -1687,7 +1687,7 @@
         },
         {
           "event": "failed_connections_burst",
-          "weight": 10
+          "weight": 3
         },
         {
           "event": "smtp_spray",
@@ -1707,7 +1707,23 @@
         },
         {
           "event": "vpn_new_country_login",
-          "weight": 3
+          "weight": 1
+        },
+        {
+          "event": "new_ftp_server",
+          "weight": 2
+        },
+        {
+          "event": "port_sweep",
+          "weight": 5
+        },
+        {
+          "event": "new_admin_behavior",
+          "weight": 2
+        },
+        {
+          "event": "abnormal_rdp_rare_host",
+          "weight": 2
         }
       ]
     },
@@ -1855,6 +1871,34 @@
         {
           "event": "vpn_new_country_login",
           "weight": 3
+        },
+        {
+          "event": "torrent_client",
+          "weight": 3
+        },
+        {
+          "event": "port_sweep",
+          "weight": 5
+        },
+        {
+          "event": "dc_smb_outbound",
+          "weight": 3
+        },
+        {
+          "event": "new_ftp_server",
+          "weight": 2
+        },
+        {
+          "event": "rare_appid",
+          "weight": 3
+        },
+        {
+          "event": "abnormal_rdp_rare_host",
+          "weight": 2
+        },
+        {
+          "event": "rare_smtp_session",
+          "weight": 2
         }
       ]
     }
@@ -2131,6 +2175,42 @@
         {
           "event": "vpn_new_country_login",
           "weight": 3
+        },
+        {
+          "event": "vpn_password_spray",
+          "weight": 3
+        },
+        {
+          "event": "rare_domain_communication",
+          "weight": 4
+        },
+        {
+          "event": "torrent_client",
+          "weight": 3
+        },
+        {
+          "event": "port_sweep",
+          "weight": 5
+        },
+        {
+          "event": "dc_smb_outbound",
+          "weight": 3
+        },
+        {
+          "event": "new_ftp_server",
+          "weight": 2
+        },
+        {
+          "event": "rare_appid",
+          "weight": 3
+        },
+        {
+          "event": "abnormal_rdp_rare_host",
+          "weight": 2
+        },
+        {
+          "event": "rare_smtp_session",
+          "weight": 2
         }
       ]
     }
@@ -2521,11 +2601,202 @@
       "name": "DigitalOcean Spaces",
       "ip_range": "138.68.0.0/16",
       "domain": "*.digitaloceanspaces.com"
+    },
+    {
+      "name": "Filebin",
+      "ip_range": "95.217.160.0/20",
+      "domain": "filebin.net"
+    },
+    {
+      "name": "transfer.sh",
+      "ip_range": "142.132.128.0/18",
+      "domain": "transfer.sh"
+    },
+    {
+      "name": "Send.now",
+      "ip_range": "104.21.64.0/19",
+      "domain": "send.now"
+    },
+    {
+      "name": "file.io",
+      "ip_range": "104.26.8.0/21",
+      "domain": "file.io"
+    },
+    {
+      "name": "Wormhole",
+      "ip_range": "172.67.160.0/19",
+      "domain": "wormhole.app"
+    },
+    {
+      "name": "Smash",
+      "ip_range": "52.47.0.0/16",
+      "domain": "fromsmash.com"
+    },
+    {
+      "name": "SwissTransfer",
+      "ip_range": "185.125.24.0/22",
+      "domain": "swisstransfer.com"
+    },
+    {
+      "name": "Pixeldrain",
+      "ip_range": "37.221.64.0/20",
+      "domain": "pixeldrain.com"
+    },
+    {
+      "name": "Catbox",
+      "ip_range": "104.21.16.0/20",
+      "domain": "catbox.moe"
+    },
+    {
+      "name": "1fichier",
+      "ip_range": "51.91.0.0/16",
+      "domain": "1fichier.com"
+    },
+    {
+      "name": "KrakenFiles",
+      "ip_range": "172.67.192.0/19",
+      "domain": "krakenfiles.com"
+    },
+    {
+      "name": "TempSend",
+      "ip_range": "104.21.32.0/19",
+      "domain": "tempsend.com"
+    },
+    {
+      "name": "DropMeFiles",
+      "ip_range": "185.22.232.0/22",
+      "domain": "dropmefiles.com"
+    },
+    {
+      "name": "uFile",
+      "ip_range": "104.26.12.0/22",
+      "domain": "ufile.io"
+    },
+    {
+      "name": "0x0.st",
+      "ip_range": "168.119.0.0/16",
+      "domain": "0x0.st"
+    },
+    {
+      "name": "BashUpload",
+      "ip_range": "159.65.128.0/18",
+      "domain": "bashupload.com"
+    },
+    {
+      "name": "OneDrive",
+      "ip_range": "13.107.42.0/24",
+      "domain": "onedrive.live.com"
+    },
+    {
+      "name": "iCloud Drive",
+      "ip_range": "17.248.128.0/18",
+      "domain": "icloud.com"
+    },
+    {
+      "name": "Icedrive",
+      "ip_range": "185.244.128.0/22",
+      "domain": "icedrive.net"
+    },
+    {
+      "name": "Koofr",
+      "ip_range": "185.100.84.0/22",
+      "domain": "koofr.net"
+    },
+    {
+      "name": "Filen",
+      "ip_range": "5.75.128.0/17",
+      "domain": "filen.io"
+    },
+    {
+      "name": "Internxt",
+      "ip_range": "185.199.224.0/22",
+      "domain": "internxt.com"
+    },
+    {
+      "name": "TeraBox",
+      "ip_range": "103.235.44.0/22",
+      "domain": "terabox.com"
+    },
+    {
+      "name": "Degoo",
+      "ip_range": "34.120.0.0/16",
+      "domain": "degoo.com"
+    },
+    {
+      "name": "OpenDrive",
+      "ip_range": "64.69.40.0/21",
+      "domain": "opendrive.com"
+    },
+    {
+      "name": "IDrive",
+      "ip_range": "66.187.216.0/21",
+      "domain": "idrive.com"
+    },
+    {
+      "name": "Jottacloud",
+      "ip_range": "185.39.144.0/22",
+      "domain": "jottacloud.com"
+    },
+    {
+      "name": "Paste.ee",
+      "ip_range": "104.21.48.0/20",
+      "domain": "paste.ee",
+      "direction": "upload"
+    },
+    {
+      "name": "Rentry",
+      "ip_range": "172.67.176.0/20",
+      "domain": "rentry.co",
+      "direction": "upload"
+    },
+    {
+      "name": "ControlC",
+      "ip_range": "104.26.4.0/22",
+      "domain": "controlc.com",
+      "direction": "upload"
+    },
+    {
+      "name": "JustPaste.it",
+      "ip_range": "104.26.0.0/22",
+      "domain": "justpaste.it",
+      "direction": "upload"
+    },
+    {
+      "name": "dpaste",
+      "ip_range": "139.59.0.0/17",
+      "domain": "dpaste.org",
+      "direction": "upload"
+    },
+    {
+      "name": "PrivateBin",
+      "ip_range": "46.101.0.0/17",
+      "domain": "privatebin.net",
+      "direction": "upload"
+    },
+    {
+      "name": "Termbin",
+      "ip_range": "88.99.0.0/17",
+      "domain": "termbin.com",
+      "direction": "upload"
+    },
+    {
+      "name": "Hastebin",
+      "ip_range": "104.21.80.0/20",
+      "domain": "hastebin.com",
+      "direction": "upload"
     }
   ],
+  "resolver": {
+    "live": true,
+    "cache_ttl_hours": 24,
+    "timeout_seconds": 3.0,
+    "max_ips_per_domain": 3,
+    "restrict_to_configured_cidr": false
+  },
   "benign_egress_destinations": [
     {
       "name": "Google DNS",
+      "domain": "dns.google",
       "ip_range": "8.8.8.0/24",
       "country": "US",
       "asn": 15169,
@@ -2538,6 +2809,7 @@
     },
     {
       "name": "Microsoft Office 365",
+      "domain": "outlook.office365.com",
       "ip_range": "40.96.0.0/13",
       "country": "US",
       "asn": 8075,
@@ -2553,6 +2825,7 @@
     },
     {
       "name": "Cloudflare DNS",
+      "domain": "one.one.one.one",
       "ip_range": "1.1.1.0/24",
       "country": "US",
       "asn": 13335,
@@ -2567,6 +2840,7 @@
     },
     {
       "name": "AWS S3 us-east-1",
+      "domain": "s3.us-east-1.amazonaws.com",
       "ip_range": "52.216.0.0/15",
       "country": "US",
       "asn": 16509,
@@ -2579,6 +2853,7 @@
     },
     {
       "name": "GitHub.com",
+      "domain": "github.com",
       "ip_range": "140.82.112.0/20",
       "country": "US",
       "asn": 36459,
@@ -2593,6 +2868,7 @@
     },
     {
       "name": "Salesforce",
+      "domain": "salesforce.com",
       "ip_range": "96.43.144.0/20",
       "country": "US",
       "asn": 714,
@@ -2605,6 +2881,7 @@
     },
     {
       "name": "Zoom",
+      "domain": "zoom.us",
       "ip_range": "170.114.0.0/16",
       "country": "US",
       "asn": 396998,
@@ -2617,6 +2894,7 @@
     },
     {
       "name": "Slack",
+      "domain": "slack.com",
       "ip_range": "54.192.128.0/19",
       "country": "US",
       "asn": 16509,
@@ -2629,6 +2907,7 @@
     },
     {
       "name": "Palo Alto Networks Updates",
+      "domain": "updates.paloaltonetworks.com",
       "ip_range": "199.167.52.0/24",
       "country": "US",
       "asn": 30048,
@@ -2641,6 +2920,7 @@
     },
     {
       "name": "Windows Update",
+      "domain": "windowsupdate.microsoft.com",
       "ip_range": "13.107.4.50/32",
       "country": "US",
       "asn": 8075,
@@ -2654,6 +2934,7 @@
     },
     {
       "name": "Apple Updates",
+      "domain": "swscan.apple.com",
       "ip_range": "17.253.0.0/16",
       "country": "US",
       "asn": 714,
@@ -2667,6 +2948,7 @@
     },
     {
       "name": "Google APIs",
+      "domain": "www.googleapis.com",
       "ip_range": "173.194.0.0/16",
       "country": "US",
       "asn": 15169,
@@ -2679,6 +2961,7 @@
     },
     {
       "name": "Okta",
+      "domain": "examplecorp.okta.com",
       "ip_range": "3.33.150.0/24",
       "country": "US",
       "asn": 16509,
@@ -2691,6 +2974,7 @@
     },
     {
       "name": "ServiceNow",
+      "domain": "examplecorp.service-now.com",
       "ip_range": "149.96.0.0/16",
       "country": "US",
       "asn": 26233,
@@ -2703,6 +2987,7 @@
     },
     {
       "name": "Zendesk",
+      "domain": "examplecorp.zendesk.com",
       "ip_range": "104.16.0.0/12",
       "country": "US",
       "asn": 13335,
@@ -2715,6 +3000,7 @@
     },
     {
       "name": "Atlassian (Jira/Confluence)",
+      "domain": "examplecorp.atlassian.net",
       "ip_range": "104.192.140.0/22",
       "country": "US",
       "asn": 16509,
@@ -2727,6 +3013,7 @@
     },
     {
       "name": "DocuSign",
+      "domain": "docusign.net",
       "ip_range": "162.248.184.0/22",
       "country": "US",
       "asn": 394333,
@@ -2739,6 +3026,7 @@
     },
     {
       "name": "Workday",
+      "domain": "examplecorp.workday.com",
       "ip_range": "130.248.0.0/16",
       "country": "US",
       "asn": 19781,
@@ -2751,6 +3039,7 @@
     },
     {
       "name": "Twilio",
+      "domain": "api.twilio.com",
       "ip_range": "3.2.34.0/26",
       "country": "US",
       "asn": 16509,
@@ -2763,6 +3052,7 @@
     },
     {
       "name": "Stripe",
+      "domain": "api.stripe.com",
       "ip_range": "54.187.0.0/16",
       "country": "US",
       "asn": 16509,
@@ -2775,6 +3065,7 @@
     },
     {
       "name": "FedEx API",
+      "domain": "apis.fedex.com",
       "ip_range": "199.81.196.0/22",
       "country": "US",
       "asn": 10929,
@@ -2787,6 +3078,7 @@
     },
     {
       "name": "UPS API",
+      "domain": "onlinetools.ups.com",
       "ip_range": "153.2.224.0/21",
       "country": "US",
       "asn": 2664,
@@ -2799,6 +3091,7 @@
     },
     {
       "name": "NTP Pool Servers",
+      "domain": "pool.ntp.org",
       "ip_range": "192.0.2.0/24",
       "country": "Global",
       "asn": 0,
@@ -2811,6 +3104,7 @@
     },
     {
       "name": "Ubuntu Package Repos",
+      "domain": "archive.ubuntu.com",
       "ip_range": "91.189.88.0/21",
       "country": "GB",
       "asn": 209288,
@@ -2824,6 +3118,7 @@
     },
     {
       "name": "Red Hat CDN",
+      "domain": "cdn.redhat.com",
       "ip_range": "209.132.176.0/20",
       "country": "US",
       "asn": 10915,
@@ -2837,6 +3132,7 @@
     },
     {
       "name": "Benign SSH Target",
+      "domain": "git.examplecorp.com",
       "ip_range": "192.0.2.0/16",
       "ports": [
         22
@@ -2849,6 +3145,7 @@
     },
     {
       "name": "Rare RDP Target (External)",
+      "domain": "rdp-gw.examplecorp.com",
       "ip_range": "198.51.100.0/16",
       "ports": [
         443
@@ -2860,6 +3157,7 @@
     },
     {
       "name": "Internal Server RDP",
+      "domain": "rdp.internal.examplecorp.local",
       "ip_range": "10.0.10.0/16",
       "ports": [
         443
@@ -3141,7 +3439,7 @@
       "name": "Turk Telekom Istanbul",
       "ip_range": "88.226.20.0/24",
       "country": "TR",
-      "resolved_country": "T\ufffdrkiye"
+      "resolved_country": "T�rkiye"
     },
     {
       "name": "Kyivstar Kyiv",
@@ -3865,9 +4163,9 @@
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/118.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/118.0",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36 Edg/117.0.2045.31",
-    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 11.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
-    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.3065.69",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.3065.69",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (Linux; Android 15; SM-S938U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.6943.98 Mobile Safari/537.36",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/133.0.6943.99 Mobile/15E148 Safari/604.1",
@@ -3945,6 +4243,8 @@
     }
   },
   "infoblox_threats": {
+    "_comment_generated_share": "Fraction of threat-domain draws that are GENERATED by modules/threat_domains.py instead of taken from the pools below. The curated pools remain the head, so an operator hunting by hand still has names they can type; generated domains are the tail that stops a long run beaconing to the same 25 hosts. Family tokens such as command-control and phishing-kit are preserved verbatim because correlation rules match them as literals. 0 disables generation.",
+    "generated_share": 0.75,
     "dga_domains": [
       "ghfjskdlaaqwer.com",
       "yutyrpwoieu.net",
@@ -4217,6 +4517,7 @@
     "benign_egress_destinations": [
       {
         "name": "Google DNS",
+        "domain": "dns.google",
         "ip_range": "8.8.8.0/24",
         "country": "US",
         "asn": 15169,
@@ -4231,6 +4532,7 @@
       },
       {
         "name": "Microsoft Office 365",
+        "domain": "outlook.office365.com",
         "ip_range": "40.96.0.0/13",
         "country": "US",
         "asn": 8075,
@@ -4246,6 +4548,7 @@
       },
       {
         "name": "Cloudflare DNS",
+        "domain": "one.one.one.one",
         "ip_range": "1.1.1.0/24",
         "country": "US",
         "asn": 13335,
@@ -4260,6 +4563,7 @@
       },
       {
         "name": "AWS S3 us-east-1",
+        "domain": "s3.us-east-1.amazonaws.com",
         "ip_range": "52.216.0.0/15",
         "country": "US",
         "asn": 16509,
@@ -4272,6 +4576,7 @@
       },
       {
         "name": "GitHub.com",
+        "domain": "github.com",
         "ip_range": "140.82.112.0/20",
         "country": "US",
         "asn": 36459,
@@ -4286,6 +4591,7 @@
       },
       {
         "name": "Salesforce",
+        "domain": "salesforce.com",
         "ip_range": "96.43.144.0/20",
         "country": "US",
         "asn": 714,
@@ -4298,6 +4604,7 @@
       },
       {
         "name": "Zoom",
+        "domain": "zoom.us",
         "ip_range": "170.114.0.0/16",
         "country": "US",
         "asn": 396998,
@@ -4312,6 +4619,7 @@
       },
       {
         "name": "Slack",
+        "domain": "slack.com",
         "ip_range": "54.192.128.0/19",
         "country": "US",
         "asn": 16509,
@@ -4324,6 +4632,7 @@
       },
       {
         "name": "Palo Alto Networks Updates",
+        "domain": "updates.paloaltonetworks.com",
         "ip_range": "199.167.52.0/24",
         "country": "US",
         "asn": 30048,
@@ -4336,6 +4645,7 @@
       },
       {
         "name": "Windows Update",
+        "domain": "windowsupdate.microsoft.com",
         "ip_range": "13.107.4.0/24",
         "country": "US",
         "asn": 8075,
@@ -4349,6 +4659,7 @@
       },
       {
         "name": "Apple Updates",
+        "domain": "swscan.apple.com",
         "ip_range": "17.253.0.0/16",
         "country": "US",
         "asn": 714,
@@ -4362,6 +4673,7 @@
       },
       {
         "name": "Ubuntu Package Repos",
+        "domain": "archive.ubuntu.com",
         "ip_range": "91.189.88.0/21",
         "country": "GB",
         "asn": 209288,
@@ -4376,6 +4688,7 @@
       },
       {
         "name": "Red Hat CDN",
+        "domain": "cdn.redhat.com",
         "ip_range": "209.132.176.0/20",
         "country": "US",
         "asn": 10915,
@@ -4388,6 +4701,7 @@
       },
       {
         "name": "Benign SSH Target",
+        "domain": "git.examplecorp.com",
         "ip_range": "192.0.2.0/16",
         "ports": [
           22
@@ -4400,6 +4714,7 @@
       },
       {
         "name": "Rare RDP Target (External)",
+        "domain": "rdp-gw.examplecorp.com",
         "ip_range": "198.51.100.0/16",
         "ports": [
           3389
@@ -4411,6 +4726,7 @@
       },
       {
         "name": "Internal Server RDP",
+        "domain": "rdp.internal.examplecorp.local",
         "ip_range": "10.0.10.0/16",
         "ports": [
           3389
@@ -4739,6 +5055,26 @@
         {
           "event": "vpn_new_country_login",
           "weight": 3
+        },
+        {
+          "event": "torrent_client",
+          "weight": 3
+        },
+        {
+          "event": "port_sweep",
+          "weight": 5
+        },
+        {
+          "event": "dc_smb_outbound",
+          "weight": 3
+        },
+        {
+          "event": "new_ftp_server",
+          "weight": 2
+        },
+        {
+          "event": "rare_smtp_session",
+          "weight": 2
         }
       ]
     },
@@ -4760,12 +5096,6 @@
     "dga_beacon_domains": [
       "asdfqwerlkj.info",
       "zxcvmnbpoiuy.biz"
-    ],
-    "file_sharing_domains": [
-      "wetransfer.com",
-      "dropbox.com",
-      "mega.nz",
-      "box.com"
     ]
   },
   "okta_config": {
@@ -4892,15 +5222,16 @@
       "noc-user",
       "soc-analyst"
     ],
+    "ad_domain": "examplecorp.local",
     "internal_domains": [
-      "corp.local",
-      "ad.corp.local",
-      "dc01.corp.local",
-      "dc02.corp.local",
-      "fileserver.corp.local",
-      "exchange.corp.local",
-      "sharepoint.corp.local",
-      "vcenter.corp.local"
+      "examplecorp.local",
+      "ad.examplecorp.local",
+      "dc01.examplecorp.local",
+      "dc02.examplecorp.local",
+      "fileserver.examplecorp.local",
+      "exchange.examplecorp.local",
+      "sharepoint.examplecorp.local",
+      "vcenter.examplecorp.local"
     ],
     "dns_views": [
       "internal-lan",
@@ -4926,63 +5257,107 @@
       "benign": [
         {
           "event": "dns_a",
-          "weight": 30
+          "weight": 4000
         },
         {
           "event": "dns_aaaa",
-          "weight": 10
+          "weight": 1400
+        },
+        {
+          "event": "dns_internal",
+          "weight": 1800
         },
         {
           "event": "dns_cname",
-          "weight": 6
-        },
-        {
-          "event": "dns_mx",
-          "weight": 3
-        },
-        {
-          "event": "dns_txt",
-          "weight": 2
-        },
-        {
-          "event": "dns_ptr",
-          "weight": 3
+          "weight": 700
         },
         {
           "event": "dns_srv",
-          "weight": 2
+          "weight": 300
         },
         {
-          "event": "dhcp_session",
-          "weight": 11
+          "event": "dns_ptr",
+          "weight": 250
         },
         {
-          "event": "dhcp_release",
+          "event": "dns_ipv6",
+          "weight": 300
+        },
+        {
+          "event": "dns_windows_probe",
+          "weight": 250
+        },
+        {
+          "event": "dns_nxdomain_benign",
+          "weight": 250
+        },
+        {
+          "event": "dns_search_suffix",
+          "weight": 150
+        },
+        {
+          "event": "dns_txt",
+          "weight": 60
+        },
+        {
+          "event": "dns_mx",
+          "weight": 30
+        },
+        {
+          "event": "dns_refused",
+          "weight": 20
+        },
+        {
+          "event": "dns_lame",
+          "weight": 15
+        },
+        {
+          "event": "dns_ops",
+          "weight": 25
+        },
+        {
+          "event": "dns_chaos",
           "weight": 3
         },
         {
+          "event": "dhcp_renewal",
+          "weight": 200
+        },
+        {
+          "event": "dhcp_session",
+          "weight": 30
+        },
+        {
+          "event": "dhcp_release",
+          "weight": 15
+        },
+        {
+          "event": "dhcp_inform",
+          "weight": 15
+        },
+        {
+          "event": "dhcp_expire",
+          "weight": 10
+        },
+        {
+          "event": "dhcp_leasequery",
+          "weight": 10
+        },
+        {
           "event": "dhcp_nak",
+          "weight": 4
+        },
+        {
+          "event": "dhcp_decline",
           "weight": 2
         },
         {
           "event": "audit",
-          "weight": 16
+          "weight": 4
         },
         {
           "event": "audit_api",
-          "weight": 2
-        },
-        {
-          "event": "dns_internal",
-          "weight": 15
-        },
-        {
-          "event": "dns_nxdomain_benign",
-          "weight": 5
-        },
-        {
-          "event": "dhcp_renewal",
-          "weight": 8
+          "weight": 1
         }
       ],
       "threat": [
@@ -20198,7 +20573,7 @@
     "tail_end_rank": 500000,
     "tail_share": 0.05,
     "_comment_exfil_tail_share": "Fraction of EXFIL destinations (Zscaler data_exfil, dlp_threat, large_download) drawn from the tail instead of exfiltration_destinations. Separate from tail_share because the two model different anomalies: a curated hit is a famous file-sharing site (pastebin/mega/anonfiles) where the anomaly is that a corporate user pushed 400MB to it, and low domain cardinality is correct; a tail hit is a host nothing else in the run resolves, which is how attacker-controlled and compromised-site exfil looks. Uploads to the curated file-sharing pool stay dominant at 0.30. Tail hits are labelled Miscellaneous or Unknown / General Browsing, never Online Storage / File Transfer. Set 0 to disable.",
-    "exfil_tail_share": 0.30,
+    "exfil_tail_share": 0.3,
     "filter_unsafe": true,
     "cache_ttl_hours": 24,
     "pinned_list_id": null
