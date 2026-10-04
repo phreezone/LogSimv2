@@ -16,9 +16,9 @@ IMPORTANT SCOPE LIMIT: this proves events are *well-formed*, NOT that any
 detector fires. Both S3-public variants normalised identically in XSIAM yet
 only one alerted — the discriminator survived only in the original API name.
 Detector alignment can only be proven by firing at a tenant and reading back a
-fired alert. See tests/aws_detector_sweep.py for that half.
+fired alert. See _local_validation/aws_detector_sweep.py for that half.
 
-usage:  python tests/aws_event_smoke.py [iterations]
+usage:  python _local_validation/aws_event_smoke.py [iterations]
 exit 0 = clean, 1 = violations found
 """
 from __future__ import annotations

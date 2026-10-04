@@ -8,9 +8,9 @@ preflight against the live box, and prints the human-readable report (including 
 discovered user/host/IP the synthetic logs would carry).
 
 Usage (from repo root):
-    python tests/xdr_preflight_check.py            # live box per config.json
-    python tests/xdr_preflight_check.py --stub     # no-box: exercise the stub path
-    python tests/xdr_preflight_check.py --json      # machine-readable report
+    python _local_validation/xdr_preflight_check.py            # live box per config.json
+    python _local_validation/xdr_preflight_check.py --stub     # no-box: exercise the stub path
+    python _local_validation/xdr_preflight_check.py --json      # machine-readable report
 
 Exit code is 0 only when preflight is GREEN, so this doubles as a CI/gate check.
 """

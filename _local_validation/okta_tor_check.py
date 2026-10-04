@@ -15,7 +15,7 @@ Guards the fixes made after the 2026-09 vendor-conformance research:
   * The private _ipCtx key _build_client() uses to thread the source context
     never reaches the wire.
 
-Run:  python tests/okta_tor_check.py
+Run:  python _local_validation/okta_tor_check.py
 Needs network for the live Tor list; skips (exit 0) if it cannot be reached.
 """
 

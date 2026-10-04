@@ -1,6 +1,6 @@
 """Multi-student capture-replay trust checks — isolation, reproducibility, alignment.
 
-Run:  python tests/training_multistudent.py
+Run:  python _local_validation/training_multistudent.py
 No XSIAM tenant or network needed — everything runs against captured payloads in memory.
 
 Proves:

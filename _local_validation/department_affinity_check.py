@@ -14,7 +14,7 @@ A hard partition would score perfectly on the first test and be wrong: it turns
 "unusual for their peer group" into "cannot happen", which is a different
 dataset and would silently change which existing rules fire.
 
-Run:  python tests/department_affinity_check.py
+Run:  python _local_validation/department_affinity_check.py
 """
 
 import collections
