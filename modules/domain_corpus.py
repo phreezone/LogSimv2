@@ -291,3 +291,34 @@ def tail_domain(view="dns"):
     """One uniformly-drawn tail domain from the given view, or None if unloaded."""
     pool = _WEB_TAIL if view == "web" else _DNS_TAIL
     return random.choice(pool) if pool else None
+
+
+# A business CORRESPONDENT is a narrower population than a browsing destination.
+# _UNSAFE_RE above is calibrated for the browsing views -- a user really might visit
+# something odd, and its 2.34% coverage figure is measured -- so it is left alone.
+# This is an extra, stricter pass for the cases where the domain stands in for a
+# company someone exchanges mail or invoices with: an adult or dating domain as the
+# sender of a "benign" business email is wrong, and conspicuous in a demo.
+# (Found exactly that way: sven_patel@babesaround.com arrived as a benign sender.)
+_NON_BUSINESS_RE = re.compile(
+    r"babe|adult|erotic|fetish|lust|sexy|strip|cam(?:s|girl|site)?|webcam"
+    r"|hookup|dating|singles|flirt|milftoon|boob|nsfw"
+    r"|lotto|jackpot|roulette|baccarat|sportsbet|wager|pari(?:match|mutuel)"
+    r"|pirat|stream(?:ing)?-?(?:free|hd)|putlocker|123movies|mp3juice"
+    r"|payday-?loan|forex-?signal|crypto-?pump|binary-?option"
+)
+
+
+def business_domain(attempts=8):
+    """A tail domain plausible as a company someone exchanges business mail with.
+
+    Returns None if the corpus is unloaded or nothing clean came up, so callers keep
+    their own fallback rather than getting something unsuitable.
+    """
+    if not _WEB_TAIL:
+        return None
+    for _ in range(attempts):
+        cand = random.choice(_WEB_TAIL)
+        if not _NON_BUSINESS_RE.search(cand.lower()):
+            return cand
+    return None

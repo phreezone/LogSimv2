@@ -29,6 +29,7 @@ def build_session_context(config):
     Returns a dict keyed by username, ready to pass to any module.
     """
     session_context = {}
+    _KNOWN_DEVICE_IPS.clear()
 
     # Department registry + affinity strength, so the weighting helpers can bias
     # by department without every call site having to pass one.
@@ -74,12 +75,29 @@ def build_session_context(config):
         # Real users keep the same browser/OS fingerprint for days or weeks.
         user_agents = config.get('user_agents', _DEFAULT_USER_AGENTS)
         for dtype, dev in active_devices.items():
+            if dev.get('hostname'):
+                _HOST_PROFILE[str(dev['hostname']).lower()] = (dev.get('type'), dev.get('os_type'))
             # Deterministic UA from hash of username+device_type so it's stable
-            # across restarts with the same config (but still looks random).
-            # Drawn only from agents an end-user device would actually send.
-            pool = enduser_agents(user_agents, dtype)
+            # across restarts with the same config (but still looks random). That
+            # stability is load-bearing: if a device's fingerprint changed on every
+            # restart, "new user agent for this user" would fire across the estate.
+            #
+            # The UA is COMPOSED rather than picked from the config list. The list
+            # holds ~13 browser strings, so the whole estate shared 31 distinct
+            # agents (measured: 2,082x reuse over 64,541 events) and a
+            # rare-user-agent detector had nothing to learn. modules/user_agents.py
+            # builds correctly-shaped agents instead, seeded from the same hash so
+            # determinism is unchanged.
+            #
+            # Note the seed uses four bytes, not one: digest[0] alone is 0-255, which
+            # silently capped any pool above 256 entries.
             digest = hashlib.sha256(f"{username}:{dtype}".encode()).digest()
-            dev['user_agent'] = pool[digest[0] % len(pool)]
+            try:
+                from modules import user_agents as _ua_mod
+            except ImportError:
+                import user_agents as _ua_mod
+            seed = int.from_bytes(digest[:4], "big")
+            dev['user_agent'] = _ua_mod.agent_for(dtype, _ua_mod.seeded(seed))
 
         # Derive the convenience primary_* shortcuts from the first primary device
         first_primary = primary_devices[0] if primary_devices else None
@@ -101,6 +119,8 @@ def build_session_context(config):
             'primary_os_version': primary_dev.get('os_version'),
             'primary_user_agent': primary_dev.get('user_agent'),
         }
+        _KNOWN_DEVICE_IPS.update(d.get('ip') for d in active_devices.values()
+                                 if isinstance(d, dict) and d.get('ip'))
 
     return session_context
 
@@ -201,6 +221,47 @@ def get_user_by_name(session_context, username, preferred_device_type=None):
 def get_all_emails(session_context):
     """Return every user's email address."""
     return [p.get('email') for p in session_context.values() if p.get('email')]
+
+
+# IEEE-registered OUIs for the hardware an enterprise actually buys. Every host
+# used to be 00:50:56 (VMware), which is right for a VM and wrong for a laptop.
+_OUI_BY_CLASS = {
+    "apple":       ["f0:18:98", "3c:22:fb"],                  # Apple
+    "laptop":      ["f4:8e:38", "18:db:f2", "28:d2:44", "54:e1:ad"],  # Dell, Dell, LCFC (Lenovo), LCFC
+    "workstation": ["f4:8e:38", "00:14:22", "3c:d9:2b", "00:1e:0b"],  # Dell, Dell, HP, HP
+    "server":      ["00:50:56"],                              # VMware guests
+}
+
+
+# hostname -> (device_type, os_type), filled by build_session_context so a module
+# that only knows a host NAME (a firewall's shost) derives the same MAC as one
+# that knows the full device record (Infoblox DHCP).
+_HOST_PROFILE = globals().get("_HOST_PROFILE") or {}
+
+
+def host_mac(hostname, device_type=None, os_type=None):
+    """One stable MAC per host, with a vendor prefix that fits the device.
+
+    Deterministic from the hostname, so every module that asks about the same
+    host gets the same NIC -- the key DHCP lease history and host identity hang
+    off. macOS hosts get Apple OUIs, laptops Dell/Lenovo, desktops Dell/HP, and
+    servers VMware.
+    """
+    name = str(hostname or "")
+    _dt, _os = _HOST_PROFILE.get(name.lower(), (None, None))
+    device_type, os_type = device_type or _dt, os_type or _os
+    os_l, dev_l = str(os_type or "").lower(), str(device_type or "").lower()
+    if "mac" in os_l or "ios" in os_l:
+        cls = "apple"
+    elif dev_l in ("server", "vm") or "server" in os_l or "-srv" in name.lower():
+        cls = "server"
+    elif dev_l == "laptop" or "-lt-" in name.lower():
+        cls = "laptop"
+    else:
+        cls = "workstation"
+    d = hashlib.sha256(name.encode()).digest()
+    ouis = _OUI_BY_CLASS[cls]
+    return f"{ouis[d[3] % len(ouis)]}:{d[0]:02x}:{d[1]:02x}:{d[2]:02x}"
 
 
 def find_user_by_ip(session_context, ip):
@@ -572,6 +633,307 @@ def random_external_ip(config=None):
         return "203.0.113.%d" % random.randint(1, 254)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Analytic-targeting helpers, shared by every firewall module (2026-09-17).
+#
+# Each exists because a detector's premise was being defeated by where a generator
+# drew its values from. Measured in-tenant before these were written:
+#   * rarity detectors fed destinations from the AMBIENT pools above;
+#   * every non-ASA VPN event carried EXAMPLECORP\user, collapsing all VPN users
+#     into one identity (ASA, the only bare-username source, is the only vendor
+#     whose VPN analytics have ever fired);
+#   * "recurring" detectors fed a random host each run, so no (host, destination)
+#     pair ever recurred across days.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Rare-destination pool — DISJOINT from _EXTERNAL_TRAFFIC_RANGES (all third octet
+# .20; these are .77), from benign_egress_destinations, the Tor /16 allowlist
+# (config tor_vpn_prefix_allowlist — verified 2026-09-17; three ranges that fell
+# inside Tor /16s were replaced) and
+# vpn_novel_country_pool's ranges. Use it for any threat whose detector scores the
+# DESTINATION's rarity; use random_external_ip() for traffic meant to look ordinary.
+# These are connection DESTINATIONS, so they never reach xdm.source.location.country
+# and cannot burn the org-scoped new-country VPN detector.
+RARE_EXTERNAL_RANGES = [
+    "45.9.77.0/24",    "45.137.77.0/24",  "5.188.77.0/24",   "31.210.77.0/24",
+    "77.83.77.0/24",   "87.251.77.0/24",  "141.98.77.0/24",  "176.113.77.0/24",
+    "185.234.77.0/24", "193.142.77.0/24", "194.26.77.0/24",  "194.87.77.0/24",
+    "212.92.77.0/24",  "45.155.77.0/24",  "91.243.77.0/24",  "146.70.77.0/24",
+    "23.106.77.0/24",  "38.147.77.0/24",  "104.168.77.0/24", "107.189.77.0/24",
+    "179.43.77.0/24",  "80.66.77.0/24",   "62.60.77.0/24",   "94.232.77.0/24",
+]
+
+
+def stable_external_ip(key, config=None):
+    """random_external_ip(), but the same address every time for the same key.
+
+    For names that have no pinned answer in the resolver: the Infoblox answer and
+    every firewall's destination for that name must agree, and must stay in the
+    ambient pool so the traffic carries ordinary geolocation.
+    """
+    ranges = None
+    if config:
+        ranges = [s.get("ip_range") for s in config.get("external_traffic_sources", [])
+                  if s.get("ip_range")]
+    if not ranges:
+        ranges = _EXTERNAL_TRAFFIC_RANGES
+    d = int(hashlib.sha256(str(key).encode()).hexdigest(), 16)
+    try:
+        net = ip_network(ranges[d % len(ranges)], strict=False)
+        return str(ip_address(int(net.network_address) + 1 + (d >> 8) % (net.num_addresses - 2)))
+    except Exception:
+        return "203.0.113.%d" % (d % 254 + 1)
+
+
+def rare_external_ip(seed=None):
+    """Public IP from the rare-destination pool. `seed` makes the choice
+    deterministic (same seed -> same IP), which recurring detectors need."""
+    rng = random.Random(seed) if seed is not None else random
+    net = ip_network(rng.choice(RARE_EXTERNAL_RANGES), strict=False)
+    return str(ip_address(int(net.network_address) + rng.randint(2, 250)))
+
+
+# Every device IP the current session context assigned: the endpoints the tenant has
+# actually seen. Filled by build_session_context().
+_KNOWN_DEVICE_IPS = set()
+
+
+def known_internal_hosts(config, exclude=()):
+    """Live internal endpoints: this run's user devices plus config['internal_servers'].
+    The counterpart of rare_internal_host() -- use it where a detector counts HOSTS
+    it already profiles, rather than addresses it has never seen."""
+    pool = set(_KNOWN_DEVICE_IPS) | set((config or {}).get('internal_servers', []))
+    return sorted(ip for ip in pool if ip not in exclude)
+
+
+def sweep_targets(config, exclude=(), n_range=(30, 80), min_subnets=3):
+    """Destinations for a port sweep: known live hosts spread over >= min_subnets /24s.
+
+    Port Sweep has never fired from any vendor while every sweep went to random
+    addresses in the /16s of internal_networks -- hosts that never appear anywhere
+    else in the data. A real sweep finds machines that exist, and Port Scan, which does
+    fire, always targets one real server. So a sweep is drawn from known hosts first,
+    across several subnets for the Low-severity "Port Sweep to multiple subnets"
+    variation, and only topped up with unseen addresses in those same subnets when the
+    session has too few devices."""
+    hosts = known_internal_hosts(config, exclude)
+    by_net = {}
+    for ip in hosts:
+        by_net.setdefault(ip.rsplit('.', 1)[0], []).append(ip)
+    nets = sorted(by_net, key=lambda k: -len(by_net[k]))
+    chosen = random.sample(nets, min(len(nets), max(min_subnets, random.randint(3, 6))))
+    want = random.randint(*n_range)
+    targets = []
+    for net in chosen:
+        targets.extend(by_net[net])
+    random.shuffle(targets)
+    targets = targets[:want]
+    tries = 0
+    while len(targets) < max(n_range[0], min(want, 20)) and chosen and tries < 400:
+        tries += 1
+        cand = f"{random.choice(chosen)}.{random.randint(2, 254)}"
+        if cand not in exclude and cand not in targets:
+            targets.append(cand)
+    return targets
+
+
+# HTTPS ports other than 443 that real services use (alternate HTTPS, cPanel, SSL-VPN
+# portals). Target of the Low-severity "Large Upload (HTTPS) to non-standard port".
+NONSTD_HTTPS_PORTS = (8443, 4443, 9443, 10443, 2083)
+
+
+def to_nonstandard_https(lines):
+    """Move an HTTPS upload's CEF records from dpt=443 to one non-standard HTTPS port.
+    The DNS precursor (dpt=53) is untouched; the whole upload shares one port."""
+    import re as _re
+    port = random.choice(NONSTD_HTTPS_PORTS)
+    return [_re.sub(r"(?<![0-9])dpt=443(?![0-9])", f"dpt={port}", ln) if isinstance(ln, str) else ln
+            for ln in (lines if isinstance(lines, list) else [lines])]
+
+
+_FTP_USED = set()
+
+
+def rare_known_host(config, exclude=(), avoid_subnet_of=None, workstation=True):
+    """A live endpoint that is rarely on the RECEIVING end of anything: a user device
+    (not one of the hot internal_servers), preferably outside the /24 of
+    `avoid_subnet_of`. For "rare X to a remote host" and "new server" detectors that
+    profile real hosts -- rare_internal_host() gives addresses nothing has ever seen."""
+    servers = set((config or {}).get('internal_servers', []))
+    pool = [ip for ip in known_internal_hosts(config, exclude)
+            if not (workstation and ip in servers)]
+    if avoid_subnet_of:
+        other = [ip for ip in pool if ip.rsplit('.', 1)[0] != avoid_subnet_of.rsplit('.', 1)[0]]
+        pool = other or pool
+    return random.choice(pool) if pool else rare_internal_host(config, exclude)
+
+
+def new_ftp_server_host(config):
+    """An internal host that has not served FTP before in this run: New FTP Server is
+    first-seen per host, and after weeks the internal_servers pool has all served FTP,
+    so none of them is ever "new" again. A workstation that suddenly accepts inbound
+    FTP is also the realistic compromise shape."""
+    ip = rare_known_host(config, exclude=_FTP_USED)
+    _FTP_USED.add(ip)
+    return ip
+
+
+def rare_internal_host(config, exclude=()):
+    """Internal address from the wide internal_networks space, avoiding the hot
+    internal_servers pool and anything in `exclude`. For RARITY-scored internal
+    destinations: config['internal_servers'] is small and every generator hits it,
+    so a destination drawn from it is a frequent receiver and never rare."""
+    servers = set((config or {}).get('internal_servers', []))
+    nets    = (config or {}).get('internal_networks', ['10.1.0.0/16'])
+    for _ in range(40):
+        try:
+            cand = rand_ip_from_network(ip_network(random.choice(nets), strict=False))
+        except (ValueError, IndexError):
+            continue
+        if cand not in servers and cand not in exclude:
+            return cand
+    return f"10.1.{random.randint(20, 250)}.{random.randint(2, 250)}"
+
+
+def vpn_username(user):
+    """Bare username for VPN AUTHENTICATION events. Never EXAMPLECORP\\user.
+
+    Proven by controlled A/B in-tenant on ASA 2026-07-28: Identity Analytics reduces
+    'EXAMPLECORP\\jdoe' to the DOMAIN, so every VPN user collapses into one identity
+    called 'examplecorp' and per-user VPN detectors can never fire. Measured
+    2026-09-17 over 7 days: FortiGate (6,561), Firepower (5,132) and Check Point
+    (6,318) VPN events were 100% domain-prefixed; ASA (9,043) was 100% bare — and ASA
+    is the only vendor whose VPN analytics have ever fired.
+
+    Non-VPN identity-firewall fields may keep the prefix; only VPN auth needs this.
+    """
+    if not user:
+        return user
+    u = str(user)
+    if "\\" in u:
+        u = u.split("\\")[-1]
+    return u
+
+
+# TLDs disproportionately used by throwaway attacker infrastructure. Benign traffic in
+# this simulator never resolves them (long_tail_domain() draws real, established
+# domains), so a name built here is rare org-wide by construction.
+_RARE_TLDS = ["top", "xyz", "cyou", "icu", "sbs", "buzz", "click", "rest", "mom", "lol"]
+_RARE_SYLLABLES = ["kor", "vex", "tali", "mun", "dra", "quo", "zel", "fin", "orb", "nax",
+                   "pel", "rhy", "sov", "tek", "ula", "wyn", "yar", "zu", "bri", "cle"]
+
+
+def rare_domain(seed=None):
+    """A plausible-looking domain nobody in the org has ever resolved.
+
+    For the rare-DOMAIN detectors ("Abnormal Communication to a Rare Domain" and its
+    recurring sibling). Never use long_tail_domain() for this — that pool is what
+    BENIGN traffic draws from, so its names are by design already seen. `seed` makes
+    it deterministic, which the recurring variant needs.
+    """
+    rng = random.Random(seed) if seed is not None else random
+    name = "".join(rng.choice(_RARE_SYLLABLES) for _ in range(rng.randint(2, 3)))
+    if rng.random() < 0.4:
+        name += str(rng.randint(2, 99))
+    return f"{name}.{rng.choice(_RARE_TLDS)}"
+
+
+def ip_country(ip, config=None):
+    """(country_code, resolved_country_name) for an IP from one of the PROBED pools
+    (benign_ingress_sources, vpn_novel_country_pool, external_traffic_sources), else
+    (None, None).
+
+    For vendor formats that carry the source country as TEXT. FortiGate's modeling
+    rule takes xdm.source.location.country straight from FTNTFGTsrccountry — measured
+    2026-09-17 the two agreed row-for-row — so a label that disagrees with the IP IS
+    the country XSIAM records. Benign FortiGate VPN logins used to stamp a random
+    _ext_geo() country (China, Russia, Ukraine, ... ~1,400 each per week), giving every
+    user a ten-country VPN baseline.
+    """
+    try:
+        a = ip_address(ip)
+    except (ValueError, TypeError):
+        return None, None
+    for key in ("benign_ingress_sources", "vpn_novel_country_pool", "external_traffic_sources"):
+        for e in (config or {}).get(key, []) or []:
+            try:
+                if a in ip_network(e.get("ip_range"), strict=False):
+                    return e.get("country"), e.get("resolved_country") or e.get("country")
+            except (ValueError, TypeError):
+                continue
+    return None, None
+
+
+def _home_entries(config=None):
+    ents = [s for s in (config or {}).get("benign_ingress_sources", []) if s.get("ip_range")]
+    if ents:
+        return ents
+    return [{"ip_range": r, "country": None} for r in _VPN_HOME_RANGES]
+
+
+# Continent of each home country. Impossible travel needs two countries that cannot
+# be reached in minutes; within-continent pairs (UK->DE) are plausible by air.
+_HOME_CONTINENT = {"US": "NA", "CA": "NA", "GB": "EU", "UK": "EU", "DE": "EU", "AU": "OC"}
+
+
+def impossible_travel_ips(user, config=None):
+    """(first_ip, first_cc, second_ip, second_cc) for an impossible-travel pair.
+
+    BOTH locations come from the existing HOME-country pool (US/GB/DE/CA/AU), on
+    DIFFERENT continents. The pair is physically impossible (e.g. US then AU minutes
+    later) while adding ZERO new countries to the org baseline — anything outside the
+    home pool would burn a country the org-scoped "first VPN access from a country"
+    detector depends on (see vpn_novel_country_pool).
+    """
+    ents = _home_entries(config)
+    first_ip = stable_vpn_ip(user, config)
+    first = next((e for e in ents
+                  if ip_address(first_ip) in ip_network(e["ip_range"], strict=False)), None)
+    first_cc = (first or {}).get("country")
+    first_cont = _HOME_CONTINENT.get(first_cc)
+    far = [e for e in ents if _HOME_CONTINENT.get(e.get("country")) not in (None, first_cont)]
+    if not far:
+        far = [e for e in ents if e is not first] or ents
+    second = random.choice(far)
+    second_ip = rand_ip_from_network(ip_network(second["ip_range"], strict=False))
+    return first_ip, first_cc, second_ip, second.get("country")
+
+
+def stable_beacon_pairs(key, config, session_context=None, n=4):
+    """A small, DETERMINISTIC set of (host_ip, username, rare_dest_ip) triples.
+
+    For detectors that need the SAME host to contact the SAME rare destination
+    repeatedly OVER MANY DAYS ("Recurring access to rare IP": "Access to this external
+    IP address has occurred repeatedly over many days"). Picking a random host per run
+    meant no (host, destination) pair ever recurred.
+
+    Derived from a hash of `key`, so the pairs survive process restarts. The host IP is
+    derived deterministically inside the chosen user's PRIMARY-device subnet rather than
+    taken from the session context: build_session_context() re-randomises every user's
+    IP on each restart, which would silently break recurrence at the first restart.
+    """
+    profiles = (config or {}).get("user_profiles") or {}
+    cands = []
+    for uname, p in profiles.items():
+        devs  = (p or {}).get("devices") or []
+        prim  = next((d for d in devs if d.get("is_primary") and d.get("subnet")), None)
+        if uname and prim:
+            cands.append((uname, prim["subnet"]))
+    cands.sort()
+    pairs = []
+    for i in range(n):
+        seed = int(hashlib.sha256(f"{key}:{i}".encode()).hexdigest(), 16)
+        if cands:
+            uname, subnet = cands[seed % len(cands)]
+            net  = ip_network(subnet, strict=False)
+            span = max(net.num_addresses - 2, 1)
+            hip  = str(ip_address(int(net.network_address) + 1 + (seed >> 16) % span))
+        else:
+            uname, hip = None, f"192.168.{10 + i}.{50 + i}"
+        pairs.append((hip, uname, rare_external_ip(seed=seed)))
+    return pairs
+
+
 # Corporate mail relay IPs — small fixed pool that every module's benign email
 # generator draws from.  Real enterprises route all outbound email through 2-3
 # relays; a user connecting to dozens of distinct SMTP servers is exactly the
@@ -862,6 +1224,32 @@ _EXFIL_URL_SHAPES = {
     "filetransfer.io":  ("/data-package/", 8, ""),
     "jumpshare.com":    ("/v/", 16, ""),
     "filemail.com":     ("/d/", 16, ""),
+    # Added with the expanded exfiltration_destinations pool. Each follows the
+    # service's real link format, because a URL-cardinality or URL-shape detector
+    # keys on exactly this and a generic /upload/<id> on every one of them is a tell.
+    # A "#" suffix is a client-side decryption key in the fragment, the same pattern
+    # MEGA uses -- Wormhole and PrivateBin are end-to-end encrypted the same way.
+    "filebin.net":      ("/", 16, ""),
+    "transfer.sh":      ("/", 8, ""),
+    "send.now":         ("/", 12, ""),
+    "file.io":          ("/", 12, ""),
+    "wormhole.app":     ("/", 6, "#"),
+    "fromsmash.com":    ("/", 10, ""),
+    "swisstransfer.com": ("/d/", 36, ""),
+    "pixeldrain.com":   ("/u/", 8, ""),
+    "catbox.moe":       ("/", 6, ""),
+    "1fichier.com":     ("/?", 20, ""),
+    "krakenfiles.com":  ("/view/", 10, "/file.html"),
+    "0x0.st":           ("/", 4, ""),
+    "onedrive.live.com": ("/?id=", 16, ""),
+    "paste.ee":         ("/p/", 5, ""),
+    "rentry.co":        ("/", 6, ""),
+    "controlc.com":     ("/", 8, ""),
+    "justpaste.it":     ("/", 5, ""),
+    "dpaste.org":       ("/", 4, ""),
+    "privatebin.net":   ("/?", 16, "#"),
+    "termbin.com":      ("/", 4, ""),
+    "hastebin.com":     ("/share/", 10, ""),
 }
 
 
@@ -919,10 +1307,21 @@ def exfil_destination(config, kind="upload"):
         except ImportError:
             import domain_corpus
         if domain_corpus.available() and random.random() < share:
-            tail = domain_corpus.tail_domain("web")
-            if tail:
-                return (tail, random_external_ip(config),
-                        exfil_url(tail, kind), True)
+            # A tail host is by definition one nothing else in the run resolves, so it
+            # must never be a curated file-sharing service. The two populations are
+            # NOT disjoint: 32 of the 60 curated services (file.io, transfer.sh,
+            # anonfiles.com, tresorit.com, mega.io, ...) are popular enough to also be
+            # in the Tranco list. Drawn through the tail, a real file-sharing site was
+            # labelled "Miscellaneous or Unknown" / "General Browsing" -- the mislabel
+            # this function's docstring warns about, in reverse. That predated the pool
+            # expansion; a larger pool just made it frequent enough to surface.
+            curated = {d.get('domain') for d in (config.get('exfiltration_destinations')
+                                                  or []) if isinstance(d, dict)}
+            for _ in range(6):
+                tail = domain_corpus.tail_domain("web")
+                if tail and tail not in curated:
+                    return (tail, random_external_ip(config),
+                            exfil_url(tail, kind), True)
 
     dests = config.get('exfiltration_destinations') or []
     if not dests:
