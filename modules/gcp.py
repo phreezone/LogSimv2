@@ -125,6 +125,10 @@ _MODEL_ARMOR_TEMPLATE_IDS = [
 # Highly privileged admin roles used in threat IAM scenarios
 _ADMIN_ROLES = [
     "roles/owner",
+    # serviceAccountUser lets a principal impersonate a service account, which is
+    # the classic GCP escalation path and one the SetIamPolicy correlation rule
+    # matches. It was missing from this list, so that branch never fired.
+    "roles/iam.serviceAccountUser",
     "roles/iam.securityAdmin",
     "roles/resourcemanager.organizationAdmin",
     "roles/iam.organizationRoleAdmin",
@@ -6091,6 +6095,80 @@ SCENARIO_FUNCTIONS = {
     "BUDGET_ALERT_DELETE":               _gen_budget_alert_delete,
 }
 
+
+# Threat -> the XSIAM analytics alert it is built to trigger. Only these threats are
+# offered for on-demand firing (dashboard / MCP / CLI, via modules/threat_catalog.py);
+# every threat still runs in long-running sessions. Names are as the tenant raises them
+# where observed, else the published Cortex name. Mapped 2026-09-29 against the Cortex
+# "Gcp Audit Log" analytics list and 90 days of tenant alerts.
+ANALYTIC_ALERTS = {
+    # Unmapped (background only), no matching published analytic: DISABLE_SCC,
+    # PROJECT_DELETE, SQL_INSTANCE_PUBLIC, COMPUTE_IMAGE_EXFIL, CLOUD_ARMOR_DELETE,
+    # VPC_PEERING_BACKDOOR, VERTEX_TRAINING_MALICIOUS, VERTEX_MODEL_ARMOR_DELETE,
+    # VERTEX_DISABLE_MODEL_LOGGING, GKE_PUBLIC_ENDPOINT_ENABLED, CLOUDRUN_PUBLIC_DEPLOY,
+    # ARTIFACT_REGISTRY_PUBLIC, CLOUDBUILD_TRIGGER_MODIFY, OAUTH_CONSENT_SCREEN_ABUSE,
+    # BUDGET_ALERT_DELETE.
+    "DISABLE_AUDIT_LOGGING":           "GCP logging sink deletion",
+    "MAKE_GCS_PUBLIC":                 "GCP data asset shared public",
+    "CREATE_SA_KEY":                   "GCP Service Account key creation",
+    "IAM_PRIVILEGE_ESCALATION":        "GCP administrative role granted to a cloud identity",
+    "TOR_API_ACCESS":                  "Suspicious API call from a Tor exit node",
+    "FIREWALL_EXPOSE_ALL":             "GCP Firewall Rule creation",
+    "DISABLE_VPC_FLOW_LOGS":           "Cloud resource logging was disabled",
+    "GKE_EXEC_INTO_POD":               "Unusual exec into a Kubernetes Pod",
+    "SNAPSHOT_EXFIL":                  "Cloud snapshot created or modified",
+    "SECRET_MASS_ACCESS":              "Suspicious secrets dump activity",
+    "VERTEX_DATASET_DELETE":           "ML artifacts destruction",
+    "VM_METADATA_MODIFY":              "Cloud compute instance user data script modification",
+    "SERVICE_ACCOUNT_IMPERSONATION":   "GCP service account impersonation attempt",
+    "CROSS_PROJECT_SA_GRANT":          "Unusual cross projects activity",
+    "KMS_KEY_DESTROY":                 "Unusual key management activity",
+    "BIGQUERY_DATA_EXFIL":             "BigQuery table or query results exfiltrated to a foreign project",
+    "EXTERNAL_USER_ADDED":             "GCP set IAM policy activity",
+    "ORG_POLICY_MODIFY":               "Cloud Organizational policy was created or modified",
+    "CLOUD_FUNCTION_MALICIOUS_DEPLOY": "A cloud function was created with an unusual runtime",
+    "VERTEX_DENIAL_OF_WALLET":         "Potential denial of wallet abusing AI services",
+    "VERTEX_MODEL_EXFIL":              "Suspicious ML Model Download",
+    "VERTEX_DATASET_POISON":           "Unusual AI dataset modification",
+    "VERTEX_RAG_CORPUS_MODIFY":        "Unusual AI RAG Knowledge Base Modification",
+    "VERTEX_TOR_PREDICT":              "Suspicious AI model usage from a Tor exit node",
+    "VPN_ROUTE_CREATE":                "GCP Virtual Private Network Route Creation",
+    "PUBSUB_SUBSCRIPTION_DELETE":      "GCP Pub/Sub Subscription Deletion",
+    "PUBSUB_TOPIC_DELETE":             "GCP Pub/Sub Topic Deletion",
+    "SA_IMPERSONATION_FAILED":         "GCP service account impersonation attempt",
+    "ADMIN_ROLE_GRANTED":              "GCP administrative role granted to a cloud identity",
+    "LOGGING_SINK_DELETE":             "GCP logging sink deletion",
+    "LOGGING_SINK_MODIFY":             "GCP logging sink modification",
+    "FIREWALL_RULE_DELETE":            "GCP VPC Firewall Rule Deletion",
+    "CLI_FROM_SERVERLESS":             "A Command Line Interface (CLI) command was executed from a GCP serverless compute service",
+    "FUNCTIONS_SENSITIVE_ROLE":        "GCP sensitive Functions role granted",
+    "SENSITIVE_ROLE_TO_GROUP":         "GCP sensitive role granted to group",
+    "IAM_DENY_POLICY_CREATE":          "GCP IAM deny policy creation",
+    "SECRETMANAGER_SELF_GRANT":        "GCP sensitive Secret Manager role granted",
+    "DEPLOYMENTMANAGER_SELF_GRANT":    "GCP sensitive Deployment Manager role granted",
+    "LOGGING_BUCKET_DELETE":           "GCP Logging Bucket Deletion",
+    "DELETE_SERVICE_ACCOUNT":          "GCP Service Account Deletion",
+    "GCS_BUCKET_CONFIG_MODIFY":        "GCP Storage Bucket Configuration Modification",
+    "GCS_BUCKET_DELETE":               "GCP Storage Bucket deletion",
+    "VPC_NETWORK_DELETE":              "GCP Virtual Private Cloud (VPC) Network Deletion",
+    "VPC_ROUTE_DELETE":                "GCP Virtual Private Network Route Deletion",
+    "IAM_ROLE_CREATE":                 "IAM role was created",
+    "DISABLE_SERVICE_ACCOUNT":         "GCP Service Account Disable",
+    "DELETE_SA_KEY":                   "GCP IAM Service Account Key Deletion",
+    "FIREWALL_RULE_MODIFY":            "GCP Firewall Rule Modification",
+    "GKE_PRIVILEGED_POD_CREATED":      "Kubernetes Privileged Pod Creation",
+    "GKE_CLUSTER_ADMIN_BINDING":       "A Kubernetes cluster role binding was created or deleted",
+    "CLOUDSQL_EXPORT_EXTERNAL":        "A Cloud DB instance was exported to an unknown destination",
+    "CLOUDSQL_BACKUP_DELETE":          "Deletion of multiple cloud resources",
+    "BIGQUERY_TABLE_DELETE":           "Deletion of multiple cloud resources",
+    "BIGQUERY_PUBLIC_DATASET":         "GCP data asset shared public",
+    "IAM_RECON_TESTPERMISSIONS":       "IAM Enumeration sequence",
+    "KMS_KEY_VERSION_DISABLE":         "Unusual key management activity",
+    "GCS_LIFECYCLE_TAMPER":            "A cloud storage configuration was modified",
+    "COMPUTE_INSTANCE_INSERT":         "Cloud instance creation attempt",
+    "SA_CREATE_KEY_IMPERSONATE_CHAIN": "GCP Service Account key creation",
+    "GCS_BULK_DOWNLOAD_EXFIL":         "An identity initiated a download of multiple cloud objects",
+}
 
 def get_threat_names():
     """Return available threat names dynamically from SCENARIO_FUNCTIONS.

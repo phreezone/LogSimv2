@@ -267,3 +267,52 @@ The following scenario keys can be passed as `scenario_event` in coordinated sim
 | `large_instance_types` | Instance types used in cryptomining staging scenarios |
 | `unusual_lambda_runtimes` | EOL runtimes used in unusual runtime scenarios |
 | `tor_exit_nodes` | List of `{ip, country}` objects — shared with other modules |
+
+## Generated Identifiers
+
+`modules/cloud_ids.py` generates correctly-shaped AWS identifiers and grows the
+`aws_config` pools once at startup, before any module reads one. Full rationale in
+[value-cardinality.md](../value-cardinality.md).
+
+| Pool | Before | After |
+|---|---|---|
+| `ec2_snapshots` | 26 | 900 |
+| `ebs_volumes` | 26 | 600 |
+| `ec2_instances` | 26 | 400 |
+| `log_groups` | 26 | 250 |
+| `s3_buckets` | 26 | 200 |
+| `foreign_account_ids` | 26 | 150 |
+| `vpcs` | 26 | **26** (a real estate has few) |
+
+Growing the pools is more faithful than generating per event for anything that persists: a
+real account genuinely keeps a stable set of instances that get started, stopped and
+snapshotted for months. The defect was never recurrence — it was having 26 of them for
+an estate of ~250 users.
+
+Formats are the documented ones, because these get pivoted on: `i-` + **17** hex (AWS left
+the 8-hex form behind in 2016), `AKIA` + 16 for a long-lived key, `ASIA` + 16 for STS
+temporary credentials, 12-digit accounts, DNS-compliant bucket names.
+
+**Your own account ID never changes** — it is your identity, appears in every ARN, and
+is read from `.env`. Only *foreign* account IDs vary, which is the field a cross-account
+AssumeRole rule keys on.
+
+Three additions worth knowing:
+
+- **Secret names.** `sensitive_credential_paths` is seeded with the six leaf names the
+  "Secret or Parameter Retrieval Targeting Credentials" rule matches —
+  `rootCredentials`, `MasterKey`, `SuperUser`, `service_account_key`, `encryption_key`,
+  `BreakGlass`. That rule previously had **one** live alternative, and only via a
+  case-insensitive match.
+- **S3 canned ACLs.** A quarter of `PutBucketAcl` events now use the
+  `x-amz-acl: public-read` form instead of the `AllUsers` grant URI, because CloudTrail
+  carries one or the other and both are real. The grant-URI form stays dominant
+  deliberately: it is the only one the built-in BIOC recognises.
+- **Automation principals.** Service-linked roles (`AWSServiceRoleForAmazonEKS`) and
+  instance profiles are now in `users_and_roles`, so the four rules that *exclude* AWS's
+  own automation finally have something to exclude.
+  `sessionContext.sessionIssuer.arn` reports the real
+  `role/aws-service-role/<service>.amazonaws.com/<name>` path.
+
+`aws_config.pentest_ami_ids` is deliberately **not** generated over — those ids encode
+distro names the Kali-AMI rule matches.
