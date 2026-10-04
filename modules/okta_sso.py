@@ -4,6 +4,7 @@
 # it to XSIAM and have it parsed identically to native Okta data.
 
 import random
+import threading
 import time
 import json
 from datetime import datetime, timezone, timedelta
@@ -389,8 +390,88 @@ def _get_threat_interval(threat_level, config):
 # Their entries must never be dressed up as a corporate broadband source.
 _ANONYMIZER_SOURCE_LISTS = {"tor_exit_nodes": "tor"}
 
+# --- Tor is reserved, and rare per user (2026-10-02) ---------------------------------
+# 37 of the 82 threats used to source EVERY event from a Tor exit, and the three bulk
+# sprays (intense_sso_failures, sso_password_spray, password_spray) sent Tor-sourced
+# SSO -- ending in a success -- to all ~500 users on every run. Since 9365f61 (April)
+# every user's Okta profile has therefore accumulated Tor activity, and the profile-
+# scored Analytics BIOC "A successful SSO sign-in from TOR" stopped firing after
+# 2026-08-30. An A/B in the tenant showed the August event shape no longer fires
+# either, so the cause is the profile, not the event format.
+#
+# Real attack traffic against an IdP is mostly cloud/VPS hosting, commercial VPNs and
+# residential proxies; Tor is a minority. So:
+#   * Tor is handed out only while a Tor-DEFINING threat runs (_TOR_THREATS). Every
+#     other request for "tor_exit_nodes" gets _attacker_ip_context() instead.
+#   * A Tor threat targets a user with no Tor history in this run (_TOR_HISTORY), so a
+#     Tor sign-in stays anomalous for the user who receives it.
+# mfa_bombing keeps Tor: it is the Okta analytic that fires today, and its "unusual
+# characteristics" may lean on the anonymized source.
+_TOR_THREATS = {"tor_login", "sso_tor", "tor_zone_bypass_access", "tor_admin_app_pivot",
+                "mfa_bombing"}
+_TOR_HISTORY = set()                    # usernames that have had Tor activity this run
+_THREAT_STATE = threading.local()       # .allow_tor, set by _generate_threat_log()
+
+# Cloud / VPS hosting, where password sprays and credential stuffing originate.
+# Real provider ranges and ASNs; the city is the provider's main region for the range.
+_ATTACKER_HOSTING = [
+    ("DigitalOcean", "167.99.0.0/16",    "US", "Clifton",        "New Jersey", "DigitalOcean, LLC",          14061,  "digitalocean.com"),
+    ("DigitalOcean", "138.68.0.0/16",    "US", "Santa Clara",    "California", "DigitalOcean, LLC",          14061,  "digitalocean.com"),
+    ("Vultr",        "45.32.0.0/16",     "US", "Piscataway",     "New Jersey", "The Constant Company, LLC",  20473,  "vultr.com"),
+    ("Vultr",        "149.28.0.0/16",    "US", "Piscataway",     "New Jersey", "The Constant Company, LLC",  20473,  "vultr.com"),
+    ("Linode",       "45.79.0.0/16",     "US", "Cedar Knolls",   "New Jersey", "Akamai Connected Cloud",     63949,  "linode.com"),
+    ("OVH",          "51.75.0.0/16",     "FR", "Roubaix",        None,         "OVH SAS",                    16276,  "ovh.net"),
+    ("OVH",          "54.36.0.0/16",     "FR", "Gravelines",     None,         "OVH SAS",                    16276,  "ovh.net"),
+    ("Hetzner",      "95.216.0.0/16",    "FI", "Helsinki",       None,         "Hetzner Online GmbH",        24940,  "hetzner.com"),
+    ("Hetzner",      "65.108.0.0/16",    "FI", "Helsinki",       None,         "Hetzner Online GmbH",        24940,  "hetzner.com"),
+    ("Contabo",      "161.97.0.0/16",    "DE", "Nuremberg",      None,         "Contabo GmbH",               51167,  "contabo.de"),
+    ("AWS",          "3.80.0.0/12",      "US", "Ashburn",        "Virginia",   "Amazon.com, Inc.",           16509,  "amazonaws.com"),
+    ("Azure",        "20.40.0.0/13",     "US", "Boydton",        "Virginia",   "Microsoft Corporation",      8075,   "microsoft.com"),
+    ("Google Cloud", "35.184.0.0/13",    "US", "Council Bluffs", "Iowa",       "Google LLC",                 396982, "googleusercontent.com"),
+    ("M247",         "185.156.172.0/22", "RO", "Bucharest",      None,         "M247 Europe SRL",            9009,   "m247.com"),
+    ("Alibaba",      "47.88.0.0/14",     "US", "San Mateo",      "California", "Alibaba (US) Technology Co., Ltd.", 45102, "alibaba-inc.com"),
+]
+
+
+def _attacker_ip_context(config):
+    """A source for attack traffic that is not Tor: 55% cloud/VPS hosting, 30% a
+    commercial VPN (still anonymized: is_proxy, proxyType "vpn"), 15% a residential-
+    proxy exit, which Okta cannot tell apart from consumer broadband."""
+    roll = random.random()
+    if roll < 0.55:
+        name, rng, country, city, state, isp, asn, domain = random.choice(_ATTACKER_HOSTING)
+        net = ip_network(rng, strict=False)
+        ip = str(net[random.randint(1, net.num_addresses - 2)])
+        return {"ip": ip, "city": city, "country": country, "state": state,
+                "isp": isp, "asn": asn, "domain": domain, "is_proxy": False}
+    if roll < 0.85:
+        vpns = [v for v in config.get("vpn_providers", [])
+                if v.get("ip_prefix") and v.get("ip_range")]
+        if vpns:
+            v = random.choice(vpns)
+            lo, hi = v["ip_range"]
+            ip = f"{v['ip_prefix']}.{random.randint(lo, hi)}.{random.randint(1, 254)}"
+            return {"ip": ip, "city": v.get("city"), "country": v.get("country"),
+                    "state": None, "isp": v.get("isp"), "asn": v.get("asn"),
+                    "domain": v.get("domain"), "is_proxy": True, "proxy_type": "vpn"}
+    return _get_random_ip_and_context(config, "external_traffic_sources")
+
+
+def _fresh_tor_user(session_context):
+    """A user with no Tor activity yet this run, or None when everyone has some."""
+    if not session_context:
+        return None
+    fresh = [u for u in session_context if u not in _TOR_HISTORY]
+    if not fresh:
+        return None
+    u = session_context[random.choice(fresh)]
+    return {"username": u["username"], "full_name": u["display_name"]}
+
 
 def _get_random_ip_and_context(config, source_list_key="benign_ingress_sources"):
+    # Tor only while a Tor-defining threat runs; see _TOR_THREATS.
+    if source_list_key == "tor_exit_nodes" and not getattr(_THREAT_STATE, "allow_tor", False):
+        return _attacker_ip_context(config)
     source_list = config.get(source_list_key, [{}])
     proxy_type = _ANONYMIZER_SOURCE_LISTS.get(source_list_key)
     if not source_list:
@@ -494,13 +575,45 @@ def _build_admin_actor(config, session_context=None):
     }
 
 
-def _build_client(ip_context, config, interactive_only=False):
+def _build_client(ip_context, config, interactive_only=False,
+                  username=None, session_context=None):
     _default_uas = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+        # Windows 11 reports NT 10.0 -- there is no NT 11.0 UA. Replaced with a
+        # second real desktop agent rather than deleted, to keep the fallback varied.
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.0.0",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0",
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1",
     ]
+    # A person signs in from THEIR device, so the agent has to be that device's --
+    # picking one at random per event made every user look like they owned 33
+    # browsers, which is precisely backwards for "new device for this user". Measured
+    # before this: 33 distinct agents across 64,451 events, a 1,953x reuse, the single
+    # worst-reused field in the whole corpus.
+    #
+    # With a username in hand, reuse the sticky per-device agent session_utils already
+    # assigns. Without one, compose a fresh agent rather than draw from the 33-entry
+    # config list; seeding from the username keeps it stable for that user either way.
+    _preset_ua = None
+    if username:
+        try:
+            from modules.session_utils import get_user_agent as _sticky
+        except ImportError:
+            from session_utils import get_user_agent as _sticky
+        try:
+            _preset_ua = _sticky(session_context, username) if session_context else None
+        except Exception:
+            _preset_ua = None
+        if not _preset_ua:
+            try:
+                from modules import user_agents as _ua_mod
+            except ImportError:
+                import user_agents as _ua_mod
+            import hashlib as _h
+            _seed = int.from_bytes(
+                _h.sha256(f"okta:{username}".encode()).digest()[:4], "big")
+            _preset_ua = _ua_mod.agent_for(None, _ua_mod.seeded(_seed))
+
     # Filter out None/empty entries; fall back to defaults if list is empty or missing
     all_uas = [ua for ua in config.get("user_agents", []) if ua and isinstance(ua, str)]
     if not all_uas:
@@ -509,7 +622,10 @@ def _build_client(ip_context, config, interactive_only=False):
     # UAs that should never appear on interactive login events
     _BOT_MARKERS = ("Googlebot", "Bingbot", "bot", "crawler", "spider")
 
-    if interactive_only:
+    if _preset_ua:
+        # The user's own device agent, sticky per user; no pool draw needed.
+        ua_string = _preset_ua
+    elif interactive_only:
         # Must be a real browser UA — exclude bots/crawlers even if they contain "Mozilla"
         browser_agents = [
             ua for ua in all_uas
@@ -1032,7 +1148,9 @@ def _session_start_targets(credential_type="PASSWORD"):
 def _generate_successful_login(config, user_info, session_context=None, ip_ctx=None):
     ip_ctx  = ip_ctx or _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.session.start", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -1077,7 +1195,9 @@ def _user_preferred_app(username, all_apps):
 def _generate_sso_access(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     all_apps = config.get("okta_config", {}).get("okta_sso_apps", ["Microsoft Office 365"])
     app    = _user_preferred_app(user_info["username"], all_apps)
     target = [{"id": _app_instance_id(app), "type": "AppInstance",
@@ -1096,7 +1216,9 @@ def _generate_sso_access(config, user_info, session_context=None):
 def _generate_mfa_verify(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     cred   = random.choice(["OIE_OKTA_VERIFY_PUSH", "TOTP", "SMS", "EMAIL"])
     return _assemble(
         "user.authentication.auth_via_mfa", actor, client,
@@ -1113,7 +1235,9 @@ def _generate_mfa_verify_failure(config, user_info, session_context=None):
     Normal noise that UEBA baselines need to distinguish from real attacks."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     cred   = random.choice(["OIE_OKTA_VERIFY_PUSH", "TOTP", "SMS"])
     reason = random.choice(["INVALID_CREDENTIALS", "FACTOR_VERIFY_TIMEOUT"])
     return _assemble(
@@ -1129,7 +1253,9 @@ def _generate_mfa_verify_failure(config, user_info, session_context=None):
 def _generate_password_reset(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.account.update_password", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -1143,7 +1269,9 @@ def _generate_change_password(config, user_info, session_context=None):
     Normal lifecycle event that should appear in benign baseline."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.account.change_password", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -1161,7 +1289,9 @@ def _generate_account_unlock_self(config, user_info, session_context=None):
     """user.account.unlock — user self-unlocks (feeds 'Okta account unlock' detection)."""
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.account.unlock", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -1177,7 +1307,9 @@ def _generate_account_unlock_by_admin(config, user_info, session_context=None):
     """user.account.unlock_by_admin — admin unlocks user (feeds 'Okta account unlock by admin' detection)."""
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     return _assemble(
         "user.account.unlock_by_admin", admin_actor, client,
@@ -1193,7 +1325,9 @@ def _generate_account_unlock_by_admin(config, user_info, session_context=None):
 def _generate_account_lock(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.account.lock", actor, client,
         outcome={"result": "FAILURE", "reason": "LOCKED_OUT"},
@@ -1207,7 +1341,9 @@ def _generate_account_lock(config, user_info, session_context=None):
 def _generate_account_unlock_token(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.account.unlock_token", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -1222,7 +1358,9 @@ def _generate_failed_login(config, user_info, ip_ctx=None, session_context=None)
     if ip_ctx is None:
         ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     reason = random.choice(["INVALID_CREDENTIALS", "LOCKED_OUT", "PASSWORD_EXPIRED", "AUTHENTICATION_FAILED"])
     return _assemble(
         "user.session.start", actor, client,
@@ -1265,7 +1403,9 @@ def _generate_benign_retry(config, user_info, session_context=None):
     """
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     sid    = f"ext-session-{uuid.uuid4()}"
     num_fails = random.randint(1, 2)
@@ -1307,7 +1447,9 @@ def _generate_tor_login(config, user_info, session_context=None):
     logs   = []
     ip_ctx = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     sid    = f"ext-session-{uuid.uuid4()}"
     all_apps = _get_sensitive_apps(config)
@@ -1354,7 +1496,9 @@ def _generate_policy_deny(config, user_info, session_context=None):
     print("    - Okta Module generating policy deny event...")
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=False)
+    client  = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     reason  = random.choice(config.get("okta_threat_events", {}).get("policy_deny_reasons", ["RISK_LEVEL_HIGH"]))
     return [_assemble(
         "policy.evaluate_sign_on", actor, client,
@@ -1370,7 +1514,9 @@ def _generate_mfa_bombing_sequence(config, user_info, session_context=None):
     logs    = []
     ip_ctx  = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=False)
+    client  = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     auth_ctx = _build_authentication_context("OIE_OKTA_VERIFY_PUSH")
     sid     = f"ext-session-{uuid.uuid4()}"
@@ -1414,7 +1560,9 @@ def _generate_user_suspended(config, user_info, session_context=None):
     """user.lifecycle.suspend — admin suspends a user account."""
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     return _assemble(
         "user.lifecycle.suspend", admin_actor, client,
@@ -1430,7 +1578,9 @@ def _generate_user_deactivated(config, user_info, session_context=None):
     """user.lifecycle.deactivate — admin deactivates (offboards) a user."""
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     return _assemble(
         "user.lifecycle.deactivate", admin_actor, client,
@@ -1446,7 +1596,9 @@ def _generate_password_reset_by_admin(config, user_info, session_context=None):
     """user.account.reset_password — admin resets a user's password."""
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     return _assemble(
         "user.account.reset_password", admin_actor, client,
@@ -1464,7 +1616,9 @@ def _generate_mfa_factor_enrolled(config, user_info, session_context=None):
     """user.mfa.factor.activate — user enrolls a new MFA factor."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     cred   = random.choice(["OIE_OKTA_VERIFY_PUSH", "TOTP", "SMS", "EMAIL", "SIGNED_NONCE"])
     factor_names = {
         "OIE_OKTA_VERIFY_PUSH": "Okta Verify",
@@ -1496,7 +1650,9 @@ def _generate_mfa_factor_reset_by_admin(config, user_info, session_context=None)
     """user.mfa.factor.reset_all — admin resets all MFA factors for a user."""
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     return _assemble(
         "user.mfa.factor.reset_all", admin_actor, client,
@@ -1515,7 +1671,9 @@ def _generate_mfa_bypass_attempt(config, user_info, session_context=None):
     """
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     dbg_ctx = _build_debug_context("PASSWORD", extra={
         "risk":            "{level=HIGH}",
@@ -1538,7 +1696,9 @@ def _generate_new_device_enrolled(config, user_info, session_context=None):
     """
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
 
     device_id = f"guuid{uuid.uuid4().hex[:20]}"
@@ -1588,7 +1748,9 @@ def _generate_device_assigned(config, user_info, session_context=None):
     """device.user.add — device assigned to a user. Feeds 'Okta device assignment' detection."""
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     os_types    = ["Windows", "macOS", "iOS", "Android"]
     os_choice   = random.choice(os_types)
@@ -1618,7 +1780,9 @@ def _generate_group_membership_add(config, user_info, session_context=None):
     """group.user_membership.add — user added to a group. Feeds group membership detection."""
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     groups = [
         "Everyone", "IT Admins", "Finance Team", "Engineering", "Sales",
@@ -1650,7 +1814,9 @@ def _generate_group_membership_remove(config, user_info, session_context=None):
     """group.user_membership.remove — user removed from a group."""
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     groups = ["IT Admins", "VPN Users", "Temp MFA Bypass", "Super Admins", "Contractors"]
     group  = random.choice(groups)
@@ -1683,7 +1849,9 @@ def _generate_admin_privilege_grant(config, user_info, session_context=None):
     """
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     _ROLE_DISPLAY = {
         "SUPER_ADMIN":      "Super administrator",
@@ -1711,7 +1879,9 @@ def _generate_admin_app_access(config, user_info, session_context=None):
     """
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target = [{
         "id":          _app_instance_id("Okta Admin Console"),
         "type":        "AppInstance",
@@ -1739,7 +1909,9 @@ def _generate_api_token_created(config, user_info, session_context=None):
     """
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     token_name = random.choice([
         "CI/CD Pipeline Token", "SIEM Integration", "Automation Token",
         "Monitoring Service", "Backup Integration", "Custom App Token",
@@ -1768,7 +1940,9 @@ def _generate_rate_limit_breach(config, user_info, session_context=None):
     """
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     endpoints = [
         "/api/v1/users", "/api/v1/sessions", "/api/v1/authn",
         "/api/v1/logs", "/api/v1/apps",
@@ -1843,7 +2017,9 @@ def _generate_fastpass_phishing_detected(config, user_info, session_context=None
     ]
     ua_str = _r.choice(fp_uas)
     # The client block uses the proxy IP — that's what Okta sees at the origin check
-    client = _build_client(proxy_ctx, config, interactive_only=False)
+    client = _build_client(proxy_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     client["userAgent"]["rawUserAgent"] = ua_str
 
     # logOnlySecurityData contains the phishing URL + mismatched origin (Okta OIE 2022)
@@ -1883,7 +2059,9 @@ def _generate_user_reported_suspicious(config, user_info, session_context=None):
     """
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.account.report_suspicious_activity_by_enduser", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -1916,7 +2094,9 @@ def _generate_okta_threat_detected(config, user_info, session_context=None):
         "displayName": ip,
         "detailEntry": None,
     }
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
 
     # Real Okta threat combinations — comma-separated in outcome.reason
     _THREAT_COMBOS = [
@@ -1969,7 +2149,9 @@ def _generate_session_impersonation(config, user_info, session_context=None):
     logs        = []
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     sec_ctx     = _build_security_context(ip_ctx)
     target      = _build_target_user(target_user)
@@ -2059,7 +2241,9 @@ def _generate_impossible_travel_sequence(config, user_info, session_context=None
     # Location 1: benign home country
     ip_ctx1 = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client1 = _build_client(ip_ctx1, config, interactive_only=True)
+    client1 = _build_client(ip_ctx1, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble(
         "user.session.start", actor, client1,
         outcome={"result": "SUCCESS", "reason": None},
@@ -2073,7 +2257,9 @@ def _generate_impossible_travel_sequence(config, user_info, session_context=None
 
     # Location 2: attacker from TOR / foreign IP — minutes later, same user
     ip_ctx2 = _get_random_ip_and_context(config, "tor_exit_nodes")
-    client2 = _build_client(ip_ctx2, config, interactive_only=False)
+    client2 = _build_client(ip_ctx2, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx2 = _build_security_context(ip_ctx2)
     dbg_ctx2 = _build_debug_context("PASSWORD", extra={
         "risk": "{level=HIGH}",
@@ -2166,7 +2352,9 @@ def _generate_app_assigned_to_user(config, user_info, session_context=None):
     """app.generic.provision.assign_user_to_app — app provisioned to user."""
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
     app         = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     targets = [
@@ -2308,7 +2496,9 @@ def _generate_sso_brute_force(config, user_info, session_context=None):
         "risk": "{level=HIGH}",
     })
     for _ in range(random.randint(8, 15)):
-        client = _build_client(ip_ctx, config, interactive_only=False)
+        client = _build_client(ip_ctx, config, interactive_only=False,
+            username=(user_info or {}).get('username'),
+            session_context=session_context)
         logs.append(_assemble(
             "user.authentication.sso", actor, client,
             outcome={"result": "FAILURE", "reason": "INVALID_CREDENTIALS"},
@@ -2317,7 +2507,9 @@ def _generate_sso_brute_force(config, user_info, session_context=None):
             target=_make_sso_target(app),
         ))
     # Final success — attacker found valid credentials; triggers XSIAM detection
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble(
         "user.authentication.sso", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -2434,7 +2626,9 @@ def _generate_ip_rotation_sso_spray(config, user_info, session_context=None):
         seen_ips.add(candidate["ip"])
         ip_pool.append(candidate)
     for ip_ctx in ip_pool:
-        client = _build_client(ip_ctx, config, interactive_only=False)
+        client = _build_client(ip_ctx, config, interactive_only=False,
+            username=(user_info or {}).get('username'),
+            session_context=session_context)
         client["ipAddress"] = ip_ctx["ip"]
         logs.append(_assemble(
             "user.authentication.sso", actor, client,
@@ -2449,7 +2643,9 @@ def _generate_ip_rotation_sso_spray(config, user_info, session_context=None):
         ))
     # Final success from the last rotated IP; triggers XSIAM spray detection
     last_ip_ctx = ip_pool[-1]
-    client = _build_client(last_ip_ctx, config, interactive_only=False)
+    client = _build_client(last_ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     client["ipAddress"] = last_ip_ctx["ip"]
     logs.append(_assemble(
         "user.authentication.sso", actor, client,
@@ -2474,7 +2670,9 @@ def _generate_sso_rejected_unusual_country(config, user_info, session_context=No
                                {"ip": anon["ip"], "isp": anon["isp"], "asn": anon["asn"],
                                 "domain": anon["domain"], "is_proxy": True})
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     logs   = []
     # Push sent
@@ -2511,7 +2709,9 @@ def _generate_sso_impossible_travel(config, user_info, session_context=None):
 
     # First SSO — home country
     ip_ctx1 = _get_random_ip_and_context(config, "benign_ingress_sources")
-    client1 = _build_client(ip_ctx1, config, interactive_only=True)
+    client1 = _build_client(ip_ctx1, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble(
         "user.authentication.sso", actor, client1,
         outcome={"result": "SUCCESS", "reason": None},
@@ -2527,7 +2727,9 @@ def _generate_sso_impossible_travel(config, user_info, session_context=None):
     ip_ctx2 = _make_ip_ctx_from(random.choice(_HIGH_RISK_COUNTRIES),
                                 {"ip": anon2["ip"], "isp": anon2["isp"], "asn": anon2["asn"],
                                  "domain": anon2["domain"], "is_proxy": True})
-    client2 = _build_client(ip_ctx2, config, interactive_only=False)
+    client2 = _build_client(ip_ctx2, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble(
         "user.authentication.sso", actor, client2,
         outcome={"result": "SUCCESS", "reason": None},
@@ -2550,7 +2752,9 @@ def _generate_sso_possible_impossible_travel(config, user_info, session_context=
     app   = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
 
     ip_ctx1 = _get_random_ip_and_context(config, "benign_ingress_sources")
-    client1 = _build_client(ip_ctx1, config, interactive_only=True)
+    client1 = _build_client(ip_ctx1, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble(
         "user.authentication.sso", actor, client1,
         outcome={"result": "SUCCESS", "reason": None},
@@ -2562,7 +2766,9 @@ def _generate_sso_possible_impossible_travel(config, user_info, session_context=
     ))
 
     ip_ctx2 = _new_country_ip_ctx()
-    client2 = _build_client(ip_ctx2, config, interactive_only=True)
+    client2 = _build_client(ip_ctx2, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble(
         "user.authentication.sso", actor, client2,
         outcome={"result": "SUCCESS", "reason": None},
@@ -2581,7 +2787,9 @@ def _generate_sso_new_country(config, user_info, session_context=None):
     """SSO from a country the user has never used — A user connected from a new country."""
     ip_ctx = _new_country_ip_ctx()
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     return _assemble(
         "user.authentication.sso", actor, client,
@@ -2606,7 +2814,9 @@ def _generate_sso_suspicious_country(config, user_info, session_context=None):
                                {"ip": anon["ip"], "isp": anon["isp"], "asn": anon["asn"],
                                 "domain": anon["domain"], "is_proxy": True})
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     return _assemble(
         "user.authentication.sso", actor, client,
@@ -2626,7 +2836,9 @@ def _generate_sso_new_country_org(config, user_info, session_context=None):
     """SSO from a country no one in the org has ever used — First connection from country in org."""
     ip_ctx = _new_country_ip_ctx()
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     return _assemble(
         "user.authentication.sso", actor, client,
@@ -2645,7 +2857,9 @@ def _generate_sso_from_tor(config, user_info, session_context=None):
     """Successful SSO from TOR exit node — A successful SSO sign-in from TOR."""
     ip_ctx = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     return _assemble(
         "user.authentication.sso", actor, client,
@@ -2671,7 +2885,9 @@ def _generate_sso_new_asn_user(config, user_info, session_context=None):
     ip_ctx   = {"ip": f"45.33.{random.randint(1,254)}.{random.randint(1,254)}",
                 "city": "Ashburn", "country": "US", "state": "VA", **asn_data}
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     return _assemble(
         "user.authentication.sso", actor, client,
@@ -2692,7 +2908,9 @@ def _generate_sso_new_asn_org(config, user_info, session_context=None):
     ip_ctx   = {"ip": f"45.33.{random.randint(1,254)}.{random.randint(1,254)}",
                 "city": "Frankfurt", "country": "DE", "state": None, **asn_data}
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     return _assemble(
         "user.authentication.sso", actor, client,
@@ -2723,7 +2941,9 @@ def _generate_sso_suspicious_asn(config, user_info, session_context=None):
                 "city": None, "country": "NL", "state": None,
                 "proxy_type": "vpn", **asn_data}
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     return _assemble(
         "user.authentication.sso", actor, client,
@@ -2755,7 +2975,9 @@ def _generate_sso_abnormal_os(config, user_info, session_context=None):
     ua_str = ua_map.get(unusual_os, ua_map["Ubuntu"])
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     client["userAgent"]["rawUserAgent"] = ua_str
     client["userAgent"]["os"]           = unusual_os
     app = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
@@ -2783,7 +3005,9 @@ def _generate_sso_new_os(config, user_info, session_context=None):
     os_name, ua_str = random.choice(new_os_options)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     client["userAgent"]["rawUserAgent"] = ua_str
     client["userAgent"]["os"]           = os_name
     app = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
@@ -2805,7 +3029,9 @@ def _generate_sso_abnormal_user_agent(config, user_info, session_context=None):
     ua_str = random.choice(_MACHINE_USER_AGENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     client["userAgent"]["rawUserAgent"] = ua_str
     client["userAgent"]["os"]           = "Unknown"
     client["userAgent"]["browser"]      = "UNKNOWN"
@@ -2828,7 +3054,9 @@ def _generate_sso_machine_account(config, user_info, session_context=None):
     ua_str = random.choice(_MACHINE_USER_AGENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     client["userAgent"]["rawUserAgent"] = ua_str
     client["userAgent"]["os"]           = "Unknown"
     client["userAgent"]["browser"]      = "UNKNOWN"
@@ -2868,7 +3096,9 @@ def _generate_sso_service_account(config, user_info, session_context=None):
     }
     ua_str = random.choice(_MACHINE_USER_AGENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     client["userAgent"]["rawUserAgent"] = ua_str
     client["userAgent"]["os"]           = "Unknown"
     client["userAgent"]["browser"]      = "UNKNOWN"
@@ -2954,7 +3184,9 @@ def _generate_sso_multiple_unusual_resources(config, user_info, session_context=
     unusual_apps = _RARE_SSO_APPS.copy()
     random.shuffle(unusual_apps)
     for app in unusual_apps[:random.randint(4, 6)]:
-        client = _build_client(ip_ctx, config, interactive_only=True)
+        client = _build_client(ip_ctx, config, interactive_only=True,
+            username=(user_info or {}).get('username'),
+            session_context=session_context)
         logs.append(_assemble(
             "user.authentication.sso", actor, client,
             outcome={"result": "SUCCESS", "reason": None},
@@ -2980,7 +3212,9 @@ def _generate_sso_unusual_time(config, user_info, session_context=None):
 
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     event  = json.loads(_assemble(
         "user.authentication.sso", actor, client,
@@ -3002,7 +3236,9 @@ def _generate_sso_suspicious_auth(config, user_info, session_context=None):
     """SSO with multiple risk signals combined — Suspicious SSO authentication."""
     ip_ctx = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     client["userAgent"]["rawUserAgent"] = random.choice(_MACHINE_USER_AGENTS)
     client["userAgent"]["os"]           = "Unknown"
     app = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
@@ -3026,7 +3262,9 @@ def _generate_sso_first_resource_org(config, user_info, session_context=None):
     rare_app = random.choice(_RARE_SSO_APPS)
     ip_ctx   = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor    = _build_actor(user_info["username"], user_info["full_name"])
-    client   = _build_client(ip_ctx, config, interactive_only=True)
+    client   = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.authentication.sso", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -3045,7 +3283,9 @@ def _generate_disabled_user_sso(config, user_info, session_context=None):
     # Use a deactivated user pattern
     deactivated_actor = _build_actor(user_info["username"], user_info["full_name"])
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
     return _assemble(
         "user.authentication.sso", deactivated_actor, client,
@@ -3069,7 +3309,14 @@ def _admin_event(config, event_type, display_message, target=None, severity="INF
                  session_context=None):
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    # The agent belongs to whoever is acting -- here the admin, taken from the actor
+    # that was just built. These two wrappers carry most of the admin and lifecycle
+    # event volume, so leaving them unwired was most of the reason only 37% of Okta
+    # events used the acting user's own device agent.
+    client      = _build_client(
+        ip_ctx, config, interactive_only=True,
+        username=str(admin_actor.get("alternateId") or "").split("@")[0] or None,
+        session_context=session_context)
     sec_ctx     = _build_security_context(ip_ctx)
     dbg_ctx     = _build_debug_context("PASSWORD", extra=extra_debug or {})
     return _assemble(event_type, admin_actor, client,
@@ -3082,7 +3329,11 @@ def _user_event(config, user_info, event_type, display_message, target=None, sev
                 session_context=None):
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_admin_actor(config, session_context) if admin else _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(
+        ip_ctx, config, interactive_only=True,
+        username=(str(actor.get("alternateId") or "").split("@")[0]
+                  if admin else (user_info or {}).get("username")) or None,
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     dbg_ctx = _build_debug_context("PASSWORD", extra=extra_debug or {})
     return _assemble(event_type, actor, client,
@@ -3299,7 +3550,9 @@ def _gen_user_mfa_factor_update(config, user_info, session_context=None):
 def _gen_user_mfa_okta_verify(config, user_info, session_context=None):
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("user.mfa.okta_verify", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="Verify user with Okta Verify",
@@ -3315,7 +3568,9 @@ def _gen_push_send_verify(config, user_info, session_context=None):
     Very high volume; fires for every Okta Verify push attempt."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "system.push.send_factor_verify_push", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -3331,7 +3586,9 @@ def _gen_mfa_push_deny(config, user_info, session_context=None):
     Common noise; distinct from MFA bombing (single isolated deny)."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.mfa.okta_verify.deny_push", actor, client,
         outcome={"result": "FAILURE", "reason": "USER_REJECTED_OKTA_VERIFY_PUSH"},
@@ -3346,7 +3603,9 @@ def _gen_radius_auth_success(config, user_info, session_context=None):
     """user.authentication.auth_via_radius — Okta RADIUS agent auth for WiFi/VPN."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(_RADIUS_APPS)
     return _assemble(
         "user.authentication.auth_via_radius", actor, client,
@@ -3398,7 +3657,9 @@ def _gen_radius_vpn_new_country(config, user_info, session_context=None):
          "asn": None, "domain": None, "is_proxy": False},
         {"ip": novel_ip})
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = "VPN Gateway"
     return _assemble(
         "user.authentication.auth_via_radius", actor, client,
@@ -3419,7 +3680,9 @@ def _gen_policy_sign_on_eval(config, user_info, session_context=None):
     Outcome ACCESS_ALLOWED for benign; includes policy + rule targets."""
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     policy  = random.choice(_POLICY_NAMES)
     rule    = random.choice(_RULE_NAMES)
     targets = _target_policy(policy) + _target_rule(rule)
@@ -3437,7 +3700,9 @@ def _gen_fastpass_session_start(config, user_info, session_context=None):
     """user.session.start via Okta FastPass (passwordless, device-bound SIGNED_NONCE)."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.session.start", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -3454,7 +3719,9 @@ def _gen_webauthn_factor_enroll(config, user_info, session_context=None):
     Covers YubiKey, Touch ID, Windows Hello, passkeys — distinct from Okta Verify."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     factor = random.choice(_WEBAUTHN_FACTORS)
     target = [{"id": f"mfa-{uuid.uuid4()}", "type": "AuthenticatorEnrollment",
                "displayName": factor, "alternateId": "FIDO2_WEBAUTHN", "detailEntry": None}]
@@ -3474,7 +3741,9 @@ def _gen_auth_via_webauthn(config, user_info, session_context=None):
     Distinct from enrollment (user.mfa.factor.activate); fires on every WebAuthn-based login."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     factor = random.choice(_WEBAUTHN_FACTORS)
     target = [{"id": f"mfa-{uuid.uuid4()}", "type": "AuthenticatorEnrollment",
                "displayName": factor, "alternateId": "FIDO2_WEBAUTHN", "detailEntry": None}]
@@ -3494,7 +3763,9 @@ def _gen_app_push_password_success(config, user_info, session_context=None):
     Very common in enterprise hybrid deployments (Okta AD agent)."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = _rand_app(config)
     target = [
         {"id": _app_instance_id(app), "type": "AppInstance",
@@ -3515,7 +3786,9 @@ def _gen_app_push_profile_success(config, user_info, session_context=None):
     """app.user_management.push_profile_update.success — profile attribute sync push."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = _rand_app(config)
     target = [
         {"id": _app_instance_id(app), "type": "AppInstance",
@@ -3536,7 +3809,9 @@ def _gen_app_push_password_failure(config, user_info, session_context=None):
     """app.user_management.push_password_update.failure — sync failure (realistic noise)."""
     ip_ctx   = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor    = _build_admin_actor(config, session_context)
-    client   = _build_client(ip_ctx, config, interactive_only=True)
+    client   = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app      = _rand_app(config)
     reasons  = ["INVALID_CREDENTIALS", "APP_UNAVAILABLE", "PUSH_FAILED", "LOCKED_OUT"]
     target   = [
@@ -3558,7 +3833,9 @@ def _gen_user_account_update_secondary_email(config, user_info, session_context=
     """user.account.update_secondary_email — user updates recovery/secondary email."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.account.update_secondary_email", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -3573,7 +3850,9 @@ def _gen_user_account_update_phone(config, user_info, session_context=None):
     """user.account.update_phone — user updates their SMS/voice phone number."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.account.update_phone", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -3588,7 +3867,9 @@ def _gen_app_push_new_user(config, user_info, session_context=None):
     """app.user_management.push_new_user — SCIM/provisioning push creates account in downstream app."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = _rand_app(config)
     target = [
         {"id": _app_instance_id(app), "type": "AppInstance",
@@ -3609,7 +3890,9 @@ def _gen_app_push_user_deactivation(config, user_info, session_context=None):
     """app.user_management.push_user_deactivation — SCIM push deactivates account in downstream app."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = _rand_app(config)
     target = [
         {"id": _app_instance_id(app), "type": "AppInstance",
@@ -3633,7 +3916,9 @@ def _gen_system_agent_ad_push_password(config, user_info, session_context=None):
     agent_name = random.choice(_AD_AGENT_NAMES)
     ad_actor   = {"id": "SYSTEM", "type": "SystemPrincipal", "alternateId": "system@okta.com",
                   "displayName": agent_name, "detailEntry": None}
-    client     = _build_client(ip_ctx, config, interactive_only=False)
+    client     = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "system.agent.ad.push_password_update", ad_actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -3649,7 +3934,9 @@ def _gen_kerberos_auth(config, user_info, session_context=None):
     """user.authentication.auth_via_kerberos — Kerberos via Okta Desktop SSO / AD-joined machine."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = random.choice(_KERBEROS_APPS)
     return _assemble(
         "user.authentication.auth_via_kerberos", actor, client,
@@ -3668,7 +3955,9 @@ def _gen_mfa_factor_challenge(config, user_info, session_context=None):
     Fires before user.authentication.auth_via_mfa in the full OIE auth flow."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     cred   = random.choice(["OIE_OKTA_VERIFY_PUSH", "TOTP", "SMS", "EMAIL"])
     return _assemble(
         "user.mfa.factor.challenge", actor, client,
@@ -3686,7 +3975,9 @@ def _gen_auth_verify(config, user_info, session_context=None):
     (currently only generated inside _generate_mfa_bombing_sequence)."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.authentication.verify", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -3702,7 +3993,9 @@ def _gen_app_import_started(config, user_info, session_context=None):
     Very common in enterprise hybrid deployments; fires on every scheduled sync."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = _rand_app(config)
     return _assemble(
         "app.generic.import.started.incremental_import", actor, client,
@@ -3719,7 +4012,9 @@ def _gen_app_import_success(config, user_info, session_context=None):
     """app.generic.import.success — AD/LDAP sync job completed successfully."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app    = _rand_app(config)
     return _assemble(
         "app.generic.import.success", actor, client,
@@ -3737,7 +4032,9 @@ def _gen_oauth2_authorize_success(config, user_info, session_context=None):
     Fires on every OAuth2 authorization flow. Only scope_denied variant existed before."""
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app     = random.choice(_OAUTH_CLIENTS)
     return _assemble(
         "app.oauth2.as.authorize", actor, client,
@@ -3755,7 +4052,9 @@ def _gen_oauth2_authorize_denied(config, user_info, session_context=None):
     """app.oauth2.as.authorize — OAuth2 authorization denied (bad redirect, missing scope)."""
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     app     = random.choice(_OAUTH_CLIENTS)
     return _assemble(
         "app.oauth2.as.authorize", actor, client,
@@ -3775,7 +4074,9 @@ def _gen_hook_outbound_sent(config, user_info, session_context=None):
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     system_actor = {"id": "SYSTEM", "type": "SystemPrincipal", "alternateId": "system@okta.com",
                     "displayName": "Okta System", "detailEntry": None}
-    client  = _build_client(ip_ctx, config, interactive_only=False)
+    client  = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     hook    = random.choice(_HOOK_ENDPOINTS)
     return _assemble(
         "hook.outbound.request.sent", system_actor, client,
@@ -3793,7 +4094,9 @@ def _gen_device_assurance_pass(config, user_info, session_context=None):
     """device.assurance.policy.evaluate — device meets assurance requirements (compliant)."""
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     policy  = random.choice(_POLICY_NAMES)
     os_types = ["Windows", "macOS", "iOS", "Android"]
     os_choice = random.choice(os_types)
@@ -3819,7 +4122,9 @@ def _gen_device_assurance_fail(config, user_info, session_context=None):
     """device.assurance.policy.evaluate — device fails assurance check (unmanaged/non-compliant)."""
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     policy  = random.choice(_POLICY_NAMES)
     os_types = ["Windows", "macOS", "iOS", "Android"]
     os_choice = random.choice(os_types)
@@ -3846,7 +4151,9 @@ def _gen_user_registration_create(config, user_info, session_context=None):
     Actor is the new user themselves (no admin actor)."""
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble(
         "user.registration.create", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -3863,7 +4170,9 @@ def _gen_user_auth_via_idp(config, user_info, session_context=None):
     idp = random.choice(_IDP_NAMES)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("user.authentication.auth_via_IDP", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"Authenticate user via IDP: {idp}",
@@ -3876,7 +4185,9 @@ def _gen_user_auth_via_saml(config, user_info, session_context=None):
     app = _rand_app(config)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("user.authentication.auth_via_inbound_SAML", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"Authenticate user via inbound SAML: {app}",
@@ -3889,7 +4200,9 @@ def _gen_user_slo(config, user_info, session_context=None):
     app = _rand_app(config)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("user.authentication.slo", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"User single logout from app: {app}",
@@ -3907,7 +4220,9 @@ def _gen_user_auth_via_social(config, user_info, session_context=None):
     provider = random.choice(_SOCIAL_IDPS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("user.authentication.auth_via_social", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"Authenticate user with social login: {provider}",
@@ -4037,7 +4352,9 @@ def _gen_application_policy_sign_on_deny(config, user_info, session_context=None
     app = _rand_app(config)
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("application.policy.sign_on.deny_access", actor, client,
         outcome={"result": "DENY", "reason": "SIGN_ON_POLICY"},
         severity="WARN", display_message=f"Deny user access to {app} due to sign-on policy",
@@ -4113,7 +4430,9 @@ def _gen_security_attack_start(config, user_info, session_context=None):
     attack = random.choice(attack_types)
     ip_ctx  = _get_random_ip_and_context(config, "tor_exit_nodes")
     admin_actor = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("security.attack.start", admin_actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="WARN", display_message=f"ThreatInsight: org under {attack} attack",
@@ -4125,7 +4444,9 @@ def _gen_security_attack_start(config, user_info, session_context=None):
 def _gen_security_attack_end(config, user_info, session_context=None):
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("security.attack.end", admin_actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="ThreatInsight: attack on org has ended",
@@ -4153,21 +4474,24 @@ def _gen_security_trusted_origin_create(config, user_info, session_context=None)
     return _admin_event(config, "security.trusted_origin.create",
         f"Create trusted origin: {origin}",
         target=[{"id": f"tos-{uuid.uuid4()}", "type": "TrustedOrigin",
-                 "displayName": origin, "alternateId": origin, "detailEntry": None}])
+                 "displayName": origin, "alternateId": origin, "detailEntry": None}],
+        session_context=session_context)
 
 def _gen_security_trusted_origin_delete(config, user_info, session_context=None):
     return _admin_event(config, "security.trusted_origin.delete",
         "Delete trusted origin", severity="WARN",
         target=[{"id": f"tos-{uuid.uuid4()}", "type": "TrustedOrigin",
                  "displayName": "https://old.examplecorp.com",
-                 "alternateId": "https://old.examplecorp.com", "detailEntry": None}])
+                 "alternateId": "https://old.examplecorp.com", "detailEntry": None}],
+        session_context=session_context)
 
 def _gen_security_trusted_origin_update(config, user_info, session_context=None):
     return _admin_event(config, "security.trusted_origin.update",
         "Update trusted origin configuration",
         target=[{"id": f"tos-{uuid.uuid4()}", "type": "TrustedOrigin",
                  "displayName": "https://app.examplecorp.com",
-                 "alternateId": "https://app.examplecorp.com", "detailEntry": None}])
+                 "alternateId": "https://app.examplecorp.com", "detailEntry": None}],
+        session_context=session_context)
 
 def _gen_security_events_provider(config, user_info, session_context=None):
     providers = ["CrowdStrike","SentinelOne","Zscaler","Palo Alto Networks","Microsoft Defender"]
@@ -4176,7 +4500,9 @@ def _gen_security_events_provider(config, user_info, session_context=None):
     detection  = random.choice(detections)
     ip_ctx  = _get_random_ip_and_context(config, "tor_exit_nodes")
     admin_actor = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("security.events.provider.receive_event", admin_actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="WARN", display_message=f"Security event from {provider}: {detection}",
@@ -4190,7 +4516,8 @@ def _gen_security_authenticator_activate(config, user_info, session_context=None
     return _admin_event(config, "security.authenticator.lifecycle.activate",
         f"Admin activated authenticator: {factor}",
         target=[{"id": f"auth-{uuid.uuid4()}", "type": "Authenticator",
-                 "displayName": factor, "alternateId": factor, "detailEntry": None}])
+                 "displayName": factor, "alternateId": factor, "detailEntry": None}],
+        session_context=session_context)
 
 def _gen_security_authenticator_deactivate(config, user_info, session_context=None):
     factor = random.choice(_AUTH_FACTORS)
@@ -4227,24 +4554,29 @@ def _gen_system_api_token_revoke(config, user_info, session_context=None):
     return _admin_event(config, "system.api_token.revoke",
         "Revoke API token", severity="WARN",
         target=[{"id": f"token-{uuid.uuid4().hex[:20]}", "type": "Token",
-                 "displayName": "Revoked Token", "alternateId": "Revoked Token", "detailEntry": None}])
+                 "displayName": "Revoked Token", "alternateId": "Revoked Token", "detailEntry": None}],
+        session_context=session_context)
 
 def _gen_system_api_token_update(config, user_info, session_context=None):
     return _admin_event(config, "system.api_token.update",
         "Update API token",
         target=[{"id": f"token-{uuid.uuid4().hex[:20]}", "type": "Token",
-                 "displayName": "Updated Token", "alternateId": "Updated Token", "detailEntry": None}])
+                 "displayName": "Updated Token", "alternateId": "Updated Token", "detailEntry": None}],
+        session_context=session_context)
 
 def _gen_system_api_token_enable(config, user_info, session_context=None):
     return _admin_event(config, "system.api_token.enable",
         "Enable API token",
         target=[{"id": f"token-{uuid.uuid4().hex[:20]}", "type": "Token",
-                 "displayName": "Enabled Token", "alternateId": "Enabled Token", "detailEntry": None}])
+                 "displayName": "Enabled Token", "alternateId": "Enabled Token", "detailEntry": None}],
+        session_context=session_context)
 
 def _gen_system_email_factor_verify(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("system.email.send_factor_verify_message", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="Email verification sent to user",
@@ -4254,7 +4586,9 @@ def _gen_system_email_factor_verify(config, user_info, session_context=None):
 def _gen_system_email_password_reset(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("system.email.password_reset.sent_message", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="Password reset email sent",
@@ -4264,7 +4598,9 @@ def _gen_system_email_password_reset(config, user_info, session_context=None):
 def _gen_system_email_new_device(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("system.email.new_device_notification.sent_message", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="New device sign-in notification email sent",
@@ -4274,7 +4610,9 @@ def _gen_system_email_new_device(config, user_info, session_context=None):
 def _gen_system_sms_factor_verify(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("system.sms.send_factor_verify_message", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="SMS factor verification sent",
@@ -4284,7 +4622,9 @@ def _gen_system_sms_factor_verify(config, user_info, session_context=None):
 def _gen_system_sms_password_reset(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("system.sms.send_password_reset_message", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="Password reset SMS sent",
@@ -4294,7 +4634,9 @@ def _gen_system_sms_password_reset(config, user_info, session_context=None):
 def _gen_system_voice_mfa_challenge(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("system.voice.send_mfa_challenge_call", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="Voice MFA challenge call sent",
@@ -4304,7 +4646,9 @@ def _gen_system_voice_mfa_challenge(config, user_info, session_context=None):
 def _gen_system_voice_password_reset(config, user_info, session_context=None):
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("system.voice.send_password_reset_call", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="Password reset voice call sent",
@@ -4348,20 +4692,23 @@ def _gen_system_log_stream_create(config, user_info, session_context=None):
     return _admin_event(config, "system.log_stream.lifecycle.create",
         f"Create log stream: {sink}",
         target=[{"id": f"ls-{uuid.uuid4()}", "type": "LogStream",
-                 "displayName": sink, "alternateId": sink, "detailEntry": None}])
+                 "displayName": sink, "alternateId": sink, "detailEntry": None}],
+        session_context=session_context)
 
 def _gen_system_log_stream_delete(config, user_info, session_context=None):
     return _admin_event(config, "system.log_stream.lifecycle.delete",
         "Delete log stream", severity="WARN",
         target=[{"id": f"ls-{uuid.uuid4()}", "type": "LogStream",
-                 "displayName": "Deleted Stream", "alternateId": "Deleted Stream", "detailEntry": None}])
+                 "displayName": "Deleted Stream", "alternateId": "Deleted Stream", "detailEntry": None}],
+        session_context=session_context)
 
 def _gen_system_mfa_factor_activate(config, user_info, session_context=None):
     factor = random.choice(_AUTH_FACTORS)
     return _admin_event(config, "system.mfa.factor.activate",
         f"Admin activated org-wide MFA factor: {factor}",
         target=[{"id": f"mfa-{uuid.uuid4()}", "type": "AuthenticatorEnrollment",
-                 "displayName": factor, "alternateId": factor, "detailEntry": None}])
+                 "displayName": factor, "alternateId": factor, "detailEntry": None}],
+        session_context=session_context)
 
 def _gen_system_mfa_factor_deactivate(config, user_info, session_context=None):
     factor = random.choice(_AUTH_FACTORS)
@@ -4383,7 +4730,9 @@ def _gen_oauth2_token_grant_access(config, user_info, session_context=None):
     client = random.choice(_OAUTH_CLIENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    c      = _build_client(ip_ctx, config, interactive_only=True)
+    c      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.oauth2.as.token.grant.access_token", actor, c,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"OAuth2 access token granted: {client}",
@@ -4398,7 +4747,9 @@ def _gen_oauth2_token_grant_refresh(config, user_info, session_context=None):
     client = random.choice(_OAUTH_CLIENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    c      = _build_client(ip_ctx, config, interactive_only=True)
+    c      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.oauth2.as.token.grant.refresh_token", actor, c,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"OAuth2 refresh token granted: {client}",
@@ -4413,7 +4764,9 @@ def _gen_oauth2_token_grant_id_token(config, user_info, session_context=None):
     client = random.choice(_OAUTH_CLIENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    c      = _build_client(ip_ctx, config, interactive_only=True)
+    c      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.oauth2.as.token.grant.id_token", actor, c,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"OAuth2 id token granted: {client}",
@@ -4431,7 +4784,9 @@ def _gen_oauth2_introspect(config, user_info, session_context=None):
     client = random.choice(_OAUTH_CLIENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    c      = _build_client(ip_ctx, config, interactive_only=False)
+    c      = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.oauth2.as.introspect", actor, c,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"OAuth2 token introspection: {client}",
@@ -4444,7 +4799,9 @@ def _gen_oauth2_token_revoke(config, user_info, session_context=None):
     client = random.choice(_OAUTH_CLIENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    c      = _build_client(ip_ctx, config, interactive_only=True)
+    c      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.oauth2.as.token.revoke", actor, c,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"OAuth2 token revoked: {client}",
@@ -4457,7 +4814,9 @@ def _gen_oauth2_token_detect_reuse(config, user_info, session_context=None):
     client = random.choice(_OAUTH_CLIENTS)
     ip_ctx = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    c      = _build_client(ip_ctx, config, interactive_only=False)
+    c      = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.oauth2.as.token.detect_reuse", actor, c,
         outcome={"result": "FAILURE", "reason": "TOKEN_REUSE_DETECTED"},
         severity="WARN", display_message=f"One-time refresh token reuse detected: {client}",
@@ -4471,7 +4830,9 @@ def _gen_oauth2_signon(config, user_info, session_context=None):
     client = random.choice(_OAUTH_CLIENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    c      = _build_client(ip_ctx, config, interactive_only=True)
+    c      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.oauth2.signon", actor, c,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"User performed OIDC SSO to app: {client}",
@@ -4496,7 +4857,9 @@ def _gen_oauth2_scope_denied(config, user_info, session_context=None):
     scope  = random.choice(scopes)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    c      = _build_client(ip_ctx, config, interactive_only=True)
+    c      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.oauth2.as.authorize.scope_denied", actor, c,
         outcome={"result": "FAILURE", "reason": "SCOPE_DENIED_BY_POLICY"},
         severity="WARN", display_message=f"OAuth2 scope denied: {scope}",
@@ -4508,7 +4871,9 @@ def _gen_oauth2_consent_grant(config, user_info, session_context=None):
     client = random.choice(_OAUTH_CLIENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    c      = _build_client(ip_ctx, config, interactive_only=True)
+    c      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.oauth2.as.consent.grant", actor, c,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"User granted consent to app: {client}",
@@ -4520,7 +4885,9 @@ def _gen_oauth2_consent_revoke(config, user_info, session_context=None):
     client = random.choice(_OAUTH_CLIENTS)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    c      = _build_client(ip_ctx, config, interactive_only=True)
+    c      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.oauth2.as.consent.revoke", actor, c,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"Consent revoked for app: {client}",
@@ -4599,7 +4966,9 @@ def _gen_app_access_request(config, user_info, session_context=None):
     app = _rand_app(config)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.access_request.request", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message=f"User requested access to app: {app}",
@@ -4622,7 +4991,9 @@ def _gen_app_unauth_access_attempt(config, user_info, session_context=None):
     app = _rand_app(config)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     return _assemble("app.generic.unauth_app_access_attempt", actor, client,
         outcome={"result": "FAILURE", "reason": "UNAUTHORIZED"},
         severity="WARN", display_message=f"User attempted unauthorized access to: {app}",
@@ -4638,7 +5009,9 @@ def _generate_rogue_admin_creation(config, user_info, session_context=None):
     print("    - Okta Module generating rogue admin creation sequence...")
     logs, ip_ctx = [], _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     new_username = f"svc.{uuid.uuid4().hex[:8]}@examplecorp.com"
     new_user_id = _stable_user_id(new_username)
@@ -4666,7 +5039,9 @@ def _generate_breached_credential_login(config, user_info, session_context=None)
     logs, ip_ctx = [], _get_random_ip_and_context(config, "tor_exit_nodes")
     actor = _build_actor(user_info["username"], user_info["full_name"])
     sec_ctx = _build_security_context(ip_ctx)
-    c1 = _build_client(ip_ctx, config, interactive_only=False)
+    c1 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("security.breached_credential.detected", actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Breached credential detected for {user_info["username"]}",
@@ -4675,7 +5050,9 @@ def _generate_breached_credential_login(config, user_info, session_context=None)
             "breachReason": "CREDENTIAL_STUFFING", "threatSuspected": "true",
             "risk": "{level=HIGH}"}),
         target=_build_target_user(actor)))
-    c2 = _build_client(ip_ctx, config, interactive_only=False)
+    c2 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     c2["ipAddress"] = ip_ctx.get("ip")
     logs.append(_assemble("user.session.start", actor, c2,
         outcome={"result": "SUCCESS", "reason": None},
@@ -4697,21 +5074,27 @@ def _generate_risk_policy_bypass(config, user_info, session_context=None):
     sec_ctx = _build_security_context(ip_ctx)
     app = random.choice(config.get("okta_config",{}).get("okta_sso_apps",["Salesforce"]))
     reason = random.choice(_RISK_REASONS)
-    c1 = _build_client(ip_ctx, config, interactive_only=False)
+    c1 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.risk.detect", actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"User risk detected: {reason}", security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "riskLevel": "HIGH", "riskReason": reason, "threatSuspected": "true"}),
         target=_build_target_user(actor)))
-    c2 = _build_client(ip_ctx, config, interactive_only=False)
+    c2 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("policy.auth_reevaluate.fail", actor, c2,
         outcome={"result": "DENY", "reason": "POLICY_VIOLATION"}, severity="WARN",
         display_message="Auth policy re-evaluation violation — user should be blocked",
         security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "risk": "{level=HIGH}"})))
-    c3 = _build_client(ip_ctx, config, interactive_only=False)
+    c3 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.authentication.sso", actor, c3,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"SSO succeeded despite risk policy violation — {app}",
@@ -4734,14 +5117,18 @@ def _generate_shadow_idp_attack(config, user_info, session_context=None):
     rogue = f"corp-auth-{uuid.uuid4().hex[:6]}.attacker.io"
     t_idp = [{"id": f"idp-{uuid.uuid4()}", "type": "IdentityProvider",
                "displayName": rogue, "alternateId": rogue, "detailEntry": None}]
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("system.idp.lifecycle.create", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"New identity provider created: {rogue}", security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "risk": "{level=HIGH}"}),
         target=t_idp))
-    c2 = _build_client(ip_ctx, config, interactive_only=True)
+    c2 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.authentication.auth_via_IDP", actor, c2,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"User authed via newly created IDP: {rogue}",
@@ -4762,12 +5149,16 @@ def _generate_universal_logout_bypass(config, user_info, session_context=None):
     actor = _build_actor(user_info["username"], user_info["full_name"])
     sec_ctx = _build_security_context(ip_ctx)
     t_user = _build_target_user(actor)
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.authentication.universal_logout", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Universal Logout triggered for {user_info["username"]}",
         security_context=sec_ctx, debug_context=_build_debug_context("PASSWORD"), target=t_user))
-    c2 = _build_client(ip_ctx, config, interactive_only=False)
+    c2 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     c2["ipAddress"] = ip_ctx.get("ip")
     logs.append(_assemble("user.session.start", actor, c2,
         outcome={"result": "SUCCESS", "reason": None},
@@ -4789,7 +5180,9 @@ def _generate_defense_evasion(config, user_info, session_context=None):
     actor = _build_actor(user_info["username"], user_info["full_name"])
     sec_ctx = _build_security_context(ip_ctx)
     app = random.choice(config.get("okta_config",{}).get("okta_sso_apps",["Salesforce"]))
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("system.log_stream.lifecycle.delete", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message="Log stream deleted — SIEM telemetry removed", security_context=sec_ctx,
@@ -4798,7 +5191,9 @@ def _generate_defense_evasion(config, user_info, session_context=None):
         target=[{"id": f"ls-{uuid.uuid4()}", "type": "LogStream",
                  "displayName": "SIEM Stream", "alternateId": "SIEM Stream", "detailEntry": None}]))
     policy_name = random.choice(["Global Session Policy","MFA Enforcement Policy","Risk-Based Access"])
-    c2 = _build_client(ip_ctx, config, interactive_only=True)
+    c2 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("policy.lifecycle.deactivate", admin_actor, c2,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Security policy deactivated: {policy_name}", security_context=sec_ctx,
@@ -4806,7 +5201,9 @@ def _generate_defense_evasion(config, user_info, session_context=None):
             "risk": "{level=HIGH}"}),
         target=[{"id": f"pol-{uuid.uuid4()}", "type": "Policy",
                  "displayName": policy_name, "alternateId": policy_name, "detailEntry": None}]))
-    c3 = _build_client(ip_ctx, config, interactive_only=False)
+    c3 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.authentication.sso", actor, c3,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"SSO access after defense evasion: {app}",
@@ -4829,7 +5226,9 @@ def _generate_third_party_signal_access(config, user_info, session_context=None)
     provider = random.choice(["CrowdStrike","SentinelOne","Zscaler","Microsoft Defender"])
     detection = random.choice(["RISKY_USER","MALWARE_DETECTED","DEVICE_COMPROMISED","LATERAL_MOVEMENT"])
     admin_actor = _build_admin_actor(config, session_context)
-    c1 = _build_client(ip_ctx, config, interactive_only=False)
+    c1 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("security.events.provider.receive_event", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Security event from {provider}: {detection} for {user_info["username"]}",
@@ -4839,7 +5238,9 @@ def _generate_third_party_signal_access(config, user_info, session_context=None)
             "affectedUser": user_info["username"],
             "risk": "{level=HIGH}"}),
         target=_build_target_user(actor)))
-    c2 = _build_client(ip_ctx, config, interactive_only=True)
+    c2 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.authentication.sso", actor, c2,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"SSO succeeded on compromised account: {app}",
@@ -4860,7 +5261,9 @@ def _generate_dormant_account_reactivation(config, user_info, session_context=No
     actor = _build_actor(user_info["username"], user_info["full_name"])
     sec_ctx = _build_security_context(ip_ctx)
     t_user = _build_target_user(actor)
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.lifecycle.reactivate", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Dormant account reactivated: {user_info["username"]}",
@@ -4870,7 +5273,9 @@ def _generate_dormant_account_reactivation(config, user_info, session_context=No
         target=t_user))
     sensitive_apps = ["AWS Console","Azure Portal","GCP Console","Okta Admin Console","Snowflake","Databricks"]
     for app in random.sample(sensitive_apps, 3):
-        c = _build_client(ip_ctx, config, interactive_only=False)
+        c = _build_client(ip_ctx, config, interactive_only=False,
+            username=(user_info or {}).get('username'),
+            session_context=session_context)
         c["ipAddress"] = ip_ctx.get("ip")
         logs.append(_assemble("user.authentication.sso", actor, c,
             outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
@@ -4895,7 +5300,9 @@ def _generate_oauth_consent_abuse(config, user_info, session_context=None):
                  "displayName": rogue_client, "alternateId": rogue_client, "detailEntry": {"signOnModeType": "OPENID_CONNECT"}}]
     broad_scopes = ["okta.users.manage","okta.apps.manage","okta.groups.manage","okta.policies.manage"]
     admin_actor = _build_admin_actor(config, session_context)
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("app.oauth2.as.consent.grant", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Admin granted broad OAuth consent: {rogue_client}",
@@ -4905,7 +5312,9 @@ def _generate_oauth_consent_abuse(config, user_info, session_context=None):
             "risk": "{level=MEDIUM}"}),
         target=t_client))
     for _ in range(random.randint(4, 7)):
-        c = _build_client(ip_ctx, config, interactive_only=True)
+        c = _build_client(ip_ctx, config, interactive_only=True,
+            username=(user_info or {}).get('username'),
+            session_context=session_context)
         logs.append(_assemble("app.oauth2.as.token.grant.access_token", actor, c,
             outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
             display_message=f"Access token granted to over-permissioned app: {rogue_client}",
@@ -4926,12 +5335,16 @@ def _generate_session_clear_bypass(config, user_info, session_context=None):
     actor = _build_actor(user_info["username"], user_info["full_name"])
     sec_ctx = _build_security_context(ip_ctx)
     t_user = _build_target_user(actor)
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.session.clear", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Admin cleared all sessions for {user_info["username"]}",
         security_context=sec_ctx, debug_context=_build_debug_context("PASSWORD"), target=t_user))
-    c2 = _build_client(ip_ctx, config, interactive_only=False)
+    c2 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     c2["ipAddress"] = ip_ctx.get("ip")
     logs.append(_assemble("user.session.start", actor, c2,
         outcome={"result": "SUCCESS", "reason": None},
@@ -4961,19 +5374,25 @@ def _generate_device_swap_enrollment(config, user_info, session_context=None):
                 "displayName": "Unknown Device",
                 "alternateId": f"serial-{uuid.uuid4().hex[:12].upper()}",
                 "detailEntry": {"platform": "Unknown", "managed": False, "registered": False}}]
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("device.lifecycle.delete", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message="Managed device deleted", security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD"), target=old_dev))
-    c2 = _build_client(ip_ctx, config, interactive_only=False)
+    c2 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("device.enrollment.create", actor, c2,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message="New unmanaged device enrolled", security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "risk": "{level=HIGH}"}),
         target=new_dev + _build_target_user(actor)))
-    c3 = _build_client(ip_ctx, config, interactive_only=False)
+    c3 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.authentication.sso", actor, c3,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"SSO from newly enrolled unmanaged device: {app}",
@@ -4997,13 +5416,17 @@ def _generate_iam_privilege_escalation(config, user_info, session_context=None):
     role_name = f"Escalated-{random.choice(["Security","Compliance","Billing","Platform"])}-Role"
     t_role = [{"id": f"role-{uuid.uuid4()}", "type": "Role",
                "displayName": role_name, "alternateId": role_name, "detailEntry": None}]
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("iam.role.create", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Custom admin role created: {role_name}", security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "risk": "{level=MEDIUM}"}), target=t_role))
-    c2 = _build_client(ip_ctx, config, interactive_only=True)
+    c2 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("iam.resourceset.bindings.add", admin_actor, c2,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Role bound to user: {role_name}",
@@ -5011,7 +5434,9 @@ def _generate_iam_privilege_escalation(config, user_info, session_context=None):
         debug_context=_build_debug_context("PASSWORD", extra={
             "risk": "{level=HIGH}"}),
         target=t_user + t_role))
-    c3 = _build_client(ip_ctx, config, interactive_only=True)
+    c3 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.account.privilege.grant", admin_actor, c3,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Admin privilege granted after IAM escalation: {user_info["username"]}",
@@ -5041,7 +5466,9 @@ def _generate_mfa_downgrade_access(config, user_info, session_context=None):
     t_user = _build_target_user(actor)
 
     # Step 1 — admin deactivates MFA factor for the user
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.mfa.factor.deactivate", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Admin removed MFA factor {factor} for {user_info["username"]}",
@@ -5051,7 +5478,9 @@ def _generate_mfa_downgrade_access(config, user_info, session_context=None):
         target=t_factor + t_user))
 
     # Step 2 — user logs in without MFA from suspicious IP (same session window)
-    c2 = _build_client(ip_ctx, config, interactive_only=False)
+    c2 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     c2["ipAddress"] = ip_ctx.get("ip")
     logs.append(_assemble("user.session.start", actor, c2,
         outcome={"result": "SUCCESS", "reason": None},
@@ -5084,7 +5513,9 @@ def _generate_authenticator_downgrade(config, user_info, session_context=None):
                "displayName": strong_factor, "alternateId": strong_factor, "detailEntry": None}]
 
     # Step 1 — org-wide strong authenticator deactivated
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("system.mfa.factor.deactivate", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Org-wide authenticator deactivated: {strong_factor}",
@@ -5094,7 +5525,9 @@ def _generate_authenticator_downgrade(config, user_info, session_context=None):
         target=t_auth))
 
     # Step 2 — user authenticates with weaker remaining factor
-    c2 = _build_client(ip_ctx, config, interactive_only=False)
+    c2 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.authentication.auth_via_mfa", actor, c2,
         outcome={"result": "SUCCESS", "reason": None},
         severity="WARN", display_message=f"User authenticated with weak factor: {weak_factor}",
@@ -5105,7 +5538,9 @@ def _generate_authenticator_downgrade(config, user_info, session_context=None):
             "risk": "{level=HIGH}"})))
 
     # Step 3 — SSO succeeds with downgraded auth bar
-    c3 = _build_client(ip_ctx, config, interactive_only=False)
+    c3 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.authentication.sso", actor, c3,
         outcome={"result": "SUCCESS", "reason": None},
         severity="WARN", display_message=f"SSO after authenticator downgrade: {app}",
@@ -5135,7 +5570,9 @@ def _generate_api_token_abuse(config, user_info, session_context=None):
                 "displayName": token_name, "alternateId": token_name, "detailEntry": None}]
 
     # Step 1 — API token created
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("system.api_token.create", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"API token created: {token_name}",
@@ -5145,7 +5582,9 @@ def _generate_api_token_abuse(config, user_info, session_context=None):
         target=t_token))
 
     # Step 2 — rate limit violation from same IP (token being hammered)
-    c2 = _build_client(ip_ctx, config, interactive_only=False)
+    c2 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     c2["ipAddress"] = ip_ctx.get("ip")
     logs.append(_assemble("system.org.rate_limit.violation", admin_actor, c2,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
@@ -5175,7 +5614,9 @@ def _generate_zone_bypass_access(config, user_info, session_context=None):
                "displayName": zone_name, "alternateId": zone_name, "detailEntry": None}]
 
     # Step 1 — corporate/blocking zone deleted
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("zone.delete", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"Network zone deleted: {zone_name}",
@@ -5185,7 +5626,9 @@ def _generate_zone_bypass_access(config, user_info, session_context=None):
         target=t_zone))
 
     # Step 2 — SSO now succeeds from IP that would have been restricted
-    c2 = _build_client(ip_ctx, config, interactive_only=False)
+    c2 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     c2["ipAddress"] = ip_ctx.get("ip")
     logs.append(_assemble("user.authentication.sso", actor, c2,
         outcome={"result": "SUCCESS", "reason": None},
@@ -5211,7 +5654,9 @@ def _generate_admin_app_after_compromise(config, user_info, session_context=None
     initial_app = random.choice(config.get("okta_config",{}).get("okta_sso_apps",["Salesforce"]))
 
     # Step 1 — SSO to a normal app from suspicious IP (initial foothold)
-    c1 = _build_client(ip_ctx, config, interactive_only=False)
+    c1 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("user.authentication.sso", actor, c1,
         outcome={"result": "SUCCESS", "reason": None},
         severity="WARN", display_message=f"SSO from suspicious IP: {initial_app}",
@@ -5222,7 +5667,9 @@ def _generate_admin_app_after_compromise(config, user_info, session_context=None
         target=_make_sso_target(initial_app)))
 
     # Step 2 — immediately accesses Okta admin console (privilege escalation)
-    c2 = _build_client(ip_ctx, config, interactive_only=False)
+    c2 = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     c2["ipAddress"] = ip_ctx.get("ip")
     logs.append(_assemble("user.session.access_admin_app", actor, c2,
         outcome={"result": "SUCCESS", "reason": None},
@@ -5253,7 +5700,9 @@ def _generate_rogue_oauth_client_spray(config, user_info, session_context=None):
               "okta.logs.read", "okta.policies.read"]
 
     # Step 1 — rogue OAuth client created
-    c1 = _build_client(ip_ctx, config, interactive_only=True)
+    c1 = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble("app.oauth2.client.lifecycle.create", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
         display_message=f"New OAuth client registered: {rogue_client}",
@@ -5264,7 +5713,9 @@ def _generate_rogue_oauth_client_spray(config, user_info, session_context=None):
 
     # Step 2 — immediate token spray from new client
     for _ in range(random.randint(5, 9)):
-        c = _build_client(ip_ctx, config, interactive_only=True)
+        c = _build_client(ip_ctx, config, interactive_only=True,
+            username=(user_info or {}).get('username'),
+            session_context=session_context)
         logs.append(_assemble("app.oauth2.as.token.grant.access_token", actor, c,
             outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
             display_message=f"Token harvested by newly registered OAuth client: {rogue_client}",
@@ -5301,7 +5752,9 @@ def _generate_sign_on_policy_downgrade(config, user_info, session_context=None):
     # Step 2: login succeeds with only PASSWORD — no MFA factor in the auth chain
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor  = _build_actor(user_info["username"], user_info["full_name"])
-    client = _build_client(ip_ctx, config, interactive_only=True)
+    client = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     logs.append(_assemble(
         "user.session.start", actor, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -5345,7 +5798,9 @@ def _generate_aitm_phishing(config, user_info, session_context=None):
                                {"ip": anon["ip"], "isp": anon["isp"], "asn": anon["asn"],
                                 "domain": anon["domain"], "is_proxy": True})
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     logs.append(_assemble(
         "user.session.start", actor, client,
@@ -5392,7 +5847,9 @@ def _generate_event_hook_deletion(config, user_info, session_context=None):
     # Step 1: delete the outbound event hook
     admin_actor = _build_admin_actor(config, session_context)
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     hook    = random.choice(_HOOK_ENDPOINTS)
     hook_id = f"who{uuid.uuid4().hex[:22]}"
@@ -5434,7 +5891,9 @@ def _generate_malicious_oauth_app_registration(config, user_info, session_contex
     logs = []
     admin_actor = _build_admin_actor(config, session_context)
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     rogue_client = f"corp-{random.choice(['sync','backup','monitor','audit'])}-{uuid.uuid4().hex[:6]}"
     rogue_target = [{"id": _app_instance_id(rogue_client), "type": "AppInstance",
@@ -5630,7 +6089,9 @@ def _generate_ephemeral_account(config, user_info, session_context=None):
     print("    - Okta Module simulating: Ephemeral account (created + deleted < 1 min)")
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx     = _build_security_context(ip_ctx)
     dbg_ctx     = _build_debug_context("PASSWORD")
 
@@ -5672,7 +6133,9 @@ def _generate_lateral_sso_attempts(config, user_info, session_context=None):
     print("    - Okta Module simulating: Lateral SSO attempts (failed logins to multiple unknown apps)")
     ip_ctx  = _get_random_ip_and_context(config, "benign_ingress_sources")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
 
     all_apps = config.get("okta_config", {}).get("okta_sso_apps", [
@@ -5717,7 +6180,9 @@ def _generate_mfa_factor_enroll_attack(config, user_info, session_context=None):
     logs    = []
     ip_ctx  = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=False)
+    client  = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     factor  = random.choice(_WEBAUTHN_FACTORS + ["OIE_OKTA_VERIFY_PUSH", "TOTP"])
 
@@ -5767,7 +6232,9 @@ def _generate_log_stream_evasion(config, user_info, session_context=None):
     logs    = []
     ip_ctx  = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=False)
+    client  = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
 
     # Step 1: admin console access (using stolen/escalated session)
@@ -5825,7 +6292,9 @@ def _generate_radius_brute_force(config, user_info, session_context=None):
     attacker_ctx = {"ip": attacker_ip, "city": None, "country": "RU",
                     "asn": 60729, "isp": "External Attacker", "domain": None, "is_proxy": False}
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(attacker_ctx, config, interactive_only=False)
+    client  = _build_client(attacker_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     client["ipAddress"] = attacker_ip
     sec_ctx = _build_security_context(attacker_ctx)
     app     = random.choice(_RADIUS_APPS)
@@ -5869,7 +6338,9 @@ def _generate_cross_idp_hijack(config, user_info, session_context=None):
     logs    = []
     ip_ctx  = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=False)
+    client  = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
 
     rogue_idp_tlds  = ["attacker.com", "evil-corp.net", "rogue-idp.io",
@@ -5933,7 +6404,9 @@ def _generate_scim_bulk_create(config, user_info, session_context=None):
     }
     # Use a minimal client block (API calls have no real browser/geo context)
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
-    client = _build_client(ip_ctx, config, interactive_only=False)
+    client = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
 
     num_accounts = random.randint(3, 8)
     for i in range(num_accounts):
@@ -5963,7 +6436,9 @@ def _generate_device_assurance_bypass(config, user_info, session_context=None):
     logs    = []
     ip_ctx  = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor   = _build_actor(user_info["username"], user_info["full_name"])
-    client  = _build_client(ip_ctx, config, interactive_only=False)
+    client  = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
     policy  = random.choice(_POLICY_NAMES)
     os_type = random.choice(["Windows", "macOS"])
@@ -6028,7 +6503,9 @@ def _generate_oauth2_token_farm(config, user_info, session_context=None):
     logs       = []
     ip_ctx     = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor      = _build_actor(user_info["username"], user_info["full_name"])
-    client     = _build_client(ip_ctx, config, interactive_only=False)
+    client     = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx    = _build_security_context(ip_ctx)
     oauth_app  = random.choice(_OAUTH_CLIENTS)
     app_target = [{"id": _app_instance_id(oauth_app), "type": "AppInstance",
@@ -6070,7 +6547,9 @@ def _generate_registration_abuse(config, user_info, session_context=None):
     attacker_ip  = random_external_ip(config)
     attacker_ctx = {"ip": attacker_ip, "city": None, "country": "RU",
                     "asn": 60729, "isp": "External Attacker", "domain": None, "is_proxy": False}
-    client  = _build_client(attacker_ctx, config, interactive_only=True)
+    client  = _build_client(attacker_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(attacker_ctx)
 
     num_accounts = random.randint(4, 8)
@@ -6130,7 +6609,9 @@ def _generate_service_account_login_abuse(config, user_info, session_context=Non
     }
     # Attacker uses a browser (not machine UA) — that's the anomaly
     ip_ctx  = _get_random_ip_and_context(config, "tor_exit_nodes")
-    client  = _build_client(ip_ctx, config, interactive_only=True)
+    client  = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx = _build_security_context(ip_ctx)
 
     logs = []
@@ -6175,7 +6656,9 @@ def _generate_bulk_mfa_reset(config, user_info, session_context=None):
     print("    - Okta Module generating bulk MFA reset attack...")
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx     = _build_security_context(ip_ctx)
     dbg_ctx     = _build_debug_context("PASSWORD")
 
@@ -6220,7 +6703,9 @@ def _generate_group_privilege_escalation(config, user_info, session_context=None
     ip_ctx      = _get_random_ip_and_context(config, "benign_ingress_sources")
     admin_actor = _build_admin_actor(config, session_context)
     victim_actor = _build_actor(user_info["username"], user_info["full_name"])
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx     = _build_security_context(ip_ctx)
     dbg_ctx     = _build_debug_context("PASSWORD")
 
@@ -6253,7 +6738,9 @@ def _generate_group_privilege_escalation(config, user_info, session_context=None
     ))
     # Step 3: newly privileged user immediately accesses admin console
     ext_ip_ctx = _get_random_ip_and_context(config, "tor_exit_nodes")
-    victim_client = _build_client(ext_ip_ctx, config, interactive_only=True)
+    victim_client = _build_client(ext_ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     victim_sec    = _build_security_context(ext_ip_ctx)
     logs.append(_assemble(
         "user.session.access_admin_app", victim_actor, victim_client,
@@ -6294,7 +6781,9 @@ def _generate_refresh_token_persistence(config, user_info, session_context=None)
     print("    - Okta Module generating OAuth2 refresh token persistence...")
     ip_ctx   = _get_random_ip_and_context(config, "tor_exit_nodes")
     actor    = _build_actor(user_info["username"], user_info["full_name"])
-    client   = _build_client(ip_ctx, config, interactive_only=False)
+    client   = _build_client(ip_ctx, config, interactive_only=False,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx  = _build_security_context(ip_ctx)
     oauth_client = random.choice(_OAUTH_CLIENTS)
     app_tgt  = [{"id": _app_instance_id(oauth_client), "type": "AppInstance",
@@ -6350,7 +6839,9 @@ def _generate_admin_role_enumeration(config, user_info, session_context=None):
     print("    - Okta Module generating admin IAM role enumeration...")
     ip_ctx      = _get_random_ip_and_context(config, "tor_exit_nodes")
     admin_actor = _build_admin_actor(config, session_context)
-    client      = _build_client(ip_ctx, config, interactive_only=True)
+    client      = _build_client(ip_ctx, config, interactive_only=True,
+        username=(user_info or {}).get('username'),
+        session_context=session_context)
     sec_ctx     = _build_security_context(ip_ctx)
     dbg_ctx     = _build_debug_context("PASSWORD", extra={"threatSuspected": "true"})
 
@@ -6520,10 +7011,74 @@ def _make_threat_dict(config, user_info, session_context):
     }
 
 
+# Threat -> the XSIAM analytics alert it is built to trigger. Only these threats are
+# offered for on-demand firing (dashboard / MCP / CLI, via modules/threat_catalog.py);
+# every threat still runs in long-running sessions. Names are as the tenant raises them
+# where observed, else the published Cortex name. Mapped 2026-09-29 against the Cortex
+# "Okta" and "Okta Audit Log" analytics list and 90 days of tenant alerts.
+ANALYTIC_ALERTS = {
+    # Unmapped (background only): Okta system-log signals with no published analytic --
+    # policy_deny, breached_credential(_login), session_roaming, token_reuse, risk_*,
+    # policy_*, account_lock_limit, unauth_app_access, oauth2_*, app_sign_on_deny,
+    # security_events_provider, idp_delete, admin_privilege_revoke, shadow_idp_attack,
+    # universal_logout_bypass, defense_evasion, third_party_signal_access,
+    # dormant_account_reactivation, oauth_consent_abuse, session_clear_bypass,
+    # rogue_oauth_client_spray, ephemeral_account, lateral_sso_attempts,
+    # log_stream_evasion, radius_brute_force, cross_idp_hijack, scim_bulk_create,
+    # device_assurance_bypass, registration_abuse, group_privilege_escalation,
+    # refresh_token_persistence, sms_otp_bombing, aitm_phishing, event_hook_deletion,
+    # malicious_oauth_app.
+    "brute_force":              "SSO Brute Force",
+    "tor_login":                "A successful SSO sign-in from TOR",
+    "mfa_bombing":              "Multiple Okta MFA requests sent to a user with unusual characteristics",
+    "mfa_bypass":               "A user attempted to bypass Okta MFA",
+    "impersonation":            "Okta User Session Impersonation",
+    "impossible_travel":        "Impossible traveler - SSO",
+    "password_spray":           "SSO Password Spray",
+    "fastpass_phishing":        "Okta FastPass reported phishing attack suspected",
+    "reported_suspicious":      "A user observed and reported unusual activity in Okta",
+    "threat_detected":          "Okta Reported Threat Detected",
+    "mfa_reset":                "A user modified an Okta MFA factor",
+    "sso_brute_force":          "SSO Brute Force",
+    "intense_sso_failures":     "Intense SSO failures",
+    "sso_password_spray":       "SSO Password Spray",
+    "ip_rotation_sso":          "IP Rotation Pattern in SSO Spray",
+    "sso_rejected_country":     "A user rejected an SSO request from an unusual country",
+    "sso_impossible_travel":    "Impossible traveler - SSO",
+    "sso_possible_imp_travel":  "Possible Impossible Travel Pattern - SSO",
+    "sso_tor":                  "A successful SSO sign-in from TOR",
+    "sso_suspicious_country":   "User attempted to connect from a suspicious country",
+    "sso_suspicious_asn":       "Suspicious SSO access from ASN",
+    "sso_abnormal_ua":          "SSO with abnormal user agent",
+    "sso_suspicious_auth":      "Suspicious SSO authentication",
+    "sso_multi_unusual":        "A user accessed multiple unusual resources via SSO",
+    "honey_auth":               "Authentication attempt by a honey user",
+    "honey_sso":                "SSO authentication attempt by a honey user",
+    "attack_start":             "Okta Reported Attack Suspected",
+    "zone_blacklist":           "A user modified an Okta network zone",
+    "iam_binding_add":          "Okta admin privilege assignment",
+    "rogue_admin_creation":     "Okta admin privilege assignment",
+    "device_swap_enrollment":   "User added a new device to Okta Verify instance",
+    "iam_privilege_escalation": "Okta admin privilege assignment",
+    "mfa_downgrade_access":     "A user modified an Okta MFA factor",
+    "authenticator_downgrade":  "A user modified an Okta MFA factor",
+    "api_token_abuse":          "Okta API Token Created",
+    "tor_zone_bypass_access":   "A user modified an Okta network zone",
+    "tor_admin_app_pivot":      "A user accessed Okta's admin application",
+    "mfa_enroll_attack":        "A user modified an Okta MFA factor",
+    "service_account_login_abuse": "SSO authentication by a service account",
+    "bulk_mfa_reset":           "A user modified an Okta MFA factor",
+    "admin_role_enumeration":   "Okta admin privilege assignment",
+    "sign_on_policy_downgrade": "A user modified an Okta policy rule",
+}
+
 def get_threat_names():
     """Return available threat names dynamically from _make_threat_dict.
     Adding a new entry to _make_threat_dict automatically surfaces it here."""
     return list(_make_threat_dict({}, {"username": "", "full_name": ""}, None).keys())
+
+
+_THREAT_KEYS = get_threat_names()
 
 
 def _generate_threat_log(config, session_context=None, forced_event=None, forced_user=None):
@@ -6533,9 +7088,21 @@ def _generate_threat_log(config, session_context=None, forced_event=None, forced
     lets a scenario thread one consistent victim across multiple Okta steps.
     """
     user_info = forced_user or _get_random_user_info(config, session_context)
-    threats   = _make_threat_dict(config, user_info, session_context)
-    label = forced_event if (forced_event and forced_event in threats) else random.choice(list(threats.keys()))
-    return (threats[label](), label)
+    label = (forced_event if (forced_event and forced_event in _THREAT_KEYS)
+             else random.choice(_THREAT_KEYS))
+    allow_tor = label in _TOR_THREATS
+    if allow_tor and not forced_user:
+        # A Tor sign-in is only anomalous for a user who has not had one before.
+        user_info = _fresh_tor_user(session_context) or user_info
+    threats = _make_threat_dict(config, user_info, session_context)
+    _THREAT_STATE.allow_tor = allow_tor
+    try:
+        result = threats[label]()
+    finally:
+        _THREAT_STATE.allow_tor = False
+    if allow_tor and user_info.get("username"):
+        _TOR_HISTORY.add(user_info["username"])
+    return (result, label)
 
 
 # --- SCENARIO SUPPORT ---
@@ -6620,8 +7187,12 @@ def generate_log(config, scenario=None, threat_level="Realistic",
             # Treat any other scenario_event as a named internal threat. Pass the
             # resolved (context-aware) user_info so the threat targets the scenario
             # victim instead of picking a fresh random user.
+            # Pin the user only when the caller named one (a scenario's victim). An
+            # unpinned threat lets _generate_threat_log choose -- for a Tor threat that
+            # means a user with no Tor history, so the sign-in stays anomalous.
+            pinned = user_info if (context and "user" in context) else None
             return _generate_threat_log(config, session_context,
-                                        forced_event=scenario_event, forced_user=user_info)
+                                        forced_event=scenario_event, forced_user=pinned)
 
     if benign_only:
         result = _generate_background_log(config, session_context)
@@ -6640,5 +7211,9 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         last_threat_event_time = current_time
         return _generate_threat_log(config, session_context)  # (content, label) tuple — return directly
 
-    result = _generate_background_log(config)
+    # session_context MUST be passed: without it every background event falls back to
+    # the placeholder identities default.user / admin.user. Measured 2026-10-02: 98% of
+    # all okta_sso_raw events were those two users, so Okta's per-user analytics had no
+    # real users to baseline. This line dropped the context since the initial import.
+    result = _generate_background_log(config, session_context)
     return result if isinstance(result, list) else [result]
