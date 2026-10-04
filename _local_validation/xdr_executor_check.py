@@ -6,9 +6,9 @@ Default (live) mode runs only NON-EXECUTING Atomic actions against the box —
 path end to end. It never runs a technique unless you pass --execute with an
 explicit --technique/--test, so the harness is safe to run casually.
 
-    python tests/xdr_executor_check.py                 # dry-run + live non-exec checks
-    python tests/xdr_executor_check.py --dry-run-only   # no box needed
-    python tests/xdr_executor_check.py --technique T1082 --test 1 --execute   # FIRES it (opt-in)
+    python _local_validation/xdr_executor_check.py                 # dry-run + live non-exec checks
+    python _local_validation/xdr_executor_check.py --dry-run-only   # no box needed
+    python _local_validation/xdr_executor_check.py --technique T1082 --test 1 --execute   # FIRES it (opt-in)
 """
 import argparse
 import json

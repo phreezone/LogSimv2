@@ -15,7 +15,7 @@ it as normal. Rarity has to come from CARDINALITY. This asserts:
 
 Needs network on the first run (tranco-list.eu); later runs use domain_cache/.
 
-Run:  python tests/domain_corpus_check.py
+Run:  python _local_validation/domain_corpus_check.py
 """
 
 import collections
@@ -157,7 +157,10 @@ def zscaler_web(cfg):
             zs._generate_benign_web_traffic(cfg, "a.tucker", "Finance", "10.0.0.5", dev)
     finally:
         zs._format_nss_log_as_cef = orig
-    named = {d.get("name", "").replace(" ", "").lower()
+    # Curated sites emit their real `domain` FQDN as ehost (2026-09-18 label fix);
+    # older configs without a domain fall back to the slugified name. Mirror the
+    # generator so only the genuine long-tail (real corpus domains) lands in `tail`.
+    named = {(d.get("domain") or d.get("name", "").replace(" ", "").lower())
              for d in cfg["zscaler_config"]["benign_egress_destinations"]}
     tail = [f for f in captured if f["ehost"] not in named]
     share = len(tail) / len(captured)
