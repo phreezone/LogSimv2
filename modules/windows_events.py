@@ -1192,6 +1192,26 @@ _SYNTH_DOMAIN_SID = "S-1-5-21-3457937927-2839227994-823803824"
 _LSASS_PID_HEX = "0x248"
 _LSASS_PID_DEC = str(int(_LSASS_PID_HEX, 16))     # 584
 
+
+def _lsass_pid(computer):
+    """LSASS's PID on this host, as (hex, decimal).
+
+    One PID per host for the life of its boot -- that part of the original pinning
+    was right -- but it was pinned GLOBALLY, so all 500+ hosts in the estate reported
+    lsass at 584 across every one of ~25,000 Security events. A real fleet has a
+    different PID per machine, assigned at boot, and anything reasoning about process
+    identity saw a single value.
+
+    Derived from the computer name so it is stable for that host across restarts, the
+    same guarantee the global constant gave. Windows hands out PIDs in multiples of
+    four, and lsass starts early, so the realistic range is a few hundred to ~1500.
+    """
+    if not computer:
+        return _LSASS_PID_HEX, _LSASS_PID_DEC
+    digest = hashlib.sha256(f"lsass:{str(computer).lower()}".encode()).digest()
+    pid = 500 + (int.from_bytes(digest[:4], "big") % 250) * 4     # 500..1496, x4
+    return hex(pid), str(pid)
+
 _LOGON_PROCESSES_BY_TYPE = {
     "interactive": [("0x1d4", "C:\\Windows\\System32\\winlogon.exe"),
                     ("0xb44", "C:\\Windows\\System32\\svchost.exe")],
@@ -1589,9 +1609,19 @@ def _build_event(event_id: int, computer: str, event_data: dict,
 
     ed_clean = {k: v for k, v in event_data.items() if v is not None}
 
-    # LSASS has one PID for the life of the boot; only the thread varies.
-    proc_pid = _LSASS_PID_DEC                      # stable: LSASS wrote this record
+    # LSASS has one PID for the life of the boot; only the thread varies. Per HOST,
+    # though -- see _lsass_pid.
+    _pid_hex, proc_pid = _lsass_pid(computer)      # stable: LSASS wrote this record
     proc_tid = str(random.randint(500, 15000))     # varies: LSASS is multithreaded
+
+    # Keep the invariant the original global pin existed to guarantee: when the
+    # logon-requesting process in EventData IS lsass, its ProcessId must be the same
+    # PID this record reports in <Execution ProcessID>, and one PID must never name
+    # two executables. Enforced here, the single place that knows both the host and
+    # the event data, rather than at each of the three tables that emit an lsass PID.
+    _pname = str(ed_clean.get("ProcessName", ""))
+    if _pname.lower().endswith("lsass.exe") and ed_clean.get("ProcessId"):
+        ed_clean["ProcessId"] = _pid_hex
 
     # The process that generates Security Auditing events is lsass.exe
     lsass_path = "C:\\Windows\\System32\\lsass.exe"
@@ -1683,8 +1713,9 @@ def _render_event_xml(event: dict) -> str:
     SE(system, "EventID").text = str(event.get("event_id", "0"))
     SE(system, "Version").text = str(event.get("version", "0"))
 
-    # Level: 0 for audit events (both success and failure)
-    SE(system, "Level").text = "0"
+    # Level: 0 for audit events (both success and failure). Non-Security channels
+    # (e.g. PowerShell/Operational 4104 = Verbose, 5) pass their own "level_num".
+    SE(system, "Level").text = str(event.get("level_num", "0"))
 
     SE(system, "Task").text = str(event.get("task", "0"))
     SE(system, "Opcode").text = str(event.get("op_code", "0"))
@@ -1708,7 +1739,13 @@ def _render_event_xml(event: dict) -> str:
 
     SE(system, "Channel").text = event.get("channel", "Security")
     SE(system, "Computer").text = event.get("computer_name", "")
-    SE(system, "Security")
+    # Security-channel audit events carry no UserID here on real Windows (the user is in
+    # EventData), so the element stays empty by default. Operational channels such as
+    # PowerShell/Operational 4104 do record the running user's SID; a record supplies it
+    # as "security_user_id".
+    sec = SE(system, "Security")
+    if event.get("security_user_id"):
+        sec.set("UserID", str(event["security_user_id"]))
 
     # -- <EventData> --
     ed = event.get("event_data", {})
@@ -1725,14 +1762,20 @@ def _render_event_xml(event: dict) -> str:
         ri = SE(root, "RenderingInfo")
         ri.set("Culture", "en-US")
         SE(ri, "Message").text = msg
-        SE(ri, "Level").text = "Information"
+        SE(ri, "Level").text = event.get("log_level", "Information")
         SE(ri, "Task").text = event.get("event_action", "")
         SE(ri, "Opcode").text = event.get("opcode", "Info")
         SE(ri, "Channel").text = event.get("channel", "Security")
-        SE(ri, "Provider").text = "Microsoft Windows security auditing."
+        SE(ri, "Provider").text = event.get("rendering_provider",
+                                            "Microsoft Windows security auditing.")
         kw_el = SE(ri, "Keywords")
-        kw_text = "Audit Success" if event.get("event_result") == "success" else "Audit Failure"
-        SE(kw_el, "Keyword").text = kw_text
+        # Security events are audit success/failure; other channels (PowerShell) carry
+        # no audit keyword, signalled by "rendering_keyword": None.
+        kw_text = event.get("rendering_keyword",
+                            "Audit Success" if event.get("event_result") == "success"
+                            else "Audit Failure")
+        if kw_text:
+            SE(kw_el, "Keyword").text = kw_text
 
     xml_str = _etree.tostring(root, encoding="unicode", xml_declaration=False)
     xml_str = re.sub(r'="([^"]*)"', lambda m: "='" + m.group(1) + "'", xml_str)
@@ -6129,7 +6172,7 @@ def _threat_new_machine_delegation(config, session_context):
     Which event carries the signal matters. delegation_change corroborates with 5136
     (msDS-AllowedToDelegateTo, userAccountControl) but the event XSIAM actually consumes is
     the 4738 that carries AllowedToDelegateTo. 5136 is not in XSIAM's Windows analytics
-    intake, so a 5136-only sequence is invisible — that is exactly why wip_dmsa_privesc sat
+    intake, so a 5136-only sequence is invisible — that is exactly why dmsa_privesc sat
     silent until a 4662 was added. For a machine the 4738 equivalent is 4742, which has its
     own AllowedToDelegateTo field, so the delegation is expressed there.
 
@@ -7342,12 +7385,21 @@ def _threat_default_account_enabled(config, session_context):
     return events
 
 
+# Threats renamed once their detection was confirmed firing in the tenant: the wip_
+# ("work in progress") prefix marked a generator whose detection had not yet been
+# seen. The old names still dispatch, so saved scenarios and MCP callers keep working.
+_RENAMED_THREATS = {
+    "WIP_AS_REP_ROASTING":          "AS_REP_ROASTING",           # fired 2026-07-30
+    "WIP_DMSA_PRIVESC":             "DMSA_PRIVESC",              # fired 2026-09-19
+    "WIP_SENSITIVE_PASSWORD_RESET": "SENSITIVE_PASSWORD_RESET",  # fired 2026-09-28
+}
+
 _THREAT_WEIGHTS = {
-    "wip_as_rep_roasting":         8,
+    "as_rep_roasting":         8,
     "account_lockout":             5,
     "suspicious_account_lockout":  4,
     "dcsync":                      4,
-    "wip_dmsa_privesc":            3,
+    "dmsa_privesc":            3,
     "priv_group_addition":         5,
     "machine_account_to_domain_admins": 3,
     "wip_adminsdholder_acl_modification": 3,
@@ -7365,7 +7417,7 @@ _THREAT_WEIGHTS = {
     "wip_priv_cert_request":       3,
     "suspicious_account_creation": 5,
     "mass_account_deletion":       4,
-    "wip_sensitive_password_reset": 4,
+    "sensitive_password_reset": 4,
     "wip_password_never_expires":  3,
     "default_account_enabled":     3,
     # LSASS handle access is a high-signal credential-dumping path, so it is
@@ -7375,11 +7427,11 @@ _THREAT_WEIGHTS = {
 }
 
 _THREAT_GENERATORS = {
-    "wip_as_rep_roasting":             _threat_as_rep_roasting,
+    "as_rep_roasting":             _threat_as_rep_roasting,
     "account_lockout":                  _threat_account_lockout,
     "suspicious_account_lockout":       _threat_suspicious_account_lockout,
     "dcsync":                           _threat_dcsync,
-    "wip_dmsa_privesc":                 _threat_dmsa_privesc,
+    "dmsa_privesc":                 _threat_dmsa_privesc,
     "priv_group_addition":              _threat_priv_group_addition,
     "machine_account_to_domain_admins": _threat_machine_account_to_domain_admins,
     "wip_adminsdholder_acl_modification": _threat_adminsdholder_acl_modification,
@@ -7397,13 +7449,60 @@ _THREAT_GENERATORS = {
     "wip_priv_cert_request":            _threat_priv_cert_request,
     "suspicious_account_creation":      _threat_suspicious_account_creation,
     "mass_account_deletion":            _threat_mass_account_deletion,
-    "wip_sensitive_password_reset":     _threat_sensitive_password_reset,
+    "sensitive_password_reset":     _threat_sensitive_password_reset,
     "wip_password_never_expires":       _threat_password_never_expires,
     "default_account_enabled":          _threat_default_account_enabled,
     "lsass_handle_access":              _threat_lsass_handle_access,
     "account_access_removal":           _threat_account_access_removal,
 }
 
+
+# Threat -> the XSIAM analytics alert it is built to trigger. Only these threats are
+# offered for on-demand firing (dashboard / MCP / CLI, via modules/threat_catalog.py);
+# every threat still runs in long-running sessions. Names are as the tenant raises them
+# where observed, else the published Cortex name. Mapped 2026-09-29 against the Cortex
+# "Windows Event Collector" analytics list and 90 days of tenant alerts.
+ANALYTIC_ALERTS = {
+    # Unmapped (background only): lsass_handle_access and account_access_removal (no
+    # Windows Event Collector analytic; LSASS access is an XDR-agent detection), and
+    # wip_irregular_service_tgs -- it only ever raises the weak-encryption alert that
+    # multiple_service_tickets owns; irregular_tgt_burst covers its intended target.
+    "as_rep_roasting":             "An excessive number of TGT requests were sent for users that do not require Kerberos pre-authentication",
+    "account_lockout":             "Multiple user accounts failed login due to account lockouts",
+    "suspicious_account_lockout":  "Excessive account lockouts on suspicious users",
+    "dcsync":                      "Possible DCSync by an unusual user",
+    "dmsa_privesc":                "Possible Privilege Escalation using Delegated MSA account attempt",
+    "priv_group_addition":         "User added to a Windows privileged group",
+    "machine_account_to_domain_admins": "Machine account was added to a domain admins group",
+    "wip_adminsdholder_acl_modification": "Suspicious modification of the AdminSDHolder's ACL",
+    "irregular_tgt_burst":         "A user sent an excessive number of TGT requests to irregular services",
+    "sms_admins_addition":         "User added to the SMS Admins local group",
+    "sms_admins_add_remove":       "User added to the SMS Admins group and removed",
+    "wip_sccm_container_recon":    "Suspicious access of the System Management Container",
+    "dnshostname_spoofing":        "Suspicious dNSHostName attribute change to DC name",
+    "samaccountname_spoofing":     "Service ticket request with a spoofed sAMAccountName",
+    "delegation_change":           "User account delegation to KRBTGT",
+    "new_machine_delegation":      "A new machine attempted Kerberos delegation",
+    "multiple_service_tickets":    "Abnormal issuance of weakly encrypted service tickets to a user",
+    "priv_group_add_remove":       "Rare privileged group addition and removal",
+    "wip_priv_cert_request":       "Privileged certificate request via certificate template",
+    "suspicious_account_creation": "Suspicious hidden user created",
+    "mass_account_deletion":       "A user deleted multiple users for the first time",
+    "sensitive_password_reset":    "Sensitive account password reset attempt for the first time",
+    "wip_password_never_expires":  "A user account was modified to password never expires",
+    "default_account_enabled":     "A user enabled the Windows DefaultAccount",
+}
+
+# Further analytics a threat's events are built to satisfy, beyond its ANALYTIC_ALERTS
+# entry. Coverage reporting reads these (the on-demand label uses the primary only).
+ANALYTIC_ALERTS_SECONDARY = {
+    "suspicious_account_creation": [
+        "Short-lived user account",                         # 1-3 of the accounts deleted
+        "Multiple suspicious user accounts were created",
+        "Suspicious domain user account creation",
+        "Local user account creation",
+    ],
+}
 
 def get_threat_names():
     """Expose named threats to the dashboard / CLI 'fire threat' mode."""
@@ -7450,6 +7549,7 @@ def _generate_scenario_event(scenario_event, config, context):
         return None
 
     ev = scenario_event.upper()
+    ev = _RENAMED_THREATS.get(ev, ev)
     if ev in ("LOGIN", "LOGIN_SUCCESS"):
         return json.dumps(_build_4624(user, config, logon_type=2, auth_pkg=_NEG_PACKAGE)), "login_success"
     if ev in ("NETWORK_LOGON", "WORKSTATION_LOGON"):
@@ -7523,11 +7623,11 @@ def _generate_scenario_event(scenario_event, config, context):
                 "object_access")
     # Dispatch to named threat generators
     _threat_dispatch = {
-        "WIP_AS_REP_ROASTING":             _threat_as_rep_roasting,
+        "AS_REP_ROASTING":             _threat_as_rep_roasting,
         "ACCOUNT_LOCKOUT":                  _threat_account_lockout,
         "SUSPICIOUS_ACCOUNT_LOCKOUT":       _threat_suspicious_account_lockout,
         "DCSYNC":                           _threat_dcsync,
-        "WIP_DMSA_PRIVESC":                 _threat_dmsa_privesc,
+        "DMSA_PRIVESC":                 _threat_dmsa_privesc,
         "PRIV_GROUP_ADDITION":              _threat_priv_group_addition,
         "MACHINE_ACCOUNT_TO_DOMAIN_ADMINS": _threat_machine_account_to_domain_admins,
         "WIP_ADMINSDHOLDER_ACL_MODIFICATION": _threat_adminsdholder_acl_modification,
@@ -7545,7 +7645,7 @@ def _generate_scenario_event(scenario_event, config, context):
         "WIP_PRIV_CERT_REQUEST":            _threat_priv_cert_request,
         "SUSPICIOUS_ACCOUNT_CREATION":      _threat_suspicious_account_creation,
         "MASS_ACCOUNT_DELETION":            _threat_mass_account_deletion,
-        "WIP_SENSITIVE_PASSWORD_RESET":     _threat_sensitive_password_reset,
+        "SENSITIVE_PASSWORD_RESET":     _threat_sensitive_password_reset,
         "WIP_PASSWORD_NEVER_EXPIRES":       _threat_password_never_expires,
         "DEFAULT_ACCOUNT_ENABLED":          _threat_default_account_enabled,
         "LSASS_HANDLE_ACCESS":              _threat_lsass_handle_access,
