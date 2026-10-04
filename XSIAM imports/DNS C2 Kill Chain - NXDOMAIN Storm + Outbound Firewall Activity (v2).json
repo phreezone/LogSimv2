@@ -1,0 +1,42 @@
+[
+ {
+  "name": "DNS C2 Kill Chain — NXDOMAIN Storm + Outbound Firewall Activity (v2)",
+  "alert_name": "DNS C2 Kill Chain — NXDOMAIN Storm + Outbound Firewall Activity (v2)",
+  "description": "Internal host with >=20 NXDOMAIN DNS responses in an hour that also opened outbound TCP sessions through the ASA in the same window - DGA cycling followed by successful egress. Replaces the original, which errored every run (suppression named a column its fields stage dropped) and filtered ASA dst_interface = \"inside\", i.e. inbound traffic, joined against the wrong end of the connection.",
+  "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\" and xdm.event.outcome_reason = \"NXDOMAIN\"\n| filter xdm.source.ipv4 != null\n| bin _time span = 60m\n| comp count() as nxd_count by xdm.source.ipv4, _time\n| filter nxd_count >= 20\n| join type = inner (\n    dataset = cisco_asa_raw\n    | alter src_if   = _json -> generalCiscoLog.src_interface,\n            dst_if   = _json -> generalCiscoLog.dst_interface,\n            int_host = _json -> generalCiscoLog.src_ip,\n            ext_host = _json -> generalCiscoLog.dst_ip\n    | filter _raw_log contains \"302014\" and src_if = \"inside\" and dst_if = \"outside\"\n    | comp count() as outbound_sessions, count_distinct(ext_host) as ext_peers by int_host\n    | filter outbound_sessions >= 1\n  ) as fw xdm.source.ipv4 = fw.int_host\n| alter client_ip = xdm.source.ipv4\n| fields client_ip, nxd_count, outbound_sessions, ext_peers\n",
+  "severity": "SEV_050_CRITICAL",
+  "alert_category": "INFILTRATION",
+  "mitre_defs": {
+   "TA0011 - Command and Control": [
+    "T1568.002 - Dynamic Resolution: Domain Generation Algorithms",
+    "T1071.004 - Application Layer Protocol: DNS"
+   ]
+  },
+  "alert_fields": {
+   "action_local_ip": "client_ip"
+  },
+  "search_window": "1 hours",
+  "suppression_duration": "2 hours",
+  "suppression_fields": [
+   "client_ip"
+  ],
+  "is_enabled": true,
+  "alert_type": null,
+  "alert_description": null,
+  "alert_domain": "DOMAIN_SECURITY",
+  "dataset": "alerts",
+  "user_defined_severity": null,
+  "user_defined_category": null,
+  "investigation_query_link": "",
+  "drilldown_query_timeframe": "ALERT",
+  "mapping_strategy": "CUSTOM",
+  "action": "ALERTS",
+  "lookup_mapping": [],
+  "execution_mode": "SCHEDULED",
+  "simple_schedule": "10 minutes",
+  "crontab": "*/10 * * * *",
+  "timezone": "America/New_York",
+  "suppression_enabled": true,
+  "rule_id": 1679
+ }
+]
