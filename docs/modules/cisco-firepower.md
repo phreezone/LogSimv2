@@ -92,7 +92,7 @@ The **effective** weights are those in `config.json` → `firepower_config.event
 | `rare_ssh` | Suspicious Activity | Outbound SSH to a rare (first-seen) external IP. Conversation-complete: DNS resolution precedes the session. XSIAM alert: **Uncommon SSH session was established**. Returns list. | `_syslog_id=430002`, `act=Allow`, `app=SSH`, `dpt=22`, `dhost=ssh-<ip>.example.net`, `duration=30s–10min`, preceded by a DNS precursor log | 3 |
 | `smtp_spray` | Spam Bot / Malware | Compromised workstation acting as a spam bot — 30–50 short SMTP sessions to **distinct external** IPs on `25`/`587`. Workstations never connect directly to external MX in normal operation. XSIAM alert: **Spam Bot Traffic**. Returns list. | `_syslog_id=430002`, `act=Allow`, `app=SMTP`, `dpt=25` (70%) / `587` (30%), 30–50 distinct `dst`, `bytesOut=2–50 KB`, `bytesIn=200–2000`, `duration=1–30s` | 3 |
 | `smtp_large_exfil` | Data Exfiltration | Exfiltration via oversized email attachment — one long SMTP session carrying 100–500 MB outbound to a real MX range (normal attachments rarely exceed 25 MB). Conversation-complete: DNS MX lookup precedes the session. XSIAM alert: **Large Upload (SMTP)**. Returns list. | `_syslog_id=430002`, `app=SMTP`, `dpt=587` (80%) / `25` (20%), `dhost∈{smtp.gmail.com, smtp.outlook.com, smtp.mail.yahoo.com, smtp.protonmail.ch, mail.external-partner.com}`, `bytesOut=100–500 MB`, `duration=5–20min` | 2 |
-| `ftp_large_exfil` | Data Exfiltration | Exfiltration via outbound FTP from an internal workstation — one long session with 100–500 MB outbound. FTP is rare in modern enterprises, so this volume is a strong signal. Conversation-complete: DNS resolution precedes the session. XSIAM alert: **New FTP Server**. Returns list. | `_syslog_id=430002`, `app=FTP`, `dhost=ftp-<ip>.example.net`, `bytesOut=100–500 MB`, `bytesIn=500–10000`, `duration=5–30min`, preceded by a DNS precursor log | 2 |
+| `ftp_large_exfil` | Data Exfiltration | Exfiltration via outbound FTP from an internal workstation — one long session with 100–500 MB outbound. FTP is rare in modern enterprises, so this volume is a strong signal. Conversation-complete: DNS resolution precedes the session. XSIAM alert: **Large Upload (FTP)** (observed firing from Firepower data 2026-09-25). Returns list. | `_syslog_id=430002`, `app=FTP`, `dhost=ftp-<ip>.example.net`, `bytesOut=100–500 MB`, `bytesIn=500–10000`, `duration=5–30min`, preceded by a DNS precursor log | 2 |
 | `ddns_connection` | C2 Infrastructure | Internal workstation connecting to a known **dynamic DNS** domain — DDNS is commonly used for cheap C2. Two logs: the DNS query resolving the DDNS hostname, then an HTTPS session to the resolved IP. XSIAM alert: **Recurring rare domain access to dynamic DNS domain**. Returns list. | `_syslog_id=430002`, DNS query then `dpt=443`, `dhost=<subdomain>.<provider>` where provider ∈ {duckdns.org, no-ip.com, dynu.com, afraid.org, hopto.org, zapto.org, sytes.net, ddns.net, servebeer.com, myftp.biz, myvnc.com, redirectme.net} | 3 |
 | `large_download` | Data Transfer Anomaly | Large **inbound** transfer — flips the byte direction of `large_file_upload` (huge `bytesIn`, small `bytesOut`). DNS precursor then a 500 MB–4 GB download from a file-sharing CDN. XSIAM alert: **Large Download**. Returns list. | `_syslog_id=430002`, `act=Allow`, `app=SSL`, `dpt=443`, `dhost=cdn.<file_sharing_domain>`, `requestMethod=GET`, `bytesIn=500 MB–4 GB`, `bytesOut=2–40 KB`, `cs5=File Sharing`, `duration=1–15min` | 3 |
 | `dns_tunneling` | C2 / DNS Tunneling | High-volume DNS with long, high-entropy **encoded labels** to one resolver — data-in-DNS exfil. Distinct from `dns_c2_beacon` (recurrence-only): here the signal is qname **length + entropy + query volume**. 40–90 queries; resolver and tunnel domain are **stable per source** via `_dns_tunnel_target_map`. XSIAM alert: **DNS Tunneling**. Returns list. | `_syslog_id=430002`, `app=DNS`, `proto=17`, `dpt=53`, `destinationDnsDomain=<b32(32–48)>.<b32(16–32)>.<tunnel_domain>` (genuine FTD DNS field → `dnsQuery.data`), tunnel domains from `firepower_config.dns_tunnel_domains` | 3 |
@@ -101,7 +101,9 @@ The **effective** weights are those in `config.json` → `firepower_config.event
 
 ### Non-Analytic events (no built-in XSIAM detection)
 
-The module's `_DEFAULT_THREAT_EVENTS` catalog marks these `analytic: False` — they are realistic and parseable but have **no native XSIAM 3rd-party-firewall analytic**, so the dashboard surfaces them with a **`[Non-Analytic] `** prefix. They are intended for XQL hunting and custom correlation rules. Among the rows already listed above, `ips`, `malware`, `url_filtering`, `security_intel`, `brute_force`, `ssh_over_https`, and `internal_smb` are also `analytic: False` (their detections come from other data sources — XDR Agent, Identity, etc.).
+> **2026-09-17 rebuild:** every event formerly in this section was re-examined against the Cortex Analytics Alert Reference and live tenant data. Several were rebuilt toward real detectors, new correctly shaped successors were added, and the ones still Non-Analytic now carry the measured reason. **Rebuilt: vpn_brute_force, vpn_impossible_travel, ssh_over_https, internal_smb. New: torrent_client.** The per-event verdicts and the cross-module root causes (bare VPN usernames, truthful country labels, rare/recurring destination pools, success-based impossible travel) are in [../firewall-analytics.md](../firewall-analytics.md). Where this page disagrees, that document is current.
+
+The module's `_DEFAULT_THREAT_EVENTS` catalog marks these `analytic: False` — they are realistic and parseable but have **no native XSIAM 3rd-party-firewall analytic**, so they run only in long-running sessions and are not offered for on-demand firing. They are intended for XQL hunting and custom correlation rules. Among the rows already listed above, `ips`, `malware`, `url_filtering`, `security_intel`, `brute_force`, `ssh_over_https`, and `internal_smb` are also `analytic: False` (their detections come from other data sources — XDR Agent, Identity, etc.).
 
 | Threat Key | Purpose | Syslog ID / Key Fields | Weight |
 |---|---|---|---|
@@ -109,3 +111,26 @@ The module's `_DEFAULT_THREAT_EVENTS` catalog marks these `analytic: False` — 
 | `vpn_impossible_travel` | Same user authenticating from two impossibly-distant geos. Each location emits several **FAILED** auth events then a **SUCCESS** — the UEBA impossible-travel detector keys on a fail→success (compromised-credential) pattern, not on bare successful logins. Legitimate location back-dated 5–10 min; `rt`/`start` carry the gap. IPs from `impossible_travel_scenario`. Returns list. | `_syslog_id=430002`, `dpt=443`, `outcome=FAILURE` ×N then `outcome=SUCCESS`, per geo; `benign_ip` (default `68.185.12.14`) then `suspicious_ip` (default `175.45.176.10`), 5–10 min apart | 3 |
 | `app_control` | Application Control block — DPI identifies and blocks prohibited apps regardless of port (P2P, anonymizers, remote access, gaming). | `_syslog_id=430002`, `act=Block`, app ∈ {BitTorrent/6881, Tor Browser/9001, TeamViewer/5938, Skype/443, Dropbox/443, WhatsApp/443, uTorrent/6881, Freenet/9481, I2P/4444, Steam/27036, Psiphon/443, Remote Desktop/3389} with its category | 4 |
 | `network_anomaly` | Network-level anomaly / DoS drop by the FTD network-analysis engine, before the application layer — protocol anomalies, malformed packets, volume attacks. | `_syslog_id=430002`, protection ∈ {SYN Flood, IP Spoofing, TCP NULL Scan, FIN Scan, Xmas Scan, DNS Protocol Anomaly, HTTP Protocol Anomaly, ICMP Flood, Fragmentation Attack, Connection Rate Limit}, `proto=6/17/1`, `src=external`, `dst=internal_server` | 4 |
+
+## Generated Values
+
+See [value-cardinality.md](../value-cardinality.md) for the full reasoning.
+
+- **Malicious DNS domains** were **three** fixed entries, so every AMP and
+  security-intelligence event in a run named one of three hosts. Now generated, with the
+  family token preserved (`malware-distro-*` for delivery, `command-control-*` for
+  callbacks).
+- **Malware file identity** was six fixed dicts. `fname`, `fileType` and `threatname` are
+  now generated together, and the AV detection name's prefix matches the file type —
+  `JS.Trojan.Nemucod`, `W97M.Downloader.gen`, `Android.Agent.G` — rather than being
+  picked independently of it.
+- **Large uploads and downloads** now draw from the shared `exfiltration_destinations`
+  pool (60 real services) that Check Point, ASA, FortiGate and Zscaler already used.
+  Firepower was the one outlier, with three defects: a separate four-entry
+  `file_sharing_domains` list (since removed from `config.json`), a destination IP
+  unrelated to the domain, and an invented `upload.` / `cdn.` host prefix
+  (`upload.pastebin.com` does not exist). Destinations went from 4 to ~130 distinct per 300
+  events, each curated IP now falls inside that service's own range so the DNS precursor
+  and the transfer name the same host, and links use the service's real format
+  (`pastebin.com/raw/...`, `filebin.net/...`). Long-tail destinations are labelled
+  `Uncategorized` rather than `File Sharing`.
