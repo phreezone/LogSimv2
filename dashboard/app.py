@@ -318,7 +318,13 @@ if not CONFIG.get("_static_tor_exit_nodes"):
 # Training runs in this process all draw from the same tail. Soft-fails to the
 # config pool; /api/health reports it.
 from modules import domain_corpus
+from modules import threat_catalog
 domain_corpus.load(CONFIG)
+
+# One name->address table shared by Infoblox and the firewall modules, so a DNS
+# answer and the connection that follows it carry the same destination.
+from modules import resolver
+resolver.load(CONFIG)
 
 THREAT_LEVELS = list(CONFIG.get("threat_generation_levels", {
     "Benign Traffic Only": 86400,
@@ -409,6 +415,11 @@ class ModuleState:
                 self.threat_names = set(fn())  # type: ignore[arg-type]
             except Exception:
                 pass
+        # The subset offered for on-demand firing: threats tied to an XSIAM analytic.
+        try:
+            self.on_demand: list = threat_catalog.analytic_threats(module)
+        except Exception:
+            self.on_demand = []
 
     # ── Metric helpers ────────────────────────────────────────────────────────
 
@@ -461,6 +472,7 @@ class ModuleState:
             "last_threat": self.last_threat,
             "event_interval": self.event_interval,
             "threat_breakdown": dict(self._threat_counts),
+            "on_demand_threats": len(self.on_demand),
         }
 
 
@@ -1021,9 +1033,12 @@ def api_get_threats(name: str):
     state = MODULE_STATES.get(name)
     if not state:
         return jsonify({"error": f"Module '{name}' not found"}), 404
-    fn = getattr(state.module, "get_threat_names", None)
-    threats = sorted(fn()) if callable(fn) else []  # type: ignore[arg-type]
-    return jsonify({"module": name, "threats": threats})
+    # Only threats tied to an XSIAM analytic are offered on demand; every threat still
+    # runs in long-running sessions. `threats` stays a list of event names (the MCP
+    # contract); `options` adds the analytic each one targets, for the dropdown label.
+    options = sorted(state.on_demand, key=lambda t: (t["alert"].lower(), t["event"].lower()))
+    return jsonify({"module": name, "threats": [t["event"] for t in options],
+                    "options": options})
 
 
 @app.post("/api/modules/<name>/fire")
@@ -1035,6 +1050,13 @@ def api_fire_threat(name: str):
     event_name = body.get("event")
     if not event_name:
         return jsonify({"error": "event name required"}), 400
+    resolved = threat_catalog.resolve_on_demand(state.module, event_name)
+    if not resolved:
+        return jsonify({"error": f"'{event_name}' is not tied to an XSIAM analytics alert, "
+                                 "so it is not offered on demand; it still runs in "
+                                 "long-running sessions. See /threats for the valid events.",
+                        "on_demand": False}), 400
+    event_name, target_alert = resolved
     process_and_send = _get_process_and_send()
     cfg = copy.deepcopy(CONFIG)
     context = {"session_context": SESSION_CONTEXT}
@@ -1066,7 +1088,8 @@ def api_fire_threat(name: str):
         except Exception as exc:
             print(f"[fire-threat] WEC flush FAILED — events not delivered: "
                   f"{type(exc).__name__}: {exc}")
-        return jsonify({"fired": True, "event": event_name, "log_count": len(valid)})
+        return jsonify({"fired": True, "event": event_name, "alert": target_alert,
+                        "log_count": len(valid)})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
@@ -1179,12 +1202,18 @@ def api_attack_stories():
 
 @app.post("/api/attack/run")
 def api_attack_run():
-    """Start a story run (small purple-team run). Body: {story_id, dry_run?}.
+    """Start a story run (small purple-team run).
+    Body: {story_id, dry_run?, cleanup_prior_incidents?}.
     Returns a run_id; poll /api/scenarios/runs/<id> (emitted manifest) and
-    /api/attack/runs/<id> (technique results)."""
+    /api/attack/runs/<id> (technique results).
+
+    cleanup_prior_incidents (default False): resolve prior OPEN box-cases before
+    firing so this run's network + endpoint alerts stitch into ONE fresh incident.
+    Opt-in because it closes incidents on the XSIAM tenant."""
     body = request.get_json(silent=True) or {}
     story_id = body.get("story_id") or "xdr_quick"
     dry_run = bool(body.get("dry_run", False))
+    cleanup = bool(body.get("cleanup_prior_incidents", False))
     from modules.xdr_orchestration import get_story
     story = get_story(story_id)
     if not story:
@@ -1196,13 +1225,15 @@ def api_attack_run():
 
     def _func(mods, c):
         from modules.xdr_orchestration import run_story_id
-        _ATTACK_SUMMARIES[run_id] = run_story_id(mods, c, story_id, dry_run=dry_run)
+        _ATTACK_SUMMARIES[run_id] = run_story_id(mods, c, story_id, dry_run=dry_run,
+                                                 cleanup_prior_incidents=cleanup)
 
     t = threading.Thread(target=_run_scenario_and_flush, args=(_func, modules, cfg, run_id),
                          daemon=True, name=f"attack-{story_id}-{run_id[:8]}")
     t.start()
     return jsonify({"started": True, "story": story.name, "story_id": story_id,
-                    "dry_run": dry_run, "run_id": run_id}), 202
+                    "dry_run": dry_run, "cleanup_prior_incidents": cleanup,
+                    "run_id": run_id}), 202
 
 
 @app.get("/api/attack/runs/<run_id>")
@@ -1808,6 +1839,37 @@ def _run_health_checks() -> dict:
                 "config pool, which UEBA will learn as normal over a long run, and "
                 "every exfil upload lands on a curated file-sharing site instead of "
                 "a never-seen host. Restart once tranco-list.eu is reachable."
+            ),
+        })
+
+    # ── Shared name resolution ────────────────────────────────────────────────
+    # Without it Infoblox answers and firewall destinations are chosen
+    # independently, and the DNS-to-connection network story cannot be built.
+    _rs = resolver.RESOLVER_STATE
+    if _rs.get("ok"):
+        _synthetic_only = _rs.get("live", 0) == 0
+        results.append({
+            "group": "Threat Intel",
+            "check": "Shared name resolution loaded",
+            "status": "warn" if _synthetic_only else "ok",
+            "detail": (
+                f"{_rs.get('internal', 0)} internal ({_rs.get('ad_domain')}) + "
+                f"{_rs.get('curated', 0)}/{_rs.get('curated_total', 0)} curated names "
+                f"[{_rs.get('source')}]: {_rs.get('live', 0)} resolved live, "
+                f"{_rs.get('synthetic', 0)} synthetic"
+                + (" — no live DNS, addresses are synthetic (the DNS/firewall join "
+                   "still holds, the addresses just are not real)" if _synthetic_only else "")
+            ),
+        })
+    else:
+        results.append({
+            "group": "Threat Intel",
+            "check": "Shared name resolution loaded",
+            "status": "error",
+            "detail": (
+                f"unavailable ({_rs.get('error')}) — Infoblox answers and firewall "
+                "destinations fall back to independent choice, so DNS-to-connection "
+                "correlation will not work."
             ),
         })
 
