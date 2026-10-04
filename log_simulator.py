@@ -1198,26 +1198,25 @@ def select_specific_threat_mode(all_modules):
     if not selected_modules:
         return None, None, False
 
-    # Collect (module, threat_name) pairs from modules that expose get_threat_names()
-    threat_entries = []
+    # Only threats tied to an XSIAM analytics alert are offered here (the same list the
+    # dashboard's Fire panel shows); every other threat still runs in long-running mode.
+    from modules import threat_catalog
+    threat_entries = []   # (module, threat_name, target_alert)
     for module in selected_modules:
-        threat_fn = getattr(module, 'get_threat_names', None)
-        names = threat_fn() if callable(threat_fn) else None
-        if names:
-            for name in names:
-                threat_entries.append((module, name))
+        for t in threat_catalog.analytic_threats(module):
+            threat_entries.append((module, t["event"], t["alert"]))
 
     if not threat_entries:
-        print("No named threats are available for the selected modules.")
+        print("None of the selected modules has a threat tied to an XSIAM analytics alert.")
         return None, None, False
 
-    print("\nAvailable Threats:")
+    print("\nAvailable Threats (-> the XSIAM analytic each triggers):")
     current_module = None
-    for i, (module, name) in enumerate(threat_entries, 1):
+    for i, (module, name, alert) in enumerate(threat_entries, 1):
         if module is not current_module:
             print(f"\n  [{module.NAME}]")
             current_module = module
-        print(f"    {i:>3}. {name}")
+        print(f"    {i:>3}. {name}  ->  {alert}")
 
     try:
         choice = int(input(f"\nSelect threat number (1-{len(threat_entries)}): ").strip())
@@ -1228,7 +1227,7 @@ def select_specific_threat_mode(all_modules):
         print("Invalid input.")
         return None, None, False
 
-    selected_module, threat_name = threat_entries[choice - 1]
+    selected_module, threat_name, _alert = threat_entries[choice - 1]
 
     repeat_choice = input("Run once [1] or repeat until Ctrl+C [2]? ").strip()
     repeat = (repeat_choice == "2")
@@ -1546,9 +1545,15 @@ def run_phishing_kill_chain_scenario(modules, config):
             cfg_domains = config.get('proofpoint_config', {}).get('phishing_domains', [])
             phishing_domains = list(dict.fromkeys(_malicious + cfg_domains))[:3]
             print(f"[STEP 2b] Infoblox: Victim browser resolves {len(phishing_domains)} phishing domains in DNS...")
+            # The LAST domain is the one the proxy step then reaches, so it must
+            # RESOLVE (pinned answer). The others fall to RPZ/NXDOMAIN, which is
+            # the blocked-attempt half of the story. Previously step 3's proxy
+            # block named a domain nobody had looked up.
+            _reached_domain, _reached_ip = _scenario_target(config, phishing_domains[-1])
             for pdom in phishing_domains:
+                _ans = _reached_ip if pdom == _reached_domain else None
                 dns_logs, dns_name = infoblox_module.generate_dns_pair(
-                    config, victim_ip, pdom, q_type="A"
+                    config, victim_ip, pdom, q_type="A", answer_ip=_ans
                 )
                 process_and_send(dns_logs, infoblox_module, config, dns_name)
                 time.sleep(0.3)
@@ -1556,7 +1561,8 @@ def run_phishing_kill_chain_scenario(modules, config):
         # STEP 3 — Zscaler sees the victim's browser hit the phishing domain
         if zs_module and hasattr(zs_module, "generate_log"):
             print("[STEP 3] Zscaler: Victim browser reaches phishing domain...")
-            zs_ctx = {**base_ctx, "src_ip": victim_ip, "user": victim_user}
+            zs_ctx = {**base_ctx, "src_ip": victim_ip, "user": victim_user,
+                      "domain": _reached_domain, "dst_ip": _reached_ip}
             result = zs_module.generate_log(config, scenario_event="THREAT_BLOCK", context=zs_ctx)
             if isinstance(result, tuple):
                 log_content, event_name = result
@@ -1773,7 +1779,9 @@ def run_insider_threat_scenario(modules, config):
             process_and_send(log_content, aws_module, config, event_name)
         time.sleep(2)
 
-        # STEP 4b — Infoblox: insider's workstation resolves exfil destination via DNS
+        # STEP 4b — Infoblox: insider's workstation resolves exfil destination via DNS.
+        # exfil_domain / exfil_ip are the one destination steps 4b and 5 share.
+        exfil_domain = exfil_ip = None
         if infoblox_module and hasattr(infoblox_module, 'generate_dns_pair'):
             exfil_domains = config.get('zscaler_config', {}).get('exfil_destinations',
                                        config.get('benign_domains', ['drive.google.com']))
@@ -1782,9 +1790,12 @@ def run_insider_threat_scenario(modules, config):
             # plain strings. generate_dns_pair needs the domain string, not the dict
             # (passing the dict throws "unhashable type: dict" and aborts steps 4b-6).
             exfil_domain  = _exfil_choice.get('domain') if isinstance(_exfil_choice, dict) else _exfil_choice
-            print(f"[STEP 4b] Infoblox: Insider workstation resolves exfil destination ({exfil_domain})...")
+            # The upload in step 5 goes to exactly this answer.
+            exfil_domain, exfil_ip = _scenario_target(config, exfil_domain)
+            print(f"[STEP 4b] Infoblox: Insider workstation resolves exfil destination "
+                  f"({exfil_domain} -> {exfil_ip})...")
             dns_logs, dns_name = infoblox_module.generate_dns_pair(
-                config, insider_ip, exfil_domain, q_type="A"
+                config, insider_ip, exfil_domain, q_type="A", answer_ip=exfil_ip
             )
             process_and_send(dns_logs, infoblox_module, config, dns_name)
             time.sleep(0.5)
@@ -1792,7 +1803,8 @@ def run_insider_threat_scenario(modules, config):
         # STEP 5 — Zscaler: DLP / data exfiltration upload
         if zs_module and hasattr(zs_module, "generate_log"):
             print("[STEP 5] Zscaler: Insider uploads data to external cloud storage (DLP)...")
-            zs_ctx = {**base_ctx, "src_ip": insider_ip, "user": insider_username}
+            zs_ctx = {**base_ctx, "src_ip": insider_ip, "user": insider_username,
+                      "domain": exfil_domain, "dst_ip": exfil_ip}
             result = zs_module.generate_log(config, scenario_event="DATA_EXFIL", context=zs_ctx)
             if isinstance(result, tuple):
                 log_content, event_name = result
@@ -1885,6 +1897,26 @@ def _collect_fw_modules(all_modules):
     return [all_modules[n] for n in _FW_MODULE_NAMES if n in all_modules]
 
 
+def _scenario_target(config, domain, pinned_ip=None):
+    """(domain, ip) for a scenario's external destination.
+
+    ONE address per scenario name: the DNS answer Infoblox gives is the address
+    the firewall step then connects to. Before this, each step invented its own
+    destination, so the scenarios' own hunt query -- "join the DNS resolve with
+    the firewall connection" -- could never return a row.
+    """
+    from modules import resolver
+    return domain, pinned_ip or resolver.answer_for(domain, config)
+
+
+def host_mac(hostname, device_type=None, os_type=None):
+    """The host's stable NIC, from session_utils -- the same MAC Infoblox DHCP
+    leases to it and FortiGate logs for it. Imported lazily: log_simulator loads
+    config and modules before session_utils is guaranteed importable."""
+    from modules.session_utils import host_mac as _hm
+    return _hm(hostname, device_type, os_type)
+
+
 def _send_to_all_fw(fw_modules, scenario_event, config, context, step_label):
     """Sends a scenario event to every loaded firewall module.
 
@@ -1929,7 +1961,7 @@ def run_dns_c2_killchain_scenario(all_modules, config):
     First two domain attempts blocked (DNS RPZ + firewall Security Intel).
     Third domain resolves (new C2 infra not yet on blocklists) — connection established.
 
-    XSIAM datasets touched: infoblox_dhcp_raw, infoblox_dns_raw, plus one network firewall dataset.
+    XSIAM datasets touched: infoblox_infoblox_raw (DHCP + DNS + RPZ), plus one network firewall dataset.
     Hunt: JOIN on xdm.source.ip across DHCP (who is the device?) → DNS (what resolved?) → FW (what connected?).
     """
     print("\n--- Running 'DNS C2 Kill Chain' Scenario ---")
@@ -1952,11 +1984,11 @@ def run_dns_c2_killchain_scenario(all_modules, config):
     if victim_info:
         victim_ip   = victim_info.get("ip", "192.168.1.50")
         victim_host = victim_info.get("hostname", "CORP-WS-001")
-        victim_mac  = f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
+        victim_mac  = host_mac(victim_host)
     else:
         victim_ip   = f"192.168.1.{random.randint(10, 200)}"
         victim_host = "CORP-WS-001"
-        victim_mac  = f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
+        victim_mac  = host_mac(victim_host)
 
     c2_domain_1 = random.choice(config.get('infoblox_threats', {}).get('malicious_domains', ['blocked-c2.ru']))
     c2_domain_3 = f"new-c2-{random.randint(1000,9999)}.com"  # new infra, not yet blocked
@@ -2011,14 +2043,19 @@ def run_dns_c2_killchain_scenario(all_modules, config):
                         {**base_ctx, "src_ip": victim_ip}, "[STEP 5]")
         time.sleep(1)
 
-        print(f"[STEP 6] Infoblox DNS: Third C2 domain resolves (NOERROR) — {c2_domain_3}...")
-        dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, c2_domain_3)
+        # Steps 6 and 7 are ONE story: the name resolves, then the implant
+        # connects to exactly that address.
+        c2_domain_3, c2_ip_3 = _scenario_target(config, c2_domain_3)
+        print(f"[STEP 6] Infoblox DNS: Third C2 domain resolves (NOERROR) — {c2_domain_3} -> {c2_ip_3}...")
+        dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, c2_domain_3,
+                                                               answer_ip=c2_ip_3)
         process_and_send(dns_logs, infoblox_module, config, dns_name)
         time.sleep(1)
 
-        print(f"[STEP 7] All firewall modules: Outbound connection to C2 IP established...")
+        print(f"[STEP 7] All firewall modules: Outbound connection to {c2_ip_3} ({c2_domain_3})...")
         _send_to_all_fw(fw_modules, "LARGE_EGRESS", config,
-                        {**base_ctx, "src_ip": victim_ip}, "[STEP 7]")
+                        {**base_ctx, "src_ip": victim_ip,
+                         "domain": c2_domain_3, "dst_ip": c2_ip_3}, "[STEP 7]")
 
     except Exception as e:
         print(f"\nAn error occurred during scenario execution: {e}")
@@ -2027,10 +2064,10 @@ def run_dns_c2_killchain_scenario(all_modules, config):
 
     print("\n--- DNS C2 Kill Chain Scenario Complete ---")
     print("\nHunt queries to run in XSIAM:")
-    print(f"  1. dataset=infoblox_dhcp_raw | filter xdm.source.ip=\"{victim_ip}\" — identify device")
-    print(f"  2. dataset=infoblox_dns_raw  | filter xdm.source.ip=\"{victim_ip}\" and xdm.network.dns.dns_response_code=\"NXDOMAIN\" | stats count — DGA storm")
-    print(f"  3. dataset=infoblox_dns_raw  | filter xdm.source.ip=\"{victim_ip}\" and xdm.network.dns.dns_response_code=\"NOERROR\" — resolving domain")
-    print(f"  4. Join step 3 resolve with firewall allowed connection to confirm C2 establishment")
+    print(f"  1. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" and xdm.event.type=\"DHCP\" — identify device")
+    print(f"  2. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" and xdm.network.dns.response_code=\"NXDOMAIN\" | comp count() — DGA storm")
+    print(f"  3. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" and xdm.network.dns.dns_question.name=\"{c2_domain_3}\" — the resolve")
+    print(f"  4. Join on the ANSWER: the firewall session in step 7 goes to {c2_domain_3}'s address")
 
 
 def run_device_compromise_scenario(all_modules, config):
@@ -2038,7 +2075,7 @@ def run_device_compromise_scenario(all_modules, config):
     Device Compromise (Full Lifecycle) — DHCP → DNS baseline → C2 attempts → detection.
 
     Story: Complete device compromise story from network join through C2 establishment.
-    Spans 4 XSIAM datasets: infoblox_dhcp_raw, infoblox_dns_raw, infoblox_threat_raw,
+    Spans: infoblox_infoblox_raw (DHCP, DNS, RPZ, Threat Protect),
     and one network firewall dataset.
 
     Hunt: Find device MAC in DHCP → find same IP in DNS NXDOMAIN storm → find same IP
@@ -2064,11 +2101,11 @@ def run_device_compromise_scenario(all_modules, config):
     if victim_info:
         victim_ip   = victim_info.get("ip", "192.168.1.60")
         victim_host = victim_info.get("hostname", "CORP-WS-002")
-        victim_mac  = f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
+        victim_mac  = host_mac(victim_host)
     else:
         victim_ip   = f"192.168.1.{random.randint(10, 200)}"
         victim_host = "CORP-WS-002"
-        victim_mac  = f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
+        victim_mac  = host_mac(victim_host)
 
     base_ctx = {"session_context": session_context}
     fw_names = ", ".join(m.NAME for m in fw_modules) if fw_modules else "none"
@@ -2141,9 +2178,9 @@ def run_device_compromise_scenario(all_modules, config):
 
     print("\n--- Device Compromise Scenario Complete ---")
     print("\nHunt queries to run in XSIAM (pivot from threat-protect alert backward):")
-    print(f"  1. dataset=infoblox_threat_raw | filter xdm.source.ip=\"{victim_ip}\" — Threat Protect alert")
-    print(f"  2. dataset=infoblox_dhcp_raw   | filter xdm.source.ip=\"{victim_ip}\" — who is this device?")
-    print(f"  3. dataset=infoblox_dns_raw    | filter xdm.source.ip=\"{victim_ip}\" | sort _time — full DNS history")
+    print(f"  1. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" and xdm.event.type=\"Threat\" — Threat Protect alert")
+    print(f"  2. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" and xdm.event.type=\"DHCP\" — who is this device?")
+    print(f"  3. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" | sort asc _time — full DNS history")
     print(f"  4. Correlate MAC from step 2 with other devices — did this MAC appear on multiple IPs?")
 
 
@@ -2199,7 +2236,7 @@ def run_gcp_cloud_pentest_scenario(modules, config):
             process_and_send(log_content, gcp_module, config, event_name)
         time.sleep(2)
 
-        print("[STEP 2] GCP: IAM privilege escalation (SetIamPolicy → roles/owner)...")
+        print("[STEP 2] GCP: IAM privilege escalation (SetIamPolicy -> roles/owner)...")
         result = gcp_module.generate_log(config, scenario_event="IAM_PRIVILEGE_ESCALATION", context=context)
         if isinstance(result, tuple):
             log_content, event_name = result
@@ -2266,7 +2303,7 @@ def run_gcp_cloud_pentest_scenario(modules, config):
     print("\n--- GCP Cloud Pentest Scenario Complete ---")
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. dataset=google_cloud_logging_raw | filter protoPayload.requestMetadata.callerIp=\"{attacker_ip}\"")
-    print(f"  2. Sequence: same principalEmail performs SetIamPolicy → CreateKey → UpdateSink → SetIamPolicy(GCS) within 15 min")
+    print(f"  2. Sequence: same principalEmail performs SetIamPolicy -> CreateKey -> UpdateSink -> SetIamPolicy(GCS) within 15 min")
     print(f"  3. Filter protoPayload.methodName contains \"setIamPolicy\" and resource.type=\"gcs_bucket\" — public bucket pivots")
 
 
@@ -2282,7 +2319,7 @@ def run_web_app_compromise_scenario(modules, config):
     Hunt: Find server IP appearing as *source* (not destination) in firewall outbound Allow
           events shortly after webshell_execution in apache_httpd_raw.
     """
-    print("\n--- Running 'Web Application Compromise → Server C2' Scenario ---")
+    print("\n--- Running 'Web Application Compromise -> Server C2' Scenario ---")
 
     httpd_module = modules.get("Apache httpd")
     fw_modules   = _collect_fw_modules(modules)
@@ -2361,7 +2398,7 @@ def run_web_app_compromise_scenario(modules, config):
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. dataset=apache_httpd_raw | filter src_ip=\"{attacker_ip}\" | sort _time")
     print(f"  2. Pivot: find server IP \"{server_ip}\" as *source* in firewall outbound Allow events (anomalous — servers don't initiate)")
-    print(f"  3. Sequence: apache webshell_execution → firewall server_outbound_http from same server IP within 5 min")
+    print(f"  3. Sequence: apache webshell_execution -> firewall server_outbound_http from same server IP within 5 min")
 
 
 def run_vpn_compromise_scenario(modules, config):
@@ -2377,7 +2414,7 @@ def run_vpn_compromise_scenario(modules, config):
     Hunt: Find same username in ASA vpn_bruteforce AND Okta impossible_travel within 30 min.
           Join on VPN-assigned IP across ASA VPN session logs → firewall SMB lateral events.
     """
-    print("\n--- Running 'VPN Compromise → Lateral Movement' Scenario ---")
+    print("\n--- Running 'VPN Compromise -> Lateral Movement' Scenario ---")
 
     asa_module  = modules.get("Cisco ASA Firewall")
     okta_module = modules.get("Okta SSO")
@@ -2476,11 +2513,11 @@ def run_vpn_compromise_scenario(modules, config):
         import traceback
         traceback.print_exc()
 
-    print("\n--- VPN Compromise → Lateral Movement Scenario Complete ---")
+    print("\n--- VPN Compromise -> Lateral Movement Scenario Complete ---")
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. dataset=cisco_asa_raw | filter xdm.source.user.username=\"{victim_user}\" and event_type in (\"vpn_bruteforce\",\"vpn_impossible_travel\")")
     print(f"  2. Pivot: find IP \"{vpn_inside_ip}\" (VPN-assigned) in firewall SMB lateral events")
-    print(f"  3. Correlate ASA VPN session for \"{victim_user}\" → Okta impossible_travel for same user within 30 min")
+    print(f"  3. Correlate ASA VPN session for \"{victim_user}\" -> Okta impossible_travel for same user within 30 min")
 
 
 def run_aitm_session_hijack_scenario(modules, config):
@@ -2498,7 +2535,7 @@ def run_aitm_session_hijack_scenario(modules, config):
           access key within 10 min. Find Okta user matching AWS principalEmail within session window.
     OOB Detections: Proofpoint phishing delivered; Okta impossible travel may fire.
     """
-    print("\n--- Running 'AiTM Session Hijack → Cloud Abuse' Scenario ---")
+    print("\n--- Running 'AiTM Session Hijack -> Cloud Abuse' Scenario ---")
 
     pp_module   = modules.get("Proofpoint Email Gateway")
     okta_module = modules.get("Okta SSO")
@@ -2627,10 +2664,10 @@ def run_aitm_session_hijack_scenario(modules, config):
         import traceback
         traceback.print_exc()
 
-    print("\n--- AiTM Session Hijack → Cloud Abuse Scenario Complete ---")
+    print("\n--- AiTM Session Hijack -> Cloud Abuse Scenario Complete ---")
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. dataset=okta_raw | filter user=\"{victim_user}\" and event_type in (\"aitm_phishing\",\"token_reuse\",\"session_roaming\") | sort _time")
-    print(f"  2. Correlate Okta session start IP → AWS API calls from same IP or access key within 10 min")
+    print(f"  2. Correlate Okta session start IP -> AWS API calls from same IP or access key within 10 min")
     print(f"  3. dataset=amazon_aws_raw | filter callerIp=\"{attacker_ip}\" and eventName in (\"AssumeRole\",\"DisableSecurityHub\")")
     print(f"  OOB: Okta aitm_phishing and impossible_travel may fire; all other steps need custom correlation rules.")
 
@@ -2782,7 +2819,7 @@ def run_ransomware_precursor_scenario(modules, config):
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. dataset=proofpoint_tap_raw | filter recipient=\"{victim_email}\" and disposition=\"delivered\"")
     print(f"  2. dataset=okta_raw | filter user=\"{victim_user}\" and event_type in (\"brute_force\",\"mfa_bypass\") | sort _time")
-    print(f"  3. Join victim IP \"{victim_ip}\" across firewall datasets: smb_share_enumeration → smb_rare_file_transfer → LARGE_EGRESS sequence")
+    print(f"  3. Join victim IP \"{victim_ip}\" across firewall datasets: smb_share_enumeration -> smb_rare_file_transfer -> LARGE_EGRESS sequence")
     print(f"  4. dataset=amazon_aws_raw | filter eventName in (\"StopConfigurationRecorder\",\"DeleteWebACL\") | same time window")
     print(f"  OOB: Proofpoint malware delivered; Okta brute_force / mfa_bypass may fire. All other steps need custom correlation rules.")
 
@@ -2840,8 +2877,8 @@ def run_domain_dominance_scenario(all_modules, config):
     victim_email = victim.get("email") or f"{victim_user}@{default_dom}"
     victim_ip    = victim.get("ip")
     victim_host  = victim.get("hostname")
-    victim_mac   = victim.get("mac") or (
-        f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}")
+    victim_mac   = victim.get("mac") or host_mac(victim_host, victim.get("device_type"),
+                                                 victim.get("os_type"))
     attacker_ip  = _fresh_attacker_ip()
 
     # Single-victim session_context so EVERY Windows AD threat targets the SAME user+host
@@ -2866,7 +2903,7 @@ def run_domain_dominance_scenario(all_modules, config):
         # alerts can resolve to the same host/user as the AD alerts — the missing rung
         # that lets all stages fold into one incident.
         if ibx_module and victim_ip:
-            print("\n[ANCHOR] Infoblox: DHCP lease — device on network (binds IP ↔ host)...")
+            print("\n[ANCHOR] Infoblox: DHCP lease — device on network (binds IP <-> host)...")
             _emit(ibx_module.generate_log(config, scenario_event="DHCP_ACK",
                                           context={"src_ip": victim_ip, "client_mac": victim_mac,
                                                    "hostname": victim_host}),
@@ -2876,7 +2913,7 @@ def run_domain_dominance_scenario(all_modules, config):
         # BINDING — victim authenticates from their workstation IP (Windows 4624 type-3).
         # This single IP↔user event is what the IP-keyed DNS/SMB detections join against
         # to resolve the user, so they fold into the AD user's incident.
-        print("[BIND] Windows: victim network logon from workstation IP (IP ↔ user)...")
+        print("[BIND] Windows: victim network logon from workstation IP (IP <-> user)...")
         _emit(win_module.generate_log(config, scenario_event="NETWORK_LOGON",
                                       context={"session_context": victim_sc, "user_identity": victim_key,
                                                "src_ip": victim_ip}),
@@ -2942,9 +2979,9 @@ def run_domain_dominance_scenario(all_modules, config):
     print("\n--- Domain Dominance Scenario Complete ---")
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. Timeline the victim across sources: user \"{victim_user}\" / host \"{victim_host}\" / IP \"{victim_ip}\"")
-    print(f"  2. dataset=microsoft_windows_raw | filter user \"{victim_user}\": Kerberoast(4769) → DCSync(4662) → delegation/priv-group")
+    print(f"  2. dataset=microsoft_windows_raw | filter user \"{victim_user}\": Kerberoast(4769) -> DCSync(4662) -> delegation/priv-group")
     print(f"  3. Correlate Infoblox client \"{victim_ip}\" (PTR sweep + zone transfer) with the AD activity on the same host")
-    print(f"  NOTE: Proofpoint↔AD linkage relies on the identity graph resolving {victim_email} ↔ AD user {victim_user}.")
+    print(f"  NOTE: Proofpoint<->AD linkage relies on the identity graph resolving {victim_email} <-> AD user {victim_user}.")
 
 
 def run_beaconing_implant_scenario(all_modules, config):
@@ -2982,12 +3019,15 @@ def run_beaconing_implant_scenario(all_modules, config):
 
     host_ip   = victim.get("ip")
     host_name = victim.get("hostname")
-    host_mac  = victim.get("mac") or (
-        f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}")
+    host_nic  = victim.get("mac") or host_mac(victim.get("hostname"),
+                                              victim.get("device_type"), victim.get("os_type"))
     c2_ip     = _fresh_attacker_ip()
+    # One C2 identity for the whole story: name and address travel together.
+    c2_domain = random.choice(config.get('infoblox_threats', {}).get(
+        'malicious_domains', ['command-control-server.org']))
     victim_sc = {victim_key: session_context[victim_key]}
 
-    print(f"  Infected host: {host_name} ({host_ip})   C2: {c2_ip}")
+    print(f"  Infected host: {host_name} ({host_ip})   C2: {c2_domain} ({c2_ip})")
 
     def _emit(result, module, default_name):
         if not result:
@@ -2999,9 +3039,9 @@ def run_beaconing_implant_scenario(all_modules, config):
     try:
         # ANCHOR — DHCP lease binds host IP ↔ host name (seeds the identity graph).
         if ibx_module:
-            print("\n[ANCHOR] Infoblox: DHCP lease (binds IP ↔ host)...")
+            print("\n[ANCHOR] Infoblox: DHCP lease (binds IP <-> host)...")
             _emit(ibx_module.generate_log(config, scenario_event="DHCP_ACK",
-                                          context={"src_ip": host_ip, "client_mac": host_mac,
+                                          context={"src_ip": host_ip, "client_mac": host_nic,
                                                    "hostname": host_name}),
                   ibx_module, "DHCP_ACK")
             time.sleep(1)
@@ -3010,7 +3050,7 @@ def run_beaconing_implant_scenario(all_modules, config):
         # lets the IP-keyed DNS detections (C2 beacon, DNS tunnel) resolve the user, so every
         # implant alert carries both host IP and user (full enrichment).
         if win_module:
-            print("[BIND] Windows: host network logon from its IP (IP ↔ user)...")
+            print("[BIND] Windows: host network logon from its IP (IP <-> user)...")
             _emit(win_module.generate_log(config, scenario_event="NETWORK_LOGON",
                                           context={"session_context": victim_sc, "user_identity": victim_key,
                                                    "src_ip": host_ip}),
@@ -3019,7 +3059,7 @@ def run_beaconing_implant_scenario(all_modules, config):
 
         # STEP 0 — Initial execution: phishing doc spawns a hidden-PowerShell process tree.
         if win_module:
-            print("[STEP 0] Windows: initial execution — Office → PowerShell → LOLBin (4688 tree)...")
+            print("[STEP 0] Windows: initial execution — Office -> PowerShell -> LOLBin (4688 tree)...")
             _emit(win_module.generate_log(config, scenario_event="PROCESS_TREE",
                                           context={"session_context": victim_sc, "user_identity": victim_key,
                                                    "c2_ip": c2_ip}),
@@ -3027,10 +3067,14 @@ def run_beaconing_implant_scenario(all_modules, config):
             time.sleep(2)
 
         # STEP 1 — DNS C2 beacon: recurring queries to the C2 domain from the host.
+        # The beacon RESOLVES to c2_ip, the address steps 2b-4 carry traffic to, so
+        # the DNS name and every later session describe one C2. It used to query a
+        # random blocked domain (NXDOMAIN) unrelated to c2_ip.
         if ibx_module:
-            print("[STEP 1] Infoblox: DNS C2 beacon (recurring domain queries)...")
+            print(f"[STEP 1] Infoblox: DNS C2 beacon — {c2_domain} -> {c2_ip}...")
             _emit(ibx_module.generate_log(config, scenario_event="C2_BEACON",
-                                          context={"src_ip": host_ip}),
+                                          context={"src_ip": host_ip,
+                                                   "domain": c2_domain, "dst_ip": c2_ip}),
                   ibx_module, "C2_BEACON")
             time.sleep(2)
 
@@ -3046,7 +3090,8 @@ def run_beaconing_implant_scenario(all_modules, config):
         if zs_module:
             print("[STEP 2b] Zscaler: web-layer C2 beacon (periodic HTTP callbacks)...")
             _emit(zs_module.generate_log(config, scenario_event="web_c2_beacon",
-                                         context={"session_context": victim_sc, "src_ip": host_ip}),
+                                         context={"session_context": victim_sc, "src_ip": host_ip,
+                                                  "domain": c2_domain, "dst_ip": c2_ip}),
                   zs_module, "web_c2_beacon")
             time.sleep(2)
 
@@ -3060,9 +3105,12 @@ def run_beaconing_implant_scenario(all_modules, config):
 
         # STEP 4 — Periodic outbound to the C2 IP across the perimeter firewalls.
         if fw_modules:
-            print("[STEP 4] Firewalls: periodic outbound to C2...")
-            _send_to_all_fw(fw_modules, "server_outbound_http", config,
-                            {"src_ip": host_ip, "dst_ip": c2_ip}, "[STEP 4]")
+            print(f"[STEP 4] Firewalls: periodic outbound to {c2_domain} ({c2_ip})...")
+            # C2_EGRESS (not server_outbound_http): it honours the pinned domain and
+            # address, so these sessions go to the host step 1 resolved.
+            _send_to_all_fw(fw_modules, "C2_EGRESS", config,
+                            {"src_ip": host_ip, "hostname": host_name, "user": victim_key,
+                             "domain": c2_domain, "dst_ip": c2_ip}, "[STEP 4]")
             time.sleep(2)
 
         # STEP 5 — Persistence: implant installs an auto-start service on the host (4697).
@@ -3098,7 +3146,7 @@ def run_server_breach_cloud_scenario(all_modules, config):
     key off it. The cloud stage links via the instance role (server↔role); the cross-tier
     merge lands once XSIAM identity unification ships.
     """
-    print("\n--- Running 'Server Breach → Cloud Takeover' Scenario ---")
+    print("\n--- Running 'Server Breach -> Cloud Takeover' Scenario ---")
 
     httpd_module = all_modules.get("Apache httpd")
     ibx_module   = all_modules.get("Infoblox NIOS")
@@ -3174,7 +3222,7 @@ def run_server_breach_cloud_scenario(all_modules, config):
 
         # STEP 7 — Cloud exfil: the stolen EC2-role credentials bulk-read + exfil S3.
         if aws_module:
-            print("[STEP 7] AWS: EC2-role S3 data exfiltration (ListBuckets → bulk GetObject)...")
+            print("[STEP 7] AWS: EC2-role S3 data exfiltration (ListBuckets -> bulk GetObject)...")
             _emit(aws_module.generate_log(config, scenario_event="S3_READ_EXFIL_CHAIN",
                                           context={"session_context": session_context,
                                                    "ip_address": attacker_ip}),
@@ -3185,8 +3233,8 @@ def run_server_breach_cloud_scenario(all_modules, config):
         import traceback
         traceback.print_exc()
 
-    print("\n--- Server Breach → Cloud Takeover Scenario Complete ---")
-    print(f"  Spine (on-prem): web server {server_ip} — Apache attack → reverse shell → DNS exfil group by server IP.")
+    print("\n--- Server Breach -> Cloud Takeover Scenario Complete ---")
+    print(f"  Spine (on-prem): web server {server_ip} — Apache attack -> reverse shell -> DNS exfil group by server IP.")
     print(f"  Cloud stage (S3 exfil) links via the instance role; cross-tier merge awaits XSIAM identity unification.")
 
 
@@ -3255,7 +3303,7 @@ def run_cloud_ransomware_scenario(all_modules, config):
                     f"delivered: {type(exc).__name__}: {exc}")
 
     print("\n--- Cloud Ransomware Scenario Complete ---")
-    print(f"  Chain: brute force → admin policy → stop CloudTrail → disable S3 logging → exfil → encrypt+ransom.")
+    print(f"  Chain: brute force -> admin policy -> stop CloudTrail -> disable S3 logging -> exfil -> encrypt+ransom.")
     print(f"  Detects: AWS console brute force, defense-evasion (StopLogging), S3 exfil, 'Suspicious objects encryption in an AWS bucket'.")
 
 
@@ -3336,7 +3384,7 @@ def run_perimeter_intrusion_scenario(all_modules, config):
         traceback.print_exc()
 
     print("\n--- Perimeter Intrusion Scenario Complete ---")
-    print(f"  Chain: port scan → denied inbound flood → VPN brute force → web exploit, from attacker {attacker_ip}.")
+    print(f"  Chain: port scan -> denied inbound flood -> VPN brute force -> web exploit, from attacker {attacker_ip}.")
     print(f"  Detects: port scan, high-volume denied inbound, VPN brute force, Apache Log4Shell/injection.")
 
 
@@ -3348,7 +3396,7 @@ def run_identity_attack_cloud_scenario(all_modules, config):
     exfiltrates. Spine: the victim username, carried from Okta into the AWS SAML session —
     pre-staging the exact Okta↔AWS link the identity graph will resolve.
     """
-    print("\n--- Running 'Identity Attack → Cloud' Scenario ---")
+    print("\n--- Running 'Identity Attack -> Cloud' Scenario ---")
 
     okta_module = all_modules.get("Okta SSO")
     aws_module  = all_modules.get("aws")
@@ -3425,10 +3473,10 @@ def run_identity_attack_cloud_scenario(all_modules, config):
             _tprint(f"[flush] S3 batch flush FAILED — scenario events not "
                     f"delivered: {type(exc).__name__}: {exc}")
 
-    print("\n--- Identity Attack → Cloud Scenario Complete ---")
-    print(f"  Spine: Okta user '{victim_user}' → AWS SAML roleSessionName '{victim_user}'.")
+    print("\n--- Identity Attack -> Cloud Scenario Complete ---")
+    print(f"  Spine: Okta user '{victim_user}' -> AWS SAML roleSessionName '{victim_user}'.")
     print(f"  Detects: Okta MFA bombing / Tor login (ThreatInsight), AWS admin-policy grant, S3 exfil.")
-    print(f"  Cross-identity (Okta↔AWS) shares the username now; full merge lands with XSIAM identity unification.")
+    print(f"  Cross-identity (Okta<->AWS) shares the username now; full merge lands with XSIAM identity unification.")
 
 
 def get_scenarios():
@@ -3643,9 +3691,22 @@ def main():
     if live_tor_nodes:
         config['tor_exit_nodes'] = live_tor_nodes
 
+    # --- Cloud identifier pools: grow them before any module reads one ---
+    # aws_config shipped ~20 pools of 26 ids, so the same 26 instances were started,
+    # stopped and snapshotted all month and a "new resource" detection had 26 things
+    # to learn. Expanded here rather than at ~100 call sites; must run AFTER the
+    # PLACEHOLDER_* substitution above so generated ARNs carry the real account id.
+    from modules import cloud_ids
+    cloud_ids.expand_pools(config)
+
     # --- Long-tail domain corpus for rare benign DNS / web destinations ---
     from modules import domain_corpus
     domain_corpus.load(config)
+
+    # --- Shared name->address resolution (Infoblox answers == firewall targets) ---
+    # Must load BEFORE the modules so every generator resolves from one table.
+    from modules import resolver
+    resolver.load(config)
 
     all_modules = load_modules()
 

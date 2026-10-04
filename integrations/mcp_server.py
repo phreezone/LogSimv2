@@ -147,10 +147,13 @@ def stop_module(name: str) -> dict:
 
 @mcp.tool()
 def list_module_threats(name: str) -> dict:
-    """List the event names a module can fire one-shot.
+    """List the event names a module can fire one-shot, with the analytic each targets.
 
-    These are the only valid `event` values for fire_event on that module. Returns an empty
-    list for modules that expose no named events.
+    Only threats built to trigger an XSIAM analytics alert are offered on demand
+    (`threats` = event names, `options` = [{event, alert}]); a module's other threats run
+    only in long-running sessions. These are the only valid `event` values for fire_event
+    on that module. Empty for modules with no analytic-backed threats (Proofpoint,
+    Infoblox, Apache httpd).
     """
     return _req("GET", f"/modules/{quote(name)}/threats")
 
@@ -160,7 +163,9 @@ def fire_event(name: str, event: str) -> dict:
     """Fire a single named threat/event from a module immediately (one-shot).
 
     Use list_modules to discover module names and list_module_threats to discover the
-    valid `event` values for that module — do not guess event names.
+    valid `event` values for that module — do not guess event names. An event that is not
+    tied to an XSIAM analytic is rejected (HTTP 400). The response's `alert` field names
+    the analytic to look for.
     """
     return _req("POST", f"/modules/{quote(name)}/fire", body={"event": event})
 
