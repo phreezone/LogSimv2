@@ -300,6 +300,54 @@ These sections allow modules to override global settings or provide their own me
 
 These sections build the "world" your simulated logs live in. They provide realistic and consistent data for users, devices, and external sites.
 
+### Curated pools vs generated values
+
+Most of the pools in this section are a **head, not the whole population**. Threat
+domains, file names, cloud resource identifiers and browser user-agents are composed
+per event by `modules/threat_domains.py`, `modules/threat_files.py`,
+`modules/cloud_ids.py` and `modules/user_agents.py`, because a fixed list of 25 entries
+stops being rare the moment a run is long enough — every entry accumulates thousands of
+hits and UEBA learns it as normal.
+
+What the curated pools still do:
+
+* **Manual hunting.** You need a handful of names you can remember and type, and the
+  scenario walkthroughs quote them. They stay in circulation for that reason.
+* **Detection contracts.** Nine tokens are matched as literal substrings of the threat
+  domain names (`command-control`, `credential-stealer`, `phishing-kit`,
+  `ransomware-payload` and others). Those tokens are reproduced verbatim in every
+  generated domain of that family. **Renaming one silences live detections** — the rule
+  goes quiet with no error anywhere.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `infoblox_threats.generated_share` | `0.75` | Fraction of threat-domain draws that are generated rather than taken from `malicious_domains` / `dga_domains`. `0` pins everything to the curated pools; `1` generates every one. |
+
+Two pools are deliberately **not** generated over:
+
+* `exfiltration_destinations` — the shared file-sharing pool every network module draws
+  from. It holds **real** services (60 of them: `mega.nz`, `dropbox.com`, `transfer.sh`,
+  `filebin.net`, `pastebin.com` and more) rather than generated names, because the
+  "Infoblox — DNS Resolution of Unsanctioned Cloud Storage" rule matches them as literals.
+  Grow it by adding genuine services; a generated name would never match. Tag an entry
+  `"direction": "upload"` only when a download is not credible (paste and snippet sites
+  are text-sized).
+* `aws_config.pentest_ami_ids` — these encode distro names
+  (`ami-kali-linux-official`, `ami-parrot-sec-os`) that the Kali-AMI rule matches.
+
+At startup you will see the cloud pools being grown, which is expected:
+
+```
+[cloud_ids] expanded 15 identifier pool(s): ec2_instances 26->400, ebs_volumes 26->600, ...
+```
+
+Your own AWS account ID and GCP project ID are never generated — they are your identity
+and are read from `.env`. Only *foreign* account IDs (the counterparty in a cross-account
+AssumeRole) vary.
+
+Full rationale, measurements and the list of what may never be renamed:
+[value-cardinality.md](value-cardinality.md).
+
 ```json
 "internal_networks": ["192.168.1.0/24", "10.0.10.0/24"],
 "internal_servers": ["10.0.10.50", "192.168.1.100"],
