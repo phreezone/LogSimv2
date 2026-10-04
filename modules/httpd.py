@@ -29,6 +29,12 @@ _ATTACK_TYPES = [
 ]
 
 
+# No threat here is offered for on-demand firing (modules/threat_catalog.py): Cortex
+# publishes no analytics for Apache httpd data, and none has fired from it in the tenant --
+# its alerts come from correlation rules and threat intel. Every threat still runs
+# in long-running sessions.
+ANALYTIC_ALERTS = {}
+
 def get_threat_names():
     """Returns all available attack types for this module."""
     return list(_ATTACK_TYPES)

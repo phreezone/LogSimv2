@@ -39,8 +39,10 @@ from datetime import datetime, timezone, timedelta
 
 try:
     from modules.session_utils import get_random_user, get_all_emails
+    from modules import threat_files
 except ImportError:
     from session_utils import get_random_user, get_all_emails
+    import threat_files
 
 NAME = "Proofpoint Email Gateway"
 DESCRIPTION = "Simulates Proofpoint TAP email security events (message and click events)."
@@ -104,25 +106,33 @@ _DEFAULT_MALICIOUS_URL_DOMAINS = [
     "paypal-secure-verify.net", "microsoft-login-portal.info",
 ]
 
+# Every template now carries at least one slot. Nine of these were fully static, so
+# the same nine strings repeated for the life of a run.
 _BENIGN_SUBJECTS = [
-    "Q4 Financial Report - Action Required",
+    "{quarter} Financial Report - Action Required",
     "Team Meeting Agenda - {date}",
     "Your invoice #{num} is ready",
     "Welcome to {service}",
-    "Reminder: Annual Performance Review",
+    "Reminder: Annual Performance Review - {person}",
     "Project Update: {project} - Week {week}",
     "Please review and sign: {doc}",
-    "Your order has shipped",
-    "Upcoming webinar: Cybersecurity Best Practices",
+    "Your order #{num} has shipped",
+    "Upcoming webinar: Cybersecurity Best Practices - {date}",
     "Board Meeting Minutes - {date}",
-    "IT Maintenance Window Notification",
-    "HR Update: Open Enrollment for Benefits",
-    "Re: Contract Renewal Discussion",
+    "IT Maintenance Window Notification - {ticket}",
+    "HR Update: Open Enrollment for Benefits ({year})",
+    "Re: Contract Renewal Discussion - {vendor}",
     "New Shared Document: {doc}",
-    "Quarterly Business Review - Save the Date",
-    "Payroll Update: Please Review",
-    "Security Awareness Training Reminder",
-    "NDA Required: New Vendor Onboarding",
+    "{quarter} Business Review - {city} - Save the Date",
+    "Payroll Update: Please Review before {date}",
+    "Security Awareness Training Reminder - {dept}",
+    "NDA Required: New Vendor Onboarding - {vendor}",
+    "{ticket} resolved: {service} access request",
+    "Approval needed: purchase order #{num} ({amount} USD)",
+    "{person} shared \"{doc}\" with you",
+    "{dept} all-hands - {date}",
+    "Invoice {num} from {vendor} - due {date}",
+    "Interview schedule: {person} - {dept}",
 ]
 
 _PHISHING_SUBJECTS = [
@@ -170,7 +180,27 @@ _SPAM_SUBJECTS = [
     "Your prescription is ready for pickup",
 ]
 
-# Malicious attachment templates (classification and threat_type inform threatsInfoMap)
+def _malicious_attachment_template():
+    """A generated malware attachment in the template shape _fill_attachment wants.
+
+    Replaces random.choice(_MALICIOUS_ATTACHMENT_TEMPLATES). The eight fixed
+    templates varied only by a {num}, so a month of runs delivered the same eight
+    file names, and they never produced .lnk, .iso, .docm or .js -- four of the
+    seven branches of the "Proofpoint - Malware Attachment Delivered" rule. The
+    generator covers all seven and ties the malware family to the delivery format.
+    """
+    filename, _ext, ctype, family = threat_files.malicious_attachment()
+    return {"filename": filename, "contentType": ctype,
+            "classification": "MALWARE", "malware_family": family}
+
+
+def _benign_attachment_template():
+    """A generated ordinary business attachment, same shape."""
+    filename, _ext, ctype = threat_files.benign_attachment()
+    return {"filename": filename, "contentType": ctype}
+
+
+# Retained for reference: the fixed pools these replaced.
 _MALICIOUS_ATTACHMENT_TEMPLATES = [
     {"filename": "Invoice_{num}.doc",   "contentType": "application/msword",                                                                   "classification": "MALWARE", "malware_family": "Emotet"},
     {"filename": "Shipment_{num}.xlsm", "contentType": "application/vnd.ms-excel.sheet.macroEnabled.12",                                       "classification": "MALWARE", "malware_family": "QakBot"},
@@ -270,16 +300,55 @@ def _offset_iso(seconds_ago):
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
+# Slot vocabularies. These were 4-5 entries each, and half the subject templates had
+# no slot at all, so 176 distinct subjects covered 1,264 messages. Real subjects are
+# close to unique -- they carry names, ticket numbers, dates and amounts -- and
+# "first time this subject has been seen" is not a detection, but subject entropy is
+# what makes a mail corpus look like mail rather than a template.
+_SUBJ_PROJECT = ("Alpha", "Phoenix", "Titan", "Aurora", "Helios", "Nimbus", "Atlas",
+                 "Orion", "Vega", "Meridian", "Catalyst", "Northstar", "Beacon",
+                 "Cascade", "Summit", "Keystone", "Lattice", "Quarry")
+_SUBJ_DOC = ("NDA_Agreement", "Contract_2024", "Proposal_Final", "MSA_Draft",
+             "SOW_v3", "DPA_Addendum", "Renewal_Quote", "Security_Questionnaire",
+             "Pricing_Schedule", "SLA_Exhibit", "Change_Order", "Work_Order",
+             "Vendor_Onboarding_Pack", "Statement_of_Work")
+_SUBJ_SERVICE = ("Microsoft 365", "Salesforce", "Workday", "ServiceNow", "Zoom",
+                 "Slack", "Atlassian Cloud", "DocuSign", "Concur", "Okta",
+                 "Box", "Smartsheet", "Tableau", "Coupa")
+_SUBJ_FIRST = ("John", "Sarah", "Alex", "Mike", "Priya", "Daniel", "Aisha", "Tom",
+               "Elena", "Marcus", "Grace", "Omar", "Lena", "Chris", "Nadia",
+               "Victor", "Ruth", "Ibrahim", "Clara", "Sven")
+_SUBJ_LAST = ("Smith", "Connor", "Johnson", "Davis", "Patel", "Nguyen", "Okafor",
+              "Muller", "Rossi", "Kowalski", "Haddad", "Silva", "Andersson",
+              "Fitzgerald", "Yamamoto", "Novak", "Ferreira", "Larsen")
+_SUBJ_DEPT = ("Finance", "HR", "Legal", "IT", "Procurement", "Sales", "Marketing",
+              "Operations", "Security", "Facilities", "Payroll")
+_SUBJ_VENDOR = ("Acme Supply", "Northwind Trading", "Contoso Ltd", "Fabrikam",
+                "Litware", "Tailspin Toys", "Proseware", "Adventure Works",
+                "Wide World Importers", "Blue Yonder")
+_SUBJ_CITY = ("London", "Dublin", "Austin", "Denver", "Toronto", "Singapore",
+              "Berlin", "Amsterdam", "Sydney", "Boston", "Lisbon")
+
+
 def _format_subject(template):
+    first, last = random.choice(_SUBJ_FIRST), random.choice(_SUBJ_LAST)
     return (template
             .replace("{date}", datetime.now(timezone.utc).strftime("%B %d, %Y"))
             .replace("{num}", str(random.randint(10000, 99999)))
             .replace("{week}", str(random.randint(1, 52)))
             .replace("{year}", str(datetime.now(timezone.utc).year))
-            .replace("{project}", random.choice(["Alpha", "Phoenix", "Titan", "Aurora", "Helios"]))
-            .replace("{doc}", random.choice(["NDA_Agreement", "Contract_2024", "Proposal_Final", "MSA_Draft"]))
-            .replace("{service}", random.choice(["Microsoft 365", "Salesforce", "Workday", "ServiceNow"]))
-            .replace("{name}", random.choice(["John Smith", "Sarah Connor", "Alex Johnson", "Mike Davis"])))
+            .replace("{quarter}", f"Q{random.randint(1, 4)}")
+            .replace("{ticket}", f"{random.choice(('INC', 'REQ', 'CHG', 'TASK'))}"
+                                 f"{random.randint(1000000, 9999999)}")
+            .replace("{amount}", f"{random.randint(1, 240):,},{random.randint(100, 999)}")
+            .replace("{project}", random.choice(_SUBJ_PROJECT))
+            .replace("{doc}", random.choice(_SUBJ_DOC))
+            .replace("{service}", random.choice(_SUBJ_SERVICE))
+            .replace("{dept}", random.choice(_SUBJ_DEPT))
+            .replace("{vendor}", random.choice(_SUBJ_VENDOR))
+            .replace("{city}", random.choice(_SUBJ_CITY))
+            .replace("{person}", f"{first} {last}")
+            .replace("{name}", f"{first} {last}"))
 
 
 def _get_all_emails(config, session_context):
@@ -322,12 +391,61 @@ def _campaign_id(config):
 
 
 
+# Local parts of inbound business mail. Bulk senders use a role address; a human
+# correspondent at a partner or customer uses their name, which is where most of the
+# real variety in an inbound corpus comes from.
+_SENDER_ROLES = ("noreply", "no-reply", "info", "support", "notifications", "updates",
+                 "news", "billing", "invoices", "accounts", "sales", "hello",
+                 "team", "donotreply", "service", "care", "help", "orders")
+
+
 def _benign_sender(config):
-    senders = _cf(config).get("benign_senders", [])
-    if senders:
-        return random.choice(senders)
-    domain = random.choice(_DEFAULT_BENIGN_SENDER_DOMAINS)
-    local  = random.choice(["noreply", "info", "support", "notifications", "updates", "news", "billing"])
+    """An inbound benign sender address.
+
+    Was `random.choice(config['benign_senders'])` -- 15 addresses -- which measured
+    at 57 distinct senders over 1,247 messages. A real mailbox receives from
+    thousands of addresses across thousands of domains, and "first time this sender
+    has emailed the organisation" is a genuine detection that a 15-entry pool makes
+    meaningless.
+    
+    Three sources, in the proportions a business mailbox actually sees:
+      * the curated SaaS senders, kept as a recognisable head for manual hunting
+      * real long-tail domains from modules/domain_corpus.py -- partners, customers,
+        suppliers, which is what most inbound mail actually is
+      * a person-shaped local part rather than a role address, most of the time
+    """
+    curated = _cf(config).get("benign_senders", [])
+    roll = random.random()
+    if curated and roll < 0.25:
+        return random.choice(curated)
+
+    # tail_domain() directly, NOT session_utils.long_tail_domain(): that helper
+    # applies domain_corpus.TAIL_SHARE, which is 5% because it is calibrated for
+    # benign BROWSING, where a dominant curated head has to stay dominant to feed
+    # affinity baselines. Inbound mail is the opposite shape -- the long tail IS the
+    # bulk of it, since most senders are partners, customers and suppliers rather
+    # than the same sixteen SaaS vendors. Same reasoning as _EXFIL_TAIL_SHARE in
+    # session_utils, which overrides the browsing share for the same reason.
+    domain = None
+    if roll > 0.45:
+        try:
+            from modules import domain_corpus as _dc
+            if _dc.available():
+                # business_domain(), not tail_domain(): a benign business sender must
+                # not be an adult or gambling domain.
+                domain = _dc.business_domain()
+        except Exception:
+            domain = None
+    if not domain:
+        domain = random.choice(_DEFAULT_BENIGN_SENDER_DOMAINS)
+
+    if random.random() < 0.55:
+        first = random.choice(_SUBJ_FIRST).lower()
+        last = random.choice(_SUBJ_LAST).lower()
+        local = random.choice((f"{first}.{last}", f"{first[0]}{last}",
+                               f"{first}{random.randint(1, 99)}", f"{first}_{last}"))
+    else:
+        local = random.choice(_SENDER_ROLES)
     return f"{local}@{domain}"
 
 
@@ -403,7 +521,53 @@ def _themed_lure(config):
     senders, subjects = _THEMED_LURES[theme]
     configured = _cf(config).get("threat_senders", [])
     pool = [x for x in senders if not configured or x in configured] or senders
-    return random.choice(pool), _format_subject(random.choice(subjects))
+    sender = (random.choice(pool) if random.random() < 0.25
+              else (_lookalike_sender(theme) or random.choice(pool)))
+    return sender, _format_subject(random.choice(subjects))
+
+
+# Lookalike sender infrastructure, PER THEME. The seven themes shipped 1-3 sender
+# addresses each -- 15 in total, measured at 57 distinct senders over 1,247 messages
+# with `meeting@zoom-meeting-invite.com` alone appearing 84 times. A campaign that
+# reuses one sender address is a campaign that gets blocked after the first report;
+# real operators rotate domains constantly, which is why "first time this sender has
+# emailed us" is worth detecting at all.
+#
+# Generated per theme rather than globally, because _THEMED_LURES exists precisely to
+# stop a Geek Squad subject arriving from hr@hr-notification.co. The brand tokens below
+# keep the sender naming the SAME brand the subject names.
+_THEME_BRANDS = {
+    "microsoft":  ("microsoft", "micros0ft", "microsoft365", "office365", "ms-office",
+                   "msonline", "office-update"),
+    "docusign":   ("docusign", "docu-sign", "docusign-notify", "esign-docs",
+                   "shared-document", "securedocs"),
+    "sharepoint": ("sharepoint", "sharepoint-online", "onedrive", "onedrive-share",
+                   "sp-online", "teams-share"),
+    "hr_payroll": ("hr-notification", "payroll-update", "hr-portal", "mypayroll",
+                   "employee-hub", "benefits-notice"),
+    "helpdesk":   ("it-helpdesk", "helpdesk-support", "secure-login", "verify-identity",
+                   "it-servicedesk", "account-security"),
+    "billing":    ("invoice-delivery", "billing-notice", "accounts-payable",
+                   "invoice-portal", "payment-update", "remittance"),
+    "zoom":       ("zoom-meeting", "zoom-invite", "zoomvideo", "zoom-notify",
+                   "meeting-invite", "zoom-account"),
+}
+_THEME_SUFFIX = ("", "-support", "-security", "-verify", "-alert", "-login", "-portal",
+                 "-update", "-notify", "-account", "-service", "-team", "-center")
+_THEME_TLD = ("com", "net", "info", "co", "xyz", "click", "link", "online", "site",
+              "top", "live", "org", "pw", "icu")
+_THEME_LOCAL = ("no-reply", "noreply", "security", "support", "billing", "helpdesk",
+                "notification", "service", "alert", "admin", "account", "docs",
+                "team", "info", "verify")
+
+
+def _lookalike_sender(theme):
+    """A fresh sender address for `theme`, still naming that theme's brand."""
+    brands = _THEME_BRANDS.get(theme)
+    if not brands:
+        return None
+    domain = f"{random.choice(brands)}{random.choice(_THEME_SUFFIX)}.{random.choice(_THEME_TLD)}"
+    return f"{random.choice(_THEME_LOCAL)}@{domain}"
 
 
 def _threat_sender(config, theme=None):
@@ -414,8 +578,19 @@ def _threat_sender(config, theme=None):
     whose subjects are brand-neutral.
     """
     if theme and theme in _THEMED_LURES:
-        return random.choice(_THEMED_LURES[theme][0])
+        # A quarter of the time reuse a curated address so the recognisable ones stay
+        # in circulation for manual hunting; otherwise rotate to a fresh lookalike.
+        if random.random() < 0.25:
+            return random.choice(_THEMED_LURES[theme][0])
+        return _lookalike_sender(theme) or random.choice(_THEMED_LURES[theme][0])
+    # No theme: the caller's subject is brand-neutral, so any lure sender fits. Still
+    # rotate rather than returning one of the fifteen configured addresses every time
+    # -- a lookalike for an arbitrary theme is internally consistent on its own.
     senders = _cf(config).get("threat_senders", [])
+    if random.random() >= 0.25:
+        generated = _lookalike_sender(random.choice(list(_THEME_BRANDS)))
+        if generated:
+            return generated
     if senders:
         return random.choice(senders)
     domain = random.choice(_DEFAULT_THREAT_SENDER_DOMAINS)
@@ -475,7 +650,11 @@ def _fill_attachment(template, malicious=False):
         att["sandboxStatus"] = _SANDBOX_MALICIOUS
     elif ct.startswith("image/"):
         att["sandboxStatus"] = None   # Images not submitted to sandbox
-    elif "pdf" in ct or "word" in ct or "excel" in ct or "powerpoint" in ct or "msword" in ct or "octet" in ct or "zip" in ct:
+    elif ("pdf" in ct or "word" in ct or "excel" in ct or "powerpoint" in ct
+          or "msword" in ct or "octet" in ct or "zip" in ct
+          # Archives beyond .zip now reach here (7z/rar/gzip), and Proofpoint does
+          # sandbox them; without these they silently came back sandboxStatus None.
+          or "7z-compressed" in ct or "vnd.rar" in ct or "gzip" in ct):
         att["sandboxStatus"] = _SANDBOX_CLEAN
     else:
         att["sandboxStatus"] = None
@@ -575,7 +754,7 @@ def _generate_benign_delivered(config, session_context=None):
 
     # 50% chance of a benign attachment
     if random.random() > 0.5:
-        tmpl = random.choice(_BENIGN_ATTACHMENT_TEMPLATES)
+        tmpl = _benign_attachment_template()
         att  = _fill_attachment(tmpl)
         if "pdf" in att["contentType"]:
             msg["modulesRun"].append("pdr")
@@ -652,7 +831,7 @@ def _generate_malware_attachment(config, session_context=None):
     sender_ip   = _random_external_ip()
     camp_id     = _campaign_id(config)
 
-    tmpl = random.choice(_MALICIOUS_ATTACHMENT_TEMPLATES)
+    tmpl = _malicious_attachment_template()
     att  = _fill_attachment(tmpl, malicious=True)
 
     msg = _base_message(config, recipients, guid, sender, sender_ip, subject)
@@ -846,7 +1025,8 @@ def _generate_qr_code_phishing(config, session_context=None, target_email=None):
     ]))
     camp_id = _campaign_id(config)
 
-    qr_att  = _fill_attachment({"filename": "AuthCode.png", "contentType": "image/png"})
+    _qr_name, _qr_ext, _qr_ctype = threat_files.qr_phishing_attachment()
+    qr_att  = _fill_attachment({"filename": _qr_name, "contentType": _qr_ctype})
     url         = _malicious_url(config)
     threat_sha, _ = _generate_hashes()
 
@@ -1223,6 +1403,12 @@ _THREAT_GENERATORS = {
     "phishing_campaign":   _generate_phishing_campaign,
 }
 
+
+# No threat here is offered for on-demand firing (modules/threat_catalog.py): Cortex
+# publishes no analytics for Proofpoint TAP data, and none has fired from it in the tenant --
+# its alerts come from correlation rules and threat intel. Every threat still runs
+# in long-running sessions.
+ANALYTIC_ALERTS = {}
 
 def get_threat_names():
     """Return available threat names dynamically from _THREAT_GENERATORS.
