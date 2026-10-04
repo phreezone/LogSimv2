@@ -7,6 +7,7 @@ A modular, high-fidelity log simulation tool for **Palo Alto Networks Cortex XSI
 - **Modular Architecture** — each log source is a self-contained Python module; the simulator auto-discovers any module in `modules/`
 - **Flask Web Dashboard** — real-time UI for controlling all modules, adjusting threat levels and event rates, firing individual threats, scheduling jobs, and monitoring health checks
 - **Centralized Configuration** — all settings (IPs, users, hostnames, threat intel, transport) in a single `config.json`
+- **Generated High-Cardinality Values** — threat domains, file names, cloud resource identifiers and browser user-agents are *composed* per event rather than drawn from fixed lists, so a month-long run never recycles the same 25 C2 domains or 26 EC2 instance IDs. The curated `config.json` pools remain in circulation as a recognisable head for manual hunting — see [docs/value-cardinality.md](docs/value-cardinality.md)
 - **Multiple Transports** — Syslog (TCP with persistent connections), HTTP Collector, AWS S3 (cached client), Google Cloud Pub/Sub, WEC (Windows Event Collector via WS-Management)
 - **Dynamic Threat Levels** — six levels from Benign Traffic Only to Insane; controls threat event frequency per module
 - **XSIAM Detection-Ready Sequences** — attack generators produce complete detection patterns (e.g., failed logins followed by success) that trigger XSIAM UEBA analytics out of the box
@@ -37,7 +38,7 @@ The web dashboard provides full control over log generation without touching the
 - **Global Controls** — header bar with global threat level dropdown, rate slider, and Start All / Stop All buttons
 - **Real-Time Metrics** — per-module log counts, events/sec rate, threat counts, and threat breakdown histograms
 - **Event Timeline** — rolling 2-minute chart showing event volume per module with red dots marking threat events
-- **Fire Individual Threats** — select any module and any of its named threats to fire on demand
+- **Fire Individual Threats** — fire any threat that is built to trigger an XSIAM analytics alert, on demand. The dropdown groups threats by the analytic each one targets, and the result names the alert to look for. Threats with no analytic behind them (policy blocks, signature hits, hunt-only patterns) still run in long-running sessions but are not offered here
 - **Attack Scenarios** — run any of the 23 pre-built multi-module kill chains from the UI
 - **Job Scheduler** — queue future actions (module start/stop, rate changes, scenario runs) by delay or exact time
 - **Health Checks** — preflight validation of all transport connections, credentials, and environment variables
@@ -107,17 +108,20 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `sms_admins_addition` | User added to SMS Admins group | Medium | T1098 |
 | `suspicious_account_creation` | Suspicious hidden user account created | Low | T1136 |
 | `mass_account_deletion` | Multiple user accounts deleted | Medium | T1531 |
+| `as_rep_roasting` | Excessive TGT requests for users that do not require Kerberos pre-authentication | Medium | T1558.004 |
+| `dmsa_privesc` | Possible Privilege Escalation using Delegated MSA account attempt | High | T1098 |
+| `sensitive_password_reset` | Sensitive account password reset attempt for the first time | Medium | T1098 |
 
-**WIP Detections** (prefixed with `wip_` — generating events but not yet triggering detections):
+`as_rep_roasting`, `dmsa_privesc` and `sensitive_password_reset` were `wip_`-prefixed until
+2026-09-29, when their detections were found firing in the tenant. The old names still work.
+
+**WIP Detections** (prefixed with `wip_` — generating events but not yet seen triggering their detection):
 
 | Generator | Reason |
 |---|---|
 | `wip_adminsdholder_acl_modification` | Identity graph dependent — needs real AD object GUIDs/SIDs |
-| `wip_dmsa_privesc` | Events ingested correctly, detection not yet firing |
-| `wip_sensitive_password_reset` | Training period — needs 30-day Identity Analytics baseline |
 | `wip_password_never_expires` | Training period — needs identity graph baseline |
-| `wip_as_rep_roasting` | Identity graph dependent — needs baseline of normal TGT patterns |
-| `wip_irregular_service_tgs` | Identity graph dependent — needs baseline of normal service access |
+| `wip_irregular_service_tgs` | Only ever raises the weak-encryption ticket alert that `multiple_service_tickets` owns; `irregular_tgt_burst` covers its intended detection. Background only — not offered on demand |
 | `wip_priv_cert_request` | Not yet investigated |
 | `wip_sccm_container_recon` | Environment dependent — requires SCCM/ConfigMgr deployment |
 
@@ -199,6 +203,7 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 | Attack scenarios (23 kill chains) | [docs/attack-scenarios.md](docs/attack-scenarios.md) |
 | Training Mode (deterministic bulk stage + live stream) | [docs/training-mode.md](docs/training-mode.md) |
 | Adding a new module | [docs/extensibility.md](docs/extensibility.md) |
+| Value cardinality (generated domains, files, cloud IDs, user-agents) | [docs/value-cardinality.md](docs/value-cardinality.md) |
 
 ## Module Reference
 
@@ -221,6 +226,118 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 **Totals:** 377 unique threat event types and 420+ benign event types across all modules.
 
 ## Recent Changes
+
+### On-Demand Threats — Analytics Only
+
+The dashboard's **Fire Individual Threat** panel, the MCP `list_module_threats` /
+`fire_event` tools and the CLI "specific threat" menu now offer only threats that are built
+to trigger an XSIAM analytics alert (XDR Analytics or Analytics BIOC). Everything else —
+signature and policy blocks, correlation-rule and hunt-only patterns, benign baselines —
+keeps running in long-running module sessions, just not on demand.
+
+- **One mapping per module.** Each threat either names the analytic it targets or is
+  background-only: `ANALYTIC_ALERTS` in AWS, GCP, Okta and Windows; the existing
+  `analytic` / `xsiam_alert` fields in the firewall modules, which ASA now shares via
+  `get_threat_info()`. `modules/threat_catalog.py` reads both. Mappings were made against
+  the published Cortex analytics list for each data source and 90 days of tenant alerts;
+  alert names are the tenant's own wording where the alert has been seen there.
+- **The dropdown groups threats by target analytic**, lists only modules with at least one
+  (with a count), and a successful fire reports the alert to look for.
+- **Proofpoint, Infoblox and Apache httpd offer nothing on demand.** Cortex publishes no
+  analytics for those data sources, and none has fired from them in the tenant; their
+  alerts come from correlation rules and threat intel.
+- **`POST /api/modules/<name>/fire` rejects** a threat with no analytic (HTTP 400).
+  `GET /api/modules/<name>/threats` still returns `threats` (event names) and adds
+  `options` (`[{event, alert}]`).
+- **The `[Non-Analytic] ` prefix is retired.** It was only a dropdown hint. Old prefixed
+  names are still accepted. Removing it also fixes ASA's threat counter, which never
+  counted its non-analytic threats because the generator returned the unprefixed name.
+- **Renamed:** Windows `wip_as_rep_roasting`, `wip_dmsa_privesc` and
+  `wip_sensitive_password_reset` became `as_rep_roasting`, `dmsa_privesc` and
+  `sensitive_password_reset`, since their detections now fire. The old names still dispatch.
+- **Reclassified:** `ftp_large_exfil` (Firepower, Check Point, FortiGate) now targets
+  *Large Upload (FTP)*, which fired from Firepower data. ASA `ldap_recon` is background-only,
+  matching Firepower and Check Point: LDAP enumeration is an XDR-agent detection.
+
+Coverage: 310 of 457 threats are offered on demand. Guarded by
+`_local_validation/on_demand_catalog_check.py`, which fires every one of them through its
+module (nothing is sent) and checks that each produces logs.
+
+### Value Cardinality — Generated Domains, Files, Cloud IDs and User-Agents
+
+Long runs previously recycled a small number of values, which quietly defeats every
+detection that reasons about novelty ("never-seen host", "rare destination", "new C2
+infrastructure", "uncommon user-agent"). Rarity cannot come from weighting a 25-entry
+list, only from cardinality. Details and the full rationale in
+[docs/value-cardinality.md](docs/value-cardinality.md).
+
+- **Threat domains are composed, tokens preserved** — `modules/threat_domains.py` builds
+  domains around 28 threat families (`command-control-relay.top`,
+  `cdn.credential-stealer-api.icu`). Nine tokens are matched as literal substrings of
+  these names by five correlation rules, so the family token is reproduced verbatim and is
+  a **contract** — the token leads and everything else varies. ~850 distinct domains per
+  1,000 draws, versus 25 fixed.
+- **Four detections that could never fire now can** — the shipped pools had
+  `phish-kit-host.ru` where the rules match `phishing-kit`, and
+  `ransomware-payment-page.biz` where they match `ransomware-payload`. Near misses,
+  two rules each.
+- **File names and attachment types** — `modules/threat_files.py` composes business
+  document names and malware lures with the content type always matching the extension.
+  The malicious extension mix now spans the whole OR-chain the Proofpoint malware rule
+  matches, including `.lnk` and `.iso` container delivery, which the old macro-document
+  templates never produced.
+- **Cloud identifiers** — `modules/cloud_ids.py` generates correctly-shaped AWS/GCP ids
+  (`i-` + 17 hex, `AKIA`/`ASIA` keys, 12-digit accounts) and grows the `aws_config` pools
+  at startup: instances 26 → 400, volumes 26 → 600, snapshots 26 → 900, GCP service
+  accounts 5 → 60. VPCs deliberately stay in the low tens, because a real estate has few.
+  Your own AWS account ID never changes — only *foreign* accounts vary.
+- **Browser user-agents** — `modules/user_agents.py` composes agents with a realistic
+  version spread. **Okta now reports each user's own device agent** instead of a random
+  one per event, which previously made every user look like they owned 33 browsers —
+  backwards for "new device for this user".
+- **File-sharing destinations** — the shared `exfiltration_destinations` pool used by
+  every network module grew from 25 to **60 real services**. They stay real rather than
+  generated because the Infoblox unsanctioned-cloud-storage rule matches them as literals;
+  three of its literals (`filebin`, `transfer.sh`, `send.now`) were absent from the
+  project until now. Firepower's large upload/download generators moved onto this pool
+  from a separate four-entry list, which also fixed a destination IP that was unrelated to
+  the domain and invented hosts like `upload.pastebin.com`.
+- **Per-host Windows LSASS PID** — was `584` on every host in the estate; now derived per
+  host (stable across restarts, multiples of 4 as Windows allocates).
+- **`infoblox_threats.generated_share`** (default `0.75`) tunes how much threat traffic is
+  generated versus drawn from the curated pools. Set it to `0` to pin everything back to
+  `config.json`. See [docs/configuration.md](docs/configuration.md).
+- **Correctness fixes found while auditing** — `Windows NT 11.0` does not exist (Windows 11
+  reports `NT 10.0`); Safari and macOS versions are now paired (Sequoia ships Safari 18,
+  not 17); and a benign business sender can no longer be an adult or gambling domain.
+- **Validation harnesses moved** to `_local_validation/`, so they can be excluded from a
+  sync or release. Run them as `python _local_validation/<name>.py`.
+
+### Correlation Rules — Replacements in `XSIAM imports/`
+
+Five rules in `XSIAM imports/` are **replacements** for rules that could never fire. If you
+have imported the originals into a tenant, the new versions are additive — import them,
+confirm they fire, then disable or delete the originals.
+
+| New rule | Replaces | Why the original could not fire |
+|---|---|---|
+| `Cisco Firepower - IPS Event with Critical Severity (v2)` | rule id **72** | Filtered `cefName = "Intrusion Detected"`. Real FTD/FMC CEF carries the eStreamer eNcore name `INTRUSION EVENT`; the tenant held no such value, ever. |
+| `Cisco Firepower - Malicious File Transferred (v2)` | rule id **75** | Filtered `cefName = "Malicious File Detected"`. FTD emits `FireAMP Event`. |
+| `Cisco ASA - High Volume of Failed Inbound Connections from One IP (v2)` | `... Denied Inbound Connections ...` | ANDed a `106023` raw match with `xdm.observer.action = "Deny"`. The ASA parser never sets that value — across 21,435 rows it produced only `Built`, `Teardown` and null. |
+| `DNS C2 Kill Chain - NXDOMAIN Storm + Outbound Firewall Activity (v2)` | same name | Suppression named a column its own `fields` stage dropped, so it errored on every run; and it matched ASA `dst_interface = "inside"`, i.e. traffic *inbound* to the host, in a rule about outbound activity. |
+| `GCP - API Access From External / Non-Corporate IP (v2)` | same name | Same suppression defect, plus it grouped by event description rather than by the caller, so the alert carried no address entity at all. |
+
+Also corrected in the replacements: direction on the Firepower IPS rule (`src` is the
+external attacker, so it maps to `action_remote_ip`, not `action_local_ip`), username
+normalisation so `EXAMPLECORP\\user` and `user@examplecorp.com` group into one case, and
+`cs3`/`cs4` no longer mapped as interfaces on FireAMP rows where they mean disposition.
+
+Two authoring notes, learned the hard way and worth knowing if you write your own:
+
+- A **CUSTOM-mapped rule needs an explicit `| fields` stage**. Without one it saves,
+  validates, runs — and produces nothing, with no error.
+- **`suppression_fields` must name output columns**, not `xdm.*` columns the query aliases
+  away, or the rule fails every run.
 
 ### Advanced Linked Kill Chains & Enrichment
 - **6 new advanced scenarios** (18–23), each built around a single pivot entity for clean case stitching: Domain Dominance, Beaconing Implant, Server Breach → Cloud, Cloud Ransomware, Perimeter Intrusion, and Identity Attack → Cloud — see [docs/attack-scenarios.md](docs/attack-scenarios.md)
