@@ -293,6 +293,67 @@ class XsiamClient:
                 return None
             time.sleep(interval)
 
+    # ── incident management ────────────────────────────────────────────────────
+    # Needed so a purple-team run can guarantee a SINGLE open incident for the box
+    # identity before it fires. XSIAM groups a correlation (network) alert into any
+    # OPEN incident that shares its user/host entity — so when several stale box
+    # incidents are left open, the run's network alerts can group into an OLDER case
+    # while its endpoint alerts form a NEW one, splitting the story across incidents.
+    # Resolving prior open box-cases first makes the run's fresh case the only
+    # grouping target, so endpoint + network reliably land together.
+
+    OPEN_STATUSES = ("new", "under_investigation")
+
+    def get_open_incidents(self, minutes_back: int = 1440, user: Optional[str] = None,
+                           host: Optional[str] = None,
+                           statuses=OPEN_STATUSES) -> List[Dict[str, Any]]:
+        """Return OPEN incidents (optionally filtered to a user and/or host entity).
+
+        `user`/`host` match case-insensitively against the incident's `users`/`hosts`
+        entity lists; `user` also matches a domain-qualified form (DOMAIN\\user).
+        """
+        since = int((time.time() - minutes_back * 60) * 1000)
+        u = (user or "").lower()
+        h = (host or "").lower()
+        out: List[Dict[str, Any]] = []
+        # Page through creation_time-desc results so a box-case is not missed when the
+        # tenant has produced >100 incidents in the window. Cap the sweep so a busy
+        # tenant can't turn cleanup into an unbounded scan.
+        PAGE, MAX_PAGES = 100, 10
+        for pg in range(MAX_PAGES):
+            res = self._post("incidents/get_incidents/", {
+                "filters": [{"field": "creation_time", "operator": "gte", "value": since}],
+                "search_from": pg * PAGE, "search_to": pg * PAGE + PAGE,
+                "sort": {"field": "creation_time", "keyword": "desc"},
+            })
+            incs = (res.get("reply", {}) or {}).get("incidents", []) or []
+            for inc in incs:
+                if statuses and inc.get("status") not in statuses:
+                    continue
+                if user:
+                    users = [str(x).lower() for x in (inc.get("users") or [])]
+                    if not any(x == u or x.endswith("\\" + u) for x in users):
+                        continue
+                if host:
+                    hosts = [str(x).lower() for x in (inc.get("hosts") or [])]
+                    if not any(h in x for x in hosts):
+                        continue
+                out.append(inc)
+            if len(incs) < PAGE:
+                break
+        return out
+
+    def update_incident(self, incident_id, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Thin wrapper over incidents/update_incident (body: {incident_id, update_data})."""
+        return self._post("incidents/update_incident/",
+                          {"incident_id": str(incident_id), "update_data": update_data})
+
+    def resolve_incident(self, incident_id, comment: str = "",
+                         status: str = "resolved_security_testing") -> Dict[str, Any]:
+        """Resolve (close) one incident. Reversible — a person can reopen it."""
+        return self.update_incident(incident_id,
+                                    {"status": status, "resolve_comment": comment})
+
 
 # ── smoke test ────────────────────────────────────────────────────────────────
 def _smoke() -> int:
