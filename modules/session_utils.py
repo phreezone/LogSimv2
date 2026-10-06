@@ -6,7 +6,10 @@
 
 import random
 import hashlib
+import json
+import os
 import string
+import threading
 from ipaddress import ip_address, ip_network
 
 
@@ -17,14 +20,15 @@ def build_session_context(config):
     Build a stable user→device→IP mapping for this simulator run.
 
     For each user in config['user_profiles']:
-      - The primary device is ALWAYS activated and gets a randomly assigned IP
-        from its configured subnet.  The IP stays fixed for the entire run.
-      - Each secondary device (mobile, home, extra laptop …) has a 40% chance
-        of being activated.  If activated it also gets a stable IP for the run.
+      - The primary device is ALWAYS activated.
+      - Each secondary device (mobile, home, extra laptop …) is activated with a
+        type-based chance, so which devices are in use varies from run to run.
       - A user can be simultaneously active on their primary workstation/laptop
         AND a mobile/home device — that's intentional (phone + desk machine).
-      - IPs do NOT jump during a run.  To simulate a different day, restart
-        the script and new IPs will be assigned.
+      - Every device holds the SAME address on every run (user_behavior.
+        device_ip_mode = "sticky", the default), like a DHCP reservation, so the
+        tenant's per-host baselines can accumulate. Set it to "per_restart" for
+        the old behaviour of new random addresses on each restart.
 
     Returns a dict keyed by username, ready to pass to any module.
     """
@@ -42,6 +46,46 @@ def build_session_context(config):
         if _p.get('department'):
             _USER_DEPARTMENT[_norm_user(_u)] = _p['department']
 
+    # Device addresses. "sticky" (default): every device holds one address across runs,
+    # like a DHCP reservation -- see _sticky_ip(). "per_restart": the original behaviour,
+    # a fresh random address each run ("restart to simulate a different day"), which
+    # resets every IP-keyed baseline in the tenant on each restart.
+    ip_mode = str((config.get('user_behavior') or {}).get('device_ip_mode', 'sticky')).lower()
+    reserved = {}
+    if ip_mode != 'per_restart':
+        # Reserve for EVERY device first, in a fixed order, so the random choice of which
+        # secondary devices are active this run cannot shift anyone else's address.
+        used = set()
+        for _u in sorted(config.get('user_profiles', {})):
+            for _d in (config['user_profiles'][_u] or {}).get('devices', []):
+                if _d.get('subnet'):
+                    _k = f"{_u}|{_d.get('device_id') or _d.get('hostname') or _d.get('type')}"
+                    reserved[_k] = _sticky_ip(_d['subnet'], _k, used)
+
+    # Some subnets hold more devices than addresses (mobile Wi-Fi: 362 phones in one
+    # /24), so not every device can own a reservation -- realistic, since phone leases
+    # are short. What must never happen is two ACTIVE devices sharing an address in one
+    # run, so a taken address probes forward to the next free one.
+    active_used = set()
+
+    def _device_ip(username, device):
+        k = f"{username}|{device.get('device_id') or device.get('hostname') or device.get('type')}"
+        ip = reserved.get(k) or _pick_ip(device['subnet'])
+        if ip in active_used:
+            try:
+                net = ip_network(device['subnet'], strict=False)
+                base, n = int(net.network_address), net.num_addresses
+                off = int(ip_address(ip)) - base
+                for step in range(1, n - 1):
+                    cand = str(ip_address(base + 1 + (off - 1 + step) % (n - 2)))
+                    if cand not in active_used:
+                        ip = cand
+                        break
+            except (ValueError, TypeError):
+                pass
+        active_used.add(ip)
+        return ip
+
     for username, profile in config.get('user_profiles', {}).items():
         devices = profile.get('devices', [])
         primary_devices   = [d for d in devices if d.get('is_primary')]
@@ -51,7 +95,7 @@ def build_session_context(config):
 
         # Always activate every primary device
         for device in primary_devices:
-            ip = _pick_ip(device['subnet'])
+            ip = _device_ip(username, device)
             active_devices[device['type']] = {**device, 'ip': ip}
 
         # Activate secondary devices with type-based affinity weights.
@@ -63,7 +107,7 @@ def build_session_context(config):
         for device in secondary_devices:
             chance = _SECONDARY_ACTIVATION.get(device.get('type'), 0.25)
             if random.random() < chance:
-                ip = _pick_ip(device['subnet'])
+                ip = _device_ip(username, device)
                 # If a device of this type is already active (e.g. two laptops),
                 # suffix the type so both are preserved.
                 dtype = device['type']
@@ -122,7 +166,93 @@ def build_session_context(config):
         _KNOWN_DEVICE_IPS.update(d.get('ip') for d in active_devices.values()
                                  if isinstance(d, dict) and d.get('ip'))
 
+    _ACTIVE_CONTEXT.clear()
+    _ACTIVE_CONTEXT.update(session_context)
     return session_context
+
+
+# --- Recurrence: the same pair, day after day -----------------------------------------
+# "Recurring access to rare IP" and the recurring-rare-domain detectors need the SAME
+# source to reach the SAME rare destination on many different days. Two things stopped
+# that everywhere except ASA's two stable_beacon_pairs() users:
+#   * the destination lived in a per-process dict, so a restart forgot it, and
+#   * the source was the dispatcher's random pick of ~500 users (or ~25 servers), so a
+#     given pair came round again only by chance.
+# recurring_host()/stable_subset() fix the source to a small set; beacon_targets()
+# persists each source's destination across restarts, as a real implant keeps its C2.
+_ACTIVE_CONTEXT: dict = {}
+
+
+def recurring_host(key, n=3):
+    """(ip, username, hostname) of one of `n` fixed hosts for `key` -- the same set on
+    every run, so each recurs daily instead of once per few hundred picks. Requires sticky
+    device addresses (the default) for the IP to hold across restarts. None if no session
+    context has been built."""
+    users = sorted(u for u, p in _ACTIVE_CONTEXT.items() if (p or {}).get("primary_ip"))
+    if not users:
+        return None
+    chosen = random.Random(f"recurring|{key}").sample(users, min(n, len(users)))
+    u = random.choice(chosen)
+    p = _ACTIVE_CONTEXT[u]
+    return p["primary_ip"], u, p.get("primary_hostname")
+
+
+def stable_subset(items, key, n=2):
+    """`n` of `items`, the same ones on every run for `key`."""
+    items = sorted({str(i) for i in (items or [])})
+    if len(items) <= n:
+        return items
+    return random.Random(f"subset|{key}").sample(items, n)
+
+
+_BEACON_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "state", "beacon_targets.json")
+_BEACON_LOCK = threading.Lock()
+_BEACON_ALL = None
+_BEACON_CAP = 2000          # keys per module; beyond this, remembered for the run only
+
+
+def _beacon_load():
+    global _BEACON_ALL
+    if _BEACON_ALL is None:
+        try:
+            with open(_BEACON_PATH, encoding="utf-8") as f:
+                _BEACON_ALL = json.load(f)
+        except (OSError, ValueError):
+            _BEACON_ALL = {}
+    return _BEACON_ALL
+
+
+class _BeaconTargets(dict):
+    """A module's source -> destination map that survives restarts (state/beacon_
+    targets.json). Same interface the modules already use (.get / [k] = v); tuples come
+    back as lists after a reload, which unpack identically. Delete the file to reset."""
+
+    def __init__(self, module):
+        self._module = module
+        with _BEACON_LOCK:
+            super().__init__(_beacon_load().get(module, {}))
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        with _BEACON_LOCK:
+            store = _beacon_load().setdefault(self._module, {})
+            if key not in store and len(store) >= _BEACON_CAP:
+                return
+            store[key] = list(value) if isinstance(value, tuple) else value
+            try:
+                os.makedirs(os.path.dirname(_BEACON_PATH), exist_ok=True)
+                tmp = _BEACON_PATH + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(_BEACON_ALL, f, indent=0)
+                os.replace(tmp, _BEACON_PATH)
+            except OSError:
+                pass        # persistence is best-effort; the in-run mapping still holds
+
+
+def beacon_targets(module):
+    """The persistent beacon map for `module` (replaces a per-process dict)."""
+    return _BeaconTargets(module)
 
 
 def rand_ip_from_network(network):
@@ -152,6 +282,38 @@ def _pick_ip(subnet_cidr):
         return rand_ip_from_network(subnet_cidr)
     except Exception:
         return '127.0.0.1'
+
+
+def _sticky_ip(subnet_cidr, device_key, used):
+    """DHCP-reservation-style address: derived from the device's identity, so the same
+    device holds the same address on every run.
+
+    Why it matters: third-party firewall logs identify an endpoint mostly by IP (there
+    is no agent), and every XSIAM host baseline -- "rarely seen host", "recurring access
+    over many days", per-host upload volume -- is learned against that key over a 30-day
+    training window. Re-drawing every device's address on each restart reset all of those
+    baselines and, across restarts, attached the same address to different people's
+    machines. Measured 2026-10-04: IT-WS-029 was .238, .211 and .125 on three restarts.
+
+    Collisions probe forward deterministically within the subnet; .1-.19 stay free for
+    gateways and infrastructure, as in a real DHCP scope.
+    """
+    try:
+        net = ip_network(subnet_cidr, strict=False)
+    except (ValueError, TypeError):
+        return '127.0.0.1'
+    span = net.num_addresses - 2
+    if span < 1:
+        return str(net.network_address)
+    lo = 20 if span > 60 else 1
+    width = span - lo + 1
+    start = int(hashlib.sha256(f"device-ip|{device_key}".encode()).hexdigest(), 16) % width
+    for i in range(width):
+        cand = str(net.network_address + lo + (start + i) % width)
+        if cand not in used:
+            used.add(cand)
+            return cand
+    return str(net.network_address + lo + start)      # subnet full: share, as DHCP would fail
 
 
 # Per-call helpers – called inside each module's generate_log()

@@ -1649,7 +1649,13 @@ def _simulate_smb_share_enumeration(config, src_ip, user, shost):
     return logs
 
 
-_beacon_target_map: dict = {}   # src_ip -> stable (resolver_ip, c2_domain) for recurring-rare-domain detection
+try:
+    from modules.session_utils import beacon_targets as _beacon_targets
+except ImportError:
+    from session_utils import beacon_targets as _beacon_targets
+# Persists across restarts (state/beacon_targets.json): a source keeps its C2, as a
+# real implant does, so recurring-access detectors can see the pair on many days.
+_beacon_target_map = _beacon_targets("checkpoint_firewall")
 
 
 def _simulate_dns_c2_beacon(config, src_ip, user, shost):
@@ -1661,6 +1667,15 @@ def _simulate_dns_c2_beacon(config, src_ip, user, shost):
 
     Triggers XSIAM: DNS Tunnelling / C2 Beacon analytics detection.
     """
+    # Recurring-access detectors need the SAME host on many days; a random pick among
+    # ~500 users almost never repeats. One of a few fixed hosts (session_utils.recurring_host).
+    try:
+        from modules.session_utils import recurring_host
+    except ImportError:
+        from session_utils import recurring_host
+    _h = recurring_host("checkpoint_firewall:dns_c2_beacon")
+    if _h:
+        src_ip, user, shost = _h
     print(f"    - Check Point Module simulating: DNS C2 Beacon from {src_ip}")
     # Was five hard-coded names, so every Check Point beacon in every run called
     # home to one of five hosts. Generated per source instead -- and only when the
@@ -2544,6 +2559,15 @@ def _simulate_dns_tunneling(config, src_ip, user, shost):
 def _simulate_reverse_ssh_tunnel(config, src_ip, user, shost):
     """Internal host -> EXTERNAL IP on SSH/22 — reverse SSH tunnel / C2 over SSH.
     Long-lived, high bidirectional volume; a few sessions to the SAME external host."""
+    # Recurring-access detectors need the SAME host on many days; a random pick among
+    # ~500 users almost never repeats. One of a few fixed hosts (session_utils.recurring_host).
+    try:
+        from modules.session_utils import recurring_host
+    except ImportError:
+        from session_utils import recurring_host
+    _h = recurring_host("checkpoint_firewall:reverse_ssh_tunnel")
+    if _h:
+        src_ip, user, shost = _h
     print(f"    - Check Point Module simulating: Reverse SSH tunnel from {src_ip}")
     dest_ip = _beacon_target_map.get(f"revssh::{src_ip}") or rare_external_ip()
     _beacon_target_map[f"revssh::{src_ip}"] = dest_ip   # stable rare dest

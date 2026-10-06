@@ -374,7 +374,13 @@ _nat_ip_map: dict[str, str] = {}
 # Stable per-src DNS C2 beacon target — beacon detections only fire when the
 # same destination is contacted repeatedly.  Random destinations every call
 # produce noise, not a beacon pattern.
-_beacon_target_map: dict[str, str] = {}
+try:
+    from modules.session_utils import beacon_targets as _beacon_targets
+except ImportError:
+    from session_utils import beacon_targets as _beacon_targets
+# Persists across restarts (state/beacon_targets.json): a source keeps its C2, as a
+# real implant does, so recurring-access detectors can see the pair on many days.
+_beacon_target_map = _beacon_targets("cisco_asa")
 
 
 def _get_nat_ip(config, src_ip=None):
@@ -1113,7 +1119,12 @@ def _simulate_server_outbound_http(config, session_context=None, src_ip_override
     """
     if not config.get('internal_servers'):
         return None
-    src_ip = src_ip_override or random.choice(config.get('internal_servers'))
+    try:
+        from modules.session_utils import stable_subset
+    except ImportError:
+        from session_utils import stable_subset
+    src_ip = src_ip_override or random.choice(
+        stable_subset(config.get('internal_servers'), "cisco_asa:server_outbound_http"))
     user   = _get_user_from_ip(config, src_ip, session_context)
 
     dest_ip = _beacon_target_map.get(f"srv_http::{src_ip}")
@@ -2670,6 +2681,17 @@ def generate_log(config, scenario=None, threat_level="Realistic",
             # Scenario victim — keep the internal host consistent across stages so
             # XSIAM entity-stitching can tie SMB/RDP/etc. to the same victim.
             internal_host_ip = ctx_src
+        elif session_context and log_choice in ("dns_c2_beacon", "tor_connection",
+                                                "reverse_ssh_tunnel"):
+            # Recurring-access detectors need the same host on many days (see
+            # session_utils.recurring_host); a scenario's pinned victim still wins above.
+            try:
+                from modules.session_utils import recurring_host
+            except ImportError:
+                from session_utils import recurring_host
+            _h = recurring_host(f"cisco_asa:{log_choice}")
+            if _h:
+                internal_host_ip = _h[0]
         elif session_context:
             user_info = get_random_user(session_context, preferred_device_type='workstation')
             if user_info and user_info.get('ip'):
