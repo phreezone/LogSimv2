@@ -2594,7 +2594,13 @@ def _simulate_tor_connection(config, src_ip, user, shost):
     return logs
 
 
-_beacon_target_map: dict = {}   # src_ip -> stable (resolver_ip, c2_base_domain) for recurring-rare-domain detection
+try:
+    from modules.session_utils import beacon_targets as _beacon_targets
+except ImportError:
+    from session_utils import beacon_targets as _beacon_targets
+# Persists across restarts (state/beacon_targets.json): a source keeps its C2, as a
+# real implant does, so recurring-access detectors can see the pair on many days.
+_beacon_target_map = _beacon_targets("fortinet_fortigate")
 
 
 def _simulate_dns_c2_beacon(config, src_ip, user, shost):
@@ -2602,6 +2608,15 @@ def _simulate_dns_c2_beacon(config, src_ip, user, shost):
     DNS beaconing to suspected C2 resolver_ip — repeated queries (returns list).
     Signal: regularity and volume of DNS queries to same suspicious resolver_ip.
     """
+    # Recurring-access detectors need the SAME host on many days; a random pick among
+    # ~500 users almost never repeats. One of a few fixed hosts (session_utils.recurring_host).
+    try:
+        from modules.session_utils import recurring_host
+    except ImportError:
+        from session_utils import recurring_host
+    _h = recurring_host("fortinet_fortigate:dns_c2_beacon")
+    if _h:
+        src_ip, user, shost = _h
     print(f"    - Fortinet Module simulating: DNS C2 beacon from {src_ip}")
     forti_conf   = _get_config(config)
     # Eight curated DGA names meant a "beacon to an algorithmic domain" detector saw
@@ -2667,7 +2682,11 @@ def _simulate_server_outbound_http(config):
     """DNS precursor + server outbound HTTP — returns list."""
     print(f"    - Fortinet Module simulating: Server outbound HTTP")
     servers     = config.get("internal_servers", ["10.0.10.50"])
-    src_ip      = random.choice(servers)
+    try:
+        from modules.session_utils import stable_subset
+    except ImportError:
+        from session_utils import stable_subset
+    src_ip      = random.choice(stable_subset(servers, "fortinet_fortigate:server_outbound_http") or servers)
     dst_ip      = _beacon_target_map.get(f"srvhttp::{src_ip}") or rare_external_ip()
     _beacon_target_map[f"srvhttp::{src_ip}"] = dst_ip
     geo         = _ext_geo()
@@ -3629,6 +3648,15 @@ def _simulate_reverse_ssh_tunnel(config, src_ip, user, shost):
     tunnel / C2 over SSH. Long-lived, high bidirectional volume; a few sessions to
     the SAME external host show persistence.
     """
+    # Recurring-access detectors need the SAME host on many days; a random pick among
+    # ~500 users almost never repeats. One of a few fixed hosts (session_utils.recurring_host).
+    try:
+        from modules.session_utils import recurring_host
+    except ImportError:
+        from session_utils import recurring_host
+    _h = recurring_host("fortinet_fortigate:reverse_ssh_tunnel")
+    if _h:
+        src_ip, user, shost = _h
     print(f"    - Fortinet Module simulating: Reverse SSH tunnel from {src_ip}")
     ext_ip = _beacon_target_map.get(f"revssh::{src_ip}") or rare_external_ip()
     _beacon_target_map[f"revssh::{src_ip}"] = ext_ip   # stable rare dest

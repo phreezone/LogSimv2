@@ -76,3 +76,6 @@ domain_cache/
 # To take an already-tracked one out of the repo as well:
 #     git rm --cached _local_validation/<name>.py
 _local_validation/
+
+# Persistent simulator state (beacon destinations etc.); delete to reset
+state/

@@ -1300,7 +1300,12 @@ def _generate_server_outbound_http(config, user, dept, internal_host_ip, device_
     """
     print("    - Zscaler Module simulating: Server Outbound HTTP (anomalous)")
     internal_servers = config.get('internal_servers', [])
-    server_ip = random.choice(internal_servers) if internal_servers else _get_random_internal_ip(config)
+    try:
+        from modules.session_utils import stable_subset
+    except ImportError:
+        from session_utils import stable_subset
+    server_ip = (random.choice(stable_subset(internal_servers, "zscaler:server_outbound_http"))
+                 if internal_servers else _get_random_internal_ip(config))
     logs = [_dns_precursor_event(config, user, dept, device_info, server_ip)]
     logs.append(_fw_event(config, user, dept, device_info,
                      server_ip, (_beacon_target_map.get(f"srvhttp::{server_ip}") or rare_external_ip()), 80, "6",
@@ -1543,7 +1548,13 @@ def _generate_brute_force(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-_beacon_target_map: dict = {}   # internal_host_ip -> stable C2 resolver for recurring-rare-IP detection
+try:
+    from modules.session_utils import beacon_targets as _beacon_targets
+except ImportError:
+    from session_utils import beacon_targets as _beacon_targets
+# Persists across restarts (state/beacon_targets.json): a source keeps its C2, as a
+# real implant does, so recurring-access detectors can see the pair on many days.
+_beacon_target_map = _beacon_targets("zscaler")
 
 
 def _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info):

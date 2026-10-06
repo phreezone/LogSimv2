@@ -2137,7 +2137,11 @@ def _generate_server_outbound_http(config):
     """
     print("    - Firepower Module simulating: Server Outbound HTTP (anomalous)")
     internal_servers = config.get('internal_servers', ['10.0.10.50'])
-    server_ip        = random.choice(internal_servers)
+    try:
+        from modules.session_utils import stable_subset
+    except ImportError:
+        from session_utils import stable_subset
+    server_ip        = random.choice(stable_subset(internal_servers, "cisco_firepower:server_outbound_http") or internal_servers)
     dest_ip          = _beacon_target_map.get(f"srvhttp::{server_ip}") or rare_external_ip()
     _beacon_target_map[f"srvhttp::{server_ip}"] = dest_ip
     dest_host        = f"c2-{dest_ip.replace('.', '-')}.example.com"
@@ -2409,8 +2413,13 @@ def _generate_abnormal_rdp_rare_host(config, src_ip, user, shost=None, session_c
     return [_format_firepower_cef(config, fields, "CONNECTION STATISTICS")]
 
 
-_beacon_target_map: dict = {}   # src_ip -> stable C2 resolver, so repeat beacon runs
-                                # form a recurring-rare-IP pattern (not random noise)
+try:
+    from modules.session_utils import beacon_targets as _beacon_targets
+except ImportError:
+    from session_utils import beacon_targets as _beacon_targets
+# Persists across restarts (state/beacon_targets.json): a source keeps its C2, as a
+# real implant does, so recurring-access detectors can see the pair on many days.
+_beacon_target_map = _beacon_targets("cisco_firepower")
 
 
 def _generate_dns_c2_beacon(config, src_ip, user, shost=None):
@@ -2424,6 +2433,15 @@ def _generate_dns_c2_beacon(config, src_ip, user, shost=None):
     Returns a list of CEF log strings (multi-event threat generator).
     Triggers XSIAM: DNS C2 Beaconing / High-Volume DNS analytics detection.
     """
+    # Recurring-access detectors need the SAME host on many days; a random pick among
+    # ~500 users almost never repeats. One of a few fixed hosts (session_utils.recurring_host).
+    try:
+        from modules.session_utils import recurring_host
+    except ImportError:
+        from session_utils import recurring_host
+    _h = recurring_host("cisco_firepower:dns_c2_beacon")
+    if _h:
+        src_ip, user, shost = _h
     print("    - Firepower Module simulating: DNS C2 Beacon (volume pattern)")
     # Stable resolver per source so successive runs recur to the same rare IP.
     c2_resolver = _beacon_target_map.get(src_ip)
@@ -3332,6 +3350,15 @@ def _generate_reverse_ssh_tunnel(config, src_ip, user, shost=None):
     """Internal host -> EXTERNAL IP on SSH/22 — reverse SSH tunnel / C2 over SSH.
     Long-lived, high bidirectional volume; a few sessions to the SAME external host.
     Returns list of CEF log strings (multi-event)."""
+    # Recurring-access detectors need the SAME host on many days; a random pick among
+    # ~500 users almost never repeats. One of a few fixed hosts (session_utils.recurring_host).
+    try:
+        from modules.session_utils import recurring_host
+    except ImportError:
+        from session_utils import recurring_host
+    _h = recurring_host("cisco_firepower:reverse_ssh_tunnel")
+    if _h:
+        src_ip, user, shost = _h
     print("    - Firepower Module simulating: Reverse SSH tunnel to external host")
     ext_ip = _beacon_target_map.get(f"revssh::{src_ip}") or rare_external_ip()
     _beacon_target_map[f"revssh::{src_ip}"] = ext_ip   # stable rare dest per source
