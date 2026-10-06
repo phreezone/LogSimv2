@@ -282,10 +282,10 @@ is **counted** in the health check rather than lost silently.
 
 | Setting | Where | Default | What it controls |
 |---|---|---|---|
-| `wks_interval_multiplier` | `windows_events_config` | `10.0` | **Windows volume.** Seconds between batches per workstation, as a multiple of `base_event_interval_seconds`. At 10.0 the 265 workstations send ~47 events/s (~4.7 M/day); at 1.0, ~476/s (~41 M/day). |
+| `wks_interval_multiplier` | `windows_events_config` | `1.0` | **Windows volume.** Seconds between batches per workstation, as a multiple of `base_event_interval_seconds`. At 1.0 (production pacing) the 265 workstations send ~484 events/s (~42 M/day); lower values send proportionally more. |
 | `dc_interval_multiplier` | `windows_events_config` | `0.5` | Domain-controller pacing (~7 events/s). |
-| `output_queue_size` / `threat_queue_size` | `windows_events_config` | `1000` / `100` | Memory buffers between Windows workers and delivery. Workers wait when full. |
-| `wec_sender_threads` | `windows_events_config` | `4` | Concurrent WEC POSTs. |
+| `output_queue_size` / `threat_queue_size` | `windows_events_config` | `20000` / `100` | Memory buffers between Windows workers and delivery. Workers wait when full. Drained once per interval, so `output_queue_size` must exceed events per interval or it becomes a ceiling (at 1000 it held 4x pacing to exactly 1,000/s). |
+| `wec_batch_size` / `wec_sender_threads` | `windows_events_config` | `100` / `4` | Events per WEC POST and concurrent POSTs. Measured broker latency is ~28 ms per POST almost regardless of size, so size matters more than threads: 100 per POST is ~3,600 events/s per thread. |
 | `wec_send_retries` / `wec_retry_backoff_s` | `windows_events_config` | `3` / `1.0` | Retries per failed POST, with exponential backoff. |
 | `wec_max_pending` | `windows_events_config` | `10000` | WEC backlog at which the **Windows** module pauses generation. Other modules are never held by it. |
 | `s3_flush_idle_s` / `s3_flush_max_age_s` / `s3_flush_max_events` | `aws_config` | `4` / `30` / `500` | When a CloudTrail object is cut. More events mean more objects, never fewer events. |
@@ -295,8 +295,21 @@ is **counted** in the health check rather than lost silently.
 
 Until 2026-10-06 Windows had a hidden ceiling of 50 events per second (one 50-event drain
 per call). The workers were configured for ~476/s, so ~90% of what they generated was
-discarded, threats included. The ceiling is gone and the default pacing was set to keep
-the tenant at the volume it already received.
+discarded, threats included. The ceiling is gone and Windows now runs at its production
+pacing.
+
+**Measured capacity** (real chain, broker stubbed at the measured 28 ms per POST):
+
+| Pacing | Delivered | CPU (one core) |
+|---|---|---|
+| 1x (production) | ~484/s, ~42 M/day | 22% |
+| 4x | ~1,785/s, ~154 M/day | 72% |
+| 10x | ~2,480/s, falls behind | 99% |
+
+The remaining ceiling, ~2,500 events/s, is physical: the simulator is one Python process
+and its threads share one core. Going beyond it (the WEC broker scales to ~25,000
+production workstations) would need generation split across processes. Re-measure with
+`python _local_validation/windows_throughput_check.py --mult <x>`.
 
 ## C. Module-Specific Configuration
 
