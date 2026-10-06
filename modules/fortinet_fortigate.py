@@ -3080,10 +3080,16 @@ def _simulate_abnormal_rdp_rare_host(config, src_ip, user, shost):
     XSIAM "Abnormal RDP session to a remote host from a rarely seen host". Source from a
     stable rare-source pool (an ordinary workstation carries too much traffic to be
     "rarely seen"); destination from rare_internal_host(). Returns list of 1-2."""
-    src = _fg_rare_source_host(config)
+    # The rare host speaks for itself: no borrowed employee identity, and a hostname of
+    # its own (see session_utils.stable_rare_sources for why both matter).
+    try:
+        from modules.session_utils import rare_source_host
+    except ImportError:
+        from session_utils import rare_source_host
+    src, src_host = rare_source_host(config, "fortinet_fortigate")
     dst = rare_internal_host(config, exclude=(src,))
     print(f"    - Fortinet Module simulating: Abnormal RDP from rare host {src} -> {dst}")
-    logs = [_fg_conn(config, src, dst, 3389, "RDP", "accept", user=user,
+    logs = [_fg_conn(config, src, dst, 3389, "RDP", "accept", user=None, shost=src_host,
                      in_role="lan", out_role="lan", appcat="Remote.Access", apprisk="high",
                      out_b=random.randint(50_000, 3_000_000), in_b=random.randint(200_000, 5_000_000),
                      duration_s=random.randint(120, 2400), logdesc="Forward traffic")]
@@ -3103,22 +3109,6 @@ def _simulate_rare_smtp_session(config, src_ip, user, shost):
                      out_b=random.randint(2_000, 200_000), in_b=random.randint(500, 5_000),
                      duration_s=random.randint(1, 30), logdesc="Forward traffic")]
     return logs
-
-
-# Stable pool of seldom-seen internal source hosts (abnormal_rdp_rare_host).
-_FG_RARE_SOURCE_POOL = []
-
-
-def _fg_rare_source_host(config):
-    if not _FG_RARE_SOURCE_POOL:
-        seen = set()
-        for _ in range(96):
-            if len(_FG_RARE_SOURCE_POOL) >= 12:
-                break
-            c = rare_internal_host(config, exclude=tuple(seen))
-            if c not in seen:
-                seen.add(c); _FG_RARE_SOURCE_POOL.append(c)
-    return random.choice(_FG_RARE_SOURCE_POOL) if _FG_RARE_SOURCE_POOL else rare_internal_host(config)
 
 
 def _simulate_dos_anomaly(config, src_ip=None, user=None, shost=None):

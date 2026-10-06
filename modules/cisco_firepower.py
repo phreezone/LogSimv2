@@ -2385,6 +2385,14 @@ def _generate_abnormal_rdp_rare_host(config, src_ip, user, shost=None, session_c
     """
     firepower_conf = _get_config(config)
     internal_iface = firepower_conf.get('inbound_interface', 'inside')
+    # The SOURCE must be rarely observed too. This used the caller's ordinary workstation
+    # -- hundreds of sessions a day -- contradicting the condition described above.
+    try:
+        from modules.session_utils import rare_source_host
+    except ImportError:
+        from session_utils import rare_source_host
+    src_ip, shost  = rare_source_host(config, "cisco_firepower")
+    user           = None
     dest_ip        = _rare_internal_host(config, exclude={src_ip})
     print(f"    - Firepower Module simulating: Abnormal RDP to rare host "
           f"{src_ip} -> {dest_ip}")

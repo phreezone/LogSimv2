@@ -957,6 +957,74 @@ def rare_internal_host(config, exclude=()):
     return f"10.1.{random.randint(20, 250)}.{random.randint(2, 250)}"
 
 
+# --- Stable, rarely-seen internal SOURCE hosts --------------------------------------
+# For detectors whose premise is that the ACTOR is seldom observed ("...from a rarely
+# seen host"). Three things have to hold together, and each module used to get at least
+# one wrong:
+#
+#   * The addresses must be the SAME across restarts. "Rarely seen" is not "never seen":
+#     the host needs a thin history that accumulates over the detector's 30-day training.
+#     The per-module pools were filled from random.* at first use, so every restart threw
+#     the history away and handed the detector twelve brand-new addresses.
+#   * The host must not borrow a busy employee's identity. FortiGate and Check Point sent
+#     the rare address with the caller's user attached; a heavily active user on an
+#     unfamiliar address reads as a known person on a new machine, and user-to-host
+#     binding pulls the session back towards that person's usual workstation.
+#   * It needs a hostname of its own -- a machine that is genuinely little used (a lab PC,
+#     a kiosk, a spare loaner) -- rather than the caller's workstation name.
+#
+# Evidence for why this matters: "Abnormal RDP ... from a rarely seen host" fired from
+# FortiGate, Check Point and Firepower only in 2026-07-24..08-01, the two weeks after the
+# tenant's analytics activated, when every host's baseline was thin. Once training filled
+# the baselines in, ordinary workstations stopped looking rare and it never fired again.
+_RARE_SOURCE_POOLS = {}
+_RARE_HOST_ROLES = ("LAB-WS", "KIOSK", "SPARE-LT", "TRAIN-PC", "CONFRM-PC")
+
+
+def stable_rare_sources(config, key, n=12):
+    """`n` internal addresses that recur RARELY -- and are the same on every restart.
+
+    Seeded from `key` (one pool per module) and the configured internal_networks, so the
+    pool only changes if the network layout does. Avoids internal_servers and any device
+    address the session context has handed to a user."""
+    pool = _RARE_SOURCE_POOLS.get(key)
+    if pool:
+        return pool
+    nets = sorted((config or {}).get("internal_networks") or ["10.1.0.0/16"])
+    servers = set((config or {}).get("internal_servers") or [])
+    rng = random.Random(f"rare-source|{key}|{'|'.join(nets)}")
+    pool = []
+    for _ in range(n * 40):
+        if len(pool) >= n:
+            break
+        try:
+            net = ip_network(rng.choice(nets), strict=False)
+        except ValueError:
+            continue
+        span = net.num_addresses - 2
+        if span < 30:
+            continue
+        cand = str(net.network_address + rng.randint(20, span))
+        if cand in servers or cand in pool or cand in _KNOWN_DEVICE_IPS:
+            continue
+        pool.append(cand)
+    _RARE_SOURCE_POOLS[key] = pool
+    return pool
+
+
+def rare_host_name(ip):
+    """A stable hostname for a little-used machine, derived from its address."""
+    h = int(hashlib.sha1(str(ip).encode()).hexdigest(), 16)
+    return f"{_RARE_HOST_ROLES[h % len(_RARE_HOST_ROLES)]}-{h % 90 + 10:02d}"
+
+
+def rare_source_host(config, key):
+    """(ip, hostname) for one rarely-seen source. Callers should send it with NO user."""
+    pool = stable_rare_sources(config, key) or [rare_internal_host(config)]
+    ip = random.choice(pool)
+    return ip, rare_host_name(ip)
+
+
 def vpn_username(user):
     """Bare username for VPN AUTHENTICATION events. Never EXAMPLECORP\\user.
 

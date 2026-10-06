@@ -2423,10 +2423,16 @@ def _simulate_rare_appid(config, src_ip, user, shost):
 def _simulate_abnormal_rdp_rare_host(config, src_ip, user, shost):
     """Single RDP session from a seldom-seen internal host to a seldom-targeted one —
     XSIAM "Abnormal RDP session to a remote host from a rarely seen host". Returns list."""
-    src = _cp_rare_source_host(config)
+    # No borrowed employee identity, and a hostname of its own
+    # (see session_utils.stable_rare_sources).
+    try:
+        from modules.session_utils import rare_source_host
+    except ImportError:
+        from session_utils import rare_source_host
+    src, src_host = rare_source_host(config, "checkpoint_firewall")
     dst = rare_internal_host(config, exclude=(src,))
     print(f"    - Check Point Module simulating: Abnormal RDP from rare host {src} -> {dst}")
-    return [_cp_conn(config, src, dst, 3389, "rdp", "RDP", user=user, internal=True,
+    return [_cp_conn(config, src, dst, 3389, "rdp", "RDP", user=None, shost=src_host, internal=True,
                      out_b=random.randint(50_000, 3_000_000), in_b=random.randint(200_000, 5_000_000),
                      duration=random.randint(120, 2400), rule="Allow_Internal_Traffic")]
 
@@ -2441,20 +2447,6 @@ def _simulate_rare_smtp_session(config, src_ip, user, shost):
                      out_b=random.randint(2_000, 200_000), in_b=random.randint(500, 5_000),
                      duration=random.randint(1, 30))]
 
-
-_CP_RARE_SOURCE_POOL = []
-
-
-def _cp_rare_source_host(config):
-    if not _CP_RARE_SOURCE_POOL:
-        seen = set()
-        for _ in range(96):
-            if len(_CP_RARE_SOURCE_POOL) >= 12:
-                break
-            c = rare_internal_host(config, exclude=tuple(seen))
-            if c not in seen:
-                seen.add(c); _CP_RARE_SOURCE_POOL.append(c)
-    return random.choice(_CP_RARE_SOURCE_POOL) if _CP_RARE_SOURCE_POOL else rare_internal_host(config)
 
 
 # Main threat dispatcher
