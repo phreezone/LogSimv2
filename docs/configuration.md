@@ -274,6 +274,30 @@ terraform -chdir=terraform/gcp_pubsub output -raw xsiam_sa_key_json
 7. The simulator substitutes all `PLACEHOLDER_GCP_*` values from your `.env` at startup — no manual edits to `config.json` are needed.
 8. In XSIAM, create a **GCP Pub/Sub** data source: enter your project ID, the subscription name, and paste the XSIAM service account key JSON.
 
+### Delivery: buffers, not limits
+
+Nothing in the delivery path caps volume or drops events to keep up. Where producers
+outrun delivery they **wait** (backpressure), and anything that still cannot be delivered
+is **counted** in the health check rather than lost silently.
+
+| Setting | Where | Default | What it controls |
+|---|---|---|---|
+| `wks_interval_multiplier` | `windows_events_config` | `10.0` | **Windows volume.** Seconds between batches per workstation, as a multiple of `base_event_interval_seconds`. At 10.0 the 265 workstations send ~47 events/s (~4.7 M/day); at 1.0, ~476/s (~41 M/day). |
+| `dc_interval_multiplier` | `windows_events_config` | `0.5` | Domain-controller pacing (~7 events/s). |
+| `output_queue_size` / `threat_queue_size` | `windows_events_config` | `1000` / `100` | Memory buffers between Windows workers and delivery. Workers wait when full. |
+| `wec_sender_threads` | `windows_events_config` | `4` | Concurrent WEC POSTs. |
+| `wec_send_retries` / `wec_retry_backoff_s` | `windows_events_config` | `3` / `1.0` | Retries per failed POST, with exponential backoff. |
+| `wec_max_pending` | `windows_events_config` | `10000` | WEC backlog at which the **Windows** module pauses generation. Other modules are never held by it. |
+| `s3_flush_idle_s` / `s3_flush_max_age_s` / `s3_flush_max_events` | `aws_config` | `4` / `30` / `500` | When a CloudTrail object is cut. More events mean more objects, never fewer events. |
+| `SEND_QUEUE_SIZE` | env | `5000` | Buffer between module workers and the shared sender pool. Modules wait when full. |
+| `SEND_WORKERS` | env | `8` | Shared sender threads. |
+| `HTTP_POOL_SIZE` | env | `32` | Reused HTTP connections. Not a cap: extra requests open new connections. |
+
+Until 2026-10-06 Windows had a hidden ceiling of 50 events per second (one 50-event drain
+per call). The workers were configured for ~476/s, so ~90% of what they generated was
+discarded, threats included. The ceiling is gone and the default pacing was set to keep
+the tenant at the volume it already received.
+
 ## C. Module-Specific Configuration
 
 These sections allow modules to override global settings or provide their own metadata.

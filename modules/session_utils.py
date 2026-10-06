@@ -209,7 +209,6 @@ _BEACON_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fi
                             "state", "beacon_targets.json")
 _BEACON_LOCK = threading.Lock()
 _BEACON_ALL = None
-_BEACON_CAP = 2000          # keys per module; beyond this, remembered for the run only
 
 
 def _beacon_load():
@@ -236,9 +235,9 @@ class _BeaconTargets(dict):
     def __setitem__(self, key, value):
         super().__setitem__(key, value)
         with _BEACON_LOCK:
+            # No key cap: with sticky device addresses the keys are a fixed set of hosts,
+            # so the file stays small (a few KB). Delete it to reset.
             store = _beacon_load().setdefault(self._module, {})
-            if key not in store and len(store) >= _BEACON_CAP:
-                return
             store[key] = list(value) if isinstance(value, tuple) else value
             try:
                 os.makedirs(os.path.dirname(_BEACON_PATH), exist_ok=True)

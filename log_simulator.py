@@ -39,7 +39,11 @@ _print_lock    = threading.Lock()   # ensures one complete line prints at a time
 # connections instead of doing a fresh handshake per event (the dominant cost in bulk
 # training runs). pool_maxsize covers the concurrent bulk sender threads.
 _http_session = requests.Session()
-_http_adapter = requests.adapters.HTTPAdapter(pool_connections=32, pool_maxsize=32, max_retries=0)
+# Pool size is a connection-reuse setting, not a throughput cap: requests beyond it still
+# go out on fresh connections. HTTP_POOL_SIZE raises it for very high sender counts.
+_HTTP_POOL_SIZE = max(1, int(os.getenv("HTTP_POOL_SIZE", "32")))
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=_HTTP_POOL_SIZE,
+                                              pool_maxsize=_HTTP_POOL_SIZE, max_retries=0)
 _http_session.mount('https://', _http_adapter)
 _http_session.mount('http://', _http_adapter)
 
@@ -393,9 +397,20 @@ _s3_flusher_started = [False]
 # batch grew in memory forever and nothing was ever uploaded. Size and age caps
 # guarantee delivery under continuous load while keeping the batching behaviour that
 # lets a whole scenario ride one collector pull.
+# Defaults; aws_config.s3_flush_idle_s / s3_flush_max_age_s / s3_flush_max_events
+# override them. These shape CloudTrail OBJECTS (when to cut one), not throughput: more
+# events simply mean more objects.
 _S3_FLUSH_IDLE_S = 4        # quiet period => end of a burst, flush what we have
 _S3_FLUSH_MAX_AGE_S = 30    # never let an event sit buffered longer than this
-_S3_FLUSH_MAX_EVENTS = 500  # cap batch size so one object stays reasonable
+_S3_FLUSH_MAX_EVENTS = 500  # events per object before it is cut
+
+
+def _apply_s3_flush_config(config):
+    global _S3_FLUSH_IDLE_S, _S3_FLUSH_MAX_AGE_S, _S3_FLUSH_MAX_EVENTS
+    aws = (config or {}).get("aws_config") or {}
+    _S3_FLUSH_IDLE_S = float(aws.get("s3_flush_idle_s", _S3_FLUSH_IDLE_S))
+    _S3_FLUSH_MAX_AGE_S = float(aws.get("s3_flush_max_age_s", _S3_FLUSH_MAX_AGE_S))
+    _S3_FLUSH_MAX_EVENTS = int(aws.get("s3_flush_max_events", _S3_FLUSH_MAX_EVENTS))
 
 
 def _ensure_s3_flusher():
@@ -431,6 +446,7 @@ def _ensure_s3_flusher():
 
 def _enqueue_s3(content_bytes, module, config):
     """Buffer one gzipped single-event blob for the current run, grouped by module."""
+    _apply_s3_flush_config(config)
     with _s3_batch_lock:
         key = getattr(module, 'NAME', 'unknown')
         grp = _s3_batches.setdefault(key, {"blobs": [], "module": module, "config": config})
@@ -645,6 +661,56 @@ _wec_batch = []
 _wec_batch_lock = threading.Lock()
 _wec_batch_timer = None
 _wec_cb_state = {"fails": 0, "open_since": None}
+# Delivery used to start a NEW thread for every 20-event POST, with no retry: a failed
+# POST lost its events, and more volume meant more threads with nothing bounding them.
+# Now a fixed pool (wec_sender_threads) sends, each chunk is retried with backoff
+# (wec_send_retries, wec_retry_backoff_s), and every outcome is counted.
+_wec_executor = None
+_wec_executor_lock = threading.Lock()
+_wec_flush_pending = [False]
+WEC_STATS = {"sent_events": 0, "posts": 0, "retries": 0,
+             "failed_events": 0, "breaker_dropped": 0, "last_error": None}
+
+
+def _wec_cfg(config):
+    return (config or {}).get("windows_events_config") or {}
+
+
+def _wec_pool(config):
+    global _wec_executor
+    if _wec_executor is None:
+        with _wec_executor_lock:
+            if _wec_executor is None:
+                from concurrent.futures import ThreadPoolExecutor
+                n = max(1, int(_wec_cfg(config).get("wec_sender_threads", 4)))
+                _wec_executor = ThreadPoolExecutor(max_workers=n,
+                                                   thread_name_prefix="wec-send")
+    return _wec_executor
+
+
+def wec_backlog():
+    """Events accepted for WEC delivery but not yet sent."""
+    with _wec_batch_lock:
+        return len(_wec_batch)
+
+
+def wait_for_transport(module, config, stop_event=None):
+    """Hold a module's generation loop while its transport is backed up.
+
+    Backpressure belongs on the PRODUCING module, not in the senders: the dashboard's
+    sender threads are shared by every module, so blocking them on a slow WEC broker
+    would stall Okta, AWS and the firewalls too. Today only WEC buffers enough to need
+    this; its threshold is windows_events_config.wec_max_pending (default 10000)."""
+    conf_key = getattr(module, "CONFIG_KEY", None)
+    transport = (config.get(conf_key) or {}).get("transport") if conf_key else None
+    if transport != "wec":
+        return
+    limit = int(_wec_cfg(config).get("wec_max_pending", 10000))
+    while wec_backlog() >= limit and not (stop_event and stop_event.is_set()):
+        with _wec_batch_lock:
+            if _wec_cb_state["open_since"]:
+                return       # broker down: send_wec_message counts what it cannot deliver
+        time.sleep(0.2)
 
 def _get_wec_client(config):
     """Lazy-init the WecClient singleton. Returns None on failure."""
@@ -678,38 +744,62 @@ def _get_wec_client(config):
 
 
 def _flush_wec_batch(config):
-    """Send accumulated WEC events in a single SOAP POST."""
+    """Send everything accumulated for WEC, in wec_batch_size chunks, each retried."""
     global _wec_batch_timer
     with _wec_batch_lock:
         batch = _wec_batch[:]
         _wec_batch.clear()
         _wec_batch_timer = None
+        _wec_flush_pending[0] = False
     if not batch:
         return
     client = _get_wec_client(config)
     if not client:
+        with _wec_batch_lock:
+            WEC_STATS["failed_events"] += len(batch)
+            WEC_STATS["last_error"] = "WEC client unavailable"
         return
-    try:
-        client.deliver_events(batch)
-        with _wec_batch_lock:
-            _wec_cb_state["fails"] = 0
-            _wec_cb_state["open_since"] = None
-    except Exception as exc:
-        with _wec_batch_lock:
-            _wec_cb_state["fails"] += 1
-            if _wec_cb_state["fails"] >= HTTP_CB_THRESHOLD:
-                if _wec_cb_state["open_since"] is None:
-                    _wec_cb_state["open_since"] = time.time()
-                    _tprint(f"WEC circuit breaker OPEN after {HTTP_CB_THRESHOLD} failures: {exc}")
+    cfg = _wec_cfg(config)
+    size = max(1, int(cfg.get("wec_batch_size", 20)))
+    retries = max(0, int(cfg.get("wec_send_retries", 3)))
+    backoff = float(cfg.get("wec_retry_backoff_s", 1.0))
+    for i in range(0, len(batch), size):
+        chunk = batch[i:i + size]
+        for attempt in range(retries + 1):
+            try:
+                client.deliver_events(chunk)
+                with _wec_batch_lock:
+                    WEC_STATS["sent_events"] += len(chunk)
+                    WEC_STATS["posts"] += 1
+                    _wec_cb_state["fails"] = 0
+                    _wec_cb_state["open_since"] = None
+                break
+            except Exception as exc:
+                if attempt < retries:
+                    with _wec_batch_lock:
+                        WEC_STATS["retries"] += 1
+                    time.sleep(backoff * (2 ** attempt))
+                    continue
+                with _wec_batch_lock:
+                    WEC_STATS["failed_events"] += len(chunk)
+                    WEC_STATS["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
+                    _wec_cb_state["fails"] += 1
+                    if (_wec_cb_state["fails"] >= HTTP_CB_THRESHOLD
+                            and _wec_cb_state["open_since"] is None):
+                        _wec_cb_state["open_since"] = time.time()
+                        _tprint(f"WEC circuit breaker OPEN after {HTTP_CB_THRESHOLD} "
+                                f"failed sends ({retries} retries each): {exc}")
 
 
 def send_wec_message(message, module, config):
     """Queue a Windows event for WEC transport (batched delivery)."""
     global _wec_batch_timer
-    # Circuit breaker check
+    # Circuit breaker: while the broker is down, events cannot be delivered or held
+    # indefinitely -- but they are counted (WEC_STATS["breaker_dropped"]), never silent.
     with _wec_batch_lock:
         if _wec_cb_state["open_since"]:
             if time.time() - _wec_cb_state["open_since"] < HTTP_CB_COOLDOWN:
+                WEC_STATS["breaker_dropped"] += 1
                 return
             _wec_cb_state["open_since"] = None
             _wec_cb_state["fails"] = 0
@@ -734,8 +824,10 @@ def send_wec_message(message, module, config):
     with _wec_batch_lock:
         _wec_batch.append(xml_str)
         if len(_wec_batch) >= batch_size:
-            threading.Thread(target=_flush_wec_batch, args=(config,),
-                             daemon=True).start()
+            # One flush in flight at a time is enough: it takes everything queued so far.
+            if not _wec_flush_pending[0]:
+                _wec_flush_pending[0] = True
+                _wec_pool(config).submit(_flush_wec_batch, config)
         elif _wec_batch_timer is None:
             _wec_batch_timer = threading.Timer(
                 batch_interval_ms / 1000.0,
@@ -1126,6 +1218,7 @@ def run_module_loop(module, config, threat_level, benign_mode, context, interval
     """Runs a single module in its own continuous loop (used by parallel mode)."""
     while not stop_event.is_set():
         try:
+            wait_for_transport(module, config, stop_event)
             result = module.generate_log(config=config, threat_level=threat_level,
                                           benign_only=benign_mode, context=context)
             _dispatch_result(result, module, config)
