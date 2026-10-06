@@ -577,10 +577,8 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
                             m["threats"] += 1
                         _baduser_state["metrics"][metrics_key] = m
                     for msg in valid:
-                        try:
-                            _SEND_QUEUE.put_nowait((msg, module, config, event_name))
-                        except _queue.Full:
-                            _note_queue_drop()
+                        if not _enqueue_send((msg, module, config, event_name), stop_event):
+                            break
 
         except Exception as exc:
             print(f"[bad-user][{module.NAME}] worker error: {exc}")
@@ -710,7 +708,23 @@ def _stop_baduser():
 # sent synchronously via HTTP.  The send queue lets the worker record metrics
 # instantly while a pool of sender threads handles the slow network I/O.
 
-_SEND_QUEUE: _queue.Queue = _queue.Queue(maxsize=5000)
+# A buffer between module workers and the sender pool, not a throughput cap: when it
+# is full the producing module WAITS (_enqueue_send) instead of dropping. Before
+# 2026-10-06 a full queue dropped events after they had already been counted, so the
+# dashboard over-reported delivery. SEND_QUEUE_SIZE resizes it.
+_SEND_QUEUE: _queue.Queue = _queue.Queue(maxsize=max(1, int(os.getenv("SEND_QUEUE_SIZE", "5000"))))
+
+
+def _enqueue_send(item, stop_event=None):
+    """Hand one event to the sender pool, waiting for room rather than dropping.
+    Returns False only if the producer is being stopped."""
+    while True:
+        try:
+            _SEND_QUEUE.put(item, timeout=1.0)
+            return True
+        except _queue.Full:
+            if stop_event is not None and stop_event.is_set():
+                return False
 _SEND_WORKERS_STARTED = False
 _SEND_WORKERS_LOCK = threading.Lock()
 # Continuous module streaming + Bad User forward through this pool. More workers = higher
@@ -823,6 +837,10 @@ def _module_worker(state: ModuleState, config: dict):
         benign_only   = (current_level == "Benign Traffic Only")
         cycle_start   = time.time()
         try:
+            # Hold generation while this module's transport is backed up (WEC today),
+            # so a slow broker slows Windows only -- never the shared senders.
+            from log_simulator import wait_for_transport
+            wait_for_transport(state.module, config, state._stop_event)
             result = state.module.generate_log(
                 config=config,
                 threat_level=current_level,
@@ -841,10 +859,9 @@ def _module_worker(state: ModuleState, config: dict):
                 if valid:
                     state.record_log(event_name, log_count=len(valid))
                     for msg in valid:
-                        try:
-                            _SEND_QUEUE.put_nowait((msg, state.module, config, event_name))
-                        except _queue.Full:
-                            _note_queue_drop()
+                        if not _enqueue_send((msg, state.module, config, event_name),
+                                             state._stop_event):
+                            break
 
         except Exception as exc:
             state.status = "error"
@@ -1683,8 +1700,10 @@ def _wec_worker_checks():
     # A worker that has never produced is different from one that has gone quiet:
     # the first usually means its generator raises, the second a stalled thread.
     never = sorted(k for k, w in workers.items() if not w.get("events_generated"))
+    # The threats worker is paced by the threat level (Realistic = one fire per 2 h),
+    # so long idle stretches are its normal state, not a stall.
     stale = sorted(k for k, w in workers.items()
-                   if w.get("events_generated")
+                   if k != "threats" and w.get("events_generated")
                    and now - w.get("last_event_time", 0) > _WEC_STALE_AFTER_S)
     out.append({
         "group": "Windows WEC Workers", "check": "events generated",
@@ -1709,12 +1728,18 @@ def _wec_worker_checks():
                               f"{', '.join(stale[:4])}" + (" …" if len(stale) > 4 else "")})
 
     # Output queue backs up when generation outpaces the drain in generate_log().
+    # Workers now wait for room instead of dropping (_put_backpressured), so a full
+    # queue is the throttle working -- generation held to the drain rate -- not loss.
     cap = getattr(getattr(mod, "_output_queue", None), "maxsize", 0) or 1000
     pct = int(100 * depth / cap) if cap else 0
+    tq = getattr(mod, "_threat_queue", None)
+    tdepth = tq.qsize() if tq is not None else 0
     out.append({
         "group": "Windows WEC Workers", "check": "output queue",
-        "status": "warn" if pct >= 70 else "ok",
-        "detail": f"{depth}/{cap} ({pct}%)",
+        "status": "ok",
+        "detail": f"{depth}/{cap} ({pct}%)"
+                  + ("; backpressure active, no drops" if pct >= 70 else "")
+                  + f"; threats waiting: {tdepth}",
     })
 
     # Generator failures and dropped events, counted by _note_worker_error().
@@ -1730,6 +1755,24 @@ def _wec_worker_checks():
     else:
         out.append({"group": "Windows WEC Workers", "check": "worker errors",
                     "status": "ok", "detail": "none"})
+
+    # WEC delivery outcomes (log_simulator.WEC_STATS): sends are pooled and retried, and
+    # anything that still fails -- or arrives while the breaker is open -- is counted.
+    try:
+        from log_simulator import WEC_STATS, wec_backlog
+        ws = dict(WEC_STATS)
+        lost = ws.get("failed_events", 0) + ws.get("breaker_dropped", 0)
+        out.append({
+            "group": "Windows WEC Workers", "check": "WEC delivery",
+            "status": "error" if lost else "ok",
+            "detail": (f"{ws.get('sent_events', 0)} sent in {ws.get('posts', 0)} POSTs; "
+                       f"{ws.get('retries', 0)} retries; backlog {wec_backlog()}"
+                       + (f"; LOST {ws.get('failed_events', 0)} failed + "
+                          f"{ws.get('breaker_dropped', 0)} while breaker open "
+                          f"({ws.get('last_error')})" if lost else "")),
+        })
+    except Exception:
+        pass
 
     threats = stats.get("threats", {})
     last_fired = threats.get("last_fired")

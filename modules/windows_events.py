@@ -1390,6 +1390,27 @@ _STATE_LOCK = threading.Lock()
 # --- Parallel host mode infrastructure ---
 _output_queue: _queue_mod.Queue = _queue_mod.Queue(maxsize=1000)
 _status_queue: _queue_mod.Queue = _queue_mod.Queue(maxsize=200)
+# Threats travel apart from benign traffic. They used to share _output_queue with ~266
+# benign workers that kept it permanently full, so a threat's put() timed out part-way:
+# the rest of that threat was lost and -- its fire time already advanced -- never
+# retried. Measured 2026-10-06 over 3.5 days: 8.16M Windows events dropped, and Windows
+# fired 20 threats while every other module fired 42. Each entry here is ONE whole
+# threat, (name, items), and generate_log() drains this queue before benign traffic.
+_threat_queue: _queue_mod.Queue = _queue_mod.Queue(maxsize=100)
+
+
+def _put_backpressured(q, item, stop_event):
+    """Wait for room instead of dropping. The drain in generate_log() is the real rate
+    limit (50 events per call, one call per second), so a full queue means "generate
+    slower", not "throw events away": workers block here and generation settles at
+    what can actually be delivered. Returns False only when the simulator is stopping."""
+    while not stop_event.is_set():
+        try:
+            q.put(item, timeout=1.0)
+            return True
+        except _queue_mod.Full:
+            continue
+    return False
 _worker_stats: dict = {}
 _orchestrator_started = False
 _orchestrator_lock = threading.Lock()
@@ -1402,10 +1423,9 @@ _workers_stop = threading.Event()
 _worker_errors: dict = {}
 _WORKER_WARN_EVERY_S = 60.0
 
-# _status_queue is drained by generate_log() itself, which uses it to label the
-# batch it returns with the threat that fired.  Anything else reading that queue
-# steals the label and the threat is under-counted, so observers get this
-# non-destructive ring instead (see get_recent_threats / get_status_events).
+# Threat labels now travel with the threat itself on _threat_queue; _status_queue is
+# advisory only (get_status_events), bounded, and drops when nobody reads it.
+# Observers should use this non-destructive ring (get_recent_threats).
 _recent_threats: collections.deque = collections.deque(maxlen=25)
 
 
@@ -7687,27 +7707,30 @@ def generate_log(config, scenario=None, scenario_event=None,
     # --- Parallel host mode ---
     if _cf(config).get("parallel_hosts", False):
         _ensure_orchestrator(config, session_context, threat_level, benign_only)
+        # A whole threat first, returned on its own and labelled with its own name.
+        # Labelling used to come from _status_queue and attach to whichever 50-event
+        # batch happened to drain it, so a threat split across batches was labelled once
+        # and counted approximately.
+        try:
+            threat_name, items = _threat_queue.get_nowait()
+            return ((items if len(items) > 1 else items[0]), threat_name)
+        except _queue_mod.Empty:
+            pass
+        # Take everything buffered at this moment. This used to stop at 50 events per
+        # call -- with one call a second, a fixed 50 events/s ceiling on Windows that
+        # silently discarded whatever the workers produced beyond it. Volume is now set
+        # by the workers' own pacing (dc/wks_interval_multiplier in windows_events_
+        # config), like every other module. The snapshot keeps one call finite while
+        # backpressured workers refill the queue behind it.
         batch = []
         try:
-            while len(batch) < 50:
+            for _ in range(_output_queue.qsize()):
                 batch.append(_output_queue.get_nowait())
         except _queue_mod.Empty:
             pass
         if not batch:
             return None
-        # Check if a threat fired during this drain cycle
-        threat_name = None
-        try:
-            while True:
-                status_evt = _status_queue.get_nowait()
-                if status_evt.get("type") == "threat_fired":
-                    threat_name = status_evt["name"]
-        except _queue_mod.Empty:
-            pass
-        content = batch if len(batch) > 1 else batch[0]
-        if threat_name:
-            return (content, threat_name)
-        return content
+        return batch if len(batch) > 1 else batch[0]
 
     # --- Original single-threaded behavior ---
     _BUILD_EVENT_OS_SUBTYPE = _get_os_subtype(config)
@@ -7801,11 +7824,10 @@ def _dc_worker(config, session_context, interval, stop_event):
             if result:
                 items = result if isinstance(result, list) else [result]
                 for item in items:
-                    _output_queue.put(item, timeout=5)
+                    if not _put_backpressured(_output_queue, item, stop_event):
+                        return
                     stats["events_generated"] += 1
                 stats["last_event_time"] = time.time()
-        except _queue_mod.Full:
-            _note_worker_error("dc", None, dropped=True)
         except Exception as exc:
             _note_worker_error("dc", exc)
         stop_event.wait(timeout=interval)
@@ -7826,11 +7848,10 @@ def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
                 continue
             items = result if isinstance(result, list) else [result]
             for item in items:
-                _output_queue.put(item, timeout=5)
+                if not _put_backpressured(_output_queue, item, stop_event):
+                    return
                 stats["events_generated"] += 1
             stats["last_event_time"] = time.time()
-        except _queue_mod.Full:
-            _note_worker_error(f"wks:{hostname}", None, dropped=True)
         except Exception as exc:
             _note_worker_error(f"wks:{hostname}", exc)
         stop_event.wait(timeout=interval)
@@ -7847,7 +7868,11 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
             current_time = time.time()
             should_fire = False
             with _STATE_LOCK:
-                if threat_interval > 0 and (current_time - last_threat_event_time) > threat_interval:
+                # An interval of 0 ("Insane") means no spacing: fire on every tick. This
+                # used to require interval > 0, so Insane fired NO threats in parallel
+                # mode -- every other module special-cases Insane before that test, this
+                # worker did not. A tick is base interval x threat_interval_multiplier.
+                if threat_interval <= 0 or (current_time - last_threat_event_time) > threat_interval:
                     last_threat_event_time = current_time
                     should_fire = True
 
@@ -7855,9 +7880,10 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
                 result, threat_name = _select_threat(config, session_context)
                 if result:
                     items = result if isinstance(result, list) else [result]
-                    for item in items:
-                        _output_queue.put(item, timeout=5)
-                        stats["events_generated"] += 1
+                    # One queue entry per threat, so it is delivered whole or not at all.
+                    if not _put_backpressured(_threat_queue, (threat_name, items), stop_event):
+                        return
+                    stats["events_generated"] += len(items)
                     stats["last_event_time"] = time.time()
                     stats["last_fired"] = threat_name
                     with _STATE_LOCK:
@@ -7882,7 +7908,7 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
 
 def _ensure_orchestrator(config, session_context, threat_level, benign_only):
     """Start worker threads on first call. Subsequent calls are no-ops."""
-    global _orchestrator_started, _BUILD_EVENT_OS_SUBTYPE
+    global _orchestrator_started, _BUILD_EVENT_OS_SUBTYPE, _output_queue, _threat_queue
     with _orchestrator_lock:
         if _orchestrator_started:
             return
@@ -7892,6 +7918,12 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
 
     base_interval = config.get("base_event_interval_seconds", 1.0)
     wcfg = _cf(config)
+
+    # Buffer sizes come from config. They are not throughput caps -- workers wait when a
+    # buffer is full (_put_backpressured) and the drain takes everything buffered -- they
+    # only bound how much is held in memory between generation and delivery.
+    _output_queue = _queue_mod.Queue(maxsize=max(1, int(wcfg.get("output_queue_size", 1000))))
+    _threat_queue = _queue_mod.Queue(maxsize=max(1, int(wcfg.get("threat_queue_size", 100))))
 
     # Group users by hostname
     hosts: dict[str, list[str]] = {}

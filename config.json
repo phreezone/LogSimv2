@@ -30,6 +30,9 @@
   },
   "aws_config": {
     "transport": "s3",
+    "s3_flush_idle_s": 4,
+    "s3_flush_max_age_s": 30,
+    "s3_flush_max_events": 500,
     "aws_account_id": "PLACEHOLDER_AWS_ACCOUNT_ID",
     "aws_region": "us-east-1",
     "user_agents": [
@@ -20403,12 +20406,19 @@
     "use_fqdn_hostnames": false,
     "parallel_hosts": true,
     "dc_interval_multiplier": 0.5,
-    "wks_interval_multiplier": 1.0,
+    "wks_interval_multiplier": 10.0,
     "threat_interval_multiplier": 2.0,
     "wec_machine_id": "logsim.examplecorp.local",
     "wec_batch_size": 20,
     "wec_batch_interval_ms": 1000,
-    "wec_heartbeat_interval_s": 900
+    "wec_heartbeat_interval_s": 900,
+    "_comment_delivery": "Buffers and sender settings -- none of these caps volume. Workers wait when a buffer is full instead of dropping. Windows VOLUME is set by wks/dc_interval_multiplier: at wks 10.0 the 265 workstations send ~47 events/s (~4.7M/day, what the tenant received under the old hidden 50/s cap); at 1.0 they send ~476/s (~41M/day).",
+    "output_queue_size": 1000,
+    "threat_queue_size": 100,
+    "wec_sender_threads": 4,
+    "wec_send_retries": 3,
+    "wec_retry_backoff_s": 1.0,
+    "wec_max_pending": 10000
   },
   "training_config": {
     "anchor_epoch": "2020-01-01T00:00:00Z",

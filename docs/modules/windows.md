@@ -114,6 +114,23 @@ Multi-event generators (process trees, some threats) return a Python **list** of
 
 WEC broker configuration (certificate export, subscription URL, subscription filter) is documented in **WEC Transport Setup** in the [README](../../README.md#wec-transport-setup). In brief: the Broker VM's Windows Event Collector must be activated, and LogSim's `.env` must supply `WEC_BROKER_URL`, `WEC_PFX_PATH`, and `WEC_PFX_PASSWORD`.
 
+## Delivery and Volume (parallel mode)
+
+In parallel mode (`parallel_hosts: true`, the default) one worker per workstation plus a
+DC worker and a threats worker generate events into buffers that `generate_log()` drains.
+
+- **Volume is set by pacing, not by a cap.** `wks_interval_multiplier` (default 10.0) sets
+  how often each workstation emits; see [Delivery: buffers, not limits](../configuration.md).
+- **Threats are delivered whole.** Each threat is queued as one unit on its own queue and
+  drained before benign traffic, so a multi-event sequence is never cut short and its
+  label is exact. They used to share the benign queue, where a full queue cut a threat off
+  part-way and it was never retried.
+- **No drops.** Workers wait when a buffer is full. A slow WEC broker pauses only the
+  Windows module (`wec_max_pending`); WEC POSTs are pooled and retried, and anything still
+  undeliverable is counted under "WEC delivery" in the health check.
+- **Insane** fires a threat on every threats-worker tick (base interval x
+  `threat_interval_multiplier`, 2 s by default). It previously fired none in parallel mode.
+
 ## Per-Host LSASS PID
 
 The Security channel is written by LSASS, so its PID appears in `<Execution ProcessID>` on
