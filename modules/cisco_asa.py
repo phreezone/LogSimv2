@@ -1191,34 +1191,19 @@ def _rare_internal_host(config, exclude=()):
     return rare_internal_host(config, exclude=exclude)
 
 
-# Small, STABLE pool of seldom-seen internal hosts, seeded once per process.
-#
-# "Rarely seen" is not the same as "never seen". A freshly minted address every run gives
-# the detector a host with no profile at all, and a host drawn from the normal user pool
-# carries ~500 events/day and is not rare by any measure. These addresses recur, so they
-# accumulate a thin but real history — a handful of appearances against a tenant where an
-# ordinary workstation logs hundreds of sessions a day.
-_RARE_SOURCE_POOL: list[str] = []
-_RARE_SOURCE_POOL_SIZE = 12
-
-
 def _rare_source_host(config):
-    """An internal address that appears occasionally and never in bulk.
+    """A rarely-seen internal SOURCE address, the same set on every restart.
 
-    Used as the SOURCE for detectors whose premise is that the actor itself is seldom
-    observed (abnormal_rdp_rare_host). Do not use this for destinations — that is what
-    _rare_internal_host() is for.
+    Delegates to session_utils.stable_rare_sources(): the old per-process pool was
+    reseeded from random.* on each restart, throwing away the thin history a "rarely
+    seen" host is supposed to accumulate. ASA connection logs carry no hostname, and an
+    unmapped address resolves to no user, so only the address is needed here.
     """
-    if not _RARE_SOURCE_POOL:
-        seen = set()
-        for _ in range(_RARE_SOURCE_POOL_SIZE * 8):
-            if len(_RARE_SOURCE_POOL) >= _RARE_SOURCE_POOL_SIZE:
-                break
-            candidate = _rare_internal_host(config, exclude=tuple(seen))
-            if candidate not in seen:
-                seen.add(candidate)
-                _RARE_SOURCE_POOL.append(candidate)
-    return random.choice(_RARE_SOURCE_POOL) if _RARE_SOURCE_POOL else _rare_internal_host(config)
+    try:
+        from modules.session_utils import rare_source_host
+    except ImportError:
+        from session_utils import rare_source_host
+    return rare_source_host(config, "cisco_asa")[0]
 
 
 def _simulate_new_admin_behavior(config, internal_host_ip, session_context=None):
