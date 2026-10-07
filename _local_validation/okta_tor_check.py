@@ -20,6 +20,7 @@ Needs network for the live Tor list; skips (exit 0) if it cannot be reached.
 """
 
 import collections
+import contextlib
 import json
 import os
 import random
@@ -36,6 +37,19 @@ from modules.session_utils import get_random_anon_ip_ctx      # noqa: E402
 _BULK = "https://check.torproject.org/torbulkexitlist"
 
 _fails, _checks = [], []
+
+
+@contextlib.contextmanager
+def in_tor_threat():
+    """Request Tor the way a Tor threat does. Since 2026-10-02 the module hands Tor out
+    only while one of _TOR_THREATS is running (_THREAT_STATE.allow_tor); everywhere else
+    "tor_exit_nodes" gets cloud/VPN attacker infrastructure, so ordinary users' profiles
+    stay free of Tor. Calling the helper bare now (correctly) returns no Tor at all."""
+    okta._THREAT_STATE.allow_tor = True
+    try:
+        yield
+    finally:
+        okta._THREAT_STATE.allow_tor = False
 
 
 def check(name, cond, detail=""):
@@ -97,7 +111,8 @@ def main():
     actor = okta._build_actor(user["username"], user["full_name"])
     events = []
     for _ in range(150):
-        ctx = okta._get_random_ip_and_context(cfg, "tor_exit_nodes")
+        with in_tor_threat():
+            ctx = okta._get_random_ip_and_context(cfg, "tor_exit_nodes")
         events.append(json.loads(okta._assemble(
             "user.session.start", actor, okta._build_client(ctx, cfg),
             {"result": "SUCCESS", "reason": None},
@@ -163,7 +178,8 @@ def main():
     print(f"  null geolocation (unresolved exit): {geo_null}/{len(events)}")
 
     # --- degraded paths ------------------------------------------------------
-    fb = okta._get_random_ip_and_context(dict(cfg, tor_exit_nodes=[]), "tor_exit_nodes")
+    with in_tor_threat():
+        fb = okta._get_random_ip_and_context(dict(cfg, tor_exit_nodes=[]), "tor_exit_nodes")
     check("empty-list fallback is not the RFC5737 doc address",
           fb["ip"] != "203.0.113.1", fb["ip"])
     check("empty-list fallback keeps anonymizer markers",
@@ -171,12 +187,22 @@ def main():
     check("empty-list fallback invents no geo",
           fb["city"] is None and fb["country"] is None)
 
-    unres = okta._get_random_ip_and_context(
-        dict(cfg, tor_exit_nodes=[{"ip": "203.0.113.77", "country": "Unknown"}]),
-        "tor_exit_nodes")
+    with in_tor_threat():
+        unres = okta._get_random_ip_and_context(
+            dict(cfg, tor_exit_nodes=[{"ip": "203.0.113.77", "country": "Unknown"}]),
+            "tor_exit_nodes")
     check("unresolved node -> null country", unres["country"] is None)
     check("unresolved node -> null geolocation",
           okta._build_client(unres, cfg)["geographicalContext"]["geolocation"] is None)
+
+    # --- Tor is reserved: outside a Tor threat the same request gets no Tor ----
+    random.seed(7)
+    outside = [okta._get_random_ip_and_context(cfg, "tor_exit_nodes") for _ in range(200)]
+    tor_ips = {(n.get("ip") if isinstance(n, dict) else str(n)) for n in cfg["tor_exit_nodes"]}
+    check("outside a Tor threat: no proxyType tor",
+          not any(o.get("proxy_type") == "tor" for o in outside))
+    check("outside a Tor threat: no live Tor exit address",
+          not any(o["ip"] in tor_ips for o in outside))
 
     # --- benign path must be untouched --------------------------------------
     random.seed(99)
