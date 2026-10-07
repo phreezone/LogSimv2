@@ -176,6 +176,19 @@ def _pid(hostname, daemon):
     return _PIDS[key]
 
 
+def reset_state():
+    """Reset per-process state for a hermetic (Training Mode) run.
+
+    Daemon PIDs are drawn from the RNG the first time each (appliance, daemon) is seen
+    and then cached. Without clearing them, a seeded replay skips those draws and every
+    later random value shifts -- which broke Training Mode determinism from the NIOS
+    rewrite on (test-scenario-18: a Windows Logon ID downstream came out different).
+    """
+    global last_threat_event_time
+    _PIDS.clear()
+    last_threat_event_time = 0
+
+
 def _members(config):
     """[(hostname, ipv4)] grid members -- shared with every network module."""
     return resolver.grid_members(config)

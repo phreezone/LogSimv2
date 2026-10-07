@@ -1590,6 +1590,8 @@ def reset_caches():
     instead of depending on whatever an earlier run left cached.
     """
     _USER_HOME_IPS.clear()
+    _FTP_USED.clear()           # "hosts that already served FTP" -- per run, or a replay
+                                # excludes what the previous run used (new_ftp_server)
     _USER_MAIL_SERVERS.clear()
     _USER_DEST_WEIGHTS.clear()
     _USER_BYTE_BANDS.clear()
