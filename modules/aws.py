@@ -3746,7 +3746,11 @@ def _generate_s3_ransomware_encrypt(config, context=None):
     # Generate object inventory once — shared across ListObjectsV2, CopyObject, DeleteObjects
     _prefixes = ["documents/", "data/", "backups/", "reports/", "exports/", "archives/", "db/", "configs/"]
     _exts = [".dat", ".bak", ".docx", ".xlsx", ".pdf", ".db", ".sql", ".csv", ".json", ".tar.gz"]
-    num_files = random.randint(50, 250)
+    # Discover and encrypt the whole bucket: a real ransomware run hits every object it
+    # finds, not a sample. 200-400 objects -> each gets a CopyObject + foreign-KMS
+    # GenerateDataKey (encrypt), and Phase 5 then permanently deletes every original
+    # version. "multiple objects ... for the first time" is cleared with wide margin.
+    num_files = random.randint(200, 400)
     objects = [
         {
             "key": f"{random.choice(_prefixes)}{random.randint(10000, 99999)}{random.choice(_exts)}",
