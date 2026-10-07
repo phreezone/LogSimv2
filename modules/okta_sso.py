@@ -74,10 +74,10 @@ import hashlib
 
 try:
     from modules.session_utils import (get_random_user, get_user_by_name, get_all_emails,
-        get_random_anon_ip_ctx, novel_country_vpn_ip, random_external_ip)
+        get_random_anon_ip_ctx, get_random_vpn_ip_ctx, novel_country_vpn_ip, random_external_ip)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name, get_all_emails,
-        get_random_anon_ip_ctx, novel_country_vpn_ip, random_external_ip)
+        get_random_anon_ip_ctx, get_random_vpn_ip_ctx, novel_country_vpn_ip, random_external_ip)
 
 # Stable alphanumeric Okta user ID: 00u + 17 base-62 chars, deterministic per username.
 # SHA-1 of the username is used as the seed so the same user always gets the same ID,
@@ -455,6 +455,20 @@ def _attacker_ip_context(config):
                     "state": None, "isp": v.get("isp"), "asn": v.get("asn"),
                     "domain": v.get("domain"), "is_proxy": True, "proxy_type": "vpn"}
     return _get_random_ip_and_context(config, "external_traffic_sources")
+
+
+def _anon_ip_ctx(config):
+    """An anonymized source for a threat where Tor is NOT the signal: a commercial VPN.
+
+    session_utils.get_random_anon_ip_ctx() picks a live Tor exit 30% of the time. Five
+    non-Tor threats called it (ip_rotation_sso, sso_rejected_unusual_country,
+    sso_impossible_travel, sso_suspicious_country, aitm_phishing), so every time one
+    fired, up to 30% of its events were tagged proxyType "tor" -- around _TOR_THREATS,
+    feeding Tor back into ordinary users' profiles. Inside a Tor threat it is unchanged.
+    """
+    if getattr(_THREAT_STATE, "allow_tor", False):
+        return get_random_anon_ip_ctx(config)
+    return get_random_vpn_ip_ctx(config)
 
 
 def _fresh_tor_user(session_context):
@@ -2619,10 +2633,10 @@ def _generate_ip_rotation_sso_spray(config, user_info, session_context=None):
     seen_ips = set()
     ip_pool = []
     for _ in range(4):
-        candidate = get_random_anon_ip_ctx(config)
+        candidate = _anon_ip_ctx(config)
         # Retry once to avoid duplicate IPs in the same pool
         if candidate["ip"] in seen_ips:
-            candidate = get_random_anon_ip_ctx(config)
+            candidate = _anon_ip_ctx(config)
         seen_ips.add(candidate["ip"])
         ip_pool.append(candidate)
     for ip_ctx in ip_pool:
@@ -2665,7 +2679,7 @@ def _generate_ip_rotation_sso_spray(config, user_info, session_context=None):
 
 def _generate_sso_rejected_unusual_country(config, user_info, session_context=None):
     """User rejects MFA push during SSO from unusual country — A user rejected SSO from unusual country."""
-    anon = get_random_anon_ip_ctx(config)
+    anon = _anon_ip_ctx(config)
     ip_ctx = _make_ip_ctx_from(random.choice(_HIGH_RISK_COUNTRIES),
                                {"ip": anon["ip"], "isp": anon["isp"], "asn": anon["asn"],
                                 "domain": anon["domain"], "is_proxy": True})
@@ -2723,7 +2737,7 @@ def _generate_sso_impossible_travel(config, user_info, session_context=None):
     ))
 
     # Second SSO — impossible foreign location minutes later
-    anon2 = get_random_anon_ip_ctx(config)
+    anon2 = _anon_ip_ctx(config)
     ip_ctx2 = _make_ip_ctx_from(random.choice(_HIGH_RISK_COUNTRIES),
                                 {"ip": anon2["ip"], "isp": anon2["isp"], "asn": anon2["asn"],
                                  "domain": anon2["domain"], "is_proxy": True})
@@ -2809,7 +2823,7 @@ def _generate_sso_suspicious_country(config, user_info, session_context=None):
     country_code = random.choice(_SUSPICIOUS_COUNTRIES)
     country_data = next((c for c in _HIGH_RISK_COUNTRIES if c["country"] == country_code),
                         _HIGH_RISK_COUNTRIES[0])
-    anon = get_random_anon_ip_ctx(config)
+    anon = _anon_ip_ctx(config)
     ip_ctx = _make_ip_ctx_from(country_data,
                                {"ip": anon["ip"], "isp": anon["isp"], "asn": anon["asn"],
                                 "domain": anon["domain"], "is_proxy": True})
@@ -5793,7 +5807,7 @@ def _generate_aitm_phishing(config, user_info, session_context=None):
     print("    - Okta Module simulating: AiTM phishing attack (session token theft)...")
     logs = []
     # Step 1: session.start via phishing proxy IP (high-risk country, anonymized via VPN/Tor)
-    anon = get_random_anon_ip_ctx(config)
+    anon = _anon_ip_ctx(config)
     ip_ctx = _make_ip_ctx_from(random.choice(_HIGH_RISK_COUNTRIES),
                                {"ip": anon["ip"], "isp": anon["isp"], "asn": anon["asn"],
                                 "domain": anon["domain"], "is_proxy": True})
