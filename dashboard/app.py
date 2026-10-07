@@ -1699,7 +1699,10 @@ def _wec_worker_checks():
     total = sum(w.get("events_generated", 0) for w in workers.values())
     # A worker that has never produced is different from one that has gone quiet:
     # the first usually means its generator raises, the second a stalled thread.
-    never = sorted(k for k, w in workers.items() if not w.get("events_generated"))
+    # The threats worker waits a full threat interval before its first fire (30 min at
+    # High, 2 h at Realistic), so "produced nothing yet" is its normal state, not silence.
+    never = sorted(k for k, w in workers.items()
+                   if k != "threats" and not w.get("events_generated"))
     # The threats worker is paced by the threat level (Realistic = one fire per 2 h),
     # so long idle stretches are its normal state, not a stall.
     stale = sorted(k for k, w in workers.items()
