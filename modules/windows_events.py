@@ -51,6 +51,7 @@
 # This module only generates synthetic events for log-ingestion and
 # detection-rule testing. It never touches a real Windows machine.
 
+import os
 import random
 import re
 import time
@@ -1477,6 +1478,8 @@ def reset_state():
     global last_threat_event_time, _BUILD_EVENT_OS_SUBTYPE, _orchestrator_started
     with _STATE_LOCK:
         _RECORD_NUMBERS.clear()
+        _RECORD_RESERVED.clear()
+        _RECORD_NUMBERS_HERMETIC.clear()
         _USER_SIDS.clear()
     last_threat_event_time = 0
     _BUILD_EVENT_OS_SUBTYPE = "Windows 10"
@@ -1496,12 +1499,107 @@ def _stable_user_sid(username: str) -> str:
         return sid
 
 
+# --- Record numbers that never go backwards --------------------------------------------
+# A real host's Security log RecordNumber only ever increases. These used to be reseeded
+# with random.randint(50_000, 500_000) on every restart, so a restart could drop a host
+# back into a range it had already used -- and the tenant stores ~13.5% fewer Windows
+# events than the broker accepts (measured 2026-10-06), uniformly across event types, while
+# brand-new test hosts and a real Windows host on the same broker lose nothing. Reuse of
+# (host, record id) is the leading explanation; persisting the counter tests it.
+#
+# IDs are taken in RESERVED BLOCKS from state/windows_record_numbers.json under a lock
+# shared between processes (the simulator and a sweep script can run at once): a process
+# claims the next block before using any of it, so concurrent processes get disjoint
+# ranges and a crash leaves a harmless gap, never a reuse. A host seen for the first time
+# starts at >= 1e9, above anything the old random seeding plus days of use could reach.
+_RECORD_STATE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                  "state", "windows_record_numbers.json")
+_RECORD_BLOCK = 10_000
+_RECORD_FIRST_SEED = 1_000_000_000
+_RECORD_RESERVED: dict[str, int] = {}      # host -> end of the block THIS process holds
+
+
+class _StateFileLock:
+    """Cross-process lock: an O_EXCL lock file, broken if it outlives a crash."""
+
+    def __init__(self, path, stale_after=15.0):
+        self.path, self.stale_after = path + ".lock", stale_after
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        deadline = time.time() + 30
+        while True:
+            try:
+                os.close(os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.path) > self.stale_after:
+                        os.remove(self.path)       # holder died mid-reservation
+                        continue
+                except OSError:
+                    continue
+                if time.time() > deadline:
+                    raise TimeoutError(f"record-number lock held too long: {self.path}")
+                time.sleep(0.01)
+
+    def __exit__(self, *exc):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+
+def _reserve_record_block(host, cur):
+    """Claim the next block of record numbers for `host`; returns the id before it."""
+    with _StateFileLock(_RECORD_STATE_PATH):
+        try:
+            with open(_RECORD_STATE_PATH, encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, ValueError):
+            state = {}
+        saved = state.get(host)
+        start = int(saved) if saved is not None else _RECORD_FIRST_SEED + random.randint(0, 50_000_000)
+        if cur is not None:
+            start = max(start, cur)
+        state[host] = start + _RECORD_BLOCK
+        tmp = _RECORD_STATE_PATH + f".{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, _RECORD_STATE_PATH)
+    _RECORD_RESERVED[host] = start + _RECORD_BLOCK
+    return start
+
+
+_RECORD_NUMBERS_HERMETIC: dict[str, int] = {}
+
+
+def _in_hermetic_run():
+    try:
+        from modules.session_utils import hermetic
+    except ImportError:
+        from session_utils import hermetic
+    return hermetic()
+
+
 def _next_record_number(host: str) -> int:
-    """Monotonic RecordNumber per host.  Seeded to a realistic multi-thousand value."""
+    """Monotonic RecordNumber per host, across restarts and concurrent processes.
+
+    Inside a deterministic Training Mode run (session_utils.hermetic()) numbering is the
+    original seeded, in-memory scheme instead, so the same seed reproduces the same ids
+    -- and the live, persistent counters are never touched by a training run."""
+    if _in_hermetic_run():
+        with _STATE_LOCK:
+            cur = _RECORD_NUMBERS_HERMETIC.get(host)
+            if cur is None:
+                cur = random.randint(50_000, 500_000)
+            cur += 1
+            _RECORD_NUMBERS_HERMETIC[host] = cur
+            return cur
     with _STATE_LOCK:
         cur = _RECORD_NUMBERS.get(host)
-        if cur is None:
-            cur = random.randint(50_000, 500_000)
+        if cur is None or cur >= _RECORD_RESERVED.get(host, -1):
+            cur = _reserve_record_block(host, cur)
         cur += 1
         _RECORD_NUMBERS[host] = cur
         return cur

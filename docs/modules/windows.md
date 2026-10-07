@@ -131,6 +131,21 @@ DC worker and a threats worker generate events into buffers that `generate_log()
 - **Insane** fires a threat on every threats-worker tick (base interval x
   `threat_interval_multiplier`, 2 s by default). It previously fired none in parallel mode.
 
+## Record Numbers
+
+Each host's `EventRecordID` only ever increases, across restarts and across processes,
+as on a real Windows host. Numbers are taken in reserved blocks of 10,000 from
+`state/windows_record_numbers.json` (gitignored) under a lock shared between processes,
+so the simulator and a sweep script running at once never hand out the same id. A host
+seen for the first time starts at 1,000,000,000 or above.
+
+They used to be reseeded at random (50,000-500,000) on every restart, so a restart could
+put a host back into a range it had already used. Deleting the state file is safe: hosts
+are reseeded above 1e9 again.
+
+Deterministic Training Mode is unaffected: inside a training run numbering is seeded and
+in-memory, so the same seed reproduces the same ids, and the live counters are untouched.
+
 ## Per-Host LSASS PID
 
 The Security channel is written by LSASS, so its PID appears in `<Execution ProcessID>` on
