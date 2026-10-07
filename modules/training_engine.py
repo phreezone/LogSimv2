@@ -149,16 +149,22 @@ def deterministic_env(seed, config):
     if static_tor is not None:
         config["tor_exit_nodes"] = copy.deepcopy(static_tor)
 
-    # 4) hermetic per-user caches
+    # 4) hermetic per-user caches, and hermetic persistent state (beacon maps and
+    #    Windows record numbers use per-run scratch state in THIS context only, so a
+    #    live simulator in the same process keeps its persistence)
+    hermetic_token = None
     try:
         from modules import session_utils
         session_utils.reset_caches()
+        hermetic_token = session_utils.enter_hermetic()
     except Exception:
         session_utils = None
 
     try:
         yield
     finally:
+        if session_utils is not None and hermetic_token is not None:
+            session_utils.exit_hermetic(hermetic_token)
         random.setstate(rng_state)
         uuid.uuid4 = orig_uuid4
         if saved_tor is not None:

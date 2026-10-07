@@ -5,6 +5,7 @@
 # context={'session_context': session_context}.
 
 import random
+import contextvars
 import hashlib
 import json
 import os
@@ -205,6 +206,36 @@ def stable_subset(items, key, n=2):
     return random.Random(f"subset|{key}").sample(items, n)
 
 
+# --- Hermetic runs (deterministic Training Mode) --------------------------------------
+# Persistent state breaks seeded replay: a beacon destination drawn at random on a fresh
+# run is READ from state on the next one, so every later random draw shifts and the
+# "same seed => same content" guarantee fails. training_engine.deterministic_env() enters
+# hermetic mode; persistent stores then use per-run scratch state instead.
+#
+# It is a context variable, not a global, deliberately: Training Mode can run inside the
+# dashboard while the live simulator keeps generating in the same process. A global flag
+# would switch persistence off for live traffic too -- and with it the record-number
+# guarantee -- for the duration of every training run.
+_HERMETIC = contextvars.ContextVar("logsim_hermetic", default=False)
+_BEACON_INSTANCES = []
+
+
+def hermetic():
+    """True inside a deterministic (training) run, in the calling context only."""
+    return _HERMETIC.get()
+
+
+def enter_hermetic():
+    """Start a hermetic run in this context; returns a token for exit_hermetic()."""
+    for inst in _BEACON_INSTANCES:
+        inst._scratch.clear()
+    return _HERMETIC.set(True)
+
+
+def exit_hermetic(token):
+    _HERMETIC.reset(token)
+
+
 _BEACON_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "state", "beacon_targets.json")
 _BEACON_LOCK = threading.Lock()
@@ -229,10 +260,30 @@ class _BeaconTargets(dict):
 
     def __init__(self, module):
         self._module = module
+        self._scratch = {}          # hermetic (training) runs read and write only this
         with _BEACON_LOCK:
             super().__init__(_beacon_load().get(module, {}))
+        _BEACON_INSTANCES.append(self)
+
+    def get(self, key, default=None):
+        if _HERMETIC.get():
+            return self._scratch.get(key, default)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        if _HERMETIC.get():
+            return self._scratch[key]
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        if _HERMETIC.get():
+            return key in self._scratch
+        return super().__contains__(key)
 
     def __setitem__(self, key, value):
+        if _HERMETIC.get():
+            self._scratch[key] = value
+            return
         super().__setitem__(key, value)
         with _BEACON_LOCK:
             # No key cap: with sticky device addresses the keys are a fixed set of hosts,
