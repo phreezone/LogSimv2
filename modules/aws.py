@@ -7101,6 +7101,10 @@ SCENARIO_FUNCTIONS = {
     "EC2_INSTANCE_TYPE_CHANGE": _generate_ec2_instance_type_change,
     "S3_COPY_TO_FOREIGN_ACCOUNT": _generate_s3_copy_to_foreign_account,
     "API_CALL_FROM_TOR": _generate_api_call_from_tor,
+    # Registered 2026-10-07: a benign generator (stays in BENIGN_SCENARIOS too) whose
+    # ListFoundationModels emits "AI model discovery" [Low] unconditionally. An ambient
+    # benign draw still reports the function name, not this key, so it is not counted a threat.
+    "AI_MODEL_DISCOVERY": _generate_bedrock_list_foundation_models,
     "DELETE_LOG_STREAM": _generate_cloudwatch_delete_log_stream,
     "DELETE_MFA_DEVICE": _generate_iam_delete_mfa_device,
     "CREATE_AND_SHARE_SNAPSHOT": _generate_ec2_create_and_share_snapshot,
@@ -7177,6 +7181,7 @@ ANALYTIC_ALERTS = {
     "EC2_INSTANCE_TYPE_CHANGE":   "Suspicious heavy allocation of compute resources - possible mining activity",
     "S3_COPY_TO_FOREIGN_ACCOUNT": "A cloud storage object was copied to a foreign cloud account",
     "API_CALL_FROM_TOR":          "Suspicious API call from a Tor exit node",
+    "AI_MODEL_DISCOVERY":         "AI model discovery",
     "DELETE_LOG_STREAM":          "AWS CloudWatch log stream deletion",
     "DELETE_MFA_DEVICE":          "MFA device was removed/deactivated from an IAM user",
     "CREATE_AND_SHARE_SNAPSHOT":  "A cloud snapshot of AWS database or storage was modified or shared",
@@ -7238,6 +7243,11 @@ ANALYTIC_ALERTS_SECONDARY = {
         "Cloud impersonation attempt by unusual identity type",
     ],
     "IAM_RECON_LIST": ["Unusual Identity and Access Management (IAM) activity"],
+    # A Tor exit node is a high-risk IP, so every Tor-sourced API call also raises
+    # "Cloud activity from an unusual high-risk IP" [Low] (observed firing 2026-10-07).
+    "TOR_LOGIN": ["Cloud activity from a high-risk IP address"],
+    "API_CALL_FROM_TOR": ["Cloud activity from a high-risk IP address"],
+    "BEDROCK_TOR_USAGE": ["Cloud activity from a high-risk IP address"],
 }
 
 def get_threat_names():
