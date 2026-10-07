@@ -738,10 +738,9 @@ _SEND_WORKER_COUNT = max(1, int(os.getenv("SEND_WORKERS", "8")))
 # actually delivered.  These counters are surfaced by _run_health_checks().
 _DELIVERY_STATS = {
     "send_failures": 0, "last_send_error": None, "last_send_error_ts": None,
-    "queue_drops":   0, "last_drop_ts": None,
 }
 _DELIVERY_LOCK = threading.Lock()
-_LAST_DELIVERY_WARN = {"send": 0.0, "drop": 0.0}
+_LAST_DELIVERY_WARN = {"send": 0.0}
 _DELIVERY_WARN_EVERY_S = 30.0
 
 
@@ -760,20 +759,6 @@ def _note_send_failure(exc):
         print(f"[send] FAILED ({total} total): {type(exc).__name__}: {exc}")
 
 
-def _note_queue_drop():
-    """Count an event dropped because the send queue was saturated."""
-    now = time.time()
-    with _DELIVERY_LOCK:
-        _DELIVERY_STATS["queue_drops"] += 1
-        _DELIVERY_STATS["last_drop_ts"] = now
-        total = _DELIVERY_STATS["queue_drops"]
-        due = now - _LAST_DELIVERY_WARN["drop"] >= _DELIVERY_WARN_EVERY_S
-        if due:
-            _LAST_DELIVERY_WARN["drop"] = now
-    if due:
-        print(f"[send] queue saturated — {total} events dropped so far "
-              f"(qsize={_SEND_QUEUE.qsize()}/{_SEND_QUEUE.maxsize}); "
-              f"metrics over-report by this much")
 
 
 def _send_worker():
@@ -828,7 +813,10 @@ def _module_worker(state: ModuleState, config: dict):
     # makes the very first generate_log call always fire a threat (since
     # time.time() - 0 >> any interval).  Reset it to now so the module waits
     # the correct interval before the first threat, matching the selected level.
-    if hasattr(state.module, "last_threat_event_time"):
+    # Only when the module has no timer yet (0 at import, or after a training reset):
+    # resetting it on every start meant a stop/start pushed the next threat a full
+    # interval out (30 min at High) no matter when the last one fired.
+    if hasattr(state.module, "last_threat_event_time") and not state.module.last_threat_event_time:
         state.module.last_threat_event_time = time.time()
 
     while not state._stop_event.is_set():
@@ -1921,7 +1909,14 @@ def _run_health_checks() -> dict:
 
     # Per-collector env vars
     global_http_url = os.getenv("HTTP_COLLECTOR_URL", "")
+    # Only collectors a module sends to over HTTP. Windows names windows_events_collector
+    # as a fallback but its transport is WEC, so checking that key was a false alarm.
+    http_in_use = {v.get("collector_id") for v in CONFIG.values()
+                   if isinstance(v, dict) and v.get("transport") == "http"
+                   and v.get("collector_id")}
     for cid, ccfg in CONFIG.get("http_collectors", {}).items():
+        if cid not in http_in_use:
+            continue
         uvar = ccfg.get("url_env_var", "")
         kvar = ccfg.get("api_key_env_var", "")
         label = cid.replace("_collector", "").replace("_", " ").title()
@@ -2146,18 +2141,24 @@ def _run_health_checks() -> dict:
     # of as "the tenant isn't ingesting".
     with _DELIVERY_LOCK:
         fails = _DELIVERY_STATS["send_failures"]
-        drops = _DELIVERY_STATS["queue_drops"]
         last_err = _DELIVERY_STATS["last_send_error"]
     results.append({
         "group": "Delivery", "check": "send failures",
         "status": "error" if fails else "ok",
         "detail": f"{fails} failed send(s); last: {last_err}" if fails else "none",
     })
+    # Events a module has generated and COUNTED but the sender pool has not sent yet.
+    # Producers wait when this is full (they never drop), so a full queue means the
+    # senders are the bottleneck and are holding generation back -- not data loss.
+    # Shown because module counters include these: on 2026-10-07 ~10,300 events sat
+    # here and a dashboard total read as an over-count until they drained.
+    depth, cap = _SEND_QUEUE.qsize(), _SEND_QUEUE.maxsize
     results.append({
-        "group": "Delivery", "check": "send queue drops",
-        "status": "warn" if drops else "ok",
-        "detail": (f"{drops} event(s) dropped — queue saturated; module metrics "
-                   f"over-report delivery by this much") if drops else "none",
+        "group": "Delivery", "check": "send queue",
+        "status": "warn" if cap and depth >= 0.9 * cap else "ok",
+        "detail": (f"{depth}/{cap} counted but not yet sent"
+                   + ("; senders are holding generation back (SEND_WORKERS)"
+                      if cap and depth >= 0.9 * cap else "")),
     })
 
     overall = ("error" if any(r["status"] == "error" for r in results)
