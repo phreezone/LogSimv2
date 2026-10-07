@@ -3422,37 +3422,71 @@ def _generate_multiple_deletes(config, context=None):
     region = aws_conf.get('aws_region', 'us-east-1')
     account_id = user_identity.get('accountId', aws_conf.get('aws_account_id', '123456789012'))
 
-    events = []
-    
-    # 1. Delete S3 Bucket
-    s3_buckets = aws_conf.get("s3_buckets", ["default-sim-bucket-1"])
-    target_bucket = random.choice(s3_buckets)
-    bucket_arn = f"arn:aws:s3:::{target_bucket}"
-    
-    s3_event = _get_base_event(config, user_identity, ip_address, region, "DeleteBucket", "s3.amazonaws.com", api_version="2006-03-01", read_only=False)
-    s3_event.update({
-        "requestParameters": {"bucketName": target_bucket, "Host": f"{target_bucket}.s3.{region}.amazonaws.com"},
-        "responseElements": None,
-        "resources": [{"type": "AWS::S3::Bucket", "ARN": bucket_arn, "accountId": account_id}]
-    })
-    events.append(s3_event)
+    # "Deletion of multiple cloud resources" keys on ONE identity destroying many
+    # resources in a short window. Two deletes (a bucket + an instance) is not "multiple"
+    # by any baseline, so this now spreads a realistic destruction burst across resource
+    # TYPES and counts -- buckets, instances, volumes, snapshots, security groups -- over
+    # a few minutes, which is what wiper/ransomware cleanup actually looks like.
+    now = datetime.datetime.now(datetime.UTC)
+    offset = [0.0]
 
-    # 2. Terminate EC2 Instance
-    instance_id = random.choice(aws_conf.get("ec2_instances", ["i-00000000000000000"]))
-    instance_arn = f"arn:aws:ec2:{region}:{account_id}:instance/{instance_id}"
-    
-    ec2_event = _get_base_event(config, user_identity, ip_address, region, "TerminateInstances", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
-    ec2_event.update({
-        "requestParameters": {"instancesSet": {"items": [{"instanceId": instance_id}]}},
-        "responseElements": {
-            "instancesSet": {"items": [
-                {"instanceId": instance_id, "currentState": {"code": 32, "name": "shutting-down"}, "previousState": {"code": 16, "name": "running"}}
-            ]}
-        },
-        "resources": [{"type": "AWS::EC2::Instance", "ARN": instance_arn, "accountId": account_id}]
-    })
-    events.append(ec2_event)
-    
+    def _at():
+        offset[0] += random.uniform(2, 20)
+        return (now + datetime.timedelta(seconds=offset[0])).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def _pick(key, default, n):
+        pool = aws_conf.get(key) or default
+        return random.sample(pool, min(n, len(pool)))
+
+    events = []
+
+    # S3 buckets
+    for b in _pick("s3_buckets", ["default-sim-bucket-1"], random.randint(2, 4)):
+        e = _get_base_event(config, user_identity, ip_address, region, "DeleteBucket", "s3.amazonaws.com", api_version="2006-03-01", read_only=False)
+        e["eventTime"] = _at()
+        e.update({"requestParameters": {"bucketName": b, "Host": f"{b}.s3.{region}.amazonaws.com"},
+                  "responseElements": None,
+                  "resources": [{"type": "AWS::S3::Bucket", "ARN": f"arn:aws:s3:::{b}", "accountId": account_id}]})
+        events.append(e)
+
+    # EC2 instances — a single TerminateInstances can carry several
+    insts = _pick("ec2_instances", ["i-00000000000000000"], random.randint(3, 6))
+    e = _get_base_event(config, user_identity, ip_address, region, "TerminateInstances", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
+    e["eventTime"] = _at()
+    e.update({
+        "requestParameters": {"instancesSet": {"items": [{"instanceId": i} for i in insts]}},
+        "responseElements": {"instancesSet": {"items": [
+            {"instanceId": i, "currentState": {"code": 32, "name": "shutting-down"},
+             "previousState": {"code": 16, "name": "running"}} for i in insts]}},
+        "resources": [{"type": "AWS::EC2::Instance",
+                       "ARN": f"arn:aws:ec2:{region}:{account_id}:instance/{i}", "accountId": account_id}
+                      for i in insts]})
+    events.append(e)
+
+    # EBS volumes
+    for v in _pick("ebs_volumes", ["vol-00000000000000000"], random.randint(2, 4)):
+        e = _get_base_event(config, user_identity, ip_address, region, "DeleteVolume", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
+        e["eventTime"] = _at()
+        e.update({"requestParameters": {"volumeId": v}, "responseElements": {"_return": True},
+                  "resources": [{"type": "AWS::EC2::Volume", "ARN": f"arn:aws:ec2:{region}:{account_id}:volume/{v}", "accountId": account_id}]})
+        events.append(e)
+
+    # EBS snapshots
+    for snap in _pick("ec2_snapshots", ["snap-00000000000000000"], random.randint(2, 4)):
+        e = _get_base_event(config, user_identity, ip_address, region, "DeleteSnapshot", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
+        e["eventTime"] = _at()
+        e.update({"requestParameters": {"snapshotId": snap}, "responseElements": {"_return": True},
+                  "resources": [{"type": "AWS::EC2::Snapshot", "ARN": f"arn:aws:ec2:{region}:{account_id}:snapshot/{snap}", "accountId": account_id}]})
+        events.append(e)
+
+    # Security groups
+    for sg in _pick("security_groups", ["sg-00000000000000000"], random.randint(1, 3)):
+        e = _get_base_event(config, user_identity, ip_address, region, "DeleteSecurityGroup", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
+        e["eventTime"] = _at()
+        e.update({"requestParameters": {"groupId": sg}, "responseElements": {"_return": True},
+                  "resources": [{"type": "AWS::EC2::SecurityGroup", "ARN": f"arn:aws:ec2:{region}:{account_id}:security-group/{sg}", "accountId": account_id}]})
+        events.append(e)
+
     return events
 
 def _generate_suspicious_iam_creation(config, context=None):
@@ -3718,6 +3752,10 @@ def _generate_s3_ransomware_encrypt(config, context=None):
             "key": f"{random.choice(_prefixes)}{random.randint(10000, 99999)}{random.choice(_exts)}",
             "size": random.randint(1024, 50 * 1024 * 1024),
             "eTag": '"' + ''.join(random.choices('0123456789abcdef', k=32)) + '"',
+            # S3 version IDs: ~32 chars from S3's own alphabet. The delete phase removes
+            # these specific versions (permanent destruction), not just a delete marker.
+            "versionId": ''.join(random.choices(
+                'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._', k=32)),
         }
         for _ in range(num_files)
     ]
@@ -3887,8 +3925,14 @@ def _generate_s3_ransomware_encrypt(config, context=None):
 
         t_offset += random.uniform(0.1, 0.5)  # Tight interval — rapid bulk operation
 
-    # ── Phase 5: DeleteObjects — remove originals in batches of 500 ──────────
-    batch_size = 500
+    # ── Phase 5: DeleteObjects — PERMANENTLY destroy the original versions ────
+    # Real ransomware deletes the specific prior versions (each carries a versionId) so
+    # the victim cannot roll back; a plain delete only adds a delete marker and leaves the
+    # data recoverable. Specifying versionId is what distinguishes "permanently deleted"
+    # from an ordinary delete, and is the signal behind the deletion analytics
+    # ("Mass deletion of versioned S3 objects", "...permanently deleted multiple objects").
+    # S3 caps DeleteObjects at 1000 keys per call; use that batch size.
+    batch_size = 1000
     for i in range(0, len(objects), batch_size):
         batch = objects[i:i + batch_size]
         e = _strip_vpc(_get_base_event(config, user_identity, ip_address, region, "DeleteObjects", "s3.amazonaws.com", api_version="2006-03-01", read_only=False))
@@ -3906,13 +3950,14 @@ def _generate_s3_ransomware_encrypt(config, context=None):
             "requestParameters": {
                 "bucketName": target_bucket,
                 "delete": {
-                    "objects": [{"key": obj['key']} for obj in batch],
+                    "objects": [{"key": obj['key'], "versionId": obj['versionId']} for obj in batch],
                     "quiet": False
                 }
             },
             "responseElements": {
                 "DeleteResult": {
-                    "Deleted": [{"Key": obj['key']} for obj in batch]
+                    "Deleted": [{"Key": obj['key'], "versionId": obj['versionId'],
+                                 "deleteMarker": False} for obj in batch]
                 }
             },
             "resources": [{"type": "AWS::S3::Bucket", "ARN": bucket_arn, "accountId": account_id}]
@@ -7243,6 +7288,16 @@ ANALYTIC_ALERTS_SECONDARY = {
         "Cloud impersonation attempt by unusual identity type",
     ],
     "IAM_RECON_LIST": ["Unusual Identity and Access Management (IAM) activity"],
+    # The ransomware chain permanently deletes the original object VERSIONS (Phase 5,
+    # each delete carries a versionId, deleteMarker=False). That is a direct match for
+    # the Medium "permanently deleted multiple objects" variation. "Mass deletion of
+    # versioned S3 objects" is PLAUSIBLE only: its Low+ variations additionally need the
+    # bucket/account classed production or sensitive-data (tenant-side), so drop it if the
+    # sweep never credits it.
+    "S3_RANSOMWARE_ENCRYPT": [
+        "Unusual AWS S3 objects deletion",
+        "Mass deletion of versioned S3 objects",
+    ],
     # A Tor exit node is a high-risk IP, so every Tor-sourced API call also raises
     # "Cloud activity from an unusual high-risk IP" [Low] (observed firing 2026-10-07).
     "TOR_LOGIN": ["Cloud activity from a high-risk IP address"],
