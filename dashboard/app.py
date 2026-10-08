@@ -727,9 +727,21 @@ def _stop_baduser():
 _SEND_QUEUE: _queue.Queue = _queue.Queue(maxsize=max(1, int(os.getenv("SEND_QUEUE_SIZE", "5000"))))
 
 
+_ENQUEUE_MAX_WAIT_S = float(os.getenv("SEND_ENQUEUE_MAX_WAIT_S", "30"))
+
+
 def _enqueue_send(item, stop_event=None):
-    """Hand one event to the sender pool, waiting for room rather than dropping.
+    """Hand one event to the sender pool. Apply backpressure (wait for room) up to
+    _ENQUEUE_MAX_WAIT_S, then DROP (counted) and move on.
+
+    The wait must be bounded. An earlier version blocked forever on a full queue, so a
+    single stalled transport -- the shared sender pool drains S3, HTTP and syslog, and a
+    slow/unreachable collector or a retry storm can keep it full -- froze EVERY module on
+    this pool at once (observed 2026-10-08: AWS, Okta and all syslog ingestion stopped
+    together while Windows, which has its own WEC path, kept running). Degrading to lossy
+    (drop + count) keeps generation alive; a permanent freeze does not.
     Returns False only if the producer is being stopped."""
+    waited = 0.0
     while True:
         try:
             _SEND_QUEUE.put(item, timeout=1.0)
@@ -737,6 +749,10 @@ def _enqueue_send(item, stop_event=None):
         except _queue.Full:
             if stop_event is not None and stop_event.is_set():
                 return False
+            waited += 1.0
+            if waited >= _ENQUEUE_MAX_WAIT_S:
+                _note_queue_drop()
+                return True
 _SEND_WORKERS_STARTED = False
 _SEND_WORKERS_LOCK = threading.Lock()
 # Continuous module streaming + Bad User forward through this pool. More workers = higher
@@ -750,9 +766,27 @@ _SEND_WORKER_COUNT = max(1, int(os.getenv("SEND_WORKERS", "8")))
 # actually delivered.  These counters are surfaced by _run_health_checks().
 _DELIVERY_STATS = {
     "send_failures": 0, "last_send_error": None, "last_send_error_ts": None,
+    "queue_drops": 0, "last_drop_ts": None,
 }
 _DELIVERY_LOCK = threading.Lock()
-_LAST_DELIVERY_WARN = {"send": 0.0}
+_LAST_DELIVERY_WARN = {"send": 0.0, "drop": 0.0}
+
+
+def _note_queue_drop():
+    """Count an event dropped after the bounded backpressure wait in _enqueue_send.
+    A non-zero count means a transport is stalled and generation is shedding load to
+    stay alive -- investigate the slow collector, do not treat it as normal."""
+    now = time.time()
+    with _DELIVERY_LOCK:
+        _DELIVERY_STATS["queue_drops"] += 1
+        _DELIVERY_STATS["last_drop_ts"] = now
+        total = _DELIVERY_STATS["queue_drops"]
+        due = now - _LAST_DELIVERY_WARN["drop"] >= _DELIVERY_WARN_EVERY_S
+        if due:
+            _LAST_DELIVERY_WARN["drop"] = now
+    if due:
+        print(f"[send] queue full > {_ENQUEUE_MAX_WAIT_S:.0f}s — dropped {total} event(s) "
+              f"to keep generation alive; a transport/collector is stalled")
 _DELIVERY_WARN_EVERY_S = 30.0
 
 
@@ -2167,9 +2201,13 @@ def _run_health_checks() -> dict:
     depth, cap = _SEND_QUEUE.qsize(), _SEND_QUEUE.maxsize
     results.append({
         "group": "Delivery", "check": "send queue",
-        "status": "warn" if cap and depth >= 0.9 * cap else "ok",
+        "status": "error" if _DELIVERY_STATS.get("queue_drops") else
+                  ("warn" if cap and depth >= 0.9 * cap else "ok"),
         "detail": (f"{depth}/{cap} counted but not yet sent"
-                   + ("; senders are holding generation back (SEND_WORKERS)"
+                   + (f"; DROPPED {_DELIVERY_STATS['queue_drops']} after >"
+                      f"{_ENQUEUE_MAX_WAIT_S:.0f}s full -- a transport is stalled"
+                      if _DELIVERY_STATS.get("queue_drops") else
+                      "; senders are holding generation back (SEND_WORKERS)"
                       if cap and depth >= 0.9 * cap else "")),
     })
 
