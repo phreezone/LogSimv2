@@ -7284,14 +7284,13 @@ ANALYTIC_ALERTS_SECONDARY = {
     ],
     # Verified: an S3 bucket is a data asset, made public by ACL.
     "MAKE_S3_PUBLIC": ["AWS data asset shared public"],
-    # PLAUSIBLE, not proven: a cross-account AssumeRole is impersonation of another
-    # identity, and an IAM list/get burst is unusual IAM activity. If the sweep never
-    # credits these, drop them rather than leaving an unearned claim.
-    "CROSS_ACCOUNT_ASSUME_ROLE": [
-        "Unusual cloud identity impersonation",
-        "Cloud impersonation attempt by unusual identity type",
-    ],
-    "IAM_RECON_LIST": ["Unusual Identity and Access Management (IAM) activity"],
+    # Dropped 2026-10-08: the cross-account-impersonation and unusual-IAM-activity
+    # secondaries never fired in 90 days of history, and all three target alerts are
+    # Informational base severity (this tenant does not raise Informational) with a
+    # 14-day activation -- so they cannot credit here regardless of time. The threats
+    # keep their proven primaries (CROSS_ACCOUNT_ASSUME_ROLE -> "Unusual cross projects
+    # activity", which fired as recently as 2026-10-08; IAM_RECON_LIST -> "IAM
+    # Enumeration sequence").
     # The ransomware chain permanently deletes the original object VERSIONS (Phase 5,
     # each delete carries a versionId, deleteMarker=False). That is a direct match for
     # the Medium "permanently deleted multiple objects" variation. "Mass deletion of
