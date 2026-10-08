@@ -359,6 +359,18 @@ def _load_modules():
 
 MODULES = _load_modules()
 
+# ── Expand low-cardinality cloud pools (same as log_simulator CLI main) ──────
+# Without this the dashboard generates from the static ~26-value config pools, so
+# AWS/GCP identifiers (foreign accounts, buckets, snapshots, KMS keys, ...) repeat and
+# get learned as "known" by the tenant -- which silences every "unknown account / not
+# seen in 30 days / first-time" analytic. The CLI main expanded these; the dashboard
+# (the path the simulator is actually run from) did not, so novelty detectors saturated.
+try:
+    from modules import cloud_ids as _cloud_ids
+    _cloud_ids.expand_pools(CONFIG, verbose=False)
+except Exception as _e:
+    print(f"[dashboard] Could not expand cloud pools: {_e}")
+
 # ── Build session context (stable user→IP map, same as parallel mode) ────────
 try:
     from modules.session_utils import build_session_context as _build_session_context
