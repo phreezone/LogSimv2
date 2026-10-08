@@ -7512,6 +7512,93 @@ _RENAMED_THREATS = {
     "WIP_SENSITIVE_PASSWORD_RESET": "SENSITIVE_PASSWORD_RESET",  # fired 2026-09-28
 }
 
+# ── Exchange mailbox abuse via PowerShell (4104 ScriptBlock) ──────────────────
+# These emit a Microsoft-Windows-PowerShell/Operational 4104 ScriptBlock event -- the
+# same shape the WEC channel probe proved ingests end-to-end -- carrying an Exchange
+# Management Shell cmdlet. The analytics key on the cmdlet text in ScriptBlockText.
+_PS_PROVIDER = "Microsoft-Windows-PowerShell"
+_PS_GUID     = "{A0C1853B-5C40-4B15-8766-3CF1C58F985A}"
+_PS_CHANNEL  = "Microsoft-Windows-PowerShell/Operational"
+_EXCHANGE_HOSTS = ["EXCH-01", "EXCH-02", "EXCH-MBX-01"]
+
+
+def _build_ps_4104(user, config, script, action, ts=None):
+    """One PowerShell/Operational 4104 ScriptBlock-logging event (dict)."""
+    ts = ts if ts is not None else time.time()
+    sb_id = str(uuid.uuid4())
+    host = (user.get("hostname") or "WORKSTATION")
+    return {
+        "event_id": "4104", "provider_name": _PS_PROVIDER, "provider_guid": _PS_GUID,
+        "channel": _PS_CHANNEL, "computer_name": host, "host_name": host,
+        "time_created": _iso_ts(ts),
+        "message": (f"Creating Scriptblock text (1 of 1):\r\n{script}\r\n\r\n"
+                    f"ScriptBlock ID: {sb_id}\r\nPath: "),
+        "keywords": "0x0", "level_num": "5", "log_level": "Verbose",
+        "rendering_provider": _PS_PROVIDER, "rendering_keyword": None,
+        "event_result": "success", "event_action": action,
+        "task": "2", "opcode": "On create calls", "op_code": "15", "version": "1",
+        "record_id": str(_next_record_number(host)),
+        "activity_id": "{" + str(uuid.uuid4()).upper() + "}",
+        "process_pid": str(random.randint(2000, 30000)),
+        "process_thread_id": str(random.randint(2000, 30000)),
+        "process_name": "powershell.exe",
+        "process_path": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        # Running user's domain SID, matching that user's Security-channel events.
+        "security_user_id": _stable_user_sid(user["username"]),
+        "event_data": {"MessageNumber": "1", "MessageTotal": "1",
+                       "ScriptBlockText": script, "ScriptBlockId": sb_id, "Path": ""},
+    }
+
+
+def _mailbox_ps_threat(session_context, config, script, action):
+    """Operator logs on to an Exchange host and runs one Exchange cmdlet (4104)."""
+    op = _pick_windows_user(session_context)
+    if not op:
+        return None
+    tgt = _pick_windows_user(session_context) or op
+    exch = random.choice(_EXCHANGE_HOSTS) + ".examplecorp.local"
+    operator = {**op, "hostname": exch}          # the cmdlet runs ON the Exchange box
+    t = time.time()
+    logs = [json.dumps(_build_4624(operator, config, logon_type=10, ip_override=op.get("ip"),
+                                   elevated=True, ts=t))]      # RDP to the Exchange server
+    t += random.uniform(3, 20)
+    logs.append(json.dumps(_build_ps_4104(operator, config,
+                                          script(tgt), action, ts=t)))
+    return logs
+
+
+def _threat_mailbox_export(config, session_context):
+    """New-MailboxExportRequest -- stage a mailbox to a PST for exfiltration.
+    XSIAM: 'PowerShell used to export mailbox contents'."""
+    exch = random.choice(_EXCHANGE_HOSTS)
+    return _mailbox_ps_threat(
+        session_context, config,
+        lambda t: (f'New-MailboxExportRequest -Mailbox "{t["username"]}@examplecorp.com" '
+                   rf'-FilePath "\\{exch}\PSTExport$\{t["username"]}.pst"'),
+        "Execute a Remote Command")
+
+
+def _threat_mailbox_export_log_removal(config, session_context):
+    """Remove-MailboxExportRequest -- delete evidence of a mailbox export (anti-forensics).
+    XSIAM: 'PowerShell used to remove mailbox export request logs'."""
+    return _mailbox_ps_threat(
+        session_context, config,
+        lambda t: (rf'Remove-MailboxExportRequest -Identity "{t["username"]}\MailboxExport" '
+                   f'-Confirm:$false'),
+        "Execute a Remote Command")
+
+
+def _threat_mailbox_cas_change(config, session_context):
+    """Set-CASMailbox -- enable client-access protocols to ease mailbox data theft.
+    XSIAM: 'Mailbox Client Access Setting (CAS) changed'."""
+    return _mailbox_ps_threat(
+        session_context, config,
+        lambda t: (f'Set-CASMailbox -Identity "{t["username"]}@examplecorp.com" '
+                   f'-OWAEnabled $true -ImapEnabled $true -PopEnabled $true '
+                   f'-ActiveSyncEnabled $true'),
+        "Execute a Remote Command")
+
+
 _THREAT_WEIGHTS = {
     "as_rep_roasting":         8,
     "account_lockout":             5,
@@ -7542,6 +7629,9 @@ _THREAT_WEIGHTS = {
     # weighted with the other privilege-abuse threats rather than rarely.
     "lsass_handle_access":         5,
     "account_access_removal":      3,
+    "mailbox_export":              3,
+    "mailbox_export_log_removal":  3,
+    "mailbox_cas_change":          3,
 }
 
 _THREAT_GENERATORS = {
@@ -7572,6 +7662,9 @@ _THREAT_GENERATORS = {
     "default_account_enabled":          _threat_default_account_enabled,
     "lsass_handle_access":              _threat_lsass_handle_access,
     "account_access_removal":           _threat_account_access_removal,
+    "mailbox_export":                   _threat_mailbox_export,
+    "mailbox_export_log_removal":       _threat_mailbox_export_log_removal,
+    "mailbox_cas_change":               _threat_mailbox_cas_change,
 }
 
 
@@ -7609,6 +7702,9 @@ ANALYTIC_ALERTS = {
     "sensitive_password_reset":    "Sensitive account password reset attempt for the first time",
     "wip_password_never_expires":  "A user account was modified to password never expires",
     "default_account_enabled":     "A user enabled the Windows DefaultAccount",
+    "mailbox_export":              "PowerShell used to export mailbox contents",
+    "mailbox_export_log_removal":  "PowerShell used to remove mailbox export request logs",
+    "mailbox_cas_change":          "Mailbox Client Access Setting (CAS) changed",
 }
 
 # Further analytics a threat's events are built to satisfy, beyond its ANALYTIC_ALERTS
@@ -7768,6 +7864,9 @@ def _generate_scenario_event(scenario_event, config, context):
         "DEFAULT_ACCOUNT_ENABLED":          _threat_default_account_enabled,
         "LSASS_HANDLE_ACCESS":              _threat_lsass_handle_access,
         "ACCOUNT_ACCESS_REMOVAL":           _threat_account_access_removal,
+        "MAILBOX_EXPORT":                   _threat_mailbox_export,
+        "MAILBOX_EXPORT_LOG_REMOVAL":       _threat_mailbox_export_log_removal,
+        "MAILBOX_CAS_CHANGE":               _threat_mailbox_cas_change,
     }
     if ev in _threat_dispatch:
         result = _threat_dispatch[ev](config, session_context)
