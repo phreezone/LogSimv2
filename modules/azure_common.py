@@ -136,6 +136,57 @@ def pick_user(config=None, context=None):
             "department": "Unknown", "os_type": "Windows", "os_version": "10"}
 
 
+def _norm(uname, p):
+    dev = (p.get("devices") or [{}])[0]
+    return {"username": uname, "upn": p.get("email") or f"{uname}@{UPN_DOMAIN}",
+            "display_name": p.get("display_name", uname),
+            "department": p.get("department", "Unknown"), "role": p.get("role", ""),
+            "os_type": dev.get("os_type", "Windows"), "os_version": dev.get("os_version", "10")}
+
+
+_ROLE_POOLS = {}
+
+
+def pick_by_role(config, roles, departments=None):
+    """Pick an actor whose profile role is in `roles` (e.g. Help Desk, IT Administrator).
+
+    Admin actions in a real tenant come from a small, stable set of admins — the analytics
+    baseline 'who normally does this', so a non-admin doing it reads as anomalous. Falls back
+    to IT-department users, then to pick_user()."""
+    profiles = (config or {}).get("user_profiles") or {}
+    key = (tuple(roles), tuple(departments or ()))
+    if key not in _ROLE_POOLS:
+        pool = [u for u, p in profiles.items() if p.get("role") in roles]
+        if not pool and departments:
+            pool = [u for u, p in profiles.items() if p.get("department") in departments]
+        _ROLE_POOLS[key] = sorted(pool)
+    pool = _ROLE_POOLS[key]
+    if not pool:
+        return pick_user(config)
+    u = random.choice(pool)
+    return _norm(u, profiles[u])
+
+
+# Business-hours activity profile (US Eastern, fixed offset). Interactive/admin activity
+# follows the workday; token refreshes continue overnight. Gives 'unusual time' detectors a
+# real diurnal baseline to judge against.
+TZ_OFFSET_HOURS = -5
+
+
+def activity_weight(now_ts=None):
+    """0..1 likelihood that a human-driven event happens right now."""
+    import time as _t
+    t = _t.gmtime((now_ts or _t.time()) + TZ_OFFSET_HOURS * 3600)
+    h, weekday = t.tm_hour, t.tm_wday < 5
+    if weekday:
+        if 8 <= h < 18:
+            return 1.0
+        if h == 7 or 18 <= h < 21:
+            return 0.35
+        return 0.06
+    return 0.15 if 9 <= h < 17 else 0.04
+
+
 def _stable_guid(seed):
     h = hashlib.sha256(str(seed).encode()).hexdigest()
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"

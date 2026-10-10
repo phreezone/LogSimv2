@@ -10,7 +10,7 @@ datasets. Source of truth: Cortex **Analytics Alerts — alerts-by-name** refere
 |------|---------|------------------------|--------------|
 | O365 Management Activity (Azure AD) | `msft_o365_azure_ad_raw` | `e1f109f886ea42fbb96be6ec0cc597a9` | Audit.AzureActiveDirectory (RecordType 15 = StsLogon sign-ins; RecordType 8 = directory audit ops) |
 | Azure AD sign-ins (Graph) | `msft_azure_ad_raw` | `f56dcfdf6bca43e793a4b6e9290e7b12` | Graph `auditLogs/signIns` object |
-| Azure AD audit (Graph) | `msft_azure_ad_audit_raw` | *(catalog)* | Graph `auditLogs/directoryAudits` object |
+| Azure AD audit (Graph) | `msft_azure_ad_audit_raw` | `0e076d5abe864bf78e8145ea9e0d749e` | Graph `auditLogs/directoryAudits` object — `modules/azuread_audit.py` |
 
 ## Activation note (important)
 Most Azure AD / SSO detectors are **Analytics / Analytics BIOC** and carry **Activation
@@ -104,6 +104,30 @@ device/owner), ApplicationManagement (Consent to application with ConsentContext
 TODO (further realism): business-hours/day-of-week weighting; occasional new-device /
 new-app first-seen events; the Graph `directoryAudits` feed (`msft_azure_ad_audit_raw`) and
 provisioning-log stream as separate sources.
+
+## Graph directory-audit feed (`msft_azure_ad_audit_raw`) — `modules/azuread_audit.py`
+The third Azure AD source and the widest set of event types. Shape verified against the
+Microsoft Graph docs (`directoryAudit`, `auditActivityInitiator`, `targetResource`,
+`modifiedProperty`) **and** real tenant rows. Differences from the O365 Management Activity
+feed, baked into the generator:
+- **Activity names are Graph style — no trailing period** ("Add member to role", "Consent to
+  application"), vs the O365 feed's trailing-period convention.
+- `id` = `<ServicePrefix>_<correlationId>_<CODE>_<bignum>`; prefix per `loggedByService`
+  (`Directory`, `SSPR`, `Sync`, `Authentication Methods`).
+- `initiatedBy` has `user` and/or `app` sub-objects (either or both; provisioning is app-only
+  with a `null` appId).
+- `targetResources[].modifiedProperties[].oldValue/newValue` are **JSON-encoded strings**;
+  `activityDateTime` has 7-digit fractional seconds; `resultReason` populated on success too.
+
+Benign catalog (activity / category / loggedByService / operationType taken verbatim from
+the Entra audit-activity reference): provisioning sync (Import/Export/Execution — dominant
+volume, as in the real tenant), Update user, self-service + admin password reset, security-
+info registration, group add/remove, app-role assignment, Consent to application, device
+registration, token-timestamp update. **Admin actions are pinned to IT/admin role pools**
+(`azure_common.pick_by_role`) and **human activity follows business hours** (`activity_weight`,
+US-Eastern diurnal; automated sync continues overnight) — so "unusual admin / unusual time"
+detectors get a real baseline. Named detection scenarios: `admin_role_add`,
+`consent_risky_app`, `app_credential_added`, `security_info_disabled`.
 
 ## Cardinality & identifiers (baseline correctness)
 The analytics profile per entity, so identity GUIDs must be **stable per entity**, not
