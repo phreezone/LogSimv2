@@ -105,6 +105,34 @@ TODO (further realism): business-hours/day-of-week weighting; occasional new-dev
 new-app first-seen events; the Graph `directoryAudits` feed (`msft_azure_ad_audit_raw`) and
 provisioning-log stream as separate sources.
 
+## Threat sequences (multi-stage kill-chains) — `modules/azuread_threat_sequences.py`
+Each sequence threads one identity through an ordered chain of events (across both
+datasets) that each trip a detector, so XSIAM correlates them into a high-severity
+**incident**. Fired on-demand via `fire(name)` / `fire_all()` (not continuous). All 10
+verified landing parsed.
+
+| Sequence | Chain (ATT&CK) | Key detectors tripped |
+|----------|----------------|-----------------------|
+| `aitm_token_theft` | TOR sign-in → register MFA → token reset | SSO sign-in from TOR (**High**), security-info reg |
+| `spray_compromise_persist` | password spray → success → attacker MFA added | SSO Brute Force (Med) + persistence |
+| `golden_saml_federation` | admin → Set federation settings → add domain | Federation modification (T1484), domain add |
+| `illicit_oauth_consent` | user consents malicious app (Mail.Read/Files.RW) → SP reads data | Azure application consent, SP sign-in |
+| `sp_credential_abuse` | admin → add SP credentials → SP sign-in from new IP | Azure application credentials added (Med) |
+| `privesc_global_admin` | risky sign-in → granted Global Admin → PIM MFA removed | Identity assigned Azure AD Admin Role (Med), PIM change |
+| `mfa_tamper_takeover` | disable MFA for target → reset password → sign in as target | MFA disabled, password reset, takeover |
+| `impossible_travel_risky` | US success → foreign high-risk success minutes later | Impossible traveler, high-risk sign-in |
+| `backdoor_user` | admin creates user → grants privileged role → it signs in | Account manipulation, privileged role add |
+| `legacy_auth_bypass` | repeated legacy-protocol (IMAP/SMTP) sign-ins succeed (no MFA) | Legacy-auth MFA bypass to Exchange |
+
+## New-device & Low-severity events (added to the baseline + scenarios)
+- **New device seen**: `azure_common.device_for(user, new=True)` → sign-in from a brand-new
+  unmanaged device; ~5% of the benign mix and the `new_device_signin` scenario. Users
+  otherwise carry a stable per-user `deviceId` so first-seen reads as an anomaly.
+- **Low scenarios**: `new_country_signin` (new-country/first-connection), `account_lockout_spray`
+  (errorCode 50053 across users → "Multiple user accounts failed login due to account lockouts"),
+  plus the earlier `powershell_signin`, `mfa_disabled`, `federation_change`, `user_deletion`,
+  `pim_role_change`, `admin_role_removals`.
+
 ## Low-and-higher severity targets
 
 | Detector | Severity | Type | Trigger (synthetic pattern) | Scenario |

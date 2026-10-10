@@ -136,6 +136,29 @@ def pick_user(config=None, context=None):
             "department": "Unknown", "os_type": "Windows", "os_version": "10"}
 
 
+def _stable_guid(seed):
+    h = hashlib.sha256(str(seed).encode()).hexdigest()
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+
+def _browser(os_type):
+    return "Safari 17.3" if os_type == "macOS" else "Chrome 154.0.0"
+
+
+def device_for(user, new=False):
+    """deviceDetail for a sign-in. Stable (registered/compliant) per user by default; a
+    brand-new unmanaged device when new=True -> feeds 'new device seen' anomaly detectors."""
+    os_type = user.get("os_type", "Windows")
+    os_str = f'{os_type} {user.get("os_version", "")}'.strip()
+    if new:
+        return {"deviceId": "", "displayName": "", "browser": _browser(os_type),
+                "operatingSystem": os_str, "isCompliant": False, "isManaged": False, "trustType": ""}
+    return {"deviceId": _stable_guid("dev:" + user["username"]),
+            "displayName": f'{user["username"].upper().replace(".", "")}-PC',
+            "browser": _browser(os_type), "operatingSystem": os_str,
+            "isCompliant": True, "isManaged": True, "trustType": "Azure AD joined"}
+
+
 def egress(user, remote_prob=0.25):
     """Stable public egress for a user: mostly their dept office NAT, sometimes a home IP.
 
