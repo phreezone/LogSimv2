@@ -12,9 +12,18 @@ import time
 import uuid
 
 NAME = "Office 365 Azure AD"
+DESCRIPTION = "Simulates Office 365 Management Activity (Azure AD) audit records for msft_o365_azure_ad_raw via the cribl_direct transport."
+CONFIG_KEY = "o365_azure_ad_config"
 SOURCE_IDENTIFIER = "e1f109f886ea42fbb96be6ec0cc597a9"
 INTEGRATION_IDENTIFIER = "logsim:o365_azure_ad"
 DATASET = "msft_o365_azure_ad_raw"
+
+# Fraction of generation ticks that emit a threat scenario instead of benign baseline.
+# Baseline dominates so the dataset builds a "normal" profile for the ML analytics.
+_THREAT_PROB = {
+    "Benign Traffic Only": 0.0, "Low": 0.02, "Realistic": 0.05,
+    "Medium": 0.08, "High": 0.12, "Insane": 0.30,
+}
 
 # Tenant-shaped defaults (override via config if desired).
 TENANT_DOMAIN = "8p68rd.onmicrosoft.com"
@@ -137,3 +146,31 @@ SCENARIOS = {
     "risky_ip_signin": scenario_risky_ip_signin,
     "admin_role_add": scenario_admin_role_add,
 }
+
+
+# ── LogSim module interface ──────────────────────────────────────────────────────────
+
+def get_threat_names():
+    """Named threats this module can fire on demand (dashboard / specific-threat menu)."""
+    return list(SCENARIOS.keys())
+
+
+def generate_log(config=None, threat_level="Realistic", benign_only=False,
+                 scenario=None, scenario_event=None, context=None):
+    """Return a LIST of Audit.AzureActiveDirectory records (dicts) for the cribl transport.
+
+    - scenario_event names a specific threat -> that scenario's records (or None if unknown,
+      so the caller's fallback can try).
+    - otherwise emit benign baseline, with a threat_level-weighted chance of a threat.
+    """
+    if scenario_event:
+        key = scenario_event if scenario_event in SCENARIOS else scenario_event.lower()
+        if key in SCENARIOS:
+            return (SCENARIOS[key](config), key)
+        return None
+    if benign_only or threat_level == "Benign Traffic Only":
+        return generate_benign(config)
+    if random.random() < _THREAT_PROB.get(threat_level, 0.05):
+        key = random.choice(list(SCENARIOS))
+        return (SCENARIOS[key](config), key)
+    return generate_benign(config)

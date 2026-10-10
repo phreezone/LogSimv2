@@ -13,9 +13,16 @@ import time
 import uuid
 
 NAME = "Azure AD Sign-ins"
+DESCRIPTION = "Simulates Microsoft Graph auditLogs/signIns events for msft_azure_ad_raw via the cribl_direct transport."
+CONFIG_KEY = "azure_ad_signin_config"
 SOURCE_IDENTIFIER = "f56dcfdf6bca43e793a4b6e9290e7b12"
 INTEGRATION_IDENTIFIER = "logsim:azure_ad_signin"
 DATASET = "msft_azure_ad_raw"
+
+_THREAT_PROB = {
+    "Benign Traffic Only": 0.0, "Low": 0.02, "Realistic": 0.05,
+    "Medium": 0.08, "High": 0.12, "Insane": 0.30,
+}
 
 TENANT_DOMAIN = "8p68rd.onmicrosoft.com"
 HOME_TENANT = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
@@ -127,3 +134,25 @@ SCENARIOS = {
     "impossible_travel": scenario_impossible_travel,
     "high_risk_signin": scenario_high_risk_signin,
 }
+
+
+# ── LogSim module interface ──────────────────────────────────────────────────────────
+
+def get_threat_names():
+    return list(SCENARIOS.keys())
+
+
+def generate_log(config=None, threat_level="Realistic", benign_only=False,
+                 scenario=None, scenario_event=None, context=None):
+    """Return a LIST of Graph signIn records (dicts) for the cribl transport."""
+    if scenario_event:
+        key = scenario_event if scenario_event in SCENARIOS else scenario_event.lower()
+        if key in SCENARIOS:
+            return (SCENARIOS[key](config), key)
+        return None
+    if benign_only or threat_level == "Benign Traffic Only":
+        return generate_benign(config)
+    if random.random() < _THREAT_PROB.get(threat_level, 0.05):
+        key = random.choice(list(SCENARIOS))
+        return (SCENARIOS[key](config), key)
+    return generate_benign(config)
