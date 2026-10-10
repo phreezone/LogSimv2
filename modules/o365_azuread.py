@@ -14,6 +14,15 @@ import time
 import uuid
 
 from modules import azure_common as ac
+from modules import azure_audit_catalog as _auditcat
+
+# O365 Management Activity directory operations (RecordType 8), derived from the Entra audit
+# catalog's Core Directory activities in O365-MA naming (trailing period). Gives the O365
+# Azure AD feed the same broad directory-operation coverage as the Graph audit feed.
+_O365_MA_OPS = [((a if a.endswith(".") else a + "."), c)
+                for a, c, s, op, t in _auditcat.AUDIT_ACTIVITIES
+                if s == "Core Directory" and c in ("UserManagement", "GroupManagement",
+                "ApplicationManagement", "RoleManagement", "DirectoryManagement", "Device")]
 
 NAME = "Office 365 Azure AD"
 DESCRIPTION = "Simulates Office 365 Management Activity (Azure AD) audit records for msft_o365_azure_ad_raw via the cribl_direct transport."
@@ -106,10 +115,10 @@ _GROUPS = ["All Employees", "Sales Team", "Engineering", "VPN Users", "Finance",
 
 
 def _benign_audit(actor, ip, config):
-    """A routine directory-change record drawn from the common Entra audit categories,
-    with Operation-appropriate ModifiedProperties (O365 Management Activity shape)."""
-    category = random.choice(list(ac.AUDIT_OPS))
-    op = random.choice(ac.AUDIT_OPS[category])
+    """A routine directory-change record drawn from the full Core Directory operation set
+    (O365 Management Activity shape), with Operation-appropriate ModifiedProperties for the
+    common ones and sensible targets otherwise."""
+    op, category = random.choice(_O365_MA_OPS)
     target = ac.pick_user(config)["upn"]
     modified = []
     if op == "Update user.":
@@ -125,6 +134,15 @@ def _benign_audit(actor, ip, config):
                     {"Name": "ConsentAction.Permissions", "NewValue": "User.Read openid profile", "OldValue": ""}]
     elif op in ("Add registered device.", "Add registered owner to device.", "Update device."):
         target = f'{actor["username"].upper()}-LT'
+    elif category == "GroupManagement":
+        target = random.choice(_GROUPS)
+    elif category == "RoleManagement":
+        target = random.choice(["Helpdesk Administrator", "User Administrator", "Security Reader",
+                                "Exchange Administrator", "Application Administrator"])
+    elif category == "ApplicationManagement":
+        target = random.choice(["Salesforce", "ServiceNow", "Workday", "GitHub Enterprise"])
+    elif category == "DirectoryManagement":
+        target = ac.UPN_DOMAIN
     return _audit(op, actor, ip, target_name=target, modified=modified)
 
 
