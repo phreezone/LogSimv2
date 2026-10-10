@@ -163,10 +163,20 @@ Each feed emits the full documented event-type set Microsoft supports for it:
 - **O365 Azure AD** (`msft_o365_azure_ad_raw`): RecordType 15 sign-in (UserLoggedIn/
   UserLoginFailed) + RecordType 8 directory operations.
 
+## SharePoint / DLP / General connectors (built)
+- **SharePoint/OneDrive** (`msft_o365_sharepoint_online_raw`, `3a37f519…`) —
+  `modules/o365_sharepoint.py`: RT6 file/folder ops + RT14 sharing; benign document activity;
+  scenarios `mass_download`, `full_sync_download`, `anonymous_link`, `external_sharing`,
+  `malware_detected` (M365 storage exfiltration / external sharing).
+- **O365 DLP** (`msft_o365_dlp_raw`, `8f052782…`) — `modules/o365_dlp.py`: Audit.DLP RT11
+  DLPRuleMatch with PolicyDetails/SensitiveInformation + Exchange/SharePoint metadata;
+  scenarios `dlp_exfil_block`, `dlp_sharepoint_block`, `dlp_match_burst`.
+- **O365 General** (`msft_o365_general_raw`, `c7655e83…`) — `modules/o365_general.py`: Copilot
+  (RT261) + Power BI (RT20); scenarios `powerbi_mass_export`, `powerbi_print_bulk`.
+All three verified landing parsed.
+
 ## Not yet built (supported M365/Entra sources & event types)
-- **Connectors**: SharePoint/OneDrive (`msft_o365_sharepoint_online_raw`, `3a37f519…` — file
-  exfil/sharing; the "M365 storage services exfiltration" detection), O365 DLP (`8f052782…`),
-  O365 General (`c7655e83…`), Graph Security alerts.
+- **Connectors**: Graph Security alerts (alert ingestion).
 - **Directory audit categories**: PIM activation (privesc), Conditional Access policy changes,
   B2B invite/redeem, entitlement management, access reviews, admin-unit changes.
 - **Sign-in variants**: device-code flow, risk-detection-populated (`riskEventTypes_v2`),

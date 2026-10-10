@@ -13,6 +13,15 @@
   "o365_exchange_config": {
     "transport": "cribl"
   },
+  "o365_sharepoint_config": {
+    "transport": "cribl"
+  },
+  "o365_dlp_config": {
+    "transport": "cribl"
+  },
+  "o365_general_config": {
+    "transport": "cribl"
+  },
   "threat_generation_levels": {
     "Benign Traffic Only": 86400,
     "Realistic": 7200,
