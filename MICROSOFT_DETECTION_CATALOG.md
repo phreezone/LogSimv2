@@ -20,13 +20,63 @@ generators emit a **continuous benign baseline** (default `generate_log` behavio
 addition to the attack scenarios. Correlation rules and some value-keyed BIOCs
 (e.g. specific audit Operations) can fire without a long baseline.
 
-## Baseline (benign) — build the "normal" profile
-- Steady successful interactive sign-ins across a stable user pool from a few consistent
-  corporate IPs/geos (`generate_benign` in both modules). This is what the ML detectors
-  profile against; anomalies are judged relative to it.
-- TODO: widen baseline realism — business-hours weighting, per-user home IP/ASN/geo
-  stickiness, routine non-interactive token refreshes, common app mix (Office portal,
-  Teams, Exchange), so "new country / new ASN / unusual time / unusual app" anomalies read true.
+## Azure AD / Entra log types & content (research)
+
+Microsoft Entra emits several distinct log streams; XSIAM ingests them into different
+datasets. The generators model the two the tenant pulls natively:
+
+**1. Sign-in logs** — Graph `auditLogs/signIns` → `msft_azure_ad_raw`. Sub-types (by volume):
+- **Non-interactive user sign-ins** — *highest volume by far* (often 10–50× interactive):
+  silent token refresh by Outlook/Teams/OneDrive sync/mobile/broker. `isInteractive=false`,
+  `signInEventTypes=["nonInteractiveUser"]`, `authenticationDetails` method "Previously
+  satisfied", `conditionalAccessStatus` success/notApplied, `status.errorCode=0`.
+- **Interactive user sign-ins** — user hits a portal/app; MFA often satisfied via session.
+  `signInEventTypes=["interactiveUser"]`, apps like Office365 Shell/OfficeHome/Teams.
+- **Service-principal / managed-identity sign-ins** — app-only auth (e.g. the Cortex XDR
+  collector itself). No UPN; `servicePrincipalName` instead.
+- Key fields: `userPrincipalName`, `appDisplayName`, `resourceDisplayName`, `ipAddress`,
+  `clientAppUsed` (Browser | Mobile Apps and Desktop clients), `conditionalAccessStatus`,
+  `status.errorCode`, `riskState`/`riskLevelDuringSignIn`, `deviceDetail{}`, `location{}`
+  (all nested objects stored as stringified JSON in the dataset).
+
+**2. Directory audit logs** — Graph `auditLogs/directoryAudits` → `msft_azure_ad_audit_raw`
+(and the same activity appears in O365 Management Activity RecordType 8). Categories:
+UserManagement, GroupManagement, ApplicationManagement, RoleManagement, Policy, Device.
+Common Operations: Add/Update/Delete user, Add/Remove member from group, Add member to
+role, Change/Reset user password, Add service principal, Consent to application, Update
+application credentials, Set federation settings on domain, Disable Strong Authentication.
+
+**3. O365 Management Activity (Audit.AzureActiveDirectory)** → `msft_o365_azure_ad_raw`
+(what this tenant pulls natively). `RecordType 15` = StsLogon sign-ins (Operation
+UserLoggedIn / UserLoginFailed, `ExtendedProperties` ResultStatusDetail/UserAgent/RequestType
+like `Login:login`/`Kmsi:kmsi`/`OAuth2:Authorize`, `DeviceProperties`, `ErrorNumber`,
+`LogonError`); `RecordType 8` = AzureActiveDirectory directory audit (Operation +
+ModifiedProperties). Shared fields: CreationTime, Id, OrganizationId, UserId (UPN),
+ClientIP, Workload=AzureActiveDirectory, Actor[], Target[].
+
+Common benign `status.errorCode` / `ErrorNumber`: `0` success; `50126` invalid password,
+`50055` expired password, `50074`/`50072` MFA required, `50058` insufficient SSO session,
+`50053` account locked, `53003` blocked by CA, `50128`/`50059` tenant/user not found.
+
+## Baseline (benign) — implemented, keyed to LogSim's user model
+Identities come from `config['user_profiles']` / `session_context` via
+`modules/azure_common.py` (UPN = the profile email `@examplecorp.com`, same identity used by
+every other module; device OS from the profile). Each user has a **stable public egress**:
+mostly their department's shared office NAT IP, sometimes a deterministic home IP — so the
+ML detectors build a coherent per-user IP/ASN/country baseline and anomalies read true.
+
+Weighted mix emitted by `generate_benign` (reflects real tenant volume):
+- **Sign-ins (`msft_azure_ad_raw`)**: ~70% non-interactive token refresh, ~22% interactive
+  success (some MFA), ~8% benign failure (expired/mistyped password, MFA needed, SSO session).
+- **O365 (`msft_o365_azure_ad_raw`)**: ~78% UserLoggedIn success, ~12% UserLoginFailed
+  (benign codes), ~10% routine directory ops (update user, group add/remove, password change).
+
+App mix: Office 365 Portal, Office365 Shell, OfficeHome, Teams, My Apps, Authentication
+Broker, OneDrive SyncEngine, Outlook Mobile. Resources: Microsoft Graph, Exchange Online,
+SharePoint Online, Windows Azure AD.
+
+TODO (further realism): business-hours/day-of-week weighting; occasional new-device /
+new-app first-seen events; provisioning-log stream.
 
 ## Low-and-higher severity targets
 
