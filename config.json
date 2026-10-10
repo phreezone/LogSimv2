@@ -7,6 +7,9 @@
   "azure_ad_signin_config": {
     "transport": "cribl"
   },
+  "azure_ad_audit_config": {
+    "transport": "cribl"
+  },
   "threat_generation_levels": {
     "Benign Traffic Only": 86400,
     "Realistic": 7200,
