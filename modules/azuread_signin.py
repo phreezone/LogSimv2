@@ -49,13 +49,13 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
             failure="Other.", risk_level="none", risk_state="none", offset_s=0,
             app=None, resource=None, conditional="success", client_app="Browser",
             mfa=False, ca_result=None, auth_method=None, user_type="member",
-            cross_tenant="none"):
+            cross_tenant="none", device=None):
     """Build one Graph signIn object from a user identity + egress location.
 
     Field set mirrors the real msft_azure_ad_raw record (Graph beta signIn) and the
     Sentinel SigninLogs schema. ca_result populates appliedConditionalAccessPolicies;
-    auth_method populates authenticationDetails (MFA step)."""
-    browser = "Chrome 154.0.0" if user.get("os_type") != "macOS" else "Safari 17.3"
+    auth_method populates authenticationDetails (MFA step); device overrides deviceDetail
+    (pass ac.device_for(user, new=True) for a first-seen/new device)."""
     ts = _ts(offset_s)
     if auth_method:
         auth_dets = ac.auth_details(auth_method, succeeded=success, step_ts=ts)
@@ -93,9 +93,7 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
                                                  "requirementProvider": "securityDefaults"}] if (mfa or auth_method) else []),
         "authenticationProcessingDetails": [{"key": "Is CAE Token", "value": "False"}],
         "networkLocationDetails": [],
-        "deviceDetail": {"deviceId": "", "displayName": "", "browser": browser,
-                         "operatingSystem": f'{user.get("os_type","Windows")} {user.get("os_version","")}'.strip(),
-                         "isCompliant": True, "isManaged": True, "trustType": "Azure AD joined"},
+        "deviceDetail": device or ac.device_for(user),
         "location": {"city": loc["city"], "state": loc["state"],
                      "countryOrRegion": loc["countryOrRegion"], "geoCoordinates": loc["geoCoordinates"]},
         "appliedConditionalAccessPolicies": (ac.applied_ca(ca_result, n=random.randint(1, 2))
@@ -133,28 +131,31 @@ def generate_benign(config=None, context=None):
     user = ac.pick_user(config, context)
     loc = ac.egress(user)
     r = random.random()
-    if r < 0.52:   # non-interactive token refresh — highest volume
+    if r < 0.50:   # non-interactive token refresh — highest volume
         return [_signin(user, loc, interactive=False, app=random.choice(ac.APPS_NONINTERACTIVE),
                         conditional=random.choice(["success", "notApplied"]))]
-    if r < 0.70:   # interactive success evaluated by Conditional Access
+    if r < 0.68:   # interactive success evaluated by Conditional Access
         return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
                         ca_result="success", conditional="success")]
-    if r < 0.78:   # interactive sign-in that completed an MFA challenge
+    if r < 0.76:   # interactive sign-in that completed an MFA challenge
         return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
                         ca_result="success", conditional="success", mfa=True,
                         auth_method=random.choice(ac.MFA_METHODS[:3]))]
-    if r < 0.84:   # service-principal (app-only) sign-in — common background auth
+    if r < 0.82:   # service-principal (app-only) sign-in — common background auth
         return [_sp_signin(loc)]
-    if r < 0.88:   # guest / B2B sign-in
+    if r < 0.86:   # guest / B2B sign-in
         guest = dict(user)
         guest["upn"] = f'{user["username"].replace(".", "")}@{random.choice(_GUEST_DOMAINS)}'
         return [_signin(guest, loc, interactive=True, app="My Apps", user_type="guest",
                         cross_tenant="b2bCollaboration", ca_result="success")]
-    if r < 0.93:   # legacy-auth attempt (usually blocked by CA 'Block Legacy Authentication')
+    if r < 0.90:   # legacy-auth attempt (usually blocked by CA 'Block Legacy Authentication')
         return [_signin(user, loc, interactive=True, client_app=random.choice(_LEGACY_CLIENTS),
                         resource="Office 365 Exchange Online", success=False, error_code=53003,
                         failure="Access has been blocked by Conditional Access policies.",
                         conditional="failure", ca_result="failure")]
+    if r < 0.95:   # first-seen / new device for this user (benign — new laptop, reinstall)
+        return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
+                        ca_result="success", conditional="success", device=ac.device_for(user, new=True))]
     # routine benign failure (mistyped/expired password, MFA needed, SSO session)
     code, reason = random.choice(ac.BENIGN_FAIL)
     return [_signin(user, loc, interactive=True, success=False, error_code=code, failure=reason,
@@ -228,6 +229,37 @@ def scenario_powershell_signin(config=None, user=None):
     return [rec]
 
 
+def scenario_new_device_signin(config=None, user=None):
+    """Successful sign-in from a brand-new, unmanaged device -> 'new device' anomaly (Low)."""
+    u = ac.pick_user(config)
+    return [_signin(u, ac.egress(u), interactive=True, ca_result="success",
+                    device=ac.device_for(u, new=True))]
+
+
+def scenario_new_country_signin(config=None, user=None):
+    """Successful sign-in from a country the user doesn't normally use ->
+    'A user connected from a new country' / 'First connection from a country' (Low/Info)."""
+    u = ac.pick_user(config)
+    far = {"ip": "102.89.44.9", "city": "Lagos", "state": "", "countryOrRegion": "NG",
+           "geoCoordinates": {"latitude": 6.52, "longitude": 3.37}}
+    return [_signin(u, far, interactive=True, ca_result="success")]
+
+
+def scenario_account_lockout_spray(config=None, victims=10, src_ip=None):
+    """Many distinct users hit account lockout (errorCode 50053) from one source ->
+    'Multiple user accounts failed login due to account lockouts' (Low)."""
+    ip = src_ip or random.choice(RISKY_IPS)
+    bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    out = []
+    for i in range(victims):
+        u = ac.pick_user(config)
+        out.append(_signin(u, bad, interactive=True, success=False, error_code=50053,
+                           failure="Account is locked because the user tried to sign in too many times with an incorrect user ID or password.",
+                           conditional="notApplied", offset_s=-(120 - i * 8)))
+    return out
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
@@ -235,6 +267,9 @@ SCENARIOS = {
     "high_risk_signin": scenario_high_risk_signin,
     "tor_signin": scenario_tor_signin,
     "powershell_signin": scenario_powershell_signin,
+    "new_device_signin": scenario_new_device_signin,
+    "new_country_signin": scenario_new_country_signin,
+    "account_lockout_spray": scenario_account_lockout_spray,
 }
 
 
