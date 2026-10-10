@@ -78,9 +78,50 @@ def _base(operation, user, ip, result_status="Success", error_number="0",
     }
 
 
+def _tor_ip(config):
+    """A real Tor exit IP from the live list LogSim loads at startup, else a fallback."""
+    nodes = (config or {}).get("tor_exit_nodes") if isinstance(config, dict) else None
+    if nodes:
+        n = random.choice(nodes)
+        return n.get("ip") if isinstance(n, dict) else n
+    return random.choice(RISKY_IPS)
+
+
+def _home_ip(user):
+    """Stable 'home' IP per user so new-country/new-ASN anomalies read true against baseline."""
+    return BENIGN_IPS[hash(user) % len(BENIGN_IPS)]
+
+
+def _audit(operation, actor_user, ip, target_name=None, modified=None, result_status="Success"):
+    """Audit.AzureActiveDirectory directory-change record (RecordType 8 = AzureActiveDirectory)."""
+    upn = _upn(actor_user)
+    rid = _g()
+    return {
+        "CreationTime": _now(), "Id": rid, "Operation": operation, "OrganizationId": ORG_ID,
+        "RecordType": 8, "ResultStatus": result_status, "UserKey": _g(), "UserType": 0,
+        "Version": 1, "Workload": "AzureActiveDirectory", "ObjectId": target_name or _g(),
+        "UserId": upn, "AzureActiveDirectoryEventType": 0,
+        "ExtendedProperties": [{"Name": "additionalDetails", "Value": "{}"}],
+        "ModifiedProperties": modified or [],
+        "Actor": [{"ID": _g(), "Type": 0}, {"ID": upn, "Type": 5}],
+        "ActorContextId": ORG_ID, "ActorIpAddress": ip, "InterSystemsId": _g(),
+        "IntraSystemId": rid, "SupportTicketId": "",
+        "Target": [{"ID": target_name or _g(), "Type": 1}], "TargetContextId": ORG_ID,
+    }
+
+
+_APPS = ["Microsoft Office 365 Portal", "Office365 Shell WCSS-Client",
+         "Microsoft Teams", "OfficeHome", "Microsoft 365 Security and Compliance Center"]
+
+
 def generate_benign(config=None):
-    """A single routine successful interactive sign-in."""
-    return [_base("UserLoggedIn", random.choice(USERS), random.choice(BENIGN_IPS))]
+    """A routine successful interactive sign-in from the user's stable home IP + common app."""
+    user = random.choice(USERS)
+    rec = _base("UserLoggedIn", user, _home_ip(user))
+    rec["ExtendedProperties"] = [{"Name": "UserAgent", "Value": UA_CHROME},
+                                 {"Name": "RequestType", "Value": "Login:login"}]
+    rec["Target"] = [{"ID": random.choice(_APPS), "Type": 1}]
+    return [rec]
 
 
 # ── analytics-triggering scenarios ───────────────────────────────────────────────────
@@ -122,29 +163,73 @@ def scenario_impossible_travel(config=None, user=None):
             _base("UserLoggedIn", u, ip2, offset_s=-60)]
 
 
-def scenario_risky_ip_signin(config=None, user=None):
-    """Successful sign-in from a known anonymizer/Tor egress IP."""
+def scenario_tor_signin(config=None, user=None):
+    """Successful sign-in from a real Tor exit node -> 'A successful SSO sign-in from TOR' (High)."""
     u = user or random.choice(USERS)
-    return [_base("UserLoggedIn", u, random.choice(RISKY_IPS))]
+    return [_base("UserLoggedIn", u, _tor_ip(config))]
 
 
 def scenario_admin_role_add(config=None, user=None):
     """Privilege escalation: add member to a privileged directory role."""
     u = user or random.choice(USERS)
-    rec = _base("Add member to role.", u, random.choice(BENIGN_IPS))
-    rec["ModifiedProperties"] = [
-        {"Name": "Role.DisplayName", "NewValue": "Global Administrator", "OldValue": ""},
-        {"Name": "Role.TemplateId", "NewValue": "62e90394-69f5-4237-9190-012177145e10", "OldValue": ""},
-    ]
+    rec = _audit("Add member to role.", u, _home_ip(u), target_name=_upn(random.choice(USERS)),
+                 modified=[{"Name": "Role.DisplayName", "NewValue": "Global Administrator", "OldValue": ""},
+                           {"Name": "Role.TemplateId",
+                            "NewValue": "62e90394-69f5-4237-9190-012177145e10", "OldValue": ""}])
     return [rec]
+
+
+def scenario_mfa_disabled(config=None, user=None):
+    """Disable strong auth (MFA) for an identity -> 'MFA was disabled for an Azure identity' (Low)."""
+    u = user or random.choice(USERS)
+    return [_audit("Disable Strong Authentication.", u, _home_ip(u),
+                   target_name=_upn(random.choice(USERS)),
+                   modified=[{"Name": "StrongAuthenticationRequirement",
+                              "NewValue": "[]", "OldValue": "[{\"State\":\"Enforced\"}]"}])]
+
+
+def scenario_federation_change(config=None, user=None):
+    """Set federation settings on a domain -> 'Azure domain federation settings modification' (Low)."""
+    u = user or random.choice(USERS)
+    return [_audit("Set federation settings on domain.", u, _home_ip(u),
+                   target_name=TENANT_DOMAIN,
+                   modified=[{"Name": "IssuerUri", "NewValue": "http://any.sts/malicious",
+                              "OldValue": ""}])]
+
+
+def scenario_user_deletion(config=None, user=None):
+    """Delete a user by a non-standard account -> 'Azure account deletion by a non-standard account' (Low)."""
+    u = user or random.choice(USERS)
+    return [_audit("Delete user.", u, _home_ip(u), target_name=_upn(random.choice(USERS)))]
+
+
+def scenario_pim_role_change(config=None, user=None):
+    """Change PIM role settings -> 'Azure AD PIM role settings change' (Low)."""
+    u = user or random.choice(USERS)
+    return [_audit("Update role setting in PIM.", u, _home_ip(u), target_name="Global Administrator",
+                   modified=[{"Name": "RequireMfaOnActivation", "NewValue": "False", "OldValue": "True"}])]
+
+
+def scenario_admin_role_removals(config=None):
+    """Several admin-role removals in a short window -> 'Multiple Azure AD admin role removals' (Low)."""
+    actor = random.choice(USERS)
+    return [_audit("Remove member from role.", actor, _home_ip(actor),
+                   target_name=_upn(v),
+                   modified=[{"Name": "Role.DisplayName", "NewValue": "", "OldValue": "Global Administrator"}])
+            for v in random.sample(USERS, min(4, len(USERS)))]
 
 
 SCENARIOS = {
     "password_spray": scenario_password_spray,
     "brute_force": scenario_brute_force,
     "impossible_travel": scenario_impossible_travel,
-    "risky_ip_signin": scenario_risky_ip_signin,
+    "tor_signin": scenario_tor_signin,
     "admin_role_add": scenario_admin_role_add,
+    "mfa_disabled": scenario_mfa_disabled,
+    "federation_change": scenario_federation_change,
+    "user_deletion": scenario_user_deletion,
+    "pim_role_change": scenario_pim_role_change,
+    "admin_role_removals": scenario_admin_role_removals,
 }
 
 
