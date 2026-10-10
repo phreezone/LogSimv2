@@ -158,10 +158,42 @@ def _b_new_mailbox(cfg):
                         UserPrincipalName=tgt["upn"]), target_user=tgt, external=True)
 
 
-_BENIGN = [(8, _b_mail_accessed), (4, _b_send), (4, _b_move), (2, _b_benign_rule),
-           (2, _b_login), (1, _b_new_mailbox)]
+# Full mailbox-audit operation set (Exchange mailbox auditing — owner/delegate/admin actions).
+_MAILBOX_OPS = ["Create", "Update", "Move", "MoveToDeletedItems", "SoftDelete", "HardDelete",
+                "Copy", "FolderBind", "Send", "SendAs", "SendOnBehalf", "MailboxLogin",
+                "UpdateInboxRules", "UpdateCalendarDelegation", "AddFolderPermissions",
+                "UpdateFolderPermissions", "RemoveFolderPermissions", "ApplyRecord",
+                "RecordDelete", "SearchQueryInitiated"]
+_ITEM_OPS = {"Create", "Update", "Move", "MoveToDeletedItems", "SoftDelete", "HardDelete",
+             "Copy", "FolderBind"}
+_SUBJECTS = ["Re: Q3 numbers", "Lunch?", "Weekly newsletter", "Ticket #4821 update",
+             "Meeting notes", "Invoice attached", "PTO request", "Deploy window"]
+# Common benign admin cmdlets (mailbox configuration housekeeping).
+_ADMIN_BENIGN = ["Set-Mailbox", "Set-CASMailbox", "Set-MailboxRegionalConfiguration",
+                 "Set-MailboxCalendarConfiguration", "Enable-Mailbox", "Set-OwaMailboxPolicy",
+                 "Set-MailboxMessageConfiguration", "Add-MailboxFolderPermission",
+                 "Set-Clutter", "Set-FocusedInbox"]
+
+
+def _b_mailbox_op(cfg):
+    u = ac.pick_user(cfg)
+    op = random.choice(_MAILBOX_OPS)
+    lt = 0 if random.random() < 0.85 else 2   # mostly owner, some delegate access
+    item = ({"Subject": random.choice(_SUBJECTS), "ParentFolder": {"Path": "\\Inbox"}}
+            if op in _ITEM_OPS else None)
+    return mailbox_action(op, u, logon_type=lt, item=item)
+
+
+def _b_admin_benign(cfg):
+    admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
+    return admin_cmdlet(random.choice(_ADMIN_BENIGN), admin, _param(Identity=tgt["upn"]),
+                        target_user=tgt)
+
+
+_BENIGN = [(8, _b_mail_accessed), (7, _b_mailbox_op), (2, _b_benign_rule),
+           (2, _b_login), (1, _b_new_mailbox), (1, _b_admin_benign)]
 _B_POOL = [fn for w, fn in _BENIGN for _ in range(w)]
-_HUMAN = {_b_send, _b_move, _b_benign_rule, _b_login, _b_new_mailbox}
+_HUMAN = {_b_mailbox_op, _b_benign_rule, _b_login, _b_new_mailbox, _b_admin_benign}
 
 
 def generate_benign(config=None, context=None):

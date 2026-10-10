@@ -149,6 +149,20 @@ delete/move-to-Deleted → "Exchange email-hiding inbox rule", Low), `mailbox_sm
 `folder_permission_mod` (Default-user folder grant → "Exchange mailbox folder permission
 modification", Low), `audit_bypass` (Set-MailboxAuditBypassAssociation — defense evasion).
 
+## Event-type coverage within the built feeds
+Each feed emits the full documented event-type set Microsoft supports for it:
+- **Graph sign-ins** (`msft_azure_ad_raw`): all four `signInEventTypes` — `interactiveUser`,
+  `nonInteractiveUser`, `servicePrincipal`, `managedIdentity` — plus CA/MFA/guest/legacy/
+  new-device variants and the benign + failure error-code set.
+- **Directory audit** (`msft_azure_ad_audit_raw`): the full 382-activity Entra audit catalog
+  (`azure_audit_catalog.py`) across every category/service.
+- **Exchange Online** (`msft_o365_exchange_online_raw`): the full mailbox-audit operation set
+  (MailItemsAccessed, Send/SendAs/SendOnBehalf, Create/Update/Move/*Delete/Copy/FolderBind,
+  UpdateInboxRules, UpdateCalendarDelegation, *FolderPermissions, ApplyRecord/RecordDelete,
+  SearchQueryInitiated, MailboxLogin) plus common admin cmdlets, plus the BEC scenarios.
+- **O365 Azure AD** (`msft_o365_azure_ad_raw`): RecordType 15 sign-in (UserLoggedIn/
+  UserLoginFailed) + RecordType 8 directory operations.
+
 ## Not yet built (supported M365/Entra sources & event types)
 - **Connectors**: SharePoint/OneDrive (`msft_o365_sharepoint_online_raw`, `3a37f519…` — file
   exfil/sharing; the "M365 storage services exfiltration" detection), O365 DLP (`8f052782…`),
