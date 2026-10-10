@@ -55,8 +55,53 @@ BENIGN_FAIL = [
 ]
 
 
+# Conditional Access policies a tenant typically has (displayName -> grant controls).
+CA_POLICIES = [
+    ("Require MFA for All Users", ["Mfa"]),
+    ("Block Legacy Authentication", ["Block"]),
+    ("Require Compliant or Hybrid Joined Device", ["CompliantDevice", "DomainJoinedDevice"]),
+    ("Require MFA for Admins", ["Mfa"]),
+    ("Require Approved Client App", ["ApprovedApplication"]),
+]
+# MFA / authentication methods (Entra authenticationMethod values).
+MFA_METHODS = ["Mobile app notification", "Mobile app verification code", "Text message",
+               "Windows Hello for Business", "FIDO2 security key", "Password"]
+# Benign directory-audit Operations by category (O365 Management Activity naming — trailing period).
+AUDIT_OPS = {
+    "UserManagement": ["Update user.", "Change user password.", "Reset user password.",
+                       "Update PasswordProfile.", "Add user.", "Update StsRefreshTokenValidFrom Timestamp."],
+    "GroupManagement": ["Add member to group.", "Remove member from group.", "Update group."],
+    "AuthMethod": ["User registered security info.", "User started security info registration.",
+                   "User deleted security info.", "Admin registered security info."],
+    "DeviceManagement": ["Add registered device.", "Add registered owner to device.", "Update device."],
+    "ApplicationManagement": ["Consent to application.", "Add app role assignment grant to user."],
+}
+
+
 def _h(s):
     return int(hashlib.sha256(str(s).encode()).hexdigest(), 16)
+
+
+def applied_ca(result="success", n=1):
+    """Return an appliedConditionalAccessPolicies list (Graph appliedConditionalAccessPolicy)."""
+    picks = random.sample(CA_POLICIES, min(n, len(CA_POLICIES)))
+    out = []
+    for name, grants in picks:
+        out.append({"id": str(_h(name) % 10**32).zfill(8)[:8] + "-ca",  # stable-ish id
+                    "displayName": name, "enforcedGrantControls": grants,
+                    "enforcedSessionControls": [], "result": result})
+    return out
+
+
+def auth_details(method="Password", succeeded=True, step_ts=None):
+    """Return an authenticationDetails list entry (Graph signIn authenticationDetail)."""
+    return [{"authenticationStepDateTime": step_ts,
+             "authenticationMethod": method,
+             "authenticationMethodDetail": "",
+             "succeeded": succeeded,
+             "authenticationStepResultDetail": ("MFA completed in Azure AD" if method != "Password"
+                                                else "Correct password"),
+             "authenticationStepRequirement": ""}]
 
 
 def pick_user(config=None, context=None):

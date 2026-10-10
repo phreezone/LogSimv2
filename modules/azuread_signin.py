@@ -48,11 +48,26 @@ def _tor_ip(config):
 def _signin(user, loc, *, interactive=True, success=True, error_code=0,
             failure="Other.", risk_level="none", risk_state="none", offset_s=0,
             app=None, resource=None, conditional="success", client_app="Browser",
-            mfa=False):
-    """Build one Graph signIn object from a user identity + egress location."""
-    browser = f"Chrome 154.0.0" if user.get("os_type") != "macOS" else "Safari 17.3"
+            mfa=False, ca_result=None, auth_method=None, user_type="member",
+            cross_tenant="none"):
+    """Build one Graph signIn object from a user identity + egress location.
+
+    Field set mirrors the real msft_azure_ad_raw record (Graph beta signIn) and the
+    Sentinel SigninLogs schema. ca_result populates appliedConditionalAccessPolicies;
+    auth_method populates authenticationDetails (MFA step)."""
+    browser = "Chrome 154.0.0" if user.get("os_type") != "macOS" else "Safari 17.3"
+    ts = _ts(offset_s)
+    if auth_method:
+        auth_dets = ac.auth_details(auth_method, succeeded=success, step_ts=ts)
+        methods_used = [auth_method] if success else []
+    else:
+        auth_dets = [{"authenticationStepDateTime": ts,
+                      "authenticationMethod": "Previously satisfied" if not interactive else "Password",
+                      "authenticationMethodDetail": "", "succeeded": success,
+                      "authenticationStepResultDetail": "", "authenticationStepRequirement": ""}]
+        methods_used = ["Password"] if success and interactive else []
     return {
-        "id": _g(), "createdDateTime": _ts(offset_s),
+        "id": _g(), "createdDateTime": ts,
         "userDisplayName": user["display_name"], "userPrincipalName": user["upn"], "userId": _g(),
         "appId": _g(), "appDisplayName": app or random.choice(ac.APPS_INTERACTIVE),
         "ipAddress": loc["ip"], "clientAppUsed": client_app, "correlationId": _g(),
@@ -61,19 +76,46 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
         "riskLevelDuringSignIn": risk_level, "riskState": risk_state,
         "riskEventTypes": [], "riskEventTypes_v2": [],
         "resourceDisplayName": resource or random.choice(ac.RESOURCES), "resourceId": _g(),
-        "homeTenantId": ac.HOME_TENANT_ID, "userType": "member",
+        "homeTenantId": ac.HOME_TENANT_ID, "userType": user_type, "crossTenantAccessType": cross_tenant,
+        "incomingTokenType": "primaryRefreshToken" if not interactive else "none",
+        "tokenIssuerType": "AzureAD", "clientCredentialType": "none",
+        "autonomousSystemNumber": ac._h(loc["ip"]) % 60000,
         "signInEventTypes": ["interactiveUser"] if interactive else ["nonInteractiveUser"],
-        "authenticationRequirement": "multiFactorAuthentication" if mfa else "singleFactorAuthentication",
+        "authenticationRequirement": "multiFactorAuthentication" if (mfa or auth_method) else "singleFactorAuthentication",
+        "authenticationProtocol": "oAuth2" if interactive else "none",
         "status": {"errorCode": error_code,
                    "failureReason": failure if not success else "Other.",
                    "additionalDetails": ("MFA requirement satisfied by claim in the token"
                                          if success else None)},
-        "authenticationDetails": [{"authenticationMethod": "Previously satisfied" if not interactive else "Password",
-                                   "succeeded": success}],
-        "authenticationMethodsUsed": (["Password"] if success and interactive else []),
-        "deviceDetail": {"browser": browser, "deviceId": "", "displayName": "",
-                         "operatingSystem": f'{user.get("os_type","Windows")}{user.get("os_version","")}'.strip(),
-                         "isCompliant": True, "isManaged": True},
+        "authenticationDetails": auth_dets,
+        "authenticationMethodsUsed": methods_used,
+        "authenticationRequirementPolicies": ([{"detail": "Security Defaults",
+                                                 "requirementProvider": "securityDefaults"}] if (mfa or auth_method) else []),
+        "authenticationProcessingDetails": [{"key": "Is CAE Token", "value": "False"}],
+        "networkLocationDetails": [],
+        "deviceDetail": {"deviceId": "", "displayName": "", "browser": browser,
+                         "operatingSystem": f'{user.get("os_type","Windows")} {user.get("os_version","")}'.strip(),
+                         "isCompliant": True, "isManaged": True, "trustType": "Azure AD joined"},
+        "location": {"city": loc["city"], "state": loc["state"],
+                     "countryOrRegion": loc["countryOrRegion"], "geoCoordinates": loc["geoCoordinates"]},
+        "appliedConditionalAccessPolicies": (ac.applied_ca(ca_result, n=random.randint(1, 2))
+                                             if ca_result else []),
+    }
+
+
+def _sp_signin(loc, offset_s=0):
+    """Service-principal (app-only) sign-in — no user, servicePrincipal identity."""
+    name = random.choice(["Microsoft Graph", "Office 365 Exchange Online", "LogSim Reporting App",
+                          "Microsoft Intune", "Azure Resource Manager"])
+    return {
+        "id": _g(), "createdDateTime": _ts(offset_s), "appId": _g(), "appDisplayName": name,
+        "servicePrincipalId": _g(), "servicePrincipalName": name,
+        "ipAddress": loc["ip"], "correlationId": _g(), "conditionalAccessStatus": "notApplied",
+        "isInteractive": False, "riskState": "none", "riskLevelDuringSignIn": "none",
+        "resourceDisplayName": random.choice(ac.RESOURCES), "resourceId": _g(),
+        "signInEventTypes": ["servicePrincipal"], "clientCredentialType": "clientAssertion",
+        "tokenIssuerType": "AzureAD", "authenticationProtocol": "oAuth2",
+        "status": {"errorCode": 0, "failureReason": "Other.", "additionalDetails": None},
         "location": {"city": loc["city"], "state": loc["state"],
                      "countryOrRegion": loc["countryOrRegion"], "geoCoordinates": loc["geoCoordinates"]},
         "appliedConditionalAccessPolicies": [],
@@ -82,18 +124,38 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
 
 # ── benign baseline (realistic weighted mix) ─────────────────────────────────────────
 
+_LEGACY_CLIENTS = ["IMAP4", "POP3", "SMTP", "Exchange ActiveSync", "Other clients"]
+_GUEST_DOMAINS = ["partnerco.com", "contoso.com", "fabrikam.com", "vendor.io"]
+
+
 def generate_benign(config=None, context=None):
-    """One routine sign-in, weighted toward silent token refreshes like a real tenant."""
+    """One routine sign-in from the real-world weighted mix a live tenant produces."""
     user = ac.pick_user(config, context)
     loc = ac.egress(user)
     r = random.random()
-    if r < 0.70:   # non-interactive token refresh — highest volume
+    if r < 0.52:   # non-interactive token refresh — highest volume
         return [_signin(user, loc, interactive=False, app=random.choice(ac.APPS_NONINTERACTIVE),
-                        conditional=random.choice(["success", "notApplied"]), client_app="Browser")]
-    if r < 0.92:   # interactive success (MFA satisfied via session)
+                        conditional=random.choice(["success", "notApplied"]))]
+    if r < 0.70:   # interactive success evaluated by Conditional Access
         return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
-                        mfa=random.random() < 0.3)]
-    # routine benign failure (mistyped/expired password, MFA needed)
+                        ca_result="success", conditional="success")]
+    if r < 0.78:   # interactive sign-in that completed an MFA challenge
+        return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
+                        ca_result="success", conditional="success", mfa=True,
+                        auth_method=random.choice(ac.MFA_METHODS[:3]))]
+    if r < 0.84:   # service-principal (app-only) sign-in — common background auth
+        return [_sp_signin(loc)]
+    if r < 0.88:   # guest / B2B sign-in
+        guest = dict(user)
+        guest["upn"] = f'{user["username"].replace(".", "")}@{random.choice(_GUEST_DOMAINS)}'
+        return [_signin(guest, loc, interactive=True, app="My Apps", user_type="guest",
+                        cross_tenant="b2bCollaboration", ca_result="success")]
+    if r < 0.93:   # legacy-auth attempt (usually blocked by CA 'Block Legacy Authentication')
+        return [_signin(user, loc, interactive=True, client_app=random.choice(_LEGACY_CLIENTS),
+                        resource="Office 365 Exchange Online", success=False, error_code=53003,
+                        failure="Access has been blocked by Conditional Access policies.",
+                        conditional="failure", ca_result="failure")]
+    # routine benign failure (mistyped/expired password, MFA needed, SSO session)
     code, reason = random.choice(ac.BENIGN_FAIL)
     return [_signin(user, loc, interactive=True, success=False, error_code=code, failure=reason,
                     conditional="notApplied")]

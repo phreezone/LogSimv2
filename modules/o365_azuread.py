@@ -98,8 +98,30 @@ def _audit(operation, actor, ip, target_name=None, modified=None, result_status=
     }
 
 
-_BENIGN_AUDIT_OPS = ["Update user.", "Change user password.", "Add member to group.",
-                     "Remove member from group.", "Update StsRefreshTokenValidFrom Timestamp."]
+_GROUPS = ["All Employees", "Sales Team", "Engineering", "VPN Users", "Finance", "Marketing"]
+
+
+def _benign_audit(actor, ip, config):
+    """A routine directory-change record drawn from the common Entra audit categories,
+    with Operation-appropriate ModifiedProperties (O365 Management Activity shape)."""
+    category = random.choice(list(ac.AUDIT_OPS))
+    op = random.choice(ac.AUDIT_OPS[category])
+    target = ac.pick_user(config)["upn"]
+    modified = []
+    if op == "Update user.":
+        modified = [{"Name": "Included Updated Properties", "NewValue": "JobTitle, Department", "OldValue": ""}]
+    elif op in ("Add member to group.", "Remove member from group."):
+        target = random.choice(_GROUPS)
+        modified = [{"Name": "Group.DisplayName", "NewValue": target, "OldValue": ""},
+                    {"Name": "Group.ObjectID", "NewValue": _g(), "OldValue": ""}]
+    elif op == "User registered security info.":
+        modified = [{"Name": "SecurityInfo.Method", "NewValue": random.choice(ac.MFA_METHODS), "OldValue": ""}]
+    elif op == "Consent to application.":
+        modified = [{"Name": "ConsentContext.IsAdminConsent", "NewValue": "False", "OldValue": ""},
+                    {"Name": "ConsentAction.Permissions", "NewValue": "User.Read openid profile", "OldValue": ""}]
+    elif op in ("Add registered device.", "Add registered owner to device.", "Update device."):
+        target = f'{actor["username"].upper()}-LT'
+    return _audit(op, actor, ip, target_name=target, modified=modified)
 
 
 # ── benign baseline (realistic weighted mix) ─────────────────────────────────────────
@@ -117,8 +139,7 @@ def generate_benign(config=None, context=None):
                         error_number=str(code),
                         extended=[{"Name": "ResultStatusDetail", "Value": "Failed"}])]
     # occasional routine directory activity (self-service / admin housekeeping)
-    return [_audit(random.choice(_BENIGN_AUDIT_OPS), user, loc["ip"],
-                   target_name=ac.pick_user(config, context)["upn"])]
+    return [_benign_audit(user, loc["ip"], config)]
 
 
 # ── attack scenarios ─────────────────────────────────────────────────────────────────

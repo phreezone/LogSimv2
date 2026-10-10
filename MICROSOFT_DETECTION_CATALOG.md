@@ -75,8 +75,35 @@ App mix: Office 365 Portal, Office365 Shell, OfficeHome, Teams, My Apps, Authent
 Broker, OneDrive SyncEngine, Outlook Mobile. Resources: Microsoft Graph, Exchange Online,
 SharePoint Online, Windows Azure AD.
 
+### Implemented sign-in variants (A) & directory-audit ops (B)
+Field-faithful against Microsoft Graph `signIn` / `directoryAudit` /
+`appliedConditionalAccessPolicy` resources, cross-checked with the Microsoft Sentinel
+`SigninLogs` column schema and real tenant records (61-column sign-in; RT8 ops observed
+natively: `Update user.`, `Reset user password.`, `Update PasswordProfile.`,
+`Add service principal.` — Management-Activity trailing-period naming).
+
+**A — sign-in variants in the benign mix (`msft_azure_ad_raw`):**
+- non-interactive token refresh (incomingTokenType=primaryRefreshToken) — highest volume
+- interactive success **evaluated by Conditional Access** (`appliedConditionalAccessPolicies`
+  populated: id/displayName/enforcedGrantControls/result) + `authenticationRequirementPolicies`
+- MFA-challenge sign-in (`authenticationDetails` with the MFA method, `authenticationMethodsUsed`)
+- **service-principal** sign-in (`signInEventTypes=["servicePrincipal"]`, servicePrincipalName, clientCredentialType)
+- **guest / B2B** sign-in (`userType=guest`, `crossTenantAccessType=b2bCollaboration`)
+- **legacy-auth** attempt (clientAppUsed IMAP4/POP3/SMTP/… → CA-blocked, ResultType 53003)
+- benign failures (50126/50055/50074/50072/50058)
+Richer fields now emitted to match the real record: autonomousSystemNumber, tokenIssuerType,
+incomingTokenType, authenticationProtocol, deviceDetail.trustType, networkLocationDetails,
+authenticationProcessingDetails.
+
+**B — directory-audit ops in the benign mix (`msft_o365_azure_ad_raw`, RecordType 8):**
+categories from `azure_common.AUDIT_OPS` — UserManagement (Update user / Change|Reset password /
+Update PasswordProfile), GroupManagement (add/remove/update group, with Group.DisplayName
+ModifiedProperties), AuthMethod (register/delete security info), DeviceManagement (register
+device/owner), ApplicationManagement (Consent to application with ConsentContext props).
+
 TODO (further realism): business-hours/day-of-week weighting; occasional new-device /
-new-app first-seen events; provisioning-log stream.
+new-app first-seen events; the Graph `directoryAudits` feed (`msft_azure_ad_audit_raw`) and
+provisioning-log stream as separate sources.
 
 ## Low-and-higher severity targets
 
