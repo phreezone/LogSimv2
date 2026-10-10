@@ -126,6 +126,32 @@ def _sp_signin(loc, offset_s=0):
 
 # ── benign baseline (realistic weighted mix) ─────────────────────────────────────────
 
+def _mi_signin(loc, offset_s=0):
+    """Managed-identity sign-in (Azure resource identity) — signInEventTypes managedIdentity."""
+    name = random.choice(["logsim-vm-prod", "logsim-func-app", "logsim-aks-cluster",
+                          "logsim-logicapp", "logsim-datafactory"])
+    msi = random.choice(["userAssigned", "systemAssigned"])
+    return {
+        "id": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name),
+        "appDisplayName": name, "servicePrincipalId": ac.user_oid("mi:" + name),
+        "servicePrincipalName": name, "ipAddress": loc["ip"], "correlationId": _g(),
+        "conditionalAccessStatus": "notApplied", "isInteractive": False,
+        "riskState": "none", "riskLevelDuringSignIn": "none",
+        "resourceDisplayName": random.choice(["Azure Resource Manager", "Azure Key Vault",
+                                              "Azure Storage", "Microsoft Graph"]),
+        "resourceId": ac.resource_id("Azure Resource Manager"),
+        "signInEventTypes": ["managedIdentity"], "tokenIssuerType": "AzureAD",
+        "authenticationProtocol": "none", "clientCredentialType": "managedIdentity",
+        "managedServiceIdentity": {"msiType": msi, "associatedResourceId":
+            f"/subscriptions/{ac._stable_guid('sub')}/resourceGroups/rg-prod/providers/"
+            f"Microsoft.Compute/virtualMachines/{name}", "federatedTokenId": "", "federatedTokenIssuer": ""},
+        "status": {"errorCode": 0, "failureReason": "Other.", "additionalDetails": None},
+        "location": {"city": loc["city"], "state": loc["state"],
+                     "countryOrRegion": loc["countryOrRegion"], "geoCoordinates": loc["geoCoordinates"]},
+        "appliedConditionalAccessPolicies": [],
+    }
+
+
 _LEGACY_CLIENTS = ["IMAP4", "POP3", "SMTP", "Exchange ActiveSync", "Other clients"]
 _GUEST_DOMAINS = ["partnerco.com", "contoso.com", "fabrikam.com", "vendor.io"]
 
@@ -145,8 +171,8 @@ def generate_benign(config=None, context=None):
         return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
                         ca_result="success", conditional="success", mfa=True,
                         auth_method=random.choice(ac.MFA_METHODS[:3]))]
-    if r < 0.82:   # service-principal (app-only) sign-in — common background auth
-        return [_sp_signin(loc)]
+    if r < 0.82:   # app-only background auth: service principal, or managed identity (Azure resources)
+        return [_mi_signin(loc) if random.random() < 0.3 else _sp_signin(loc)]
     if r < 0.86:   # guest / B2B sign-in
         guest = dict(user)
         guest["upn"] = f'{user["username"].replace(".", "")}@{random.choice(_GUEST_DOMAINS)}'
