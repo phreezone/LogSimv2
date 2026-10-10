@@ -129,6 +129,37 @@ US-Eastern diurnal; automated sync continues overnight) — so "unusual admin / 
 detectors get a real baseline. Named detection scenarios: `admin_role_add`,
 `consent_risky_app`, `app_credential_added`, `security_info_disabled`.
 
+## Exchange Online feed (`msft_o365_exchange_online_raw`) — `modules/o365_exchange.py`
+O365 Management Activity, `Workload=Exchange`, dedicated UUID `dee8e85ce7db4573a8bc21b807e1d73a`.
+RecordTypes verified against the Management Activity schema + real tenant rows:
+`1` ExchangeAdmin (cmdlet audit — `Parameters` `[{Name,Value}]`, path-style `ObjectId`,
+`ResultStatus "True"/"False"`, `ExternalAccess`, `OriginatingServer`), `2` ExchangeItem
+(mailbox action — `LogonType` 0 Owner/2 Delegated, `MailboxOwnerUPN`, `MailboxGuid`,
+`ClientInfoString`, `Item`/`Folders`), `50` MailItemsAccessed (`OperationProperties`
+`[{MailAccessType:Bind}]`, `OperationCount`). Benign baseline is MailItemsAccessed-dominant
+(matches real tenant) plus Send/Move/benign rules/login and light admin.
+
+BEC detection scenarios: `inbox_forwarding_rule` (New-InboxRule ForwardTo external →
+"Exchange inbox forwarding rule configured"), `email_hiding_rule` (New-InboxRule
+delete/move-to-Deleted → "Exchange email-hiding inbox rule", Low), `mailbox_smtp_forwarding`
+(Set-Mailbox ForwardingSmtpAddress → "Exchange user mailbox forwarding"), `mailbox_delegation`
+(Add-MailboxPermission FullAccess → "Exchange mailbox delegation permissions added", Low),
+`send_as_permission` (Add-RecipientPermission SendAs), `transport_forwarding_rule`
+(New-TransportRule BlindCopyTo external → "Exchange transport forwarding rule configured"),
+`folder_permission_mod` (Default-user folder grant → "Exchange mailbox folder permission
+modification", Low), `audit_bypass` (Set-MailboxAuditBypassAssociation — defense evasion).
+
+## Not yet built (supported M365/Entra sources & event types)
+- **Connectors**: SharePoint/OneDrive (`msft_o365_sharepoint_online_raw`, `3a37f519…` — file
+  exfil/sharing; the "M365 storage services exfiltration" detection), O365 DLP (`8f052782…`),
+  O365 General (`c7655e83…`), Graph Security alerts.
+- **Directory audit categories**: PIM activation (privesc), Conditional Access policy changes,
+  B2B invite/redeem, entitlement management, access reviews, admin-unit changes.
+- **Sign-in variants**: device-code flow, risk-detection-populated (`riskEventTypes_v2`),
+  ADFS/federated, cross-tenant inbound, token protection.
+- **Exchange**: eDiscovery/compliance search, connector changes, SafeLinks/SafeAttachment/
+  anti-phish/DKIM disable, `Set-OwaMailboxPolicy`.
+
 ## Cardinality & identifiers (baseline correctness)
 The analytics profile per entity, so identity GUIDs must be **stable per entity**, not
 random per event — otherwise every sign-in looks like a brand-new user/app and the baseline
