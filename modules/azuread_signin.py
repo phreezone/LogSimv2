@@ -81,9 +81,24 @@ def _signin(user, full_name, ip, *, success=True, error_code=0, failure="Other."
     }
 
 
+def _tor_ip(config):
+    """A real Tor exit IP from LogSim's live list, else a fallback risky IP."""
+    nodes = (config or {}).get("tor_exit_nodes") if isinstance(config, dict) else None
+    if nodes:
+        n = random.choice(nodes)
+        return n.get("ip") if isinstance(n, dict) else n
+    return random.choice(RISKY_IPS)
+
+
+def _home_ip(user):
+    """Stable home IP per user, so new-country/new-ASN anomalies read true vs baseline."""
+    return BENIGN_IPS[hash(user) % len(BENIGN_IPS)]
+
+
 def generate_benign(config=None):
+    """Routine successful interactive sign-in from the user's stable home IP."""
     u, fn = random.choice(USERS)
-    return [_signin(u, fn, random.choice(BENIGN_IPS))]
+    return [_signin(u, fn, _home_ip(u))]
 
 
 def scenario_brute_force(config=None, user=None, attempts=10, src_ip=None):
@@ -128,11 +143,32 @@ def scenario_high_risk_signin(config=None, user=None):
     return [rec]
 
 
+def scenario_tor_signin(config=None, user=None):
+    """Successful sign-in from a real Tor exit node -> 'A successful SSO sign-in from TOR' (High)."""
+    u, fn = next((x for x in USERS if x[0] == user), random.choice(USERS))
+    rec = _signin(u, fn, _tor_ip(config), risk_level="high", risk_state="atRisk")
+    rec["riskEventTypes_v2"] = ["anonymizedIPAddress"]
+    return [rec]
+
+
+def scenario_powershell_signin(config=None, user=None):
+    """Interactive Azure PowerShell sign-in from an unusual geo/ASN ->
+    'Suspicious Azure AD interactive sign-in using PowerShell' (Low)."""
+    u, fn = next((x for x in USERS if x[0] == user), random.choice(USERS))
+    rec = _signin(u, fn, "185.220.101.34", interactive=True)   # Frankfurt/DE, not the home geo
+    rec["appDisplayName"] = "Microsoft Azure PowerShell"
+    rec["appId"] = "1950a258-227b-4e31-a9cf-717495945fc2"      # the well-known Azure PowerShell app id
+    rec["clientAppUsed"] = "Mobile Apps and Desktop clients"
+    return [rec]
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
     "impossible_travel": scenario_impossible_travel,
     "high_risk_signin": scenario_high_risk_signin,
+    "tor_signin": scenario_tor_signin,
+    "powershell_signin": scenario_powershell_signin,
 }
 
 
