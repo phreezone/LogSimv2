@@ -66,16 +66,19 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
                       "authenticationMethodDetail": "", "succeeded": success,
                       "authenticationStepResultDetail": "", "authenticationStepRequirement": ""}]
         methods_used = ["Password"] if success and interactive else []
+    app_name = app or random.choice(ac.APPS_INTERACTIVE)
+    res_name = resource or random.choice(ac.RESOURCES)
     return {
         "id": _g(), "createdDateTime": ts,
-        "userDisplayName": user["display_name"], "userPrincipalName": user["upn"], "userId": _g(),
-        "appId": _g(), "appDisplayName": app or random.choice(ac.APPS_INTERACTIVE),
+        "userDisplayName": user["display_name"], "userPrincipalName": user["upn"],
+        "userId": ac.user_oid(user["username"]),
+        "appId": ac.app_id(app_name), "appDisplayName": app_name,
         "ipAddress": loc["ip"], "clientAppUsed": client_app, "correlationId": _g(),
         "conditionalAccessStatus": conditional, "isInteractive": interactive,
         "riskDetail": "none", "riskLevelAggregated": risk_level,
         "riskLevelDuringSignIn": risk_level, "riskState": risk_state,
         "riskEventTypes": [], "riskEventTypes_v2": [],
-        "resourceDisplayName": resource or random.choice(ac.RESOURCES), "resourceId": _g(),
+        "resourceDisplayName": res_name, "resourceId": ac.resource_id(res_name),
         "homeTenantId": ac.HOME_TENANT_ID, "userType": user_type, "crossTenantAccessType": cross_tenant,
         "incomingTokenType": "primaryRefreshToken" if not interactive else "none",
         "tokenIssuerType": "AzureAD", "clientCredentialType": "none",
@@ -105,12 +108,13 @@ def _sp_signin(loc, offset_s=0):
     """Service-principal (app-only) sign-in — no user, servicePrincipal identity."""
     name = random.choice(["Microsoft Graph", "Office 365 Exchange Online", "LogSim Reporting App",
                           "Microsoft Intune", "Azure Resource Manager"])
+    _res = random.choice(ac.RESOURCES)
     return {
-        "id": _g(), "createdDateTime": _ts(offset_s), "appId": _g(), "appDisplayName": name,
-        "servicePrincipalId": _g(), "servicePrincipalName": name,
+        "id": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name), "appDisplayName": name,
+        "servicePrincipalId": ac.user_oid("sp:" + name), "servicePrincipalName": name,
         "ipAddress": loc["ip"], "correlationId": _g(), "conditionalAccessStatus": "notApplied",
         "isInteractive": False, "riskState": "none", "riskLevelDuringSignIn": "none",
-        "resourceDisplayName": random.choice(ac.RESOURCES), "resourceId": _g(),
+        "resourceDisplayName": _res, "resourceId": ac.resource_id(_res),
         "signInEventTypes": ["servicePrincipal"], "clientCredentialType": "clientAssertion",
         "tokenIssuerType": "AzureAD", "authenticationProtocol": "oAuth2",
         "status": {"errorCode": 0, "failureReason": "Other.", "additionalDetails": None},

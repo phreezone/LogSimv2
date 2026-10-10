@@ -62,17 +62,20 @@ def _signin(operation, user, ip, *, result_status="Success", error_number="0",
            {"Name": "RequestType", "Value": request_type}]
     if extended:
         ext = extended + ext
+    app_name = random.choice(_APPS)
+    app_guid = ac.app_id(app_name)   # stable per app; sign-in ObjectId==ApplicationId==Target.ID
     return {
         "CreationTime": _now(offset_s), "Id": rid, "Operation": operation,
         "OrganizationId": ORG_ID, "RecordType": 15, "ResultStatus": result_status,
-        "UserKey": _g(), "UserType": 0, "Version": 1, "Workload": "AzureActiveDirectory",
-        "ClientIP": ip, "ObjectId": _g(), "UserId": upn, "AzureActiveDirectoryEventType": 1,
+        "UserKey": ac.user_oid(user["username"]), "UserType": 0, "Version": 1,
+        "Workload": "AzureActiveDirectory",
+        "ClientIP": ip, "ObjectId": app_guid, "UserId": upn, "AzureActiveDirectoryEventType": 1,
         "ExtendedProperties": ext, "ModifiedProperties": [],
-        "Actor": [{"ID": _g(), "Type": 0}, {"ID": upn, "Type": 5}],
+        "Actor": [{"ID": ac.user_oid(user["username"]), "Type": 0}, {"ID": upn, "Type": 5}],
         "ActorContextId": ORG_ID, "ActorIpAddress": ip, "InterSystemsId": _g(),
         "IntraSystemId": rid, "SupportTicketId": "",
-        "Target": [{"ID": random.choice(_APPS), "Type": 1}], "TargetContextId": ORG_ID,
-        "ApplicationId": _g(),
+        "Target": [{"ID": app_guid, "Type": 1}], "TargetContextId": ORG_ID,
+        "ApplicationId": app_guid,
         "DeviceProperties": [{"Name": "OS", "Value": user.get("os_type", "Windows")},
                              {"Name": "BrowserType", "Value": "Chrome"},
                              {"Name": "IsCompliant", "Value": "True"}],
@@ -86,12 +89,13 @@ def _audit(operation, actor, ip, target_name=None, modified=None, result_status=
     rid = _g()
     return {
         "CreationTime": _now(), "Id": rid, "Operation": operation, "OrganizationId": ORG_ID,
-        "RecordType": 8, "ResultStatus": result_status, "UserKey": _g(), "UserType": 0,
+        "RecordType": 8, "ResultStatus": result_status,
+        "UserKey": ac.user_oid(actor["username"]), "UserType": 0,
         "Version": 1, "Workload": "AzureActiveDirectory", "ObjectId": target_name or _g(),
         "UserId": upn, "AzureActiveDirectoryEventType": 0,
         "ExtendedProperties": [{"Name": "additionalDetails", "Value": "{}"}],
         "ModifiedProperties": modified or [],
-        "Actor": [{"ID": _g(), "Type": 0}, {"ID": upn, "Type": 5}],
+        "Actor": [{"ID": ac.user_oid(actor["username"]), "Type": 0}, {"ID": upn, "Type": 5}],
         "ActorContextId": ORG_ID, "ActorIpAddress": ip, "InterSystemsId": _g(),
         "IntraSystemId": rid, "SupportTicketId": "",
         "Target": [{"ID": target_name or _g(), "Type": 1}], "TargetContextId": ORG_ID,

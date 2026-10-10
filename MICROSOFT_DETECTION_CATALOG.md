@@ -105,6 +105,22 @@ TODO (further realism): business-hours/day-of-week weighting; occasional new-dev
 new-app first-seen events; the Graph `directoryAudits` feed (`msft_azure_ad_audit_raw`) and
 provisioning-log stream as separate sources.
 
+## Cardinality & identifiers (baseline correctness)
+The analytics profile per entity, so identity GUIDs must be **stable per entity**, not
+random per event — otherwise every sign-in looks like a brand-new user/app and the baseline
+never forms. Handled by `azure_common.user_oid()` / `app_id()` / `resource_id()` (SHA-256 →
+stable GUID):
+- **Stable per user**: `userId` (Graph), `UserKey` / `Actor.ID` (O365) — one object id per
+  user, and the *same* id across both feeds. `userPrincipalName`, `userDisplayName`, per-user
+  egress IP and `deviceId` are also stable.
+- **Stable per app / resource**: `appId` / `ApplicationId` (sign-in `ObjectId==ApplicationId==
+  Target.ID`), `resourceId`, `servicePrincipalId`.
+- **Unique per event** (left random): `id` / `Id`, `correlationId`, `InterSystemsId`,
+  `IntraSystemId`, `sessionId`.
+- **No incrementing sequence numbers**: Azure AD / O365 use GUIDs, not an ordered
+  RecordNumber like the Windows WEC feed — the only "state" is `createdDateTime` ordering,
+  which sequences handle via time offsets. No per-event counter to persist.
+
 ## Threat sequences (multi-stage kill-chains) — `modules/azuread_threat_sequences.py`
 Each sequence threads one identity through an ordered chain of events (across both
 datasets) that each trip a detector, so XSIAM correlates them into a high-severity

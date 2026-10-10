@@ -145,6 +145,27 @@ def _browser(os_type):
     return "Safari 17.3" if os_type == "macOS" else "Chrome 154.0.0"
 
 
+# ── stable-per-entity identifiers (cardinality) ──────────────────────────────────────
+# These MUST be stable per entity, not random per event, or the analytics see every
+# sign-in as a brand-new user/app (infinite cardinality) and the baseline never forms and
+# "first seen"/"new app" detectors misfire. IDs that MUST stay unique per event
+# (id/Id, correlationId, InterSystemsId, IntraSystemId, sessionId) are left random.
+
+def user_oid(username):
+    """Stable directory object id for a user (Graph userId / O365 UserKey)."""
+    return _stable_guid("oid:" + str(username))
+
+
+def app_id(name):
+    """Stable application id for an app display name (Graph appId / O365 ApplicationId)."""
+    return _stable_guid("app:" + str(name))
+
+
+def resource_id(name):
+    """Stable resource id for a resource display name (Graph resourceId)."""
+    return _stable_guid("res:" + str(name))
+
+
 def device_for(user, new=False):
     """deviceDetail for a sign-in. Stable (registered/compliant) per user by default; a
     brand-new unmanaged device when new=True -> feeds 'new device seen' anomaly detectors."""
