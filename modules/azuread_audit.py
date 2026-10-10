@@ -23,6 +23,7 @@ import string
 import uuid
 
 from modules import azure_common as ac
+from modules import azure_audit_catalog as cat
 
 NAME = "Azure AD Audit"
 DESCRIPTION = "Simulates Microsoft Graph directoryAudits events for msft_azure_ad_audit_raw via the cribl_direct transport."
@@ -192,20 +193,72 @@ def _b_provisioning(cfg):
                  reason="Retrieved TenantDetail 'MSFT' from Microsoft Entra ID")
 
 
-_BENIGN = [(5, _b_provisioning), (4, _b_update_user), (3, _b_secinfo_register),
-           (3, _b_group_member), (3, _b_self_password), (2, _b_app_role_assign),
-           (2, _b_consent), (2, _b_register_device), (1, _b_admin_reset), (1, _b_token_timestamp)]
-_B_POOL = [fn for w, fn in _BENIGN for _ in range(w)]
-# human-driven activities to suppress outside business hours (keep provisioning running 24/7)
-_HUMAN = {_b_update_user, _b_secinfo_register, _b_group_member, _b_app_role_assign,
-          _b_consent, _b_register_device, _b_admin_reset, _b_self_password}
+# High-fidelity builders for the common activities (bespoke modifiedProperties/details).
+_B_HUMAN = [_b_update_user, _b_secinfo_register, _b_group_member, _b_self_password,
+            _b_app_role_assign, _b_consent, _b_register_device, _b_admin_reset, _b_token_timestamp]
+
+_GROUPS_T = ["All Employees", "Sales Team", "Engineering", "VPN Users", "Finance",
+             "Marketing", "DevOps Admins", "Contractors"]
+_ROLES_T = ["Helpdesk Administrator", "User Administrator", "Security Reader",
+            "Exchange Administrator", "Global Reader", "Application Administrator"]
+
+
+def _generic_mods(category, op_type):
+    if op_type not in ("Add", "Update"):
+        return []
+    return {"GroupManagement": [mp("Group.DisplayName", None, random.choice(_GROUPS_T))],
+            "RoleManagement": [mp("Role.DisplayName", None, random.choice(_ROLES_T))],
+            "UserManagement": [mp("Included Updated Properties", None,
+                                  random.choice(["AccountEnabled", "Department", "JobTitle", "UsageLocation"]))],
+            "ApplicationManagement": [mp("AppRole.Value", None, "User")],
+            "Policy": [mp("ConditionalAccessPolicy", None, "[conditions updated]")],
+            "PolicyManagement": [mp("ConditionalAccessPolicy", None, "[conditions updated]")],
+            }.get(category, [])
+
+
+def _target_for(ttype, cfg, actor):
+    if ttype == "User":
+        return t_user(ac.pick_user(cfg))
+    if ttype == "Group":
+        return t_obj("Group", random.choice(_GROUPS_T), group_type="unifiedGroups")
+    if ttype == "Role":
+        return t_obj("Role", random.choice(_ROLES_T))
+    if ttype in ("ServicePrincipal", "Application"):
+        return t_obj(ttype, random.choice(_SAAS_APPS))
+    if ttype == "Device":
+        return t_obj("Device", f'{actor["username"].upper().replace(".", "")}-PC')
+    if ttype == "Directory":
+        return t_obj("Directory", ac.UPN_DOMAIN)
+    if ttype == "Policy":
+        return t_obj("Policy", random.choice(_CA_POLICIES))
+    return t_obj("Other", "resource")
+
+
+def _catalog_record(config, entry):
+    """Build a faithful directoryAudit record for any catalogued activity."""
+    activity, category, service, op_type, ttype = entry
+    is_self = service == "Self-service Password Management" or activity.startswith(("User ", "user "))
+    if service == "Account Provisioning":
+        return _b_provisioning(config)
+    if is_self:
+        u = ac.pick_user(config)
+        return audit(activity, category, service, op_type, by_user(u), [t_user(u)],
+                     [_ua(u)], reason=activity)
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    tgt = _target_for(ttype, config, admin)
+    tgt["modifiedProperties"] = _generic_mods(category, op_type)
+    return audit(activity, category, service, op_type, by_user(admin), [tgt],
+                 [_ua(admin)], reason=activity)
 
 
 def generate_benign(config=None, context=None):
-    fn = random.choice(_B_POOL)
-    if fn in _HUMAN and random.random() > ac.activity_weight():
-        fn = _b_provisioning   # off-hours: fall back to automated sync activity
-    return [fn(config)]
+    # Off-hours: automated directory sync still runs; little human admin activity.
+    if random.random() > ac.activity_weight():
+        return [_b_provisioning(config)]
+    # Business hours: mostly full-catalog coverage, with high-fidelity common activities mixed in.
+    if random.random() < 0.25:
+        return [random.choice(_B_HUMAN)(config)]
+    return [_catalog_record(config, random.choice(cat.AUDIT_ACTIVITIES))]
 
 
 # ── detection-relevant scenarios (named, on-demand) ─────────────────────────────────
