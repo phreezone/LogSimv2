@@ -1,0 +1,110 @@
+"""Shared helpers for the Azure AD / O365 generators.
+
+Sources identities from LogSim's canonical user model (config['user_profiles'] /
+session_context, same as every other module) and models realistic sign-in content:
+stable corporate-egress and home public IPs per user (so the ML analytics build a
+coherent per-user baseline), plus catalogs of the apps, resources and status codes that
+dominate a real Microsoft Entra tenant.
+
+Research basis (Microsoft Entra sign-in / audit schema + typical tenant volume):
+- Non-interactive sign-ins (silent token refresh by Outlook/Teams/OneDrive/mobile) are by
+  far the highest volume, then interactive user sign-ins, then benign failures, then
+  directory-audit activity. generate-side weighting reflects that.
+"""
+import hashlib
+import random
+
+try:
+    from modules.session_utils import get_random_user
+except Exception:  # pragma: no cover
+    get_random_user = None
+
+UPN_DOMAIN = "examplecorp.com"   # match LogSim's identity model (user emails are @examplecorp.com)
+HOME_TENANT_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
+
+# A few shared corporate NAT egress IPs (realistic "many users behind one office IP").
+OFFICE_EGRESS = [
+    {"ip": "52.14.33.10",  "city": "Columbus", "state": "Ohio",       "countryOrRegion": "US", "lat": 39.96, "lon": -82.99},
+    {"ip": "20.44.12.88",  "city": "Austin",   "state": "Texas",      "countryOrRegion": "US", "lat": 30.27, "lon": -97.74},
+    {"ip": "40.112.55.3",  "city": "Seattle",  "state": "Washington", "countryOrRegion": "US", "lat": 47.60, "lon": -122.33},
+]
+_HOME_PREFIXES = ["71.84.", "98.112.", "24.17.", "73.202.", "68.44.", "99.7."]
+_HOME_CITIES = [
+    {"city": "Dublin",    "state": "Ohio",       "countryOrRegion": "US", "lat": 40.09, "lon": -83.11},
+    {"city": "Round Rock","state": "Texas",      "countryOrRegion": "US", "lat": 30.50, "lon": -97.67},
+    {"city": "Redmond",   "state": "Washington", "countryOrRegion": "US", "lat": 47.67, "lon": -122.12},
+    {"city": "Naperville","state": "Illinois",   "countryOrRegion": "US", "lat": 41.75, "lon": -88.15},
+]
+
+# Apps/resources that dominate real Entra sign-in telemetry.
+APPS_INTERACTIVE = ["Microsoft Office 365 Portal", "Office365 Shell WCSS-Client", "OfficeHome",
+                    "Microsoft Teams", "My Apps", "Microsoft Office", "Outlook Web App",
+                    "Microsoft 365 Security and Compliance Center"]
+APPS_NONINTERACTIVE = ["Microsoft Authentication Broker", "Microsoft Office", "OneDrive SyncEngine",
+                       "Microsoft Teams", "Outlook Mobile", "Windows Sign In",
+                       "Office365 Shell WCSS-Client", "Microsoft Account Controls V2"]
+RESOURCES = ["Microsoft Graph", "Office 365 Exchange Online", "Office 365 SharePoint Online",
+             "Windows Azure Active Directory", "Microsoft.Azure.SyncFabric"]
+# Benign sign-in failures that happen routinely (mistyped password, expired password, MFA needed).
+BENIGN_FAIL = [
+    (50126, "Error validating credentials due to invalid username or password."),
+    (50055, "The password is expired."),
+    (50074, "Strong Authentication is required."),
+    (50058, "Session information is not sufficient for single-sign-on."),
+    (50072, "User needs to enroll for second factor authentication."),
+]
+
+
+def _h(s):
+    return int(hashlib.sha256(str(s).encode()).hexdigest(), 16)
+
+
+def pick_user(config=None, context=None):
+    """Return a normalized identity from LogSim's user model.
+
+    Prefers the run's session_context; falls back to config['user_profiles']; last resort a
+    stub. Keys: username, upn, display_name, department, os_type, os_version.
+    """
+    sc = (context or {}).get("session_context") if isinstance(context, dict) else None
+    if sc and get_random_user:
+        u = get_random_user(sc)
+        if u:
+            uname = u["username"]
+            return {"username": uname,
+                    "upn": u.get("email") or f"{uname}@{UPN_DOMAIN}",
+                    "display_name": u.get("display_name", uname),
+                    "department": u.get("department", "Unknown"),
+                    "os_type": u.get("os_type", "Windows"),
+                    "os_version": u.get("os_version", "10")}
+    profiles = (config or {}).get("user_profiles") or {}
+    if profiles:
+        uname = random.choice(list(profiles))
+        p = profiles[uname]
+        dev = (p.get("devices") or [{}])[0]
+        return {"username": uname,
+                "upn": p.get("email") or f"{uname}@{UPN_DOMAIN}",
+                "display_name": p.get("display_name", uname),
+                "department": p.get("department", "Unknown"),
+                "os_type": dev.get("os_type", "Windows"),
+                "os_version": dev.get("os_version", "10")}
+    return {"username": "a.user", "upn": f"a.user@{UPN_DOMAIN}", "display_name": "A User",
+            "department": "Unknown", "os_type": "Windows", "os_version": "10"}
+
+
+def egress(user, remote_prob=0.25):
+    """Stable public egress for a user: mostly their dept office NAT, sometimes a home IP.
+
+    Returns {ip, city, state, countryOrRegion, geoCoordinates}. Deterministic per user so a
+    user keeps a coherent IP/ASN/country baseline (anomaly detectors judge against it).
+    """
+    if random.random() < remote_prob:
+        n = _h("home:" + user["username"])
+        pfx = _HOME_PREFIXES[n % len(_HOME_PREFIXES)]
+        ip = f"{pfx}{(n >> 8) % 254 + 1}.{(n >> 16) % 254 + 1}"
+        loc = _HOME_CITIES[n % len(_HOME_CITIES)]
+    else:
+        loc = OFFICE_EGRESS[_h(user["department"]) % len(OFFICE_EGRESS)]
+        ip = loc["ip"]
+    return {"ip": ip, "city": loc["city"], "state": loc["state"],
+            "countryOrRegion": loc["countryOrRegion"],
+            "geoCoordinates": {"latitude": loc["lat"], "longitude": loc["lon"]}}

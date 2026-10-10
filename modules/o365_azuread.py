@@ -1,15 +1,19 @@
 """Office 365 Azure AD (Management Activity API) generator -> msft_o365_azure_ad_raw.
 
-Emits Audit.AzureActiveDirectory records in the exact shape the manage.office.com
-Management Activity feed produces (captured from the live tenant). Pushed via the
-cribl_direct transport using the dedicated O365 Azure AD UUID, so events land parsed in
-the native dataset and are Fusion/analytics-eligible WITHOUT a Cribl instance.
+Emits Audit.AzureActiveDirectory records in the manage.office.com Management Activity
+shape (captured from the live tenant): RecordType 15 = StsLogon sign-ins, RecordType 8 =
+directory audit operations. Identities come from LogSim's user model via azure_common, so
+O365 activity ties to the same people as every other module. Pushed via cribl_direct under
+the dedicated O365 Azure AD UUID (lands parsed in the native dataset, Fusion-eligible).
 
-Scenario functions return a LIST of records (an attack is usually several events).
+Benign baseline reflects real tenant mix: mostly successful interactive sign-ins, some
+routine benign failures (mistyped/expired password), occasional directory activity.
 """
 import random
 import time
 import uuid
+
+from modules import azure_common as ac
 
 NAME = "Office 365 Azure AD"
 DESCRIPTION = "Simulates Office 365 Management Activity (Azure AD) audit records for msft_o365_azure_ad_raw via the cribl_direct transport."
@@ -17,48 +21,45 @@ CONFIG_KEY = "o365_azure_ad_config"
 SOURCE_IDENTIFIER = "e1f109f886ea42fbb96be6ec0cc597a9"
 INTEGRATION_IDENTIFIER = "logsim:o365_azure_ad"
 DATASET = "msft_o365_azure_ad_raw"
+ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 
-# Fraction of generation ticks that emit a threat scenario instead of benign baseline.
-# Baseline dominates so the dataset builds a "normal" profile for the ML analytics.
+RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
+_APPS = ["Microsoft Office 365 Portal", "Office365 Shell WCSS-Client", "Microsoft Teams",
+         "OfficeHome", "Microsoft 365 Security and Compliance Center"]
+_UA_WIN = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+_UA_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+
 _THREAT_PROB = {
     "Benign Traffic Only": 0.0, "Low": 0.02, "Realistic": 0.05,
     "Medium": 0.08, "High": 0.12, "Insane": 0.30,
 }
-
-# Tenant-shaped defaults (override via config if desired).
-TENANT_DOMAIN = "8p68rd.onmicrosoft.com"
-ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
-
-USERS = ["aturing", "ghopper", "klovelace", "mcurie", "rfranklin", "nbohr"]
-BENIGN_IPS = ["108.245.61.200", "73.202.14.6", "98.45.112.9"]
-# anonymizer / hosting / Tor-ish egress (risky source IPs)
-RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
-# geographically distant pair for impossible-travel
-GEO_PAIR = [("108.245.61.200", "US", "Columbus"), ("103.21.244.12", "SG", "Singapore")]
-
-UA_CHROME = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-             "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
 
 
 def _g():
     return str(uuid.uuid4())
 
 
-def _now(offset_s: int = 0):
+def _now(offset_s=0):
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + offset_s))
 
 
-def _upn(user):
-    return f"{user}@{TENANT_DOMAIN}"
+def _tor_ip(config):
+    nodes = (config or {}).get("tor_exit_nodes") if isinstance(config, dict) else None
+    if nodes:
+        n = random.choice(nodes)
+        return n.get("ip") if isinstance(n, dict) else n
+    return random.choice(RISKY_IPS)
 
 
-def _base(operation, user, ip, result_status="Success", error_number="0",
-          extended=None, offset_s=0):
-    """One Audit.AzureActiveDirectory record (RecordType 15 = AzureActiveDirectoryStsLogon)."""
-    upn = _upn(user)
+def _signin(operation, user, ip, *, result_status="Success", error_number="0",
+            extended=None, offset_s=0, request_type="Login:login"):
+    """Audit.AzureActiveDirectory sign-in record (RecordType 15 = AzureActiveDirectoryStsLogon)."""
+    upn = user["upn"]
     rid = _g()
-    ext = [{"Name": "UserAgent", "Value": UA_CHROME},
-           {"Name": "RequestType", "Value": "Login:login"}]
+    ua = _UA_MAC if user.get("os_type") == "macOS" else _UA_WIN
+    ext = [{"Name": "ResultStatusDetail", "Value": result_status},
+           {"Name": "UserAgent", "Value": ua},
+           {"Name": "RequestType", "Value": request_type}]
     if extended:
         ext = extended + ext
     return {
@@ -70,31 +71,18 @@ def _base(operation, user, ip, result_status="Success", error_number="0",
         "Actor": [{"ID": _g(), "Type": 0}, {"ID": upn, "Type": 5}],
         "ActorContextId": ORG_ID, "ActorIpAddress": ip, "InterSystemsId": _g(),
         "IntraSystemId": rid, "SupportTicketId": "",
-        "Target": [{"ID": _g(), "Type": 0}], "TargetContextId": ORG_ID, "ApplicationId": _g(),
-        "DeviceProperties": [{"Name": "OS", "Value": "Windows10"},
+        "Target": [{"ID": random.choice(_APPS), "Type": 1}], "TargetContextId": ORG_ID,
+        "ApplicationId": _g(),
+        "DeviceProperties": [{"Name": "OS", "Value": user.get("os_type", "Windows")},
                              {"Name": "BrowserType", "Value": "Chrome"},
-                             {"Name": "IsCompliant", "Value": "False"}],
+                             {"Name": "IsCompliant", "Value": "True"}],
         "ErrorNumber": error_number,
     }
 
 
-def _tor_ip(config):
-    """A real Tor exit IP from the live list LogSim loads at startup, else a fallback."""
-    nodes = (config or {}).get("tor_exit_nodes") if isinstance(config, dict) else None
-    if nodes:
-        n = random.choice(nodes)
-        return n.get("ip") if isinstance(n, dict) else n
-    return random.choice(RISKY_IPS)
-
-
-def _home_ip(user):
-    """Stable 'home' IP per user so new-country/new-ASN anomalies read true against baseline."""
-    return BENIGN_IPS[hash(user) % len(BENIGN_IPS)]
-
-
-def _audit(operation, actor_user, ip, target_name=None, modified=None, result_status="Success"):
+def _audit(operation, actor, ip, target_name=None, modified=None, result_status="Success"):
     """Audit.AzureActiveDirectory directory-change record (RecordType 8 = AzureActiveDirectory)."""
-    upn = _upn(actor_user)
+    upn = actor["upn"]
     rid = _g()
     return {
         "CreationTime": _now(), "Id": rid, "Operation": operation, "OrganizationId": ORG_ID,
@@ -110,113 +98,106 @@ def _audit(operation, actor_user, ip, target_name=None, modified=None, result_st
     }
 
 
-_APPS = ["Microsoft Office 365 Portal", "Office365 Shell WCSS-Client",
-         "Microsoft Teams", "OfficeHome", "Microsoft 365 Security and Compliance Center"]
+_BENIGN_AUDIT_OPS = ["Update user.", "Change user password.", "Add member to group.",
+                     "Remove member from group.", "Update StsRefreshTokenValidFrom Timestamp."]
 
 
-def generate_benign(config=None):
-    """A routine successful interactive sign-in from the user's stable home IP + common app."""
-    user = random.choice(USERS)
-    rec = _base("UserLoggedIn", user, _home_ip(user))
-    rec["ExtendedProperties"] = [{"Name": "UserAgent", "Value": UA_CHROME},
-                                 {"Name": "RequestType", "Value": "Login:login"}]
-    rec["Target"] = [{"ID": random.choice(_APPS), "Type": 1}]
-    return [rec]
+# ── benign baseline (realistic weighted mix) ─────────────────────────────────────────
+
+def generate_benign(config=None, context=None):
+    user = ac.pick_user(config, context)
+    loc = ac.egress(user)
+    r = random.random()
+    if r < 0.78:   # successful interactive sign-in
+        return [_signin("UserLoggedIn", user, loc["ip"],
+                        request_type=random.choice(["Login:login", "Kmsi:kmsi", "OAuth2:Authorize"]))]
+    if r < 0.90:   # routine benign failure
+        code, _ = random.choice(ac.BENIGN_FAIL)
+        return [_signin("UserLoginFailed", user, loc["ip"], result_status="Failed",
+                        error_number=str(code),
+                        extended=[{"Name": "ResultStatusDetail", "Value": "Failed"}])]
+    # occasional routine directory activity (self-service / admin housekeeping)
+    return [_audit(random.choice(_BENIGN_AUDIT_OPS), user, loc["ip"],
+                   target_name=ac.pick_user(config, context)["upn"])]
 
 
-# ── analytics-triggering scenarios ───────────────────────────────────────────────────
+# ── attack scenarios ─────────────────────────────────────────────────────────────────
 
 def scenario_password_spray(config=None, victims=12, src_ip=None):
-    """One source IP fails sign-in against many users (spray), then one success.
-    Targets brute-force / password-spray detections."""
     ip = src_ip or random.choice(RISKY_IPS)
     out = []
-    targets = random.sample(USERS, min(victims, len(USERS))) if victims <= len(USERS) \
-        else [random.choice(USERS) for _ in range(victims)]
-    for i, u in enumerate(targets):
-        out.append(_base("UserLoginFailed", u, ip, result_status="Failed",
-                         error_number="50126",
-                         extended=[{"Name": "ResultStatusDetail",
-                                    "Value": "InvalidUserNameOrPassword"}],
-                         offset_s=-(60 - i)))
-    # the spray lands one account
-    out.append(_base("UserLoggedIn", targets[0], ip, offset_s=0))
+    for i in range(victims):
+        u = ac.pick_user(config)
+        out.append(_signin("UserLoginFailed", u, ip, result_status="Failed", error_number="50126",
+                           extended=[{"Name": "ResultStatusDetail", "Value": "InvalidUserNameOrPassword"}],
+                           offset_s=-(60 - i)))
+    out.append(_signin("UserLoggedIn", ac.pick_user(config), ip, offset_s=0))
     return out
 
 
 def scenario_brute_force(config=None, user=None, attempts=10, src_ip=None):
-    """Many failures against ONE user then a success — classic brute force."""
-    u = user or random.choice(USERS)
+    u = ac.pick_user(config)
     ip = src_ip or random.choice(RISKY_IPS)
-    out = [_base("UserLoginFailed", u, ip, result_status="Failed", error_number="50126",
-                 extended=[{"Name": "ResultStatusDetail", "Value": "InvalidUserNameOrPassword"}],
-                 offset_s=-(120 - i * 8)) for i in range(attempts)]
-    out.append(_base("UserLoggedIn", u, ip, offset_s=0))
+    out = [_signin("UserLoginFailed", u, ip, result_status="Failed", error_number="50126",
+                   extended=[{"Name": "ResultStatusDetail", "Value": "InvalidUserNameOrPassword"}],
+                   offset_s=-(120 - i * 8)) for i in range(attempts)]
+    out.append(_signin("UserLoggedIn", u, ip, offset_s=0))
     return out
 
 
 def scenario_impossible_travel(config=None, user=None):
-    """Same user signs in successfully from two distant countries minutes apart."""
-    u = user or random.choice(USERS)
-    (ip1, _, _), (ip2, _, _) = GEO_PAIR[0], GEO_PAIR[1]
-    return [_base("UserLoggedIn", u, ip1, offset_s=-300),
-            _base("UserLoggedIn", u, ip2, offset_s=-60)]
+    u = ac.pick_user(config)
+    return [_signin("UserLoggedIn", u, "108.245.61.200", offset_s=-300),
+            _signin("UserLoggedIn", u, "103.21.244.12", offset_s=-60)]
 
 
 def scenario_tor_signin(config=None, user=None):
-    """Successful sign-in from a real Tor exit node -> 'A successful SSO sign-in from TOR' (High)."""
-    u = user or random.choice(USERS)
-    return [_base("UserLoggedIn", u, _tor_ip(config))]
+    u = ac.pick_user(config)
+    return [_signin("UserLoggedIn", u, _tor_ip(config))]
 
 
 def scenario_admin_role_add(config=None, user=None):
-    """Privilege escalation: add member to a privileged directory role."""
-    u = user or random.choice(USERS)
-    rec = _audit("Add member to role.", u, _home_ip(u), target_name=_upn(random.choice(USERS)),
-                 modified=[{"Name": "Role.DisplayName", "NewValue": "Global Administrator", "OldValue": ""},
-                           {"Name": "Role.TemplateId",
-                            "NewValue": "62e90394-69f5-4237-9190-012177145e10", "OldValue": ""}])
-    return [rec]
+    actor = ac.pick_user(config)
+    return [_audit("Add member to role.", actor, ac.egress(actor)["ip"],
+                   target_name=ac.pick_user(config)["upn"],
+                   modified=[{"Name": "Role.DisplayName", "NewValue": "Global Administrator", "OldValue": ""},
+                             {"Name": "Role.TemplateId",
+                              "NewValue": "62e90394-69f5-4237-9190-012177145e10", "OldValue": ""}])]
 
 
 def scenario_mfa_disabled(config=None, user=None):
-    """Disable strong auth (MFA) for an identity -> 'MFA was disabled for an Azure identity' (Low)."""
-    u = user or random.choice(USERS)
-    return [_audit("Disable Strong Authentication.", u, _home_ip(u),
-                   target_name=_upn(random.choice(USERS)),
-                   modified=[{"Name": "StrongAuthenticationRequirement",
-                              "NewValue": "[]", "OldValue": "[{\"State\":\"Enforced\"}]"}])]
+    actor = ac.pick_user(config)
+    return [_audit("Disable Strong Authentication.", actor, ac.egress(actor)["ip"],
+                   target_name=ac.pick_user(config)["upn"],
+                   modified=[{"Name": "StrongAuthenticationRequirement", "NewValue": "[]",
+                              "OldValue": "[{\"State\":\"Enforced\"}]"}])]
 
 
 def scenario_federation_change(config=None, user=None):
-    """Set federation settings on a domain -> 'Azure domain federation settings modification' (Low)."""
-    u = user or random.choice(USERS)
-    return [_audit("Set federation settings on domain.", u, _home_ip(u),
-                   target_name=TENANT_DOMAIN,
-                   modified=[{"Name": "IssuerUri", "NewValue": "http://any.sts/malicious",
-                              "OldValue": ""}])]
+    actor = ac.pick_user(config)
+    return [_audit("Set federation settings on domain.", actor, ac.egress(actor)["ip"],
+                   target_name=ac.UPN_DOMAIN,
+                   modified=[{"Name": "IssuerUri", "NewValue": "http://any.sts/malicious", "OldValue": ""}])]
 
 
 def scenario_user_deletion(config=None, user=None):
-    """Delete a user by a non-standard account -> 'Azure account deletion by a non-standard account' (Low)."""
-    u = user or random.choice(USERS)
-    return [_audit("Delete user.", u, _home_ip(u), target_name=_upn(random.choice(USERS)))]
+    actor = ac.pick_user(config)
+    return [_audit("Delete user.", actor, ac.egress(actor)["ip"], target_name=ac.pick_user(config)["upn"])]
 
 
 def scenario_pim_role_change(config=None, user=None):
-    """Change PIM role settings -> 'Azure AD PIM role settings change' (Low)."""
-    u = user or random.choice(USERS)
-    return [_audit("Update role setting in PIM.", u, _home_ip(u), target_name="Global Administrator",
+    actor = ac.pick_user(config)
+    return [_audit("Update role setting in PIM.", actor, ac.egress(actor)["ip"],
+                   target_name="Global Administrator",
                    modified=[{"Name": "RequireMfaOnActivation", "NewValue": "False", "OldValue": "True"}])]
 
 
 def scenario_admin_role_removals(config=None):
-    """Several admin-role removals in a short window -> 'Multiple Azure AD admin role removals' (Low)."""
-    actor = random.choice(USERS)
-    return [_audit("Remove member from role.", actor, _home_ip(actor),
-                   target_name=_upn(v),
+    actor = ac.pick_user(config)
+    ip = ac.egress(actor)["ip"]
+    return [_audit("Remove member from role.", actor, ip, target_name=ac.pick_user(config)["upn"],
                    modified=[{"Name": "Role.DisplayName", "NewValue": "", "OldValue": "Global Administrator"}])
-            for v in random.sample(USERS, min(4, len(USERS)))]
+            for _ in range(4)]
 
 
 SCENARIOS = {
@@ -236,26 +217,19 @@ SCENARIOS = {
 # ── LogSim module interface ──────────────────────────────────────────────────────────
 
 def get_threat_names():
-    """Named threats this module can fire on demand (dashboard / specific-threat menu)."""
     return list(SCENARIOS.keys())
 
 
 def generate_log(config=None, threat_level="Realistic", benign_only=False,
                  scenario=None, scenario_event=None, context=None):
-    """Return a LIST of Audit.AzureActiveDirectory records (dicts) for the cribl transport.
-
-    - scenario_event names a specific threat -> that scenario's records (or None if unknown,
-      so the caller's fallback can try).
-    - otherwise emit benign baseline, with a threat_level-weighted chance of a threat.
-    """
     if scenario_event:
         key = scenario_event if scenario_event in SCENARIOS else scenario_event.lower()
         if key in SCENARIOS:
             return (SCENARIOS[key](config), key)
         return None
     if benign_only or threat_level == "Benign Traffic Only":
-        return generate_benign(config)
+        return generate_benign(config, context)
     if random.random() < _THREAT_PROB.get(threat_level, 0.05):
         key = random.choice(list(SCENARIOS))
         return (SCENARIOS[key](config), key)
-    return generate_benign(config)
+    return generate_benign(config, context)
