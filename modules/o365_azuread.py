@@ -236,10 +236,11 @@ def scenario_priv_auth_method_added(config=None, user=None):
 
 
 def scenario_atypical_account_deletion(config=None, user=None):
-    """A burst of user deletions by an actor who does NOT typically delete accounts (a regular,
-    non-admin user) -> 'Azure accounts were deleted by a user that does not typically delete
-    accounts'. The anomalous actor + volume is the signal."""
-    actor = ac.pick_user(config)   # a regular user, not an admin-role deleter
+    """Deletions by an identity with HIGH administrative activity that does NOT typically delete
+    users -> 'Azure account deletion by a non-standard account'. Per the detector, the actor is an
+    admin (high admin-op baseline) whose anomaly is the deletion itself, not a random user."""
+    actor = ac.pick_by_role(config, ("IT Administrator", "IT Director", "Systems Engineer"),
+                            ("IT", "Security"))
     ip = ac.egress(actor)["ip"]
     return [_audit("Delete user.", actor, ip, target_name=ac.pick_user(config)["upn"])
             for _ in range(random.randint(3, 6))]

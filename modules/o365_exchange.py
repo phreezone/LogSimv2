@@ -295,16 +295,19 @@ def scenario_folder_permission_mod(config=None):
 
 
 def scenario_mail_accessed_multi_ip_subnet(config=None):
-    """One mailbox's items accessed from MULTIPLE IPs in the same /24 subnet with anomalous (REST,
-    non-Outlook) client properties -> 'Mail objects accessed by multiple IPs in the same subnet'."""
+    """One mailbox accessed from MULTIPLE rotating IPs in the same /16 subnet (per the detector
+    'User mail items accessed from multiple IPs in the same subnet'), where the caller IPs are
+    anomalous for the user (risky ASN/country vs their baseline). Rotating within one /16 evades
+    per-IP rate limits (T1090.003)."""
     owner = ac.pick_user(config)
-    base = f"198.51.{random.randint(1, 254)}."
+    # A hosting/VPS /16 that is NOT this user's normal egress -> anomalous ASN/country signal.
+    net16 = random.choice(["45.148", "193.218", "185.220", "146.70"])
     out = []
-    for i in range(6):
-        r = mail_items_accessed(owner, count=random.randint(2, 6), offset_s=-(i * 20))
-        ip = f"{base}{random.randint(2, 250)}"
+    for i in range(8):
+        r = mail_items_accessed(owner, count=random.randint(2, 6), offset_s=-(i * 15))
+        ip = f"{net16}.{random.randint(0, 255)}.{random.randint(2, 250)}"   # rotate across the /16
         r["ClientIPAddress"] = ip
-        r["ClientInfoString"] = "Client=REST;Client=RESTSystem;;"   # anomalous automated access
+        r["ClientInfoString"] = "Client=REST;Client=RESTSystem;;"   # unmanaged automated access
         out.append(r)
     return out
 
