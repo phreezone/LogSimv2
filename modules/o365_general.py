@@ -23,11 +23,7 @@ DATASET = "msft_o365_general_raw"
 ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 
 _COPILOT_HOSTS = ["Microsoft Teams", "Word", "Outlook", "Excel", "PowerPoint", "Microsoft365Chat"]
-_PBI_REPORTS = ["Sales Pipeline", "Revenue Dashboard", "Customer 360", "Exec KPIs",
-                "Support Metrics", "Finance Actuals", "Churn Analysis"]
-_WORKSPACES = ["Sales Analytics", "Finance", "Exec", "Customer Success"]
-_THREAT_PROB = {"Benign Traffic Only": 0.0, "Low": 0.02, "Realistic": 0.05,
-                "Medium": 0.08, "High": 0.12, "Insane": 0.30}
+# Threat rate governed centrally by ac.ThreatGate / ac.THREAT_EPISODES_PER_HOUR (see _GATE below).
 
 
 def _g():
@@ -57,13 +53,24 @@ def _copilot(user, offset_s=0):
 
 
 def _powerbi(user, operation, report=None, offset_s=0):
-    report = report or random.choice(_PBI_REPORTS)
+    report = report or ac.report_name()
+    ws = ac.workspace_name()
     r = _base(operation, user, 20, "PowerBI", offset_s)
     r.update({"ObjectId": report, "ArtifactName": report, "ArtifactId": ac._stable_guid("pbi:" + report),
-              "WorkSpaceName": random.choice(_WORKSPACES),
-              "WorkspaceId": ac._stable_guid("pbiws"), "DatasetName": report + " Dataset",
-              "IsSuccess": True})
+              "WorkSpaceName": ws, "WorkspaceId": ac._stable_guid("pbiws:" + ws),
+              "DatasetName": report + " Dataset", "IsSuccess": True})
     return r
+
+
+# A realistic minority of Power BI operations fail (IsSuccess False): report render/refresh errors,
+# datasets the user can't reach, export failures.
+_FAIL_RATE = 0.07
+
+
+def _maybe_fail(rec):
+    if rec.get("Workload") == "PowerBI" and random.random() < _FAIL_RATE:
+        rec["IsSuccess"] = False
+    return rec
 
 
 def generate_benign(config=None, context=None):
@@ -72,14 +79,14 @@ def generate_benign(config=None, context=None):
         return [_copilot(u)]   # Copilot/BI usage is human-driven; keep light off-hours
     if random.random() < 0.55:
         return [_copilot(u)]
-    return [_powerbi(u, random.choice(["ViewReport", "ViewDashboard", "ViewTile"]))]
+    return [_maybe_fail(_powerbi(u, random.choice(["ViewReport", "ViewDashboard", "ViewTile"])))]
 
 
 def scenario_powerbi_mass_export(config=None, count=25):
     """Many Power BI report exports in a short window -> data exfiltration via BI export."""
     u = ac.pick_user(config)
     return [_powerbi(u, random.choice(["ExportReport", "ExportTile", "ExportArtifact"]),
-                     report=random.choice(_PBI_REPORTS), offset_s=-(count - i) * 3)
+                     report=ac.report_name(), offset_s=-(count - i) * 3)
             for i in range(count)]
 
 
@@ -96,6 +103,9 @@ SCENARIOS = {
 }
 
 
+_GATE = ac.ThreatGate(SCENARIOS)
+
+
 def get_threat_names():
     return list(SCENARIOS.keys())
 
@@ -109,7 +119,7 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
         return None
     if benign_only or threat_level == "Benign Traffic Only":
         return generate_benign(config, context)
-    if random.random() < _THREAT_PROB.get(threat_level, 0.05):
+    if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
         return (SCENARIOS[key](config), key)
     return generate_benign(config, context)

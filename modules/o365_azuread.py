@@ -35,13 +35,9 @@ ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
 _APPS = ["Microsoft Office 365 Portal", "Office365 Shell WCSS-Client", "Microsoft Teams",
          "OfficeHome", "Microsoft 365 Security and Compliance Center"]
-_UA_WIN = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
-_UA_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 
-_THREAT_PROB = {
-    "Benign Traffic Only": 0.0, "Low": 0.02, "Realistic": 0.05,
-    "Medium": 0.08, "High": 0.12, "Insane": 0.30,
-}
+# Threat rate is governed centrally by ac.ThreatGate / ac.THREAT_EPISODES_PER_HOUR (wall-clock
+# episode rate, with a benign warmup) — see _GATE below.
 
 
 def _g():
@@ -65,7 +61,7 @@ def _signin(operation, user, ip, *, result_status="Success", error_number="0",
     """Audit.AzureActiveDirectory sign-in record (RecordType 15 = AzureActiveDirectoryStsLogon)."""
     upn = user["upn"]
     rid = _g()
-    ua = _UA_MAC if user.get("os_type") == "macOS" else _UA_WIN
+    ua = ac.user_agent(user)
     ext = [{"Name": "ResultStatusDetail", "Value": result_status},
            {"Name": "UserAgent", "Value": ua},
            {"Name": "RequestType", "Value": request_type}]
@@ -111,9 +107,6 @@ def _audit(operation, actor, ip, target_name=None, modified=None, result_status=
     }
 
 
-_GROUPS = ["All Employees", "Sales Team", "Engineering", "VPN Users", "Finance", "Marketing"]
-
-
 def _benign_audit(actor, ip, config):
     """A routine directory-change record drawn from the full Core Directory operation set
     (O365 Management Activity shape), with Operation-appropriate ModifiedProperties for the
@@ -124,9 +117,9 @@ def _benign_audit(actor, ip, config):
     if op == "Update user.":
         modified = [{"Name": "Included Updated Properties", "NewValue": "JobTitle, Department", "OldValue": ""}]
     elif op in ("Add member to group.", "Remove member from group."):
-        target = random.choice(_GROUPS)
+        target = ac.group_name()
         modified = [{"Name": "Group.DisplayName", "NewValue": target, "OldValue": ""},
-                    {"Name": "Group.ObjectID", "NewValue": _g(), "OldValue": ""}]
+                    {"Name": "Group.ObjectID", "NewValue": ac._stable_guid("Group:" + target), "OldValue": ""}]
     elif op == "User registered security info.":
         modified = [{"Name": "SecurityInfo.Method", "NewValue": random.choice(ac.MFA_METHODS), "OldValue": ""}]
     elif op == "Consent to application.":
@@ -135,7 +128,7 @@ def _benign_audit(actor, ip, config):
     elif op in ("Add registered device.", "Add registered owner to device.", "Update device."):
         target = f'{actor["username"].upper()}-LT'
     elif category == "GroupManagement":
-        target = random.choice(_GROUPS)
+        target = ac.group_name()
     elif category == "RoleManagement":
         target = random.choice(["Helpdesk Administrator", "User Administrator", "Security Reader",
                                 "Exchange Administrator", "Application Administrator"])
@@ -228,6 +221,49 @@ def scenario_user_deletion(config=None, user=None):
     return [_audit("Delete user.", actor, ac.egress(actor)["ip"], target_name=ac.pick_user(config)["upn"])]
 
 
+_PRIV_ROLES = ("IT Administrator", "IT Director", "Systems Engineer")
+
+
+def scenario_priv_auth_method_added(config=None, user=None):
+    """A new strong-auth method is registered ON a privileged account -> 'Suspicious authentication
+    method added to an Azure Privileged account'. Target is an admin (the privilege is the signal);
+    an attacker who took over an admin registers their own MFA method for persistence."""
+    admin = ac.pick_by_role(config, _PRIV_ROLES, ("IT", "Security"))
+    return [_audit("User registered security info.", admin, ac.egress(admin)["ip"],
+                   target_name=admin["upn"],
+                   modified=[{"Name": "SecurityInfo.Method", "NewValue": "Phone (SMS)", "OldValue": ""},
+                             {"Name": "SecurityInfo.Action", "NewValue": "Register", "OldValue": ""}])]
+
+
+def scenario_atypical_account_deletion(config=None, user=None):
+    """A burst of user deletions by an actor who does NOT typically delete accounts (a regular,
+    non-admin user) -> 'Azure accounts were deleted by a user that does not typically delete
+    accounts'. The anomalous actor + volume is the signal."""
+    actor = ac.pick_user(config)   # a regular user, not an admin-role deleter
+    ip = ac.egress(actor)["ip"]
+    return [_audit("Delete user.", actor, ip, target_name=ac.pick_user(config)["upn"])
+            for _ in range(random.randint(3, 6))]
+
+
+def scenario_account_created_nonstandard(config=None, user=None):
+    """A new Azure AD account is created BY an actor who does not normally create accounts (a
+    regular non-admin user) -> 'Azure account created by non-standard account'."""
+    actor = ac.pick_user(config)   # non-admin / non-standard creator
+    new = f"svc_temp_{random.randint(1000, 9999)}@{ac.UPN_DOMAIN}"
+    return [_audit("Add user.", actor, ac.egress(actor)["ip"], target_name=new,
+                   modified=[{"Name": "AccountEnabled", "NewValue": "True", "OldValue": ""}])]
+
+
+def scenario_user_create_delete_short(config=None, user=None):
+    """An Azure AD account is created and then deleted within a short window (burner account) ->
+    'Azure AD user created and deleted in a short time period'."""
+    actor = ac.pick_user(config); ip = ac.egress(actor)["ip"]
+    burner = f"temp_{random.randint(1000, 9999)}@{ac.UPN_DOMAIN}"
+    return [_audit("Add user.", actor, ip, target_name=burner,
+                   modified=[{"Name": "AccountEnabled", "NewValue": "True", "OldValue": ""}]),
+            _audit("Delete user.", actor, ip, target_name=burner)]
+
+
 def scenario_pim_role_change(config=None, user=None):
     actor = ac.pick_user(config)
     return [_audit("Update role setting in PIM.", actor, ac.egress(actor)["ip"],
@@ -250,6 +286,10 @@ SCENARIOS = {
     "tor_signin": scenario_tor_signin,
     "admin_role_add": scenario_admin_role_add,
     "mfa_disabled": scenario_mfa_disabled,
+    "priv_auth_method_added": scenario_priv_auth_method_added,
+    "atypical_account_deletion": scenario_atypical_account_deletion,
+    "account_created_nonstandard": scenario_account_created_nonstandard,
+    "user_create_delete_short": scenario_user_create_delete_short,
     "federation_change": scenario_federation_change,
     "user_deletion": scenario_user_deletion,
     "pim_role_change": scenario_pim_role_change,
@@ -258,6 +298,9 @@ SCENARIOS = {
 
 
 # ── LogSim module interface ──────────────────────────────────────────────────────────
+
+_GATE = ac.ThreatGate(SCENARIOS)
+
 
 def get_threat_names():
     return list(SCENARIOS.keys())
@@ -272,7 +315,7 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
         return None
     if benign_only or threat_level == "Benign Traffic Only":
         return generate_benign(config, context)
-    if random.random() < _THREAT_PROB.get(threat_level, 0.05):
+    if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
         return (SCENARIOS[key](config), key)
     return generate_benign(config, context)
