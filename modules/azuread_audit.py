@@ -622,9 +622,135 @@ def scenario_app_privilege_escalation(config=None):
                    t_user(tgt)])]
 
 
+def scenario_ca_policy_removed(config=None):
+    """A Conditional Access policy is deleted -> 'Conditional Access policy removed' (guardrail
+    removal)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    pol = random.choice(_CA_POLICIES)
+    return [audit("Delete conditional access policy", "Policy", "Conditional Access", "Delete",
+                  by_user(admin), [t_obj("Policy", pol, [mp("ConditionalAccessPolicy", pol, None)])],
+                  [_ua(admin)])]
+
+
+def scenario_ca_operation_unusual(config=None):
+    """A Conditional Access policy is weakened by an identity that doesn't normally touch CA ->
+    'Unusual Conditional Access operation for an identity'."""
+    actor = ac.pick_user(config)   # not a typical CA admin
+    pol = random.choice(_CA_POLICIES)
+    return [audit("Update conditional access policy", "Policy", "Conditional Access", "Update",
+                  by_user(actor), [t_obj("Policy", pol,
+                  [mp("ConditionalAccessPolicy", "[state=enabled]", "[state=disabled]")])], [_ua(actor)])]
+
+
+def scenario_tap_registered(config=None):
+    """A Temporary Access Pass is registered on an account (MFA-bypass persistence) -> 'Azure
+    Temporary Access Pass (TAP) registered to an account'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
+    return [audit("Admin registered security info", "UserManagement", "Core Directory", "Update",
+                  by_user(admin), [t_user(tgt, [mp("StrongAuthenticationMethod", None,
+                  "TemporaryAccessPass"), mp("SecurityInfo.Action", None, "Register")])], [_ua(admin)])]
+
+
+def scenario_bitlocker_key_retrieval(config=None):
+    """A user reads a BitLocker recovery key -> 'BitLocker key retrieval'."""
+    u = ac.pick_user(config)
+    return [audit("Read BitLocker key", "KeyManagement", "Core Directory", "Read", by_user(u),
+                  [t_obj("Device", f'{u["username"].upper().replace(".", "")}-PC',
+                   [mp("KeyId", None, ac._stable_guid("blk:" + u["username"]))])], [_ua(u)])]
+
+
+def scenario_owner_added_to_application(config=None):
+    """An owner is added to an Azure application (app takeover / persistence) -> 'Owner added to
+    Azure application'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
+    return [audit("Add owner to application", "ApplicationManagement", "Core Directory", "Add",
+                  by_user(admin), [t_obj("Application", "Internal Automation App"), t_user(tgt)],
+                  [_ua(admin)])]
+
+
+def scenario_sp_app_role_assigned(config=None):
+    """A high-privilege app role (Graph app permission) is granted to a service principal ->
+    'Azure service principal assigned app role'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    return [audit("Add app role assignment to service principal", "ApplicationManagement",
+                  "Core Directory", "Assign", by_user(admin),
+                  [t_obj("ServicePrincipal", "External Reporting Connector",
+                   [mp("AppRole.Value", None, "Mail.ReadWrite.All"),
+                    mp("AppRole.Id", None, "e2a3a72e-5f79-4c64-b1b1-878b674786c9")])], [_ua(admin)])]
+
+
+def scenario_application_uri_modification(config=None):
+    """An application's reply/redirect URI is modified to an attacker-controlled URL (token
+    redirect hijack) -> 'Azure application URI modification'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [audit("Update application", "ApplicationManagement", "Core Directory", "Update",
+                  by_user(admin), [t_obj("Application", "Internal Automation App",
+                  [mp("AppAddress.ReplyUrl", "https://app.examplecorp.com/auth",
+                      "https://attacker-collect.example/oauth/callback")])], [_ua(admin)])]
+
+
+def scenario_pim_elevation_request(config=None):
+    """A PIM activation elevates an identity into a privileged role -> 'Azure AD PIM elevation
+    request'."""
+    u = ac.pick_user(config)
+    return [audit("Add member to role completed (PIM activation)", "RoleManagement", "Core Directory",
+                  "Add", by_user(u), [t_obj("Role", "Global Administrator",
+                  [mp("Role.DisplayName", None, "Global Administrator")]), t_user(u)], [_ua(u)])]
+
+
+def scenario_pim_alert_disabled(config=None):
+    """A PIM security alert is disabled -> 'Azure AD PIM alert disabled' (defense evasion)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    return [audit("Disable PIM alert", "RoleManagement", "PIM", "Update", by_user(admin),
+                  [t_obj("Other", "Roles are being assigned outside of Privileged Identity Management",
+                   [mp("AlertEnabled", "True", "False")])], [_ua(admin)])]
+
+
+def scenario_device_registration_policy_mod(config=None):
+    """The device registration policy is weakened (e.g. MFA no longer required to join) -> 'Device
+    Registration Policy modification'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [audit("Set device registration policy", "Policy", "Core Directory", "Update",
+                  by_user(admin), [t_obj("Policy", "Device Registration Policy",
+                  [mp("RequireMfaSetting", "True", "False"),
+                   mp("AzureADJoinPolicy", "Selected", "All")])], [_ua(admin)])]
+
+
+def scenario_unusual_guest_invitation(config=None):
+    """An external guest is invited by an identity that doesn't normally invite guests ->
+    'Successful unusual guest user invitation'."""
+    inviter = ac.pick_user(config)
+    guest = f"contractor_{random.randint(100,999)}#EXT#@examplecorp.com"
+    return [audit("Invite external user", "UserManagement", "Core Directory", "Add", by_user(inviter),
+                  [t_user({"username": "guest", "upn": guest, "display_name": "external guest"},
+                   [mp("Invitation.InvitedUserEmailAddress", None,
+                       f"contractor{random.randint(100,999)}@proton.me")])], [_ua(inviter)])]
+
+
+def scenario_account_unlock_password_reset(config=None):
+    """An admin resets/unlocks a user's password (potential account takeover prep) -> 'Azure AD
+    account unlock/password reset attempt'."""
+    admin = ac.pick_by_role(config, HELPDESK_ROLES, ("IT",)); tgt = ac.pick_user(config)
+    act = random.choice(["Reset user password", "Unlock user account", "Change user password"])
+    return [audit(act, "UserManagement", "Self-service Password Management", "Update",
+                  by_user(admin), [t_user(tgt)], [_ua(admin)], reason=act)]
+
+
 SCENARIOS = {
     "admin_role_add": scenario_admin_role_add,
     "consent_risky_app": scenario_consent_risky_app,
+    "ca_policy_removed": scenario_ca_policy_removed,
+    "ca_operation_unusual": scenario_ca_operation_unusual,
+    "tap_registered": scenario_tap_registered,
+    "bitlocker_key_retrieval": scenario_bitlocker_key_retrieval,
+    "owner_added_to_application": scenario_owner_added_to_application,
+    "sp_app_role_assigned": scenario_sp_app_role_assigned,
+    "application_uri_modification": scenario_application_uri_modification,
+    "pim_elevation_request": scenario_pim_elevation_request,
+    "pim_alert_disabled": scenario_pim_alert_disabled,
+    "device_registration_policy_mod": scenario_device_registration_policy_mod,
+    "unusual_guest_invitation": scenario_unusual_guest_invitation,
+    "account_unlock_password_reset": scenario_account_unlock_password_reset,
     "failed_federation_change": scenario_failed_federation_change,
     "app_privilege_escalation": scenario_app_privilege_escalation,
     "app_credential_added": scenario_app_credential_added,
