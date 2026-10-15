@@ -102,7 +102,7 @@ def seq_golden_saml_federation(config):
     admin = ac.pick_user(config); ip = HOME_US["ip"]
     return [_aad(aad._signin(admin, HOME_US, interactive=True, ca_result="success", offset_s=-400)),
             _o365(o365._audit("Set federation settings on domain.", admin, ip, target_name=ac.UPN_DOMAIN,
-                              modified=[{"Name": "IssuerUri", "NewValue": "http://attacker.sts/adfs/services/trust", "OldValue": ""},
+                              modified=[{"Name": "IssuerUri", "NewValue": "http://any.sts/adfs/services/trust", "OldValue": ""},
                                         {"Name": "TokenSigningCertificate", "NewValue": "<attacker-cert-thumbprint>", "OldValue": "<orig>"}])),
             _o365(o365._audit("Add unverified domain.", admin, ip, target_name="attacker-backdoor.com"))]
 

@@ -591,7 +591,7 @@ def scenario_federated_domain_backdoor(config=None):
               by_user(admin), [t_obj("Directory", dom)], [_ua(admin)]),
         audit("Set federation settings on domain", "DirectoryManagement", "Core Directory", "Update",
               by_user(admin), [t_obj("Directory", dom,
-                     [mp("IssuerUri", None, "http://attacker.sts/adfs/services/trust"),
+                     [mp("IssuerUri", None, "http://any.sts/adfs/services/trust"),
                       mp("PassiveSignInUri", None, "https://attacker-idp.example/adfs/ls/"),
                       mp("SigningCertificate", None, "<attacker-cert-thumbprint>")])], [_ua(admin)])]
 
@@ -603,7 +603,7 @@ def scenario_failed_federation_change(config=None):
     return [audit("Set federation settings on domain", "DirectoryManagement", "Core Directory",
                   "Update", by_user(admin),
                   [t_obj("Directory", "login-security-update.com",
-                         [mp("IssuerUri", None, "http://attacker.sts/adfs/services/trust")])],
+                         [mp("IssuerUri", None, "http://any.sts/adfs/services/trust")])],
                   [_ua(admin)], result="failure",
                   reason="Insufficient privileges to complete the operation.")]
 
