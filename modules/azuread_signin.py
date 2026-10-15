@@ -399,6 +399,87 @@ def scenario_multi_sso_anon_proxy(config=None, user=None):
     return out
 
 
+# A designated honey/decoy account that should never authenticate (requires the matching
+# honey-user designation in XSIAM ITDR for the detector to fire).
+_HONEY_ACCOUNT = {"username": "svc_backup_da", "upn": "svc_backup_da@examplecorp.com",
+                  "display_name": "Backup Domain Admin (service)", "department": "IT", "os_type": "Windows"}
+_SUSPICIOUS_COUNTRIES = [
+    {"ip": "5.188.206.10", "city": "Moscow", "state": "", "countryOrRegion": "RU",
+     "geoCoordinates": {"latitude": 55.75, "longitude": 37.62}},
+    {"ip": "175.45.176.12", "city": "Pyongyang", "state": "", "countryOrRegion": "KP",
+     "geoCoordinates": {"latitude": 39.03, "longitude": 125.75}},
+    {"ip": "45.129.33.8", "city": "Tehran", "state": "", "countryOrRegion": "IR",
+     "geoCoordinates": {"latitude": 35.69, "longitude": 51.39}}]
+
+
+def scenario_disabled_user_signin(config=None, user=None):
+    """A disabled account attempts SSO -> 'A disabled user attempted to authenticate via SSO'
+    (errorCode 50057)."""
+    u = ac.pick_user(config)
+    return [_signin(u, ac.egress(u), interactive=True, success=False, error_code=50057,
+                    failure="The user account is disabled.", conditional="notApplied")]
+
+
+def scenario_honey_user_signin(config=None, user=None):
+    """An authentication attempt against a honey/decoy account -> 'Authentication attempt by a
+    honey user' (any sign-in to this account is suspicious)."""
+    return [_signin(_HONEY_ACCOUNT, {"ip": _tor_ip(config), "city": "Unknown", "state": "",
+                    "countryOrRegion": "US", "geoCoordinates": {"latitude": 0, "longitude": 0}},
+                    interactive=True, risk_level="high", risk_state="atRisk")]
+
+
+def scenario_suspicious_country_signin(config=None, user=None):
+    """Sign-in from a high-risk country -> 'User attempted to connect from a suspicious country'."""
+    u = ac.pick_user(config)
+    return [_signin(u, random.choice(_SUSPICIOUS_COUNTRIES), interactive=True,
+                    risk_level="high", risk_state="atRisk")]
+
+
+def scenario_sso_abnormal_user_agent(config=None, user=None):
+    """Sign-in with a user-agent abnormal for this user (automation/LOLBin agent) -> 'SSO with
+    abnormal user agent'."""
+    u = ac.pick_user(config)
+    dev = dict(ac.device_for(u), browser=random.choice(
+        ["python-requests/2.31.0", "curl/8.4.0", "axios/1.6.2", "Go-http-client/2.0"]))
+    return [_signin(u, ac.egress(u), interactive=False, device=dev, risk_level="low", risk_state="atRisk")]
+
+
+def scenario_sso_abnormal_os(config=None, user=None):
+    """Sign-in from an operating system abnormal/new for this user -> 'SSO with abnormal/new
+    operating system'."""
+    u = ac.pick_user(config)
+    odd = "Linux" if u.get("os_type") != "Linux" else "Windows"
+    dev = dict(ac.device_for(u), operatingSystem=odd, isCompliant=False, isManaged=False, trustType="")
+    return [_signin(u, ac.egress(u), interactive=True, device=dev, risk_level="low", risk_state="atRisk")]
+
+
+def scenario_machine_account_sso(config=None, user=None):
+    """A machine (computer) account authenticates via SSO -> 'SSO authentication by a machine
+    account' (computer accounts should not interactively sign in to SaaS)."""
+    u = ac.pick_user(config)
+    mach = {"username": f'{u["username"].upper().replace(".", "")}-PC$',
+            "upn": f'{u["username"].upper().replace(".", "")}-PC$@examplecorp.com',
+            "display_name": f'{u["username"].upper()}-PC', "department": u.get("department", "IT"),
+            "os_type": "Windows"}
+    return [_signin(mach, ac.egress(u), interactive=True, user_type="member",
+                    risk_level="low", risk_state="atRisk")]
+
+
+def scenario_sso_spray_ip_rotation(config=None, victims=12):
+    """Password spray with ROTATING source IPs across a subnet -> 'IP Rotation Pattern in SSO
+    Spray' (evades per-IP lockout)."""
+    net = random.choice(["45.148", "193.218", "185.220"])
+    out = []
+    for i in range(victims):
+        v = ac.pick_user(config)
+        ip = f"{net}.{random.randint(0, 255)}.{random.randint(2, 250)}"
+        out.append(_signin(v, {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
+                    "geoCoordinates": {"latitude": 0, "longitude": 0}}, interactive=True,
+                    success=False, error_code=50126, failure="Invalid username or password.",
+                    conditional="notApplied", offset_s=-(180 - i * 12)))
+    return out
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
@@ -410,6 +491,13 @@ SCENARIOS = {
     "multi_resource_sso": scenario_multi_resource_sso,
     "multi_sso_anon_proxy": scenario_multi_sso_anon_proxy,
     "aad_connect_sync_unusual_host": scenario_aad_connect_sync_unusual_host,
+    "disabled_user_signin": scenario_disabled_user_signin,
+    "honey_user_signin": scenario_honey_user_signin,
+    "suspicious_country_signin": scenario_suspicious_country_signin,
+    "sso_abnormal_user_agent": scenario_sso_abnormal_user_agent,
+    "sso_abnormal_os": scenario_sso_abnormal_os,
+    "machine_account_sso": scenario_machine_account_sso,
+    "sso_spray_ip_rotation": scenario_sso_spray_ip_rotation,
     "powershell_signin": scenario_powershell_signin,
     "new_device_signin": scenario_new_device_signin,
     "new_country_signin": scenario_new_country_signin,

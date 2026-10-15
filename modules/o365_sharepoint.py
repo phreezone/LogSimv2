@@ -316,6 +316,29 @@ def scenario_mass_download(config=None, count=40):
             for i in range(count)]
 
 
+def scenario_mass_file_deletion(config=None, count=50):
+    """Many files deleted/recycled in a short window by one user -> 'Massive files deletion in
+    Microsoft SharePoint or OneDrive' (ransomware/destruction or anti-forensics)."""
+    u = ac.pick_user(config); site = random.choice(_SITES)
+    return [_sp(random.choice(["FileDeleted", "FileRecycled"]), u, site=site, offset_s=-(count - i))
+            for i in range(count)]
+
+
+def scenario_mass_file_editing(config=None, count=40):
+    """Many files modified in a short window by one user -> 'Massive files editing in Microsoft
+    SharePoint or OneDrive' (ransomware encryption-in-place)."""
+    u = ac.pick_user(config); site = random.choice(_SITES)
+    return [_sp("FileModified", u, site=site, offset_s=-(count - i)) for i in range(count)]
+
+
+def scenario_mass_file_upload(config=None, count=40):
+    """Many files uploaded in a short window -> 'Massive upload to SaaS service' (staging/implants
+    or re-upload of encrypted files)."""
+    u = ac.pick_user(config); site = random.choice(_SITES)
+    return [_sp(random.choice(["FileUploaded", "FileSyncUploadedFull"]), u, site=site,
+                offset_s=-(count - i)) for i in range(count)]
+
+
 def scenario_full_sync_download(config=None):
     """OneDrive full-library sync download -> bulk data staging/exfil."""
     u = ac.pick_user(config)
@@ -399,6 +422,9 @@ SCENARIOS = {
     "site_collection_admin_added": scenario_site_collection_admin_added,
     "anon_link_used_external": scenario_anon_link_used_external,
     "external_sharing_unusual_domain": scenario_external_sharing_unusual_domain,
+    "mass_file_deletion": scenario_mass_file_deletion,
+    "mass_file_editing": scenario_mass_file_editing,
+    "mass_file_upload": scenario_mass_file_upload,
 }
 
 
