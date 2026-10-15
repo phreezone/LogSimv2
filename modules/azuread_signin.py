@@ -480,6 +480,25 @@ def scenario_sso_spray_ip_rotation(config=None, victims=12):
     return out
 
 
+def scenario_first_sso_resource_org(config=None, user=None):
+    """A sign-in accessing an app/resource never before seen in the org -> 'First SSO Resource
+    Access in the Organization' (Informational baseline)."""
+    u = ac.pick_user(config)
+    novel = f"Custom LOB App {random.randint(1000, 9999)}"
+    return [_signin(u, ac.egress(u), interactive=True, app=novel, resource=novel, ca_result="success")]
+
+
+def scenario_first_sso_new_asn(config=None, user=None):
+    """A sign-in from an ASN this user has never used (a hosting/VPS ASN, same country) -> 'First
+    SSO access from ASN for user' (Informational baseline / 'Suspicious SSO access from ASN')."""
+    u = ac.pick_user(config)
+    loc = {"ip": f"165.1.{random.randint(0,255)}.{random.randint(2,250)}", "city": "Ashburn",
+           "state": "Virginia", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 39.04, "longitude": -77.49},
+           "asn": 14061, "isp": "DigitalOcean LLC"}
+    return [_signin(u, loc, interactive=True, ca_result="success")]
+
+
 _PENTEST_AGENTS = ["MSOLSpray/1.0", "AADInternals", "ROADtools", "o365-attack-toolkit",
                    "TeamFiltration/3.5", "python-requests/2.31 (MFASweep)", "Mantis"]
 
@@ -521,6 +540,8 @@ SCENARIOS = {
     "machine_account_sso": scenario_machine_account_sso,
     "sso_spray_ip_rotation": scenario_sso_spray_ip_rotation,
     "pentest_tool_activity": scenario_pentest_tool_activity,
+    "first_sso_resource_org": scenario_first_sso_resource_org,
+    "first_sso_new_asn": scenario_first_sso_new_asn,
     "powershell_signin": scenario_powershell_signin,
     "new_device_signin": scenario_new_device_signin,
     "new_country_signin": scenario_new_country_signin,
