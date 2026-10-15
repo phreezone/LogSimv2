@@ -328,6 +328,78 @@ def scenario_sent_to_deleted_scripted(config=None):
     return out
 
 
+def scenario_anti_phish_policy_disabled(config=None):
+    """Anti-phishing policy disabled/removed -> 'Exchange anti-phish policy disabled or removed'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [admin_cmdlet(random.choice(["Disable-AntiPhishRule", "Remove-AntiPhishPolicy"]), admin,
+                         _param(Identity="Office365 AntiPhish Default"))]
+
+
+def scenario_exchange_audit_log_disabled(config=None):
+    """Per-mailbox audit logging turned off -> 'Exchange audit log disabled'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
+    return [admin_cmdlet("Set-Mailbox", admin, _param(Identity=tgt["upn"], AuditEnabled="False"),
+                         target_user=tgt)]
+
+
+def scenario_compliance_search_created(config=None):
+    """eDiscovery/content search created -> 'Exchange compliance search created'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    return [admin_cmdlet("New-ComplianceSearch", admin,
+                         _param(Name=f"Search-{random.randint(1000,9999)}",
+                                ContentMatchQuery="(password OR confidential OR wire transfer)",
+                                ExchangeLocation="All"))]
+
+
+def scenario_dkim_disabled(config=None):
+    """DKIM signing disabled for a domain -> 'Exchange DKIM signing configuration disabled'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [admin_cmdlet("Set-DkimSigningConfig", admin, _param(Identity=ORG_NAME, Enabled="False"))]
+
+
+def scenario_malware_filter_removed(config=None):
+    """Malware filter policy removed -> 'Exchange malware filter policy removed'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [admin_cmdlet("Remove-MalwareFilterPolicy", admin, _param(Identity="Default"))]
+
+
+def scenario_safe_attachment_disabled(config=None):
+    """Safe Attachments policy disabled/removed -> 'Exchange Safe Attachment policy disabled or removed'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [admin_cmdlet(random.choice(["Disable-SafeAttachmentRule", "Remove-SafeAttachmentPolicy"]),
+                         admin, _param(Identity="Default SafeAttachment Policy"))]
+
+
+def scenario_safe_link_disabled(config=None):
+    """Safe Links policy disabled/removed -> 'Exchange Safe Link policy disabled or removed'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [admin_cmdlet(random.choice(["Disable-SafeLinksRule", "Remove-SafeLinksPolicy"]),
+                         admin, _param(Identity="Default SafeLinks Policy"))]
+
+
+def scenario_email_hiding_transport_rule(config=None):
+    """Transport (mail-flow) rule that silently deletes/redirects mail -> 'Exchange email-hiding
+    transport rule'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [admin_cmdlet("New-TransportRule", admin,
+                         _param(Name="Compliance Journaling", DeleteMessage="True",
+                                SubjectOrBodyContainsWords="invoice;payment;breach", Enabled="True"))]
+
+
+def scenario_single_ip_multi_mailbox(config=None):
+    """One caller IP reads mail items from MANY different mailboxes -> 'Single IP accessed mail
+    items of multiple users'."""
+    ip = random.choice(["45.148.10.92", "193.218.118.158", "185.220.101.34"])
+    out = []
+    for i in range(8):
+        owner = ac.pick_user(config)
+        r = mail_items_accessed(owner, count=random.randint(2, 5), offset_s=-(i * 15))
+        r["ClientIPAddress"] = ip
+        r["ClientInfoString"] = "Client=REST;Client=RESTSystem;;"
+        out.append(r)
+    return out
+
+
 def scenario_audit_bypass(config=None):
     """Set-MailboxAuditBypassAssociation enabling audit bypass -> defense evasion (Exchange audit bypass)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
@@ -346,6 +418,15 @@ SCENARIOS = {
     "folder_permission_mod": scenario_folder_permission_mod,
     "mail_accessed_multi_ip_subnet": scenario_mail_accessed_multi_ip_subnet,
     "sent_to_deleted_scripted": scenario_sent_to_deleted_scripted,
+    "single_ip_multi_mailbox": scenario_single_ip_multi_mailbox,
+    "anti_phish_policy_disabled": scenario_anti_phish_policy_disabled,
+    "exchange_audit_log_disabled": scenario_exchange_audit_log_disabled,
+    "compliance_search_created": scenario_compliance_search_created,
+    "dkim_disabled": scenario_dkim_disabled,
+    "malware_filter_removed": scenario_malware_filter_removed,
+    "safe_attachment_disabled": scenario_safe_attachment_disabled,
+    "safe_link_disabled": scenario_safe_link_disabled,
+    "email_hiding_transport_rule": scenario_email_hiding_transport_rule,
     "audit_bypass": scenario_audit_bypass,
 }
 
