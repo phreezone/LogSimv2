@@ -162,6 +162,18 @@ _EVENT_META = {
     4738: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4697: {"task": 12805, "category": "Security System Extension",  "version": 0, "outcome": "success"},
     1102: {"task": 104,   "category": "Log clear",                  "version": 0, "outcome": "success"},
+    # Forest/domain trust + SID-history (Phase 2 rogue-forest-trust chain)
+    4706: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4707: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4716: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4865: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4866: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4867: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4765: {"task": 13824, "category": "User Account Management",     "version": 0, "outcome": "success"},
+    4766: {"task": 13824, "category": "User Account Management",     "version": 0, "outcome": "failure"},
+    # DCShadow — detailed directory-service replication (rogue DC pushing changes)
+    4928: {"task": 14083, "category": "Detailed Directory Service Replication", "version": 0, "outcome": "success"},
+    4929: {"task": 14083, "category": "Detailed Directory Service Replication", "version": 0, "outcome": "success"},
 }
 
 def _format_message(event_id: int, ed: dict) -> str:
@@ -1089,6 +1101,102 @@ def _msg_4738(d):
     )
 
 
+def _msg_4706(d):
+    return (
+        "A new trust was created to a domain.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        f"\tDomain Name:\t\t{d.get('DomainName','')}\r\n"
+        f"\tDomain ID:\t\t{d.get('DomainSid','')}\r\n"
+        f"\tTrust Type:\t\t{d.get('TdoType','')}\r\n"
+        f"\tTrust Direction:\t{d.get('TdoDirection','')}\r\n"
+        f"\tTrust Attributes:\t{d.get('TdoAttributes','')}\r\n"
+        f"\tSID Filtering:\t\t{d.get('SidFilteringEnabled','')}"
+    )
+
+
+def _msg_4716(d):
+    return (
+        "Trusted domain information was modified.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        f"\tDomain Name:\t\t{d.get('DomainName','')}\r\n"
+        f"\tDomain ID:\t\t{d.get('DomainSid','')}\r\n"
+        f"\tTrust Attributes:\t{d.get('TdoAttributes','')}\r\n"
+        f"\tSID Filtering:\t\t{d.get('SidFilteringEnabled','')}"
+    )
+
+
+def _msg_4865(d):
+    return (
+        "A trusted forest information entry was added.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        f"\tForest Root:\t\t{d.get('ForestRootSid','')}\r\n"
+        f"\tForest Root Domain:\t{d.get('ForestRoot','')}\r\n"
+        f"\tOperation ID:\t\t{d.get('OperationId','')}\r\n"
+        f"\tEntry Type:\t\t{d.get('EntryType','')}\r\n"
+        f"\tFlags:\t\t\t{d.get('Flags','')}\r\n"
+        f"\tTop Level Name:\t\t{d.get('TopLevelName','')}\r\n"
+        f"\tDNS Name:\t\t{d.get('DnsName','')}\r\n"
+        f"\tNetBIOS Name:\t\t{d.get('NetbiosName','')}"
+    )
+
+
+def _msg_4867(d):
+    return _msg_4865(d).replace("was added", "was modified")
+
+
+def _msg_4765(d):
+    return (
+        "SID History was added to an account.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Target Account:\r\n"
+        f"\tSecurity ID:\t\t{d.get('TargetSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n\r\n"
+        "Source Account:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SourceSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SourceUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SourceDomainName','')}"
+    )
+
+
+def _msg_4766(d):
+    return _msg_4765(d).replace(
+        "SID History was added to an account.",
+        "An attempt to add SID History to an account failed.")
+
+
+def _msg_4928(d):
+    return (
+        "An Active Directory replica source naming context was established.\r\n\r\n"
+        f"\tDestination DRA:\t{d.get('DestinationDRA','')}\r\n"
+        f"\tSource DRA:\t\t{d.get('SourceDRA','')}\r\n"
+        f"\tSource Address:\t\t{d.get('SourceAddr','')}\r\n"
+        f"\tNaming Context:\t\t{d.get('NamingContext','')}\r\n"
+        f"\tOptions:\t\t{d.get('Options','')}\r\n"
+        f"\tSession ID:\t\t{d.get('SessionID','')}"
+    )
+
+
+def _msg_4929(d):
+    return _msg_4928(d).replace("was established", "was removed")
+
+
 _MSG_BUILDERS = {
     4624: _msg_4624,
     4625: _msg_4625,
@@ -1124,6 +1232,14 @@ _MSG_BUILDERS = {
     4720: _msg_4720,
     4697: _msg_4697,
     1102: _msg_1102,
+    4706: _msg_4706,
+    4716: _msg_4716,
+    4865: _msg_4865,
+    4867: _msg_4867,
+    4765: _msg_4765,
+    4766: _msg_4766,
+    4928: _msg_4928,
+    4929: _msg_4929,
     4722: _msg_4722,
     4724: _msg_4724,
     4725: _msg_4725,
@@ -7088,7 +7204,357 @@ def _threat_default_account_enabled(config, session_context):
     return events
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 — rogue forest trust kill chain (on-prem AD)
+#   A rogue external forest is trusted by this domain with SID filtering
+#   disabled, then SID History is injected so a controlled account inherits
+#   privileged SIDs across the trust. Events are DC-originated Security logs
+#   (Authentication Policy Change + User Account Management).
+# ---------------------------------------------------------------------------
+
+_ROGUE_FOREST_DNS     = "rogue-forest.lab"
+_ROGUE_FOREST_NETBIOS = "ROGUEFOREST"
+# Stable fake SID for the rogue forest root domain.
+_ROGUE_FOREST_SID     = "S-1-5-21-" + "-".join(
+    str(int(hashlib.sha256(("rogueforest:" + str(i)).encode()).hexdigest(), 16) % 4000000000 + 1000000000)
+    for i in range(3))
+
+
+def _build_4706(user_info, config, *, logon_id=None, ts=None) -> dict:
+    """4706 – A new trust was created to a domain (DC event)."""
+    dc_host = _get_dc_hostname(config)
+    event_data = {
+        "DomainName":          _ROGUE_FOREST_NETBIOS,
+        "DomainSid":           _ROGUE_FOREST_SID,
+        "TdoType":             "Forest (uplevel)",      # TRUST_TYPE_UPLEVEL + forest
+        "TdoDirection":        "Bidirectional",         # TRUST_DIRECTION_BIDIRECTIONAL
+        # TrustAttributes 0x8 = FOREST_TRANSITIVE; filtering disabled below is the danger.
+        "TdoAttributes":       "0x8",
+        "SidFilteringEnabled": "False",                 # quarantine OFF -> SID history crosses the trust
+        "SubjectUserSid":      _stable_user_sid(user_info["username"]),
+        "SubjectUserName":     user_info["username"],
+        "SubjectDomainName":   _get_domain(config),
+        "SubjectLogonId":      logon_id or _new_logon_id(),
+    }
+    return _build_event(4706, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_4865(user_info, config, *, logon_id=None, ts=None) -> dict:
+    """4865 – A trusted forest information entry was added (DC event)."""
+    dc_host = _get_dc_hostname(config)
+    event_data = {
+        "ForestRoot":        _ROGUE_FOREST_DNS,
+        "ForestRootSid":     _ROGUE_FOREST_SID,
+        "OperationId":       f"0x{random.randint(0x10000, 0xfffff):x}",
+        "EntryType":         "Top Level Name (TLN)",
+        "Flags":             "0",                       # not excluded/disabled -> active TLN routing
+        "TopLevelName":      _ROGUE_FOREST_DNS,
+        "DnsName":           _ROGUE_FOREST_DNS,
+        "NetbiosName":       _ROGUE_FOREST_NETBIOS,
+        "DomainSid":         _ROGUE_FOREST_SID,
+        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserName":   user_info["username"],
+        "SubjectDomainName": _get_domain(config),
+        "SubjectLogonId":    logon_id or _new_logon_id(),
+    }
+    return _build_event(4865, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_4716(user_info, config, *, logon_id=None, ts=None,
+                domain_netbios=_ROGUE_FOREST_NETBIOS, domain_sid=_ROGUE_FOREST_SID) -> dict:
+    """4716 – Trusted domain information was modified (SID filtering disabled)."""
+    dc_host = _get_dc_hostname(config)
+    event_data = {
+        "DomainName":          domain_netbios,
+        "DomainSid":           domain_sid,
+        "TdoAttributes":       "0x8",
+        "SidFilteringEnabled": "False",
+        "SubjectUserSid":      _stable_user_sid(user_info["username"]),
+        "SubjectUserName":     user_info["username"],
+        "SubjectDomainName":   _get_domain(config),
+        "SubjectLogonId":      logon_id or _new_logon_id(),
+    }
+    return _build_event(4716, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_4765(user_info, config, *, target_name, target_sid,
+                source_sid, logon_id=None, ts=None) -> dict:
+    """4765 – SID History was added to an account (cross-forest privilege injection)."""
+    dc_host = _get_dc_hostname(config)
+    domain = _get_domain(config)
+    event_data = {
+        "TargetUserName":    target_name,
+        "TargetDomainName":  domain,
+        "TargetSid":         target_sid,
+        "SourceUserName":    "Domain Admins",
+        "SourceDomainName":  _ROGUE_FOREST_NETBIOS,
+        "SourceSid":         source_sid,
+        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserName":   user_info["username"],
+        "SubjectDomainName": domain,
+        "SubjectLogonId":    logon_id or _new_logon_id(),
+    }
+    return _build_event(4765, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_4928(user_info, config, *, source_addr, naming_context, logon_id=None, ts=None) -> dict:
+    """4928 – An Active Directory replica source naming context was established (DCShadow push)."""
+    dc_host = _get_dc_hostname(config)
+    event_data = {
+        "DestinationDRA":  dc_host,
+        "SourceDRA":       source_addr,
+        "SourceAddr":      source_addr,
+        "NamingContext":   naming_context,
+        "Options":         "0x40000000",   # DRS_WRIT_REP (writable replication)
+        "SessionID":       f"0x{random.randint(0x100, 0xffff):x}",
+        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserName":   user_info["username"],
+        "SubjectDomainName": _get_domain(config),
+        "SubjectLogonId":    logon_id or _new_logon_id(),
+    }
+    return _build_event(4928, dc_host, event_data, success=True, ts=ts)
+
+
+# A legitimate, long-standing partner forest (NOT the rogue one) — used by the existing-trust
+# SID-filter-downgrade threat.
+_PARTNER_NETBIOS = "CONTOSO"
+_PARTNER_DNS     = "contoso.com"
+_PARTNER_SID     = "S-1-5-21-" + "-".join(
+    str(int(hashlib.sha256(("partner:" + str(i)).encode()).hexdigest(), 16) % 4000000000 + 1000000000)
+    for i in range(3))
+
+
+def _threat_existing_trust_sid_filter_downgrade(config, session_context):
+    """SID-filter downgrade on an EXISTING legitimate trust (T1484.002 / T1134.005): rather than
+    standing up a new rogue forest, the attacker disables SID filtering (quarantine) on a real,
+    long-standing partner trust, then injects that forest's Domain-Admins SID into a controlled
+    account — quieter than a brand-new trust. DC-originated Security events."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"), logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2, auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id, elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id, is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+    events.append(json.dumps(_build_4688(u, config,
+                                         process_name="C:\\Windows\\System32\\netdom.exe",
+                                         command_line=f'netdom trust {_get_dns_domain(config)} '
+                                                      f'/Domain:{_PARTNER_DNS} /quarantine:No',
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    events.append(json.dumps(_build_4716(u, config, logon_id=logon_id, ts=t,
+                                         domain_netbios=_PARTNER_NETBIOS, domain_sid=_PARTNER_SID)))
+    t += random.uniform(1.0, 3.0)
+    victim = _pick_windows_user(session_context) or u
+    events.append(json.dumps(_build_4765(u, config, target_name=victim["username"],
+                                         target_sid=_stable_user_sid(victim["username"]),
+                                         source_sid=_PARTNER_SID + "-512", logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(u, config,
+                                         process_name="C:\\Windows\\System32\\netdom.exe",
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_dcshadow(config, session_context):
+    """DCShadow (T1207 Rogue Domain Controller): the attacker registers a fake DC in the directory
+    and pushes malicious changes via replication, bypassing change auditing on real DCs.
+
+    Sequence (DC-originated Security events):
+      1. admin authenticates                    -> 4624 + 4672
+      2. mimikatz lsadump::dcshadow              -> 4688
+      3. attacker host registers as a DC (DRS SPNs + SERVER_TRUST_ACCOUNT) -> 4742
+      4. nTDSDSA object created under Configuration (the rogue DC)         -> 5137
+      5. replica source naming context established (the malicious push)    -> 4928  (primary signal)
+      6. process exit                            -> 4689
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    dns_domain = _get_dns_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    rogue_host = "WS-" + "".join(random.choice("ABCDEFGHJKMNPQRSTUVWXYZ23456789") for _ in range(6))
+    rogue_fqdn = f"{rogue_host}.{dns_domain}"
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"), logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2, auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id, elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id, is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+    events.append(json.dumps(_build_4688(u, config,
+                                         process_name="C:\\Tools\\mimikatz.exe",
+                                         command_line='mimikatz.exe "lsadump::dcshadow /object:'
+                                                      'CN=Administrator,CN=Users,' + base_dn +
+                                                      ' /attribute:sidHistory /value:S-1-5-21-...-519" "exit"',
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    # the attacker workstation registers itself as a DC (DRS SPNs + SERVER_TRUST_ACCOUNT UAC)
+    drs_spns = (f"GC/{rogue_fqdn}/{dns_domain},"
+                f"E3514235-4B06-11D1-AB04-00C04FC2DCD2/{uuid.uuid4()}/{dns_domain},"
+                f"ldap/{rogue_fqdn}/{dns_domain}")
+    events.append(json.dumps(_build_4742(u, config, target_computer_name=rogue_host + "$",
+                                         target_sid=_stable_user_sid(rogue_host + "$"),
+                                         sam_account_name=rogue_host + "$", dns_host_name=rogue_fqdn,
+                                         spns=drs_spns, old_uac_value="0x1000", new_uac_value="0x2000",
+                                         uac_control="%%2087",  # SERVER_TRUST_ACCOUNT
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 1.0)
+    events.append(json.dumps(_build_5137(u, config,
+                                         object_dn=f"CN={rogue_host},CN=Servers,CN=Default-First-Site-Name,"
+                                                   f"CN=Sites,CN=Configuration,{base_dn}",
+                                         object_class="nTDSDSA",
+                                         object_guid=str(uuid.uuid4()), logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 1.0)
+    events.append(json.dumps(_build_4928(u, config, source_addr=rogue_fqdn,
+                                         naming_context=base_dn, logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(u, config, process_name="C:\\Tools\\mimikatz.exe",
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_golden_ticket(config, session_context):
+    """Golden/forged-TGT usage (T1558.001): a controlled account presents service tickets with NO
+    preceding TGT request (4768) and anomalous RC4 encryption — the hallmark of a forged ticket
+    minted offline from the krbtgt hash. Burst of 4769 service-ticket requests, no 4768."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    events = []
+    t = time.time()
+    sensitive = ["cifs/DC01.{d}", "host/DC01.{d}", "ldap/DC01.{d}", "HTTP/sql-prod.{d}",
+                 "MSSQLSvc/sql-prod.{d}:1433", "cifs/fileserver.{d}"]
+    dns_domain = _get_dns_domain(config)
+    for i, spn_t in enumerate(random.sample(sensitive, k=random.randint(4, 6))):
+        spn = spn_t.format(d=dns_domain)
+        # RC4 (0x17) where the realm normally issues AES — a forged-ticket indicator.
+        events.append(json.dumps(_build_4769(u, config, service_spn=spn, encryption="0x17",
+                                             status="0x0", ip_override=u.get("ip"),
+                                             ts=t + i * random.uniform(0.3, 1.2))))
+    return events
+
+
+def _threat_malicious_gpo(config, session_context):
+    """Malicious GPO modification (T1484.001 Group Policy Modification): an attacker edits a GPO to
+    push a startup script / restricted-group change domain-wide, then links it to a privileged OU.
+
+    Sequence: admin auth -> 4688 (GPO edit) -> 5136 gPCMachineExtensionNames/versionNumber ->
+    5136 gPLink on the OU -> 4689."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    dns_domain = _get_dns_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    gpo_guid = str(uuid.uuid4())
+    gpo_dn = f"CN={{{gpo_guid}}},CN=Policies,CN=System,{base_dn}"
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"), logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2, auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id, elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id, is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+    events.append(json.dumps(_build_4688(u, config,
+                                         process_name="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                                         command_line='powershell.exe -c "Set-GPPrefRegistryValue -Name '
+                                                      '\'Default Domain Policy\' -Context Computer -Action Update '
+                                                      '-Key HKLM\\...\\Run -ValueName Updater -Value C:\\pkg\\u.exe"',
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    events.append(json.dumps(_build_5136(u, config, object_dn=gpo_dn, object_class="groupPolicyContainer",
+                                         object_guid=gpo_guid, attribute_name="gPCMachineExtensionNames",
+                                         attribute_value="[{35378EAC-683F-11D2-A89A-00C04FBBCFA2}]",
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.6)
+    events.append(json.dumps(_build_5136(u, config,
+                                         object_dn=f"OU=Domain Controllers,{base_dn}", object_class="organizationalUnit",
+                                         object_guid=str(uuid.uuid4()), attribute_name="gPLink",
+                                         attribute_value=f"[LDAP://{gpo_dn};0]", logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(u, config,
+                                         process_name="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_rogue_forest_trust(config, session_context):
+    """Rogue forest trust + SID-history injection (ATT&CK T1484.002 Domain Trust Modification,
+    T1134.005 SID-History Injection). A compromised admin on a DC establishes a two-way forest
+    trust to an attacker-controlled forest with SID filtering disabled, then injects the rogue
+    forest's Domain-Admins SID into a controlled account so it is privileged across the trust.
+
+    Sequence (all DC-originated Security events):
+      1. admin authenticates to the DC          -> 4624 + 4672
+      2. netdom/PowerShell trust creation        -> 4688
+      3. new trust created to the rogue domain   -> 4706   (primary signal)
+      4. trusted forest information entry added   -> 4865   (TLN routing to the rogue forest)
+      5. trusted domain info modified, SID filtering disabled -> 4716 (the dangerous misconfig)
+      6. SID History injected into a controlled account       -> 4765 (cross-forest privesc)
+      7. process exit                             -> 4689
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2, auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id, elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id, is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+    tool = random.choice([
+        ("C:\\Windows\\System32\\netdom.exe",
+         f'netdom trust {_get_dns_domain(config)} /Domain:{_ROGUE_FOREST_DNS} '
+         f'/add /twoway /transitive:yes /quarantine:No'),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f'powershell.exe -c "$f=[System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest(); '
+         f'$f.CreateTrustRelationship(\'{_ROGUE_FOREST_DNS}\',\'Bidirectional\')"'),
+    ])
+    events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
+                                         command_line=tool[1], logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    events.append(json.dumps(_build_4706(u, config, logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.8)
+    events.append(json.dumps(_build_4865(u, config, logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.8)
+    events.append(json.dumps(_build_4716(u, config, logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 3.0)
+    # Inject the rogue forest's Domain-Admins SID into a controlled account (SID history).
+    victim = _pick_windows_user(session_context) or u
+    events.append(json.dumps(_build_4765(u, config,
+                                         target_name=victim["username"],
+                                         target_sid=_stable_user_sid(victim["username"]),
+                                         source_sid=_ROGUE_FOREST_SID + "-512",
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
 _THREAT_WEIGHTS = {
+    "rogue_forest_trust":                3,
+    "existing_trust_sid_filter_downgrade": 3,
+    "dcshadow":                          3,
+    "golden_ticket":                     4,
+    "malicious_gpo":                     3,
     "wip_as_rep_roasting":         8,
     "account_lockout":             5,
     "suspicious_account_lockout":  4,
@@ -7117,6 +7583,11 @@ _THREAT_WEIGHTS = {
 }
 
 _THREAT_GENERATORS = {
+    "rogue_forest_trust":               _threat_rogue_forest_trust,
+    "existing_trust_sid_filter_downgrade": _threat_existing_trust_sid_filter_downgrade,
+    "dcshadow":                         _threat_dcshadow,
+    "golden_ticket":                    _threat_golden_ticket,
+    "malicious_gpo":                    _threat_malicious_gpo,
     "wip_as_rep_roasting":             _threat_as_rep_roasting,
     "account_lockout":                  _threat_account_lockout,
     "suspicious_account_lockout":       _threat_suspicious_account_lockout,
@@ -7213,6 +7684,11 @@ def _generate_scenario_event(scenario_event, config, context):
         return json.dumps(_build_4768(user, config)), "kerberos_tgt"
     # Dispatch to named threat generators
     _threat_dispatch = {
+        "ROGUE_FOREST_TRUST":               _threat_rogue_forest_trust,
+        "EXISTING_TRUST_SID_FILTER_DOWNGRADE": _threat_existing_trust_sid_filter_downgrade,
+        "DCSHADOW":                         _threat_dcshadow,
+        "GOLDEN_TICKET":                    _threat_golden_ticket,
+        "MALICIOUS_GPO":                    _threat_malicious_gpo,
         "WIP_AS_REP_ROASTING":             _threat_as_rep_roasting,
         "ACCOUNT_LOCKOUT":                  _threat_account_lockout,
         "SUSPICIOUS_ACCOUNT_LOCKOUT":       _threat_suspicious_account_lockout,
