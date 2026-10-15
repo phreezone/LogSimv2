@@ -452,12 +452,15 @@ def scenario_admin_role_add(config=None):
 
 
 def scenario_consent_risky_app(config=None):
-    """Consent granting high-privilege Graph scopes -> 'Azure application consent'."""
-    u = ac.pick_user(config)
+    """Admin consent granting high-privilege Graph scopes -> 'Azure application consent' (the
+    detector is 'an ADMINISTRATIVE identity consented permissions to an application', so the
+    initiator is an admin and ConsentContext.IsAdminConsent is True)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
     mods = [mp("ConsentContext.IsAdminConsent", None, "True"),
+            mp("ConsentContext.OnBehalfOfAll", None, "True"),
             mp("ConsentAction.Permissions", None, "Mail.Read Files.ReadWrite.All Directory.Read.All offline_access")]
     return [audit("Consent to application", "ApplicationManagement", "Core Directory", "Assign",
-                  by_user(u), [t_obj("ServicePrincipal", "External Reporting Connector", mods)],
+                  by_user(admin), [t_obj("ServicePrincipal", "External Reporting Connector", mods)],
                   [{"key": "User-Agent", "value": "EvoSTS"}])]
 
 
@@ -606,20 +609,17 @@ def scenario_failed_federation_change(config=None):
 
 
 def scenario_app_privilege_escalation(config=None):
-    """A service principal / app is granted a privileged directory role and a high-privilege app
-    role -> 'Azure privilege escalation using an application' (the app becomes a privilege path)."""
-    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    """An APPLICATION (service principal) assigns an Azure administrator role to a user ->
+    'Azure Privilege Escalation Using an Application'. Per the detector the APP is the initiator
+    (initiatedBy.app), the target is a user, and the role is a privileged directory role."""
     sp_name = "Internal Automation App"
-    return [
-        audit("Add app role assignment to service principal", "ApplicationManagement",
-              "Core Directory", "Assign", by_user(admin),
-              [t_obj("ServicePrincipal", sp_name,
-                     [mp("AppRole.Value", None, "RoleManagement.ReadWrite.Directory"),
-                      mp("AppRole.Id", None, "9e3f62cf-ca93-4989-b6ce-bf83c28f9fe8")])], [_ua(admin)]),
-        audit("Add member to role", "RoleManagement", "Core Directory", "Add", by_user(admin),
-              [t_obj("Role", "Privileged Role Administrator",
-                     [mp("Role.DisplayName", None, "Privileged Role Administrator")]),
-               t_obj("ServicePrincipal", sp_name)], [_ua(admin)])]
+    tgt = ac.pick_user(config)
+    return [audit("Add member to role", "RoleManagement", "Core Directory", "Add",
+                  by_app(sp_name, ac.app_id(sp_name)),
+                  [t_obj("Role", "Global Administrator",
+                         [mp("Role.DisplayName", None, "Global Administrator"),
+                          mp("Role.TemplateId", None, "62e90394-69f5-4237-9190-012177145e10")]),
+                   t_user(tgt)])]
 
 
 SCENARIOS = {
