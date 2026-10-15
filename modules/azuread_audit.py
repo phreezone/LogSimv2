@@ -736,6 +736,15 @@ def scenario_account_unlock_password_reset(config=None):
                   by_user(admin), [t_user(tgt)], [_ua(admin)], reason=act)]
 
 
+def scenario_first_powershell_op(config=None):
+    """A user performs an Azure AD directory operation via the Azure AD PowerShell module for the
+    first time -> 'First Azure AD PowerShell operation for a user' (Informational baseline)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
+    return [audit("Update user", "UserManagement", "Core Directory", "Update", by_user(admin),
+                  [t_user(tgt, [mp("Included Updated Properties", None, "Department")])],
+                  [{"key": "User-Agent", "value": "Microsoft Azure Active Directory PowerShell"}])]
+
+
 def scenario_mfa_fraud_reported(config=None):
     """A user reported an MFA prompt as fraud -> 'Suspicious MFA request reported by user in Entra
     ID' (a sign of MFA-fatigue / push-bombing against the account)."""
@@ -761,6 +770,7 @@ SCENARIOS = {
     "admin_role_add": scenario_admin_role_add,
     "consent_risky_app": scenario_consent_risky_app,
     "mfa_fraud_reported": scenario_mfa_fraud_reported,
+    "first_powershell_op": scenario_first_powershell_op,
     "onprem_sync_collision": scenario_onprem_sync_collision,
     "ca_policy_removed": scenario_ca_policy_removed,
     "ca_operation_unusual": scenario_ca_operation_unusual,
