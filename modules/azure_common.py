@@ -12,7 +12,9 @@ Research basis (Microsoft Entra sign-in / audit schema + typical tenant volume):
   directory-audit activity. generate-side weighting reflects that.
 """
 import hashlib
+import math
 import random
+import time
 
 try:
     from modules.session_utils import get_random_user
@@ -22,29 +24,63 @@ except Exception:  # pragma: no cover
 UPN_DOMAIN = "examplecorp.com"   # match LogSim's identity model (user emails are @examplecorp.com)
 HOME_TENANT_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 
-# A few shared corporate NAT egress IPs (realistic "many users behind one office IP").
-OFFICE_EGRESS = [
-    {"ip": "52.14.33.10",  "city": "Columbus", "state": "Ohio",       "countryOrRegion": "US", "lat": 39.96, "lon": -82.99},
-    {"ip": "20.44.12.88",  "city": "Austin",   "state": "Texas",      "countryOrRegion": "US", "lat": 30.27, "lon": -97.74},
-    {"ip": "40.112.55.3",  "city": "Seattle",  "state": "Washington", "countryOrRegion": "US", "lat": 47.60, "lon": -122.33},
+# Corporate office sites. Each site is a geo + ISP/ASN + a NAT egress pool of several public IPs,
+# so users at a site share a realistic small pool (many users behind a few office IPs) while the
+# population as a whole spreads across ~50 office IPs across ~10 sites instead of collapsing onto 3.
+OFFICES = [
+    {"city": "Columbus",  "state": "Ohio",        "countryOrRegion": "US", "lat": 39.96, "lon": -82.99, "asn": 7922,  "isp": "Comcast Business",       "ips": ["52.14.33.10", "52.14.33.11", "52.14.33.12", "52.14.33.13", "52.14.33.14", "52.14.33.15"]},
+    {"city": "Austin",    "state": "Texas",       "countryOrRegion": "US", "lat": 30.27, "lon": -97.74, "asn": 7018,  "isp": "AT&T Services",          "ips": ["20.44.12.88", "20.44.12.89", "20.44.12.90", "20.44.12.91", "20.44.12.92", "20.44.12.93"]},
+    {"city": "Seattle",   "state": "Washington",  "countryOrRegion": "US", "lat": 47.60, "lon": -122.33, "asn": 3356, "isp": "Lumen",                 "ips": ["40.112.55.3", "40.112.55.4", "40.112.55.5", "40.112.55.6", "40.112.55.7", "40.112.55.8"]},
+    {"city": "New York",  "state": "New York",    "countryOrRegion": "US", "lat": 40.71, "lon": -74.01, "asn": 701,   "isp": "Verizon Business",      "ips": ["66.108.14.20", "66.108.14.21", "66.108.14.22", "66.108.14.23", "66.108.14.24", "66.108.14.25"]},
+    {"city": "Chicago",   "state": "Illinois",    "countryOrRegion": "US", "lat": 41.88, "lon": -87.63, "asn": 174,   "isp": "Cogent Communications", "ips": ["64.69.108.40", "64.69.108.41", "64.69.108.42", "64.69.108.43", "64.69.108.44"]},
+    {"city": "San Jose",  "state": "California",  "countryOrRegion": "US", "lat": 37.34, "lon": -121.89, "asn": 7018, "isp": "AT&T Services",          "ips": ["198.51.72.60", "198.51.72.61", "198.51.72.62", "198.51.72.63", "198.51.72.64"]},
+    {"city": "Atlanta",   "state": "Georgia",     "countryOrRegion": "US", "lat": 33.75, "lon": -84.39, "asn": 6939,  "isp": "Hurricane Electric",    "ips": ["184.105.33.80", "184.105.33.81", "184.105.33.82", "184.105.33.83"]},
+    {"city": "Dublin",    "state": "Leinster",    "countryOrRegion": "IE", "lat": 53.35, "lon": -6.26,  "asn": 5466,  "isp": "Eircom",                "ips": ["185.3.44.100", "185.3.44.101", "185.3.44.102", "185.3.44.103"]},
+    {"city": "London",    "state": "England",     "countryOrRegion": "GB", "lat": 51.51, "lon": -0.13,  "asn": 2856,  "isp": "BT",                    "ips": ["194.73.21.120", "194.73.21.121", "194.73.21.122", "194.73.21.123"]},
+    {"city": "Toronto",   "state": "Ontario",     "countryOrRegion": "CA", "lat": 43.65, "lon": -79.38, "asn": 812,   "isp": "Rogers Communications", "ips": ["99.231.60.140", "99.231.60.141", "99.231.60.142", "99.231.60.143"]},
 ]
-_HOME_PREFIXES = ["71.84.", "98.112.", "24.17.", "73.202.", "68.44.", "99.7."]
+# Kept for back-compat (a flat list of the primary office IPs).
+OFFICE_EGRESS = [{"ip": o["ips"][0], "city": o["city"], "state": o["state"],
+                  "countryOrRegion": o["countryOrRegion"], "lat": o["lat"], "lon": o["lon"]} for o in OFFICES]
+
+# Residential ISP egress for remote/home days (stable per user).
+_HOME_PREFIXES = ["71.84.", "98.112.", "24.17.", "73.202.", "68.44.", "99.7.",
+                  "174.52.", "107.3.", "76.98.", "97.83."]
+_HOME_ISPS = [(7922, "Comcast Cable"), (20115, "Charter Spectrum"), (701, "Verizon Fios"),
+              (22773, "Cox Communications"), (209, "CenturyLink"), (11427, "Spectrum")]
 _HOME_CITIES = [
-    {"city": "Dublin",    "state": "Ohio",       "countryOrRegion": "US", "lat": 40.09, "lon": -83.11},
-    {"city": "Round Rock","state": "Texas",      "countryOrRegion": "US", "lat": 30.50, "lon": -97.67},
-    {"city": "Redmond",   "state": "Washington", "countryOrRegion": "US", "lat": 47.67, "lon": -122.12},
-    {"city": "Naperville","state": "Illinois",   "countryOrRegion": "US", "lat": 41.75, "lon": -88.15},
+    {"city": "Dublin",     "state": "Ohio",       "countryOrRegion": "US", "lat": 40.09, "lon": -83.11},
+    {"city": "Round Rock", "state": "Texas",      "countryOrRegion": "US", "lat": 30.50, "lon": -97.67},
+    {"city": "Redmond",    "state": "Washington", "countryOrRegion": "US", "lat": 47.67, "lon": -122.12},
+    {"city": "Naperville", "state": "Illinois",   "countryOrRegion": "US", "lat": 41.75, "lon": -88.15},
+    {"city": "Brooklyn",   "state": "New York",   "countryOrRegion": "US", "lat": 40.68, "lon": -73.94},
+    {"city": "Sunnyvale",  "state": "California", "countryOrRegion": "US", "lat": 37.37, "lon": -122.04},
+    {"city": "Marietta",   "state": "Georgia",    "countryOrRegion": "US", "lat": 33.95, "lon": -84.55},
+]
+# Mobile carrier egress (LTE/5G) — used for occasional phone sign-ins.
+_MOBILE_CARRIERS = [
+    {"prefix": "174.192.", "asn": 6167,  "isp": "Verizon Wireless"},
+    {"prefix": "172.58.",  "asn": 21928, "isp": "T-Mobile USA"},
+    {"prefix": "107.77.",  "asn": 20057, "isp": "AT&T Mobility"},
 ]
 
 # Apps/resources that dominate real Entra sign-in telemetry.
 APPS_INTERACTIVE = ["Microsoft Office 365 Portal", "Office365 Shell WCSS-Client", "OfficeHome",
                     "Microsoft Teams", "My Apps", "Microsoft Office", "Outlook Web App",
-                    "Microsoft 365 Security and Compliance Center"]
+                    "Microsoft 365 Security and Compliance Center", "Azure Portal",
+                    "Microsoft App Access Panel", "Power BI", "Microsoft Power Apps",
+                    "Microsoft Forms", "SharePoint Online Client", "Microsoft Stream",
+                    "Microsoft Intune Company Portal", "Microsoft Bookings", "Yammer"]
 APPS_NONINTERACTIVE = ["Microsoft Authentication Broker", "Microsoft Office", "OneDrive SyncEngine",
                        "Microsoft Teams", "Outlook Mobile", "Windows Sign In",
-                       "Office365 Shell WCSS-Client", "Microsoft Account Controls V2"]
+                       "Office365 Shell WCSS-Client", "Microsoft Account Controls V2",
+                       "Microsoft Edge", "Microsoft Intune Web Company Portal",
+                       "Microsoft Device Registration Client", "OfficeClientService",
+                       "Microsoft Teams Web Client", "Enterprise Roaming and Backup"]
 RESOURCES = ["Microsoft Graph", "Office 365 Exchange Online", "Office 365 SharePoint Online",
-             "Windows Azure Active Directory", "Microsoft.Azure.SyncFabric"]
+             "Windows Azure Active Directory", "Microsoft.Azure.SyncFabric", "Windows Azure Service Management API",
+             "Microsoft Teams Services", "Azure Key Vault", "Microsoft Information Protection Sync Service",
+             "Office 365 Management APIs", "Microsoft Graph Change Tracking", "Azure Storage"]
 # Benign sign-in failures that happen routinely (mistyped password, expired password, MFA needed).
 BENIGN_FAIL = [
     (50126, "Error validating credentials due to invalid username or password."),
@@ -52,6 +88,11 @@ BENIGN_FAIL = [
     (50074, "Strong Authentication is required."),
     (50058, "Session information is not sufficient for single-sign-on."),
     (50072, "User needs to enroll for second factor authentication."),
+    (50076, "Due to a configuration change made by your administrator, or because you moved to a new location, you must use multi-factor authentication."),
+    (50140, "This occurred due to 'Keep me signed in' interrupt when the user was signing in."),
+    (50173, "The provided grant has expired due to it being revoked; the user must sign in again."),
+    (65001, "The user or administrator has not consented to use the application."),
+    (16000, "Either multiple user identities are available for the current request or none are selected."),
 ]
 
 
@@ -76,6 +117,182 @@ AUDIT_OPS = {
     "DeviceManagement": ["Add registered device.", "Add registered owner to device.", "Update device."],
     "ApplicationManagement": ["Consent to application.", "Add app role assignment grant to user."],
 }
+
+
+# ── programmatic business-entity generators ──────────────────────────────────────────
+# Shared across the O365/Entra modules. Two kinds:
+#   * UNBOUNDED, non-entity text (email subjects, external recipients) — fine to be unique per
+#     event, since the record's own id (MessageId/InternetMessageId) is the entity key.
+#   * BOUNDED, deterministic catalogs for things that ARE entities with stable ids (security/
+#     distribution groups, Power BI reports/workspaces) — a real tenant has many but a finite,
+#     recurring set, so detectors can baseline them. Seeded -> identical across runs/machines.
+
+_SUBJECT_PREFIX = ["", "", "", "Re: ", "Re: ", "RE: ", "Fwd: ", "FW: ", "[EXTERNAL] "]
+_SUBJECT_TOPIC = [
+    "Q{q} forecast", "budget review", "invoice {n}", "PO {n}", "contract draft", "renewal quote",
+    "meeting notes", "weekly status", "project update", "design review", "sprint planning",
+    "incident {n}", "ticket #{n}", "customer escalation", "onboarding", "offer letter",
+    "performance review", "payroll", "expense report", "travel approval", "security review",
+    "access request", "password reset", "deployment window", "release notes", "roadmap",
+    "pricing proposal", "partnership", "NDA for signature", "SOW attached", "data request",
+    "board deck", "all-hands", "team lunch", "office closure", "benefits enrollment",
+    "policy update", "compliance attestation", "audit follow-up", "vendor review", "QBR prep"]
+_SUBJECT_SUFFIX = ["", "", "", "", " - action required", " (FYI)", " [URGENT]", " - please review",
+                   " - EOD", " 2025", " 2026", " v2", " - final", " (no reply needed)"]
+_EXT_FIRST = ["john", "sarah", "mike", "priya", "chen", "maria", "david", "anna", "raj", "emma",
+              "carlos", "yuki", "tom", "laura", "sam", "nina", "omar", "lena", "paul", "zoe",
+              "accounts", "billing", "sales", "support", "info", "procurement", "legal", "hr",
+              "noreply", "notifications", "team", "contact", "admin", "orders"]
+_EXT_DOMAINS_WIDE = ["gmail.com", "outlook.com", "proton.me", "yahoo.com", "icloud.com",
+                     "partner-co.com", "acmecorp.com", "globex.com", "initech.com", "contoso.com",
+                     "fabrikam.com", "northwind.com", "vendor.io", "consulting-grp.com",
+                     "law-firm.net", "bank-corp.com", "logistics-llc.com", "supplier.co"]
+
+
+def email_subject(rnd=None, q=None, external=False):
+    r = rnd or random
+    topic = r.choice(_SUBJECT_TOPIC).replace("{q}", str(q or r.randint(1, 4))).replace(
+        "{n}", str(r.randint(1000, 99999)))
+    pfx = r.choice(_SUBJECT_PREFIX)
+    if external and not pfx.startswith("[EXTERNAL]") and r.random() < 0.5:
+        pfx = "[EXTERNAL] " + pfx
+    return f"{pfx}{topic[0].upper()}{topic[1:]}{r.choice(_SUBJECT_SUFFIX)}"
+
+
+def external_email(rnd=None):
+    r = rnd or random
+    first = r.choice(_EXT_FIRST)
+    dom = r.choice(_EXT_DOMAINS_WIDE)
+    style = r.random()
+    if style < 0.45:
+        return f"{first}.{r.choice(_EXT_FIRST)}@{dom}"
+    if style < 0.7:
+        return f"{first}{r.randint(1, 999)}@{dom}"
+    return f"{first}@{dom}"
+
+
+def _build_catalog(seed, n, genfn):
+    rnd = random.Random(seed)
+    seen, out = set(), []
+    while len(out) < n:
+        v = genfn(rnd)
+        if v not in seen:
+            seen.add(v); out.append(v)
+    return out
+
+
+# Security / distribution / M365 groups — bounded deterministic catalog (entities w/ stable ids).
+_GROUP_DEPTS = ["Sales", "Marketing", "Engineering", "Finance", "HR", "Legal", "IT", "Operations",
+                "Support", "Product", "Security", "DevOps", "Data", "Procurement", "Facilities",
+                "Customer Success", "Research", "Design", "QA", "Compliance"]
+_GROUP_FUNC = ["Team", "Managers", "Admins", "Leads", "All", "Users", "Owners", "Members",
+               "Approvers", "Readers", "Contributors", "On-Call", "Interns", "Contractors"]
+_GROUP_REGION = ["", "", "", "AMER", "EMEA", "APAC", "LATAM", "US", "EU", "UK", "Global"]
+_GROUP_PREFIX = ["", "", "DL-", "SG-", "M365-", "GRP-", "sec-", "dist-"]
+
+
+def _gen_group(rnd):
+    style = rnd.random()
+    if style < 0.2:
+        return rnd.choice(["All Employees", "All Company", "VPN Users", "Everyone",
+                           "Licensed Users", "Guest Users", "External Collaborators"])
+    pfx = rnd.choice(_GROUP_PREFIX); dept = rnd.choice(_GROUP_DEPTS)
+    func = rnd.choice(_GROUP_FUNC); region = rnd.choice(_GROUP_REGION)
+    name = f"{dept} {func}"
+    if region:
+        name = f"{name} - {region}"
+    if rnd.random() < 0.15:
+        name = f"Project {rnd.choice(['Apollo','Zephyr','Helios','Orion','Atlas','Titan','Nova'])} {func}"
+    return f"{pfx}{name}"
+
+
+_GROUPS_CATALOG = _build_catalog("logsim-groups-v1", 400, _gen_group)
+
+
+def group_name(rnd=None):
+    return (rnd or random).choice(_GROUPS_CATALOG)
+
+
+# Power BI workspaces & reports — bounded deterministic catalogs (entities w/ stable ids).
+_PBI_TOPIC = ["Sales Pipeline", "Revenue", "Customer 360", "Exec KPIs", "Support Metrics",
+              "Finance Actuals", "Churn", "Marketing Funnel", "Product Usage", "Headcount",
+              "Forecast", "Bookings", "Pipeline Health", "Renewals", "NPS", "Cost Analysis",
+              "Inventory", "Logistics", "Compliance", "Security Posture", "SLA", "Adoption",
+              "Cohort", "Attribution", "Budget vs Actual", "Cash Flow", "Utilization"]
+_PBI_KIND = ["Dashboard", "Report", "Analysis", "Scorecard", "Summary", "Trends", "Overview",
+             "Deep Dive", "Weekly", "Monthly", "QBR", "Executive"]
+_PBI_WS_SUFFIX = ["Analytics", "Reporting", "BI", "Insights", "Data", "Metrics"]
+
+
+def _gen_report(rnd):
+    return f"{rnd.choice(_PBI_TOPIC)} {rnd.choice(_PBI_KIND)}"
+
+
+def _gen_workspace(rnd):
+    return f"{rnd.choice(_GROUP_DEPTS)} {rnd.choice(_PBI_WS_SUFFIX)}"
+
+
+_PBI_REPORTS_CATALOG = _build_catalog("logsim-pbi-reports-v1", 300, _gen_report)
+_PBI_WS_CATALOG = _build_catalog("logsim-pbi-ws-v1", 60, _gen_workspace)
+
+
+def report_name(rnd=None):
+    return (rnd or random).choice(_PBI_REPORTS_CATALOG)
+
+
+def workspace_name(rnd=None):
+    return (rnd or random).choice(_PBI_WS_CATALOG)
+
+
+# ── threat gating ────────────────────────────────────────────────────────────────────
+# Threats are modeled as wall-clock EPISODES, not a per-log percentage. A detection fires on an
+# episode (a burst/sequence: a spray, a mass-download, an impossible-travel pair), once per episode,
+# so the realistic knob is "how many malicious episodes happen per hour" — independent of log volume
+# and burst size. In a real low-incident tenant genuine malicious activity is a needle in a haystack
+# (well under 0.01% of logs; most days zero). Rates below are PER MODULE; tenant-wide totals (×7
+# feeds) are noted. The gate uses a Poisson process over elapsed real time, so episodes occur at the
+# target wall-clock rate however often the module is polled. A benign warmup still withholds all
+# threats until a baseline has accrued.
+THREAT_EPISODES_PER_HOUR = {
+    "Benign Traffic Only": 0.0,
+    "Low": 0.01,         # ~1-2 episodes/day tenant-wide
+    "Realistic": 0.03,   # ~5/day tenant-wide — a handful, like a real low-incident tenant
+    "Medium": 0.15,      # ~25/day tenant-wide
+    "High": 0.6,         # ~100/day tenant-wide
+    "Insane": 6.0,       # stress/demo — ~1000/day tenant-wide
+}
+THREAT_WARMUP_EVENTS = 500   # benign records per module before any threat may fire
+_THREAT_MAX_DT = 600.0       # cap elapsed-time per call so a long idle gap can't dump an episode
+
+
+class ThreatGate:
+    """Decides when a module should emit a threat scenario vs. benign. Fires episodes as a Poisson
+    process at THREAT_EPISODES_PER_HOUR (wall-clock), independent of how often the module is polled
+    or how large each scenario burst is, and withholds all threats during a benign warmup so
+    baselines form first. `scenarios` is accepted for call-site compatibility and not required."""
+
+    def __init__(self, scenarios=None, warmup=THREAT_WARMUP_EVENTS, max_dt=_THREAT_MAX_DT):
+        self._scenarios = scenarios
+        self._warmup = warmup
+        self._max_dt = max_dt
+        self.count = 0
+        self._last = None
+
+    def fire(self, threat_level, config=None, now=None):
+        """True if a threat scenario should fire on this call."""
+        self.count += 1
+        t = now if now is not None else time.time()
+        last, self._last = self._last, t
+        if self.count <= self._warmup:                  # still accruing baseline
+            return False
+        rate_hr = THREAT_EPISODES_PER_HOUR.get(threat_level, THREAT_EPISODES_PER_HOUR["Realistic"])
+        if rate_hr <= 0 or last is None:
+            return False
+        dt = min(max(0.0, t - last), self._max_dt)      # seconds since last call (capped)
+        if dt <= 0:
+            return False
+        p = 1.0 - math.exp(-(rate_hr / 3600.0) * dt)    # Poisson: P(>=1 episode in dt)
+        return random.random() < p
 
 
 def _h(s):
@@ -192,8 +409,51 @@ def _stable_guid(seed):
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
 
-def _browser(os_type):
-    return "Safari 17.3" if os_type == "macOS" else "Chrome 154.0.0"
+# Browser/user-agent matrix keyed by OS family. Each entry: (browser label, full UA string).
+# A user sticks to one profile (stable per user) so their device baseline is coherent.
+_UA_CHROME_WIN = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{v} Safari/537.36"
+_UA_EDGE_WIN   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{v} Safari/537.36 Edg/{v}"
+_UA_FF_WIN     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{fv}) Gecko/20100101 Firefox/{fv}"
+_UA_SAFARI_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{sv} Safari/605.1.15"
+_UA_CHROME_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{v} Safari/537.36"
+_UA_SAFARI_IOS = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+_UA_CHROME_AND = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{v} Mobile Safari/537.36"
+
+_BROWSER_PROFILES = {
+    "Windows": [("Chrome 154.0.0", "Chrome", "154.0.0.0", "Windows10", _UA_CHROME_WIN.format(v="154.0.0.0")),
+                ("Chrome 153.0.0", "Chrome", "153.0.0.0", "Windows10", _UA_CHROME_WIN.format(v="153.0.0.0")),
+                ("Edge 154.0.0",   "Edge",   "154.0.0.0", "Windows10", _UA_EDGE_WIN.format(v="154.0.0.0")),
+                ("Edge 153.0.0",   "Edge",   "153.0.0.0", "Windows10", _UA_EDGE_WIN.format(v="153.0.0.0")),
+                ("Firefox 131.0",  "Firefox","131.0",     "Windows10", _UA_FF_WIN.format(fv="131.0"))],
+    "macOS":   [("Safari 17.4",    "Safari", "17.4",      "MacOsX",    _UA_SAFARI_MAC.format(sv="17.4")),
+                ("Safari 17.3",    "Safari", "17.3",      "MacOsX",    _UA_SAFARI_MAC.format(sv="17.3")),
+                ("Chrome 154.0.0", "Chrome", "154.0.0.0", "MacOsX",    _UA_CHROME_MAC.format(v="154.0.0.0"))],
+    "iOS":     [("Mobile Safari 17.4", "Safari", "17.4", "IPhone",     _UA_SAFARI_IOS)],
+    "Android": [("Chrome Mobile 154", "Chrome", "154.0.0.0", "Android", _UA_CHROME_AND.format(v="154.0.0.0"))],
+}
+
+
+def _profile(user, mobile=False):
+    """Stable (browser_label, browser_name, browser_version, platform, user_agent) for a user."""
+    if mobile:
+        fam = "iOS" if _h("mobfam:" + user["username"]) % 2 else "Android"
+    else:
+        fam = user.get("os_type", "Windows")
+        if fam not in _BROWSER_PROFILES:
+            fam = "Windows"
+    opts = _BROWSER_PROFILES[fam]
+    return opts[_h("brow:" + user["username"]) % len(opts)]
+
+
+def _browser(os_type, user=None):
+    if user is None:
+        return "Safari 17.4" if os_type == "macOS" else "Chrome 154.0.0"
+    return _profile(user)[0]
+
+
+def user_agent(user, mobile=False):
+    """Stable, realistic User-Agent string for a user (desktop by default)."""
+    return _profile(user, mobile=mobile)[4]
 
 
 # ── stable-per-entity identifiers (cardinality) ──────────────────────────────────────
@@ -217,34 +477,80 @@ def resource_id(name):
     return _stable_guid("res:" + str(name))
 
 
-def device_for(user, new=False):
-    """deviceDetail for a sign-in. Stable (registered/compliant) per user by default; a
-    brand-new unmanaged device when new=True -> feeds 'new device seen' anomaly detectors."""
+# Device trust posture, stable per user. Most corporate endpoints are AADJ/Hybrid + managed/
+# compliant; a realistic minority are Azure AD registered or Workplace joined (BYOD) and not managed.
+_TRUST_TYPES = [
+    ("Azure AD joined",        True,  True),
+    ("Azure AD joined",        True,  True),
+    ("Hybrid Azure AD joined", True,  True),
+    ("Hybrid Azure AD joined", True,  True),
+    ("Azure AD registered",    False, False),
+    ("Workplace joined",       False, False),
+]
+
+
+def device_for(user, new=False, mobile=False):
+    """deviceDetail for a sign-in. Stable per user by default (coherent device baseline); a
+    brand-new unmanaged device when new=True -> feeds 'new device seen' anomaly detectors.
+    mobile=True returns the user's phone profile."""
     os_type = user.get("os_type", "Windows")
     os_str = f'{os_type} {user.get("os_version", "")}'.strip()
     if new:
-        return {"deviceId": "", "displayName": "", "browser": _browser(os_type),
+        return {"deviceId": "", "displayName": "", "browser": _browser(os_type, user),
                 "operatingSystem": os_str, "isCompliant": False, "isManaged": False, "trustType": ""}
+    if mobile:
+        label, bname, _bv, _plat, _ua = _profile(user, mobile=True)
+        mos = "iOS 17.4" if "iOS" in _plat or _plat == "IPhone" else "Android 14.0"
+        return {"deviceId": _stable_guid("mdev:" + user["username"]),
+                "displayName": f'{user["username"].split(".")[0].capitalize()}-Phone',
+                "browser": label, "operatingSystem": mos,
+                "isCompliant": True, "isManaged": True, "trustType": "Azure AD registered"}
+    trust, managed, compliant = _TRUST_TYPES[_h("trust:" + user["username"]) % len(_TRUST_TYPES)]
     return {"deviceId": _stable_guid("dev:" + user["username"]),
             "displayName": f'{user["username"].upper().replace(".", "")}-PC',
-            "browser": _browser(os_type), "operatingSystem": os_str,
-            "isCompliant": True, "isManaged": True, "trustType": "Azure AD joined"}
+            "browser": _browser(os_type, user), "operatingSystem": os_str,
+            "isCompliant": compliant, "isManaged": managed, "trustType": trust}
 
 
-def egress(user, remote_prob=0.25):
-    """Stable public egress for a user: mostly their dept office NAT, sometimes a home IP.
+def office_for(user):
+    """The stable office site a user belongs to (by department)."""
+    return OFFICES[_h("site:" + str(user.get("department", "Unknown"))) % len(OFFICES)]
 
-    Returns {ip, city, state, countryOrRegion, geoCoordinates}. Deterministic per user so a
-    user keeps a coherent IP/ASN/country baseline (anomaly detectors judge against it).
+
+def _loc(city, state, country, lat, lon, ip, asn, isp):
+    return {"ip": ip, "city": city, "state": state, "countryOrRegion": country,
+            "geoCoordinates": {"latitude": lat, "longitude": lon}, "asn": asn, "isp": isp}
+
+
+def egress(user, remote_prob=0.25, mobile_prob=0.08):
+    """Stable public egress for a user: mostly their dept office NAT (a stable IP within the
+    site's pool), sometimes a residential/home IP, occasionally a mobile-carrier IP.
+
+    Returns {ip, city, state, countryOrRegion, geoCoordinates, asn, isp}. Deterministic per user
+    so each user keeps a coherent IP/ASN/geo baseline (anomaly detectors judge against it), while
+    the population spreads across ~50 office IPs + per-user home + carrier IPs.
     """
-    if random.random() < remote_prob:
-        n = _h("home:" + user["username"])
+    un = user["username"]
+    site = office_for(user)
+    r = random.random()
+    if r < mobile_prob:                                   # phone on cellular (near office metro)
+        n = _h("mob:" + un); c = _MOBILE_CARRIERS[n % len(_MOBILE_CARRIERS)]
+        ip = f'{c["prefix"]}{(n >> 8) % 254 + 1}.{(n >> 16) % 254 + 1}'
+        return _loc(site["city"], site["state"], site["countryOrRegion"],
+                    site["lat"], site["lon"], ip, c["asn"], c["isp"])
+    if r < mobile_prob + remote_prob:                     # working from home (residential, same metro)
+        n = _h("home:" + un)
         pfx = _HOME_PREFIXES[n % len(_HOME_PREFIXES)]
         ip = f"{pfx}{(n >> 8) % 254 + 1}.{(n >> 16) % 254 + 1}"
-        loc = _HOME_CITIES[n % len(_HOME_CITIES)]
-    else:
-        loc = OFFICE_EGRESS[_h(user["department"]) % len(OFFICE_EGRESS)]
-        ip = loc["ip"]
-    return {"ip": ip, "city": loc["city"], "state": loc["state"],
-            "countryOrRegion": loc["countryOrRegion"],
-            "geoCoordinates": {"latitude": loc["lat"], "longitude": loc["lon"]}}
+        asn, isp = _HOME_ISPS[(n >> 24) % len(_HOME_ISPS)]
+        # US metros use a nearby residential suburb; non-US sites stay in the office metro.
+        if site["countryOrRegion"] == "US":
+            city = _HOME_CITIES[n % len(_HOME_CITIES)]
+            return _loc(city["city"], city["state"], city["countryOrRegion"],
+                        city["lat"], city["lon"], ip, asn, isp)
+        return _loc(site["city"], site["state"], site["countryOrRegion"],
+                    site["lat"], site["lon"], ip, asn, isp)
+    # at the office (stable IP in the site's NAT pool)
+    ip = site["ips"][_h("deskip:" + un) % len(site["ips"])]
+    return _loc(site["city"], site["state"], site["countryOrRegion"],
+                site["lat"], site["lon"], ip, site["asn"], site["isp"])
