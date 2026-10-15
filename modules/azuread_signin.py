@@ -521,6 +521,39 @@ def scenario_pentest_tool_activity(config=None, user=None, attempts=8):
     return out
 
 
+def scenario_unusual_resource_access_by_app(config=None, user=None):
+    """A service principal reaches a resource outside its learned access pattern ->
+    'Unusual resource access by Azure application'. The app itself is a stable entity (pinned
+    appId) so UEBA learns its normal resource set; here it touches a sensitive resource
+    (Key Vault / ARM / Directory) it does not normally call."""
+    loc = {"ip": random.choice(RISKY_IPS), "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    rec = _sp_signin(loc)
+    res = random.choice(["Azure Key Vault", "Windows Azure Service Management API",
+                         "Windows Azure Active Directory", "Azure Storage"])
+    rec["resourceDisplayName"] = res
+    rec["resourceId"] = ac.resource_id(res)
+    rec["riskState"] = "atRisk"
+    rec["riskLevelDuringSignIn"] = "medium"
+    return [rec]
+
+
+def scenario_app_access_unknown_tenant(config=None, user=None):
+    """An app sign-in originating from a foreign/unknown tenant via cross-tenant access ->
+    'Attempted Azure application access from unknown tenant'. Carries a homeTenantId that is NOT
+    this tenant and crossTenantAccessType=b2bCollaboration, from an anonymized IP."""
+    loc = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    rec = _sp_signin(loc)
+    rec["homeTenantId"] = ac._stable_guid("rogue-tenant")
+    rec["resourceTenantId"] = ac.HOME_TENANT_ID
+    rec["crossTenantAccessType"] = "b2bCollaboration"
+    rec["riskState"] = "atRisk"
+    rec["riskLevelDuringSignIn"] = "high"
+    rec["riskEventTypes_v2"] = ["anonymizedIPAddress"]
+    return [rec]
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
@@ -542,6 +575,8 @@ SCENARIOS = {
     "pentest_tool_activity": scenario_pentest_tool_activity,
     "first_sso_resource_org": scenario_first_sso_resource_org,
     "first_sso_new_asn": scenario_first_sso_new_asn,
+    "unusual_resource_access_by_app": scenario_unusual_resource_access_by_app,
+    "app_access_unknown_tenant": scenario_app_access_unknown_tenant,
     "powershell_signin": scenario_powershell_signin,
     "new_device_signin": scenario_new_device_signin,
     "new_country_signin": scenario_new_country_signin,

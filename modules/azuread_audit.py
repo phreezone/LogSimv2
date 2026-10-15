@@ -745,6 +745,14 @@ def scenario_first_powershell_op(config=None):
                   [{"key": "User-Agent", "value": "Microsoft Azure Active Directory PowerShell"}])]
 
 
+def scenario_owner_removed_from_application(config=None):
+    """An owner is removed from an application / service principal (seize control, hide tracks) ->
+    'Removal of an Azure Owner from an Application or Service Principal'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
+    return [audit("Remove owner from application", "ApplicationManagement", "Core Directory", "Remove",
+                  by_user(admin), [t_obj("Application", "Internal Automation App"), t_user(tgt)], [_ua(admin)])]
+
+
 def scenario_mfa_fraud_reported(config=None):
     """A user reported an MFA prompt as fraud -> 'Suspicious MFA request reported by user in Entra
     ID' (a sign of MFA-fatigue / push-bombing against the account)."""
@@ -770,6 +778,7 @@ SCENARIOS = {
     "admin_role_add": scenario_admin_role_add,
     "consent_risky_app": scenario_consent_risky_app,
     "mfa_fraud_reported": scenario_mfa_fraud_reported,
+    "owner_removed_from_application": scenario_owner_removed_from_application,
     "first_powershell_op": scenario_first_powershell_op,
     "onprem_sync_collision": scenario_onprem_sync_collision,
     "ca_policy_removed": scenario_ca_policy_removed,
