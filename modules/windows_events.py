@@ -4148,8 +4148,8 @@ def _threat_suspicious_account_lockout(config, session_context):
 
 
 # DCSync replication GUIDs (DS-Replication-Get-Changes family)
-_GUID_REPL_GET_CHANGES     = "{1131f6ad-9c07-11d1-f79f-00c04fc2dcd2}"
-_GUID_REPL_GET_CHANGES_ALL = "{1131f6ae-9c07-11d1-f79f-00c04fc2dcd2}"
+_GUID_REPL_GET_CHANGES     = "{1131f6aa-9c07-11d1-f79f-00c04fc2dcd2}"
+_GUID_REPL_GET_CHANGES_ALL = "{1131f6ad-9c07-11d1-f79f-00c04fc2dcd2}"
 _GUID_REPL_IN_FILTERED_SET = "{89e95b76-444d-4c62-991a-0facbeda640c}"
 
 
