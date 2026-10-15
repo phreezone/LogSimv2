@@ -422,6 +422,28 @@ def scenario_malware_detected(config=None):
                 extra={"ItemType": "File"})]
 
 
+def scenario_sharepoint_enumeration(config=None, count=40):
+    """One identity rapidly accesses many distinct files across many sites in a short window ->
+    'Microsoft SharePoint enumeration activity' (Collection/Discovery before exfiltration)."""
+    u = ac.pick_user(config)
+    out = []
+    for i in range(count):
+        out.append(_sp(random.choice(["FileAccessed", "FileAccessedExtended", "FilePreviewed"]),
+                       u, site=random.choice(_SITES), offset_s=-(count - i)))
+    return out
+
+
+def scenario_onedrive_enumeration(config=None, count=40):
+    """One identity rapidly accesses many distinct files within OneDrive in a short window ->
+    'Microsoft OneDrive enumeration activity' (personal-store discovery/exfil staging)."""
+    u = ac.pick_user(config)
+    out = []
+    for i in range(count):
+        out.append(_sp(random.choice(["FileAccessed", "FileAccessedExtended", "FilePreviewed"]),
+                       u, workload="OneDrive", offset_s=-(count - i)))
+    return out
+
+
 SCENARIOS = {
     "mass_download": scenario_mass_download,
     "full_sync_download": scenario_full_sync_download,
@@ -436,6 +458,8 @@ SCENARIOS = {
     "mass_file_editing": scenario_mass_file_editing,
     "mass_file_upload": scenario_mass_file_upload,
     "aip_sensitive_file_access": scenario_aip_sensitive_file_access,
+    "sharepoint_enumeration": scenario_sharepoint_enumeration,
+    "onedrive_enumeration": scenario_onedrive_enumeration,
 }
 
 

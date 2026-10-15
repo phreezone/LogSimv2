@@ -554,6 +554,63 @@ def scenario_app_access_unknown_tenant(config=None, user=None):
     return [rec]
 
 
+def scenario_device_code_auth_flow(config=None, user=None):
+    """A sign-in completed via the OAuth device-code flow from an anomalous location -> 'Suspicious
+    Entra ID Device Code Authentication Flow'. Device-code phishing tricks a user into entering a
+    code the attacker generated, so the token is minted for the attacker's device."""
+    u = ac.pick_user(config)
+    bad = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    rec = _signin(u, bad, interactive=True, resource="Microsoft Graph",
+                  app=random.choice(["Microsoft Authentication Broker", "Microsoft Office",
+                                     "Visual Studio Code"]),
+                  client_app="Mobile Apps and Desktop clients",
+                  risk_level="high", risk_state="atRisk")
+    rec["authenticationProtocol"] = "deviceCode"
+    rec["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures"]
+    return [rec]
+
+
+def scenario_service_account_sso(config=None, user=None):
+    """A non-interactive service account authenticates interactively via SSO -> 'SSO authentication
+    by a service account'. Service accounts (svc_*) should only use app/token flows; an interactive
+    SSO by one signals credential theft."""
+    u = ac.pick_user(config)
+    svc = {"username": f'svc_{u["department"].lower().replace(" ", "")}' if u.get("department") else "svc_app",
+           "upn": f'svc_{random.choice(["sql","backup","iis","batch","integration"])}@examplecorp.com',
+           "display_name": "Service Account", "department": u.get("department", "IT"), "os_type": "Windows"}
+    return [_signin(svc, ac.egress(u), interactive=True, user_type="member",
+                    app=random.choice(ac.APPS_INTERACTIVE), risk_level="medium", risk_state="atRisk")]
+
+
+def scenario_mi_token_remote_usage(config=None, user=None):
+    """An Azure Managed Identity token used from OUTSIDE Azure (non-Azure egress) -> 'Remote usage
+    of an Azure Managed Identity token'. MI tokens are bound to an Azure resource; external use
+    means the token (e.g. from IMDS) was exfiltrated and replayed."""
+    loc = {"ip": random.choice(RISKY_IPS), "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    rec = _mi_signin(loc)
+    rec["riskState"] = "atRisk"
+    rec["riskLevelDuringSignIn"] = "high"
+    rec["riskEventTypes_v2"] = ["anonymizedIPAddress"]
+    return [rec]
+
+
+def scenario_sp_token_remote_usage(config=None, user=None):
+    """A service-principal token used from OUTSIDE the cloud environment (non-Azure egress) ->
+    'Remote usage of an Azure Service Principal token'. The SP is a stable entity whose tokens
+    normally originate from Azure/Microsoft ranges; here the app-only token is replayed from an
+    external datacenter/residential IP."""
+    loc = {"ip": random.choice(RISKY_IPS), "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    rec = _sp_signin(loc)
+    rec["clientCredentialType"] = "clientAssertion"
+    rec["riskState"] = "atRisk"
+    rec["riskLevelDuringSignIn"] = "high"
+    rec["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures"]
+    return [rec]
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
@@ -577,6 +634,10 @@ SCENARIOS = {
     "first_sso_new_asn": scenario_first_sso_new_asn,
     "unusual_resource_access_by_app": scenario_unusual_resource_access_by_app,
     "app_access_unknown_tenant": scenario_app_access_unknown_tenant,
+    "sp_token_remote_usage": scenario_sp_token_remote_usage,
+    "mi_token_remote_usage": scenario_mi_token_remote_usage,
+    "device_code_auth_flow": scenario_device_code_auth_flow,
+    "service_account_sso": scenario_service_account_sso,
     "powershell_signin": scenario_powershell_signin,
     "new_device_signin": scenario_new_device_signin,
     "new_country_signin": scenario_new_country_signin,
