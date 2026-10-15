@@ -16,6 +16,7 @@ import time
 import uuid
 
 from modules import azure_common as ac
+from modules import o365_sharepoint as spo
 
 NAME = "Office 365 DLP"
 DESCRIPTION = "Simulates Office 365 DLP rule-match records for msft_o365_dlp_raw via the cribl_direct transport."
@@ -31,9 +32,28 @@ _SIT = ["Credit Card Number", "U.S. Social Security Number (SSN)", "U.S. Bank Ac
         "ABA Routing Number", "U.S. / U.K. Passport Number", "U.S. Individual Taxpayer Identification Number (ITIN)"]
 _POLICIES = {"U.S. PII": ["U.S. SSN", "U.S. ITIN"], "PCI DSS": ["Credit Card"],
              "Financial Data": ["Bank Account", "ABA Routing"], "GDPR": ["EU Passport"]}
-_DOCS = ["Customer List.xlsx", "Payroll.xlsx", "Cardholder Data.csv", "Patient Records.xlsx"]
-_THREAT_PROB = {"Benign Traffic Only": 0.0, "Low": 0.02, "Realistic": 0.05,
-                "Medium": 0.08, "High": 0.12, "Insane": 0.30}
+# Programmatic sensitive-filename generator (unbounded, realistic) — e.g. "Payroll Register 2026 Q3.xlsx".
+_SENS_SUBJECT = ["Customer List", "Payroll", "Payroll Register", "Cardholder Data", "Patient Records",
+                 "Employee SSNs", "Bank Details", "Tax Forms W2", "Credit Applications", "Insurance Claims",
+                 "Vendor Banking", "HR Compensation", "Member PII", "Passport Scans", "Loan Applications",
+                 "Benefits Enrollment", "Account Numbers", "Wire Instructions", "Salary Data", "Medical Records",
+                 "Background Checks", "Direct Deposit", "Credit Card Export", "Donor List", "Student Records",
+                 "Claimant Data", "Beneficiary List", "KYC Documents", "Investor Statements", "Tax Returns"]
+_SENS_QUAL = ["", "", " Export", " Backup", " Master", " 2024", " 2025", " 2026", " Q1", " Q2", " Q3", " Q4",
+              " Full", " Confidential", " - DO NOT SHARE", " copy", " (1)", " final"]
+_SENS_EXT = ["xlsx", "xlsx", "csv", "csv", "pdf", "xls", "txt", "zip"]
+
+
+def _sensitive_name(rnd=None):
+    r = rnd or random
+    return f"{r.choice(_SENS_SUBJECT)}{r.choice(_SENS_QUAL)}.{r.choice(_SENS_EXT)}"
+
+
+_SIT = ["Credit Card Number", "U.S. Social Security Number (SSN)", "U.S. Bank Account Number",
+        "ABA Routing Number", "U.S. / U.K. Passport Number", "U.S. Individual Taxpayer Identification Number (ITIN)"]
+_POLICIES = {"U.S. PII": ["U.S. SSN", "U.S. ITIN"], "PCI DSS": ["Credit Card"],
+             "Financial Data": ["Bank Account", "ABA Routing"], "GDPR": ["EU Passport"]}
+# Threat rate governed centrally by ac.ThreatGate / ac.THREAT_EPISODES_PER_HOUR (see _GATE below).
 
 
 def _g():
@@ -53,31 +73,57 @@ def _policy_details(policy, rule, sits, severity, actions, count):
                              "Confidence": random.choice([75, 85, 95])} for s in sits]}}]}]
 
 
-def _dlp(user, workload, policy, rule, sits, severity, actions, count, offset_s=0):
-    r = {"CreationTime": _now(offset_s), "Id": _g(), "Operation": "DLPRuleMatch",
+def _dlp(user, workload, policy, rule, sits, severity, actions, count, offset_s=0,
+         operation="DLPRuleMatch", override=None):
+    r = {"CreationTime": _now(offset_s), "Id": _g(), "Operation": operation,
          "OrganizationId": ORG_ID, "RecordType": 11, "UserType": 0, "Version": 1,
          "Workload": workload, "UserId": user["upn"], "UserKey": ac.user_oid(user["username"]),
          "ClientIP": ac.egress(user)["ip"], "SensitiveInfoDetectionIsIncluded": True,
          "PolicyDetails": _policy_details(policy, rule, sits, severity, actions, count)}
+    if override:
+        # User overrode a block or reported a false positive (OverrideInfo in the DLP schema).
+        r["PolicyDetails"][0]["Rules"][0]["OverrideInfo"] = {
+            "Reason": override, "Justification": {
+                "FalsePositive": "This file does not contain sensitive data.",
+                "Override": "I have business approval to send this.",
+                "ReportFalsePositiveAndOverride": "Reported and overridden with manager approval.",
+            }[override]}
     if workload == "Exchange":
+        n_to = random.choices([1, 1, 2, 3], weights=[60, 20, 15, 5])[0]
         r["ExchangeMetaData"] = {"MessageID": f"<{_g()}@{ac.UPN_DOMAIN}>", "From": user["upn"],
-                                 "To": [f"ext@{random.choice(_EXT_DOMAINS)}"],
-                                 "Subject": random.choice(["Report", "Files", "FYI", "Data export"]),
-                                 "Sent": _now(offset_s)}
+                                 "To": [ac.external_email() for _ in range(n_to)],
+                                 "Subject": ac.email_subject(external=True), "Sent": _now(offset_s)}
     else:
-        doc = random.choice(_DOCS)
-        r["SharePointMetaData"] = {"From": user["upn"], "FileName": doc, "DocumentId": _g(),
-                                   "FilePathUrl": f"https://{SP_HOST}/sites/Finance/Shared Documents/{doc}"}
+        f = spo.path_for_filename(random, _sensitive_name())
+        r["SharePointMetaData"] = {"From": user["upn"], "FileName": f["filename"],
+                                   "DocumentId": ac._stable_guid("item:" + f["host"] + f["rel"]),
+                                   "FilePathUrl": f'https://{f["host"]}{f["rel"]}'}
     return r
 
 
 def generate_benign(config=None, context=None):
-    """Routine low-severity notify-only match (false positive / policy tip)."""
+    """Routine DLP outcomes: low-severity notify-only matches, policy tips, user overrides with
+    justification, false-positive reports, and undo events — the everyday DLP outcome spread."""
     u = ac.pick_user(config, context)
     pol = random.choice(list(_POLICIES))
     wl = "Exchange" if random.random() < 0.6 else "SharePoint"
+    r = random.random()
+    if r < 0.55:   # low-severity notify-only match (policy tip / routine false positive)
+        return [_dlp(u, wl, pol, f"{pol} - Low", random.sample(_SIT, 1), "Low",
+                     ["GenerateIncidentReport", "NotifyUser"], random.randint(1, 2))]
+    if r < 0.72:   # DLPInfo — policy tip shown to the user, no enforcement
+        return [_dlp(u, wl, pol, f"{pol} - Notify", random.sample(_SIT, 1), "Low",
+                     ["NotifyUser"], random.randint(1, 2), operation="DLPInfo")]
+    if r < 0.86:   # user overrode a block with a business justification
+        return [_dlp(u, wl, pol, f"{pol} - Medium", random.sample(_SIT, 1), "Medium",
+                     ["BlockAccess", "NotifyUser"], random.randint(1, 4),
+                     override=random.choice(["Override", "ReportFalsePositiveAndOverride"]))]
+    if r < 0.94:   # user reported a false positive
+        return [_dlp(u, wl, pol, f"{pol} - Low", random.sample(_SIT, 1), "Low",
+                     ["NotifyUser"], 1, override="FalsePositive")]
+    # DLPRuleUndo — a previously enforced action was undone (e.g., policy retuned, item released)
     return [_dlp(u, wl, pol, f"{pol} - Low", random.sample(_SIT, 1), "Low",
-                 ["GenerateIncidentReport", "NotifyUser"], random.randint(1, 2))]
+                 ["GenerateIncidentReport"], random.randint(1, 2), operation="DLPRuleUndo")]
 
 
 def scenario_dlp_exfil_block(config=None):
@@ -110,6 +156,9 @@ SCENARIOS = {
 }
 
 
+_GATE = ac.ThreatGate(SCENARIOS)
+
+
 def get_threat_names():
     return list(SCENARIOS.keys())
 
@@ -123,7 +172,7 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
         return None
     if benign_only or threat_level == "Benign Traffic Only":
         return generate_benign(config, context)
-    if random.random() < _THREAT_PROB.get(threat_level, 0.05):
+    if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
         return (SCENARIOS[key](config), key)
     return generate_benign(config, context)

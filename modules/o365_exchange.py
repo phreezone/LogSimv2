@@ -34,8 +34,7 @@ ADMIN_ROLES = ("IT Administrator", "IT Director", "Systems Engineer")
 _EXT_DOMAINS = ["gmail.com", "proton.me", "mailrelay-xyz.com", "outlook.com", "secure-fwd.net"]
 _SERVERS = ["SA1PR22MB4272 (15.21.0496.000)", "CH2PR22MB1863 (15.20.4200.000)",
             "BN9PR22MB3421 (15.20.4200.012)"]
-_THREAT_PROB = {"Benign Traffic Only": 0.0, "Low": 0.02, "Realistic": 0.05,
-                "Medium": 0.08, "High": 0.12, "Insane": 0.30}
+# Threat rate governed centrally by ac.ThreatGate / ac.THREAT_EPISODES_PER_HOUR (see _GATE below).
 
 
 def _g():
@@ -105,8 +104,10 @@ def mailbox_action(operation, owner, actor=None, logon_type=0, client="OWA",
     return r
 
 
-def mail_items_accessed(owner, count=1, offset_s=0):
-    """RecordType 50 — MailItemsAccessed."""
+def mail_items_accessed(owner, count=1, offset_s=0, throttled=False):
+    """RecordType 50 — MailItemsAccessed. throttled=True emits a sync-level throttled access
+    (IsThrottled True) — Microsoft stops logging per-item binds under heavy access, which is itself
+    a documented mass-mailbox-access / compromise indicator."""
     r = _common("MailItemsAccessed", owner, 50, "Succeeded", offset_s)
     r.update({"UserType": 5, "ExternalAccess": False, "LogonType": 0, "InternalLogonType": 0,
               "MailboxOwnerUPN": owner["upn"], "MailboxOwnerSid": _sid(owner["username"]),
@@ -115,16 +116,24 @@ def mail_items_accessed(owner, count=1, offset_s=0):
               "ClientIPAddress": ac.egress(owner)["ip"],
               "ClientInfoString": "Client=REST;Client=RESTSystem;;",
               "AppId": "00000003-0000-0000-c000-000000000000", "ClientAppId": _g(),
-              "OperationCount": count, "TokenTenantId": ORG_ID,
-              "OperationProperties": [{"Name": "MailAccessType", "Value": "Bind"}],
-              "Folders": [{"Path": "\\Inbox", "FolderItems": [{"InternetMessageId": f"<{_g()}@{ORG_NAME}>"}
-                                                              for _ in range(count)]}]})
+              "OperationCount": count, "TokenTenantId": ORG_ID})
+    if throttled:
+        r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Sync"},
+                                    {"Name": "IsThrottled", "Value": "True"}]
+    else:
+        r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Bind"},
+                                    {"Name": "IsThrottled", "Value": "False"}]
+        r["Folders"] = [{"Path": "\\Inbox", "FolderItems": [{"InternetMessageId": f"<{_g()}@{ORG_NAME}>"}
+                                                            for _ in range(count)]}]
     return r
 
 
 # ── benign baseline ─────────────────────────────────────────────────────────────────
 
 def _b_mail_accessed(cfg):
+    # ~4% of heavy benign access sessions get throttled (large mailboxes, migrations, busy users).
+    if random.random() < 0.04:
+        return mail_items_accessed(ac.pick_user(cfg), throttled=True)
     return mail_items_accessed(ac.pick_user(cfg), count=random.randint(1, 8))
 
 
@@ -135,8 +144,7 @@ def _b_send(cfg):
 def _b_move(cfg):
     u = ac.pick_user(cfg)
     return mailbox_action(random.choice(["MoveToDeletedItems", "Move", "SoftDelete"]), u,
-                          item={"Subject": random.choice(["Re: Q3 numbers", "Lunch?", "Newsletter",
-                                "Ticket update", "Meeting notes"]), "ParentFolder": {"Path": "\\Inbox"}})
+                          item={"Subject": ac.email_subject(), "ParentFolder": {"Path": "\\Inbox"}})
 
 
 def _b_benign_rule(cfg):
@@ -166,8 +174,6 @@ _MAILBOX_OPS = ["Create", "Update", "Move", "MoveToDeletedItems", "SoftDelete", 
                 "RecordDelete", "SearchQueryInitiated"]
 _ITEM_OPS = {"Create", "Update", "Move", "MoveToDeletedItems", "SoftDelete", "HardDelete",
              "Copy", "FolderBind"}
-_SUBJECTS = ["Re: Q3 numbers", "Lunch?", "Weekly newsletter", "Ticket #4821 update",
-             "Meeting notes", "Invoice attached", "PTO request", "Deploy window"]
 # Common benign admin cmdlets (mailbox configuration housekeeping).
 _ADMIN_BENIGN = ["Set-Mailbox", "Set-CASMailbox", "Set-MailboxRegionalConfiguration",
                  "Set-MailboxCalendarConfiguration", "Enable-Mailbox", "Set-OwaMailboxPolicy",
@@ -179,7 +185,7 @@ def _b_mailbox_op(cfg):
     u = ac.pick_user(cfg)
     op = random.choice(_MAILBOX_OPS)
     lt = 0 if random.random() < 0.85 else 2   # mostly owner, some delegate access
-    item = ({"Subject": random.choice(_SUBJECTS), "ParentFolder": {"Path": "\\Inbox"}}
+    item = ({"Subject": ac.email_subject(), "ParentFolder": {"Path": "\\Inbox"}}
             if op in _ITEM_OPS else None)
     return mailbox_action(op, u, logon_type=lt, item=item)
 
@@ -196,11 +202,28 @@ _B_POOL = [fn for w, fn in _BENIGN for _ in range(w)]
 _HUMAN = {_b_mailbox_op, _b_benign_rule, _b_login, _b_new_mailbox, _b_admin_benign}
 
 
+# A realistic minority of benign Exchange operations fail: admin cmdlets rejected for insufficient
+# permissions / bad parameters (ResultStatus "False"), and mailbox actions that error (ResultStatus
+# "Failed"). Background MailItemsAccessed (RT50) is left as success.
+_FAIL_RATE = 0.08
+
+
+def _maybe_fail(rec):
+    if random.random() >= _FAIL_RATE:
+        return rec
+    rt = rec.get("RecordType")
+    if rt == 1:                      # admin cmdlet: mostly hard-fail, sometimes partial
+        rec["ResultStatus"] = "PartiallySucceeded" if random.random() < 0.25 else "False"
+    elif rt == 2:                    # mailbox action
+        rec["ResultStatus"] = "Failed"
+    return rec
+
+
 def generate_benign(config=None, context=None):
     fn = random.choice(_B_POOL)
     if fn in _HUMAN and random.random() > ac.activity_weight():
         fn = _b_mail_accessed   # off-hours: background mail sync still runs
-    return [fn(config)]
+    return [_maybe_fail(fn(config))]
 
 
 # ── Exchange BEC detection scenarios ────────────────────────────────────────────────
@@ -218,6 +241,16 @@ def scenario_email_hiding_rule(config=None):
     u = ac.pick_user(config)
     return [admin_cmdlet("New-InboxRule", u, _param(Name=".", MoveToFolder="Deleted Items",
                          MarkAsRead="True", DeleteMessage="True", StopProcessingRules="True"),
+                         target_user=u)]
+
+
+def scenario_catch_all_hiding_rule(config=None):
+    """New-InboxRule with NO filtering condition (applies to ALL incoming mail) that moves to an
+    obscure folder, marks read and stops processing -> 'Suspicious catch-all inbox rule for email
+    hiding'. The absence of any From/Subject condition is the catch-all signal."""
+    u = ac.pick_user(config)
+    return [admin_cmdlet("New-InboxRule", u, _param(Name="...", MoveToFolder="RSS Feeds",
+                         MarkAsRead="True", DeleteMessage="False", StopProcessingRules="True"),
                          target_user=u)]
 
 
@@ -261,6 +294,37 @@ def scenario_folder_permission_mod(config=None):
     return [mailbox_action("ModifyFolderPermissions", u, item=item, result="Succeeded")]
 
 
+def scenario_mail_accessed_multi_ip_subnet(config=None):
+    """One mailbox's items accessed from MULTIPLE IPs in the same /24 subnet with anomalous (REST,
+    non-Outlook) client properties -> 'Mail objects accessed by multiple IPs in the same subnet'."""
+    owner = ac.pick_user(config)
+    base = f"198.51.{random.randint(1, 254)}."
+    out = []
+    for i in range(6):
+        r = mail_items_accessed(owner, count=random.randint(2, 6), offset_s=-(i * 20))
+        ip = f"{base}{random.randint(2, 250)}"
+        r["ClientIPAddress"] = ip
+        r["ClientInfoString"] = "Client=REST;Client=RESTSystem;;"   # anomalous automated access
+        out.append(r)
+    return out
+
+
+def scenario_sent_to_deleted_scripted(config=None):
+    """A burst of Sent Items -> Deleted Items moves via a REST/scripting client from an unusual
+    source -> 'User moved Exchange Sent items to Deleted Items (possible scripting)' (anti-forensics)."""
+    u = ac.pick_user(config)
+    bad = random.choice(["45.148.10.92", "193.218.118.158", "171.25.193.78"])
+    out = []
+    for i in range(12):
+        r = mailbox_action("Move", u, client="REST",
+                           item={"Subject": ac.email_subject(), "ParentFolder": {"Path": "\\Sent Items"}},
+                           extra={"DestFolderPathName": "\\Deleted Items"}, offset_s=-(i * 5))
+        r["ClientIPAddress"] = bad
+        r["ClientIP"] = bad
+        out.append(r)
+    return out
+
+
 def scenario_audit_bypass(config=None):
     """Set-MailboxAuditBypassAssociation enabling audit bypass -> defense evasion (Exchange audit bypass)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
@@ -271,13 +335,19 @@ def scenario_audit_bypass(config=None):
 SCENARIOS = {
     "inbox_forwarding_rule": scenario_inbox_forwarding_rule,
     "email_hiding_rule": scenario_email_hiding_rule,
+    "catch_all_hiding_rule": scenario_catch_all_hiding_rule,
     "mailbox_smtp_forwarding": scenario_mailbox_smtp_forwarding,
     "mailbox_delegation": scenario_mailbox_delegation,
     "send_as_permission": scenario_send_as_permission,
     "transport_forwarding_rule": scenario_transport_forwarding_rule,
     "folder_permission_mod": scenario_folder_permission_mod,
+    "mail_accessed_multi_ip_subnet": scenario_mail_accessed_multi_ip_subnet,
+    "sent_to_deleted_scripted": scenario_sent_to_deleted_scripted,
     "audit_bypass": scenario_audit_bypass,
 }
+
+
+_GATE = ac.ThreatGate(SCENARIOS)
 
 
 def get_threat_names():
@@ -293,7 +363,7 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
         return None
     if benign_only or threat_level == "Benign Traffic Only":
         return generate_benign(config, context)
-    if random.random() < _THREAT_PROB.get(threat_level, 0.05):
+    if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
         return (SCENARIOS[key](config), key)
     return generate_benign(config, context)

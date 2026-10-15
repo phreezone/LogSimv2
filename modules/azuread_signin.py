@@ -23,10 +23,8 @@ DATASET = "msft_azure_ad_raw"
 
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
 
-_THREAT_PROB = {
-    "Benign Traffic Only": 0.0, "Low": 0.02, "Realistic": 0.05,
-    "Medium": 0.08, "High": 0.12, "Insane": 0.30,
-}
+# Threat rate is governed centrally by ac.ThreatGate / ac.THREAT_EPISODES_PER_HOUR (wall-clock
+# episode rate, with a benign warmup) — see _GATE below.
 
 
 def _g():
@@ -46,7 +44,8 @@ def _tor_ip(config):
 
 
 def _signin(user, loc, *, interactive=True, success=True, error_code=0,
-            failure="Other.", risk_level="none", risk_state="none", offset_s=0,
+            failure="Other.", risk_level="none", risk_state="none", risk_detail="none",
+            risk_events=None, offset_s=0,
             app=None, resource=None, conditional="success", client_app="Browser",
             mfa=False, ca_result=None, auth_method=None, user_type="member",
             cross_tenant="none", device=None):
@@ -75,14 +74,14 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
         "appId": ac.app_id(app_name), "appDisplayName": app_name,
         "ipAddress": loc["ip"], "clientAppUsed": client_app, "correlationId": _g(),
         "conditionalAccessStatus": conditional, "isInteractive": interactive,
-        "riskDetail": "none", "riskLevelAggregated": risk_level,
+        "riskDetail": risk_detail, "riskLevelAggregated": risk_level,
         "riskLevelDuringSignIn": risk_level, "riskState": risk_state,
-        "riskEventTypes": [], "riskEventTypes_v2": [],
+        "riskEventTypes": risk_events or [], "riskEventTypes_v2": risk_events or [],
         "resourceDisplayName": res_name, "resourceId": ac.resource_id(res_name),
         "homeTenantId": ac.HOME_TENANT_ID, "userType": user_type, "crossTenantAccessType": cross_tenant,
         "incomingTokenType": "primaryRefreshToken" if not interactive else "none",
         "tokenIssuerType": "AzureAD", "clientCredentialType": "none",
-        "autonomousSystemNumber": ac._h(loc["ip"]) % 60000,
+        "autonomousSystemNumber": loc.get("asn", ac._h(loc["ip"]) % 60000),
         "signInEventTypes": ["interactiveUser"] if interactive else ["nonInteractiveUser"],
         "authenticationRequirement": "multiFactorAuthentication" if (mfa or auth_method) else "singleFactorAuthentication",
         "authenticationProtocol": "oAuth2" if interactive else "none",
@@ -99,6 +98,8 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
         "deviceDetail": device or ac.device_for(user),
         "location": {"city": loc["city"], "state": loc["state"],
                      "countryOrRegion": loc["countryOrRegion"], "geoCoordinates": loc["geoCoordinates"]},
+        "ipAddressFromResourceProvider": None, "networkNames": [],
+        "autonomousSystemOrganization": loc.get("isp"),
         "appliedConditionalAccessPolicies": (ac.applied_ca(ca_result, n=random.randint(1, 2))
                                              if ca_result else []),
     }
@@ -156,11 +157,45 @@ _LEGACY_CLIENTS = ["IMAP4", "POP3", "SMTP", "Exchange ActiveSync", "Other client
 _GUEST_DOMAINS = ["partnerco.com", "contoso.com", "fabrikam.com", "vendor.io"]
 
 
+# Azure AD Connect directory-sync service account. In a real tenant this account authenticates
+# ONLY from the on-prem AAD Connect server; a sign-in from anywhere else means its credentials
+# (which carry directory-write / password-hash-sync rights) were stolen.
+_SYNC_ACCOUNT = {"username": "sync_aadconnect01",
+                 "upn": "Sync_AADCONNECT01_7f3c2b9e@examplecorp.com",
+                 "display_name": "On-Premises Directory Synchronization Service Account",
+                 "department": "IT", "os_type": "Windows"}
+_AADCONNECT_HOST_LOC = {"ip": "52.14.33.10", "city": "Columbus", "state": "Ohio",
+                        "countryOrRegion": "US", "geoCoordinates": {"latitude": 39.96, "longitude": -82.99},
+                        "asn": 7922, "isp": "Comcast Business"}
+
+
+def _sync_signin(loc, *, risky=False, offset_s=0):
+    rec = _signin(_SYNC_ACCOUNT, loc, interactive=False, app="Microsoft Azure AD Connect",
+                  resource="Windows Azure Active Directory",
+                  client_app="Mobile Apps and Desktop clients", offset_s=offset_s,
+                  risk_level="high" if risky else "none",
+                  risk_state="atRisk" if risky else "none")
+    if risky:
+        rec["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures"]
+    return rec
+
+
+def scenario_aad_connect_sync_unusual_host(config=None, user=None):
+    """The AAD Connect directory-sync service account authenticates from an UNUSUAL host/IP (it
+    normally signs in only from the on-prem Connect server) -> 'Unusual Azure AD sync account
+    sign-in from a new host' (sync-account credential theft)."""
+    bad = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    return [_sync_signin(bad, risky=True)]
+
+
 def generate_benign(config=None, context=None):
     """One routine sign-in from the real-world weighted mix a live tenant produces."""
     user = ac.pick_user(config, context)
     loc = ac.egress(user)
     r = random.random()
+    if r < 0.004:  # AAD Connect sync account's periodic auth FROM ITS NORMAL HOST (baseline for the
+        return [_sync_signin(_AADCONNECT_HOST_LOC)]   # 'unusual host' anomaly to measure against)
     if r < 0.50:   # non-interactive token refresh — highest volume
         return [_signin(user, loc, interactive=False, app=random.choice(ac.APPS_NONINTERACTIVE),
                         conditional=random.choice(["success", "notApplied"]))]
@@ -171,9 +206,15 @@ def generate_benign(config=None, context=None):
         return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
                         ca_result="success", conditional="success", mfa=True,
                         auth_method=random.choice(ac.MFA_METHODS[:3]))]
-    if r < 0.82:   # app-only background auth: service principal, or managed identity (Azure resources)
+    if r < 0.78:   # mobile sign-in from a phone (cellular egress + registered mobile device)
+        mloc = ac.egress(user, remote_prob=0.0, mobile_prob=1.0)
+        return [_signin(user, mloc, interactive=(random.random() < 0.4),
+                        app=random.choice(["Microsoft Teams", "Outlook Mobile", "OneDrive SyncEngine"]),
+                        client_app="Mobile Apps and Desktop clients", ca_result="success",
+                        conditional="success", device=ac.device_for(user, mobile=True))]
+    if r < 0.84:   # app-only background auth: service principal, or managed identity (Azure resources)
         return [_mi_signin(loc) if random.random() < 0.3 else _sp_signin(loc)]
-    if r < 0.86:   # guest / B2B sign-in
+    if r < 0.87:   # guest / B2B sign-in
         guest = dict(user)
         guest["upn"] = f'{user["username"].replace(".", "")}@{random.choice(_GUEST_DOMAINS)}'
         return [_signin(guest, loc, interactive=True, app="My Apps", user_type="guest",
@@ -183,10 +224,22 @@ def generate_benign(config=None, context=None):
                         resource="Office 365 Exchange Online", success=False, error_code=53003,
                         failure="Access has been blocked by Conditional Access policies.",
                         conditional="failure", ca_result="failure")]
+    if r < 0.925:  # report-only CA evaluation (policy in report-only mode — sign-in still succeeds)
+        return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
+                        conditional="success",
+                        ca_result=random.choice(["reportOnlySuccess", "reportOnlyFailure"]))]
     if r < 0.95:   # first-seen / new device for this user (benign — new laptop, reinstall)
         return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
                         ca_result="success", conditional="success", device=ac.device_for(user, new=True))]
-    # routine benign failure (mistyped/expired password, MFA needed, SSO session)
+    if r < 0.97:   # low/medium sign-in risk that Identity Protection auto-remediated/dismissed (benign noise)
+        lvl = random.choice(["low", "medium"])
+        return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
+                        ca_result="success", conditional="success", mfa=True,
+                        auth_method=random.choice(ac.MFA_METHODS[:3]),
+                        risk_level=lvl, risk_state=random.choice(["dismissed", "remediated"]),
+                        risk_detail=random.choice(["aiConfirmedSigninSafe", "adminConfirmedSigninSafe"]),
+                        risk_events=[random.choice(["unfamiliarFeatures", "unlikelyTravel"])])]
+    # routine benign failure / MFA interrupt (mistyped or expired password, MFA needed, SSO session)
     code, reason = random.choice(ac.BENIGN_FAIL)
     return [_signin(user, loc, interactive=True, success=False, error_code=code, failure=reason,
                     conditional="notApplied")]
@@ -290,12 +343,73 @@ def scenario_account_lockout_spray(config=None, victims=10, src_ip=None):
     return out
 
 
+def scenario_saas_api_from_tor(config=None, user=None):
+    """A non-interactive SaaS/API token call to a Microsoft API from a TOR exit node ->
+    'SaaS API called from TOR node'. (tor_signin is an interactive login; this is the API/token
+    use of a SaaS resource over TOR.)"""
+    u = ac.pick_user(config)
+    bad = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    rec = _signin(u, bad, interactive=False,
+                  resource=random.choice(["Microsoft Graph", "Office 365 Exchange Online",
+                                          "Office 365 SharePoint Online"]),
+                  app=random.choice(ac.APPS_NONINTERACTIVE),
+                  client_app="Mobile Apps and Desktop clients",
+                  risk_level="high", risk_state="atRisk")
+    rec["riskEventTypes_v2"] = ["anonymizedIPAddress"]
+    return [rec]
+
+
+def scenario_saas_api_from_tor_mobile(config=None, user=None):
+    """SaaS/API token call from a TOR exit node on a MOBILE device -> 'SaaS API call from TOR via
+    mobile device'."""
+    u = ac.pick_user(config)
+    bad = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    rec = _signin(u, bad, interactive=False, resource=random.choice(["Microsoft Graph", "Office 365 Exchange Online"]),
+                  app=random.choice(["Outlook Mobile", "Microsoft Teams", "OneDrive SyncEngine"]),
+                  client_app="Mobile Apps and Desktop clients",
+                  device=ac.device_for(u, mobile=True), risk_level="high", risk_state="atRisk")
+    rec["riskEventTypes_v2"] = ["anonymizedIPAddress"]
+    return [rec]
+
+
+def scenario_multi_resource_sso(config=None, user=None):
+    """One user accesses many apps/resources via SSO in a short window -> 'Suspicious user accessed
+    multiple items via SSO'."""
+    u = ac.pick_user(config); loc = ac.egress(u); out = []
+    for i, r in enumerate(random.sample(ac.RESOURCES, min(6, len(ac.RESOURCES)))):
+        out.append(_signin(u, loc, interactive=False, resource=r,
+                           app=random.choice(ac.APPS_NONINTERACTIVE), offset_s=-(i * 20)))
+    return out
+
+
+def scenario_multi_sso_anon_proxy(config=None, user=None):
+    """Many SSO resource accesses from an anonymized proxy / TOR -> 'User accessed multiple items
+    via SSO using an anonymized proxy'."""
+    u = ac.pick_user(config)
+    bad = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    out = []
+    for i, r in enumerate(random.sample(ac.RESOURCES, min(6, len(ac.RESOURCES)))):
+        rec = _signin(u, bad, interactive=True, resource=r, risk_level="high", risk_state="atRisk",
+                      offset_s=-(i * 15))
+        rec["riskEventTypes_v2"] = ["anonymizedIPAddress"]
+        out.append(rec)
+    return out
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
     "impossible_travel": scenario_impossible_travel,
     "high_risk_signin": scenario_high_risk_signin,
     "tor_signin": scenario_tor_signin,
+    "saas_api_from_tor": scenario_saas_api_from_tor,
+    "saas_api_from_tor_mobile": scenario_saas_api_from_tor_mobile,
+    "multi_resource_sso": scenario_multi_resource_sso,
+    "multi_sso_anon_proxy": scenario_multi_sso_anon_proxy,
+    "aad_connect_sync_unusual_host": scenario_aad_connect_sync_unusual_host,
     "powershell_signin": scenario_powershell_signin,
     "new_device_signin": scenario_new_device_signin,
     "new_country_signin": scenario_new_country_signin,
@@ -304,6 +418,9 @@ SCENARIOS = {
 
 
 # ── LogSim module interface ──────────────────────────────────────────────────────────
+
+_GATE = ac.ThreatGate(SCENARIOS)
+
 
 def get_threat_names():
     return list(SCENARIOS.keys())
@@ -318,7 +435,7 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
         return None
     if benign_only or threat_level == "Benign Traffic Only":
         return generate_benign(config, context)
-    if random.random() < _THREAT_PROB.get(threat_level, 0.05):
+    if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
         return (SCENARIOS[key](config), key)
     return generate_benign(config, context)
