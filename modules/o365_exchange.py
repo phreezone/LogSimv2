@@ -400,6 +400,20 @@ def scenario_single_ip_multi_mailbox(config=None):
     return out
 
 
+def scenario_mailbox_enumeration(config=None):
+    """An Azure application uses the Graph API to enumerate/read many distinct mailboxes in a short
+    window -> 'Mailbox enumeration activity by Azure application' (Cloud Service Discovery T1526,
+    Informational)."""
+    out = []
+    for i in range(10):
+        owner = ac.pick_user(config)
+        r = mail_items_accessed(owner, count=1, offset_s=-(i * 6))
+        r["ClientInfoString"] = "Client=REST;Client=RESTSystem;;"   # Graph app, not interactive
+        r["AppId"] = "00000003-0000-0000-c000-000000000000"         # Microsoft Graph
+        out.append(r)
+    return out
+
+
 def scenario_sensitive_mail_external(config=None):
     """Sensitive mail sent to an external recipient -> 'Sensitive Exchange mail sent to external
     users'."""
@@ -448,6 +462,7 @@ SCENARIOS = {
     "safe_link_disabled": scenario_safe_link_disabled,
     "email_hiding_transport_rule": scenario_email_hiding_transport_rule,
     "sensitive_mail_external": scenario_sensitive_mail_external,
+    "mailbox_enumeration": scenario_mailbox_enumeration,
     "dlp_policy_disabled": scenario_dlp_policy_disabled,
     "audit_bypass": scenario_audit_bypass,
 }
