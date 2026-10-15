@@ -255,6 +255,15 @@ def scenario_inbox_forwarding_suspicious(config=None):
                          DeleteMessage="True", StopProcessingRules="True"), target_user=u)]
 
 
+def scenario_transport_forwarding_delegate(config=None):
+    """A mail-flow (transport) forwarding rule configured by a delegate -> 'Exchange transport
+    forwarding rule configured' delegate variant."""
+    delegate = ac.pick_user(config)
+    ext = f"collector@{random.choice(_EXT_DOMAINS)}"
+    return [admin_cmdlet("New-TransportRule", delegate, _param(Name="External Archive",
+                         BlindCopyTo=ext, Enabled="True"), external=True)]
+
+
 def scenario_mailbox_smtp_forwarding_delegate(config=None):
     """Set-Mailbox SMTP forwarding set by a DELEGATE on another user's mailbox -> 'Exchange user
     mailbox forwarding' delegate variant."""
@@ -475,6 +484,7 @@ SCENARIOS = {
     "inbox_forwarding_delegate": scenario_inbox_forwarding_delegate,
     "inbox_forwarding_suspicious": scenario_inbox_forwarding_suspicious,
     "mailbox_smtp_forwarding_delegate": scenario_mailbox_smtp_forwarding_delegate,
+    "transport_forwarding_delegate": scenario_transport_forwarding_delegate,
     "email_hiding_rule": scenario_email_hiding_rule,
     "catch_all_hiding_rule": scenario_catch_all_hiding_rule,
     "mailbox_smtp_forwarding": scenario_mailbox_smtp_forwarding,
