@@ -400,6 +400,26 @@ def scenario_single_ip_multi_mailbox(config=None):
     return out
 
 
+def scenario_sensitive_mail_external(config=None):
+    """Sensitive mail sent to an external recipient -> 'Sensitive Exchange mail sent to external
+    users'."""
+    u = ac.pick_user(config)
+    ext = f"{u['username'].replace('.', '')}@{random.choice(_EXT_DOMAINS)}"
+    return [mailbox_action("Send", u, client="OWA",
+                           item={"Subject": "Wire transfer instructions - CONFIDENTIAL",
+                                 "ParentFolder": {"Path": "\\Sent Items"}},
+                           extra={"Recipients": [ext], "ExternalAccess": True})]
+
+
+def scenario_dlp_policy_disabled(config=None):
+    """A Microsoft 365 DLP compliance policy is disabled or removed -> 'Microsoft 365 DLP policy
+    disabled or removed' (compliance-cmdlet audit record)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    return [admin_cmdlet(random.choice(["Set-DlpCompliancePolicy", "Remove-DlpCompliancePolicy"]),
+                         admin, _param(Identity=random.choice(["U.S. PII", "PCI DSS", "Financial Data"]),
+                                       Mode="Disable"))]
+
+
 def scenario_audit_bypass(config=None):
     """Set-MailboxAuditBypassAssociation enabling audit bypass -> defense evasion (Exchange audit bypass)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
@@ -427,6 +447,8 @@ SCENARIOS = {
     "safe_attachment_disabled": scenario_safe_attachment_disabled,
     "safe_link_disabled": scenario_safe_link_disabled,
     "email_hiding_transport_rule": scenario_email_hiding_transport_rule,
+    "sensitive_mail_external": scenario_sensitive_mail_external,
+    "dlp_policy_disabled": scenario_dlp_policy_disabled,
     "audit_bypass": scenario_audit_bypass,
 }
 

@@ -480,6 +480,28 @@ def scenario_sso_spray_ip_rotation(config=None, victims=12):
     return out
 
 
+_PENTEST_AGENTS = ["MSOLSpray/1.0", "AADInternals", "ROADtools", "o365-attack-toolkit",
+                   "TeamFiltration/3.5", "python-requests/2.31 (MFASweep)", "Mantis"]
+
+
+def scenario_pentest_tool_activity(config=None, user=None, attempts=8):
+    """Sign-ins bearing known offensive-tool signatures in the user-agent -> 'Penetration testing
+    tool activity attempt' (MSOLSpray / AADInternals / ROADtools / TeamFiltration etc.)."""
+    agent = random.choice(_PENTEST_AGENTS)
+    bad = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
+           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    out = []
+    for i in range(attempts):
+        u = ac.pick_user(config)
+        dev = dict(ac.device_for(u), browser=agent, isCompliant=False, isManaged=False, trustType="")
+        out.append(_signin(u, bad, interactive=True, success=(i == attempts - 1),
+                           error_code=(0 if i == attempts - 1 else 50126),
+                           failure="Invalid username or password.", device=dev,
+                           risk_level="high", risk_state="atRisk", conditional="notApplied",
+                           offset_s=-(120 - i * 12)))
+    return out
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
@@ -498,6 +520,7 @@ SCENARIOS = {
     "sso_abnormal_os": scenario_sso_abnormal_os,
     "machine_account_sso": scenario_machine_account_sso,
     "sso_spray_ip_rotation": scenario_sso_spray_ip_rotation,
+    "pentest_tool_activity": scenario_pentest_tool_activity,
     "powershell_signin": scenario_powershell_signin,
     "new_device_signin": scenario_new_device_signin,
     "new_country_signin": scenario_new_country_signin,
