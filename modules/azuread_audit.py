@@ -774,6 +774,119 @@ def scenario_onprem_sync_collision(config=None):
                                 mp("Included Updated Properties", None, "SourceAnchor, DirSyncEnabled")])])]
 
 
+def scenario_user_account_created(config=None):
+    """A new directory user is created by an identity that does not normally provision accounts ->
+    'Azure account creation by a non-standard account' (rogue account persistence)."""
+    actor = ac.pick_user(config)
+    newu = f"svc_{random.randint(1000,9999)}"
+    return [audit("Add user", "UserManagement", "Core Directory", "Add", by_user(actor),
+                  [t_user({"username": newu, "upn": f"{newu}@examplecorp.com",
+                           "display_name": "Service Account"},
+                          [mp("AccountEnabled", None, "True"),
+                           mp("UserPrincipalName", None, f"{newu}@examplecorp.com")])], [_ua(actor)])]
+
+
+def scenario_user_account_deleted(config=None):
+    """A directory user is deleted by an identity that does not normally delete accounts ->
+    'Azure account deletion by a non-standard account' (destruction / covering tracks)."""
+    actor = ac.pick_user(config); tgt = ac.pick_user(config)
+    return [audit("Delete user", "UserManagement", "Core Directory", "Delete", by_user(actor),
+                  [t_user(tgt)], [_ua(actor)])]
+
+
+def scenario_short_lived_account(config=None):
+    """An account is created and then deleted within a short window (burner account used for an
+    operation, then cleaned up) -> 'Short-lived Azure AD user account'."""
+    actor = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    burner = f"tmp_{random.randint(1000,9999)}"
+    u = {"username": burner, "upn": f"{burner}@examplecorp.com", "display_name": "Temp Account"}
+    add = audit("Add user", "UserManagement", "Core Directory", "Add", by_user(actor),
+                [t_user(u, [mp("AccountEnabled", None, "True")])], [_ua(actor)])
+    rem = audit("Delete user", "UserManagement", "Core Directory", "Delete", by_user(actor),
+                [t_user(u)], [_ua(actor)])
+    return [add, rem]
+
+
+def scenario_multiple_admin_role_removals(config=None):
+    """An identity removes several members from privileged roles in a short window (mass privilege
+    teardown / sabotage) -> 'Multiple Azure AD admin role removals'."""
+    actor = ac.pick_by_role(config, ("IT Director",), ("IT",))
+    roles = ["Global Administrator", "Privileged Role Administrator", "Security Administrator",
+             "Exchange Administrator", "User Administrator"]
+    out = []
+    for r in random.sample(roles, 4):
+        tgt = ac.pick_user(config)
+        out.append(audit("Remove member from role", "RoleManagement", "Core Directory", "Remove",
+                         by_user(actor), [t_obj("Role", r, [mp("Role.DisplayName", None, r)]),
+                                          t_user(tgt)], [_ua(actor)]))
+    return out
+
+
+def scenario_pim_member_removal(config=None):
+    """A privileged member is removed from a role via PIM (removing a rival admin / hiding an
+    assignment) -> 'PIM privilege member removal'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security")); tgt = ac.pick_user(config)
+    return [audit("Remove member from role (PIM activation)", "RoleManagement", "PIM", "Remove",
+                  by_user(admin), [t_obj("Role", "Privileged Role Administrator",
+                   [mp("Role.DisplayName", None, "Privileged Role Administrator")]), t_user(tgt)],
+                  [_ua(admin)])]
+
+
+def scenario_pim_role_settings_change(config=None):
+    """PIM role settings are weakened (e.g. MFA/approval/justification no longer required for
+    activation) -> 'Azure AD PIM role settings change'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    return [audit("Update role setting in PIM", "RoleManagement", "PIM", "Update", by_user(admin),
+                  [t_obj("Role", "Global Administrator",
+                   [mp("Setting.MfaOnActivation", "True", "False"),
+                    mp("Setting.RequireApproval", "True", "False"),
+                    mp("Setting.MaximumActivationDuration", "PT1H", "PT12H")])], [_ua(admin)])]
+
+
+def scenario_sp_created(config=None):
+    """A new service principal / application is registered (persistence via an app identity) ->
+    'Azure Service principal/Application creation'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    app = _saas_app()
+    return [audit("Add service principal", "ApplicationManagement", "Core Directory", "Add",
+                  by_user(admin), [t_obj("ServicePrincipal", app,
+                   [mp("AccountEnabled", None, "True"),
+                    mp("AppId", None, ac.app_id(app)),
+                    mp("ServicePrincipalType", None, "Application")])], [_ua(admin)])]
+
+
+def scenario_sp_removed(config=None):
+    """A service principal / application is deleted (removing an app identity to cover tracks) ->
+    'Azure application removed'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    app = _saas_app()
+    return [audit("Delete service principal", "ApplicationManagement", "Core Directory", "Delete",
+                  by_user(admin), [t_obj("ServicePrincipal", app)], [_ua(admin)])]
+
+
+def scenario_auth_method_added(config=None):
+    """A new authentication method (phone/authenticator) is registered onto a privileged account by
+    an admin -> 'Authentication method added to an Azure account' (MFA method backdoor on a
+    high-value identity)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    tgt = ac.pick_by_role(config, ("IT Director",), ("IT",))
+    method = random.choice(["Phone", "Microsoft Authenticator", "Email", "FIDO2 Security Key"])
+    return [audit("Admin registered security info", "UserManagement", "Authentication Methods",
+                  "Update", by_user(admin),
+                  [t_user(tgt, [mp("AuthenticationMethod", None, method)])], [_ua(admin)],
+                  reason="Admin registered security info")]
+
+
+def scenario_unverified_domain_added(config=None):
+    """An unverified custom domain is added to the tenant (precursor to federation backdoor /
+    domain takeover) -> 'Unverified domain added to Azure AD'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    dom = random.choice(["corp-mail-sync.com", "m365-verify.net", "tenant-federation.org"])
+    return [audit("Add unverified domain", "DirectoryManagement", "Core Directory", "Add",
+                  by_user(admin), [t_obj("Domain", dom,
+                   [mp("Capability", None, "Email"), mp("IsVerified", None, "False")])], [_ua(admin)])]
+
+
 SCENARIOS = {
     "admin_role_add": scenario_admin_role_add,
     "consent_risky_app": scenario_consent_risky_app,
@@ -803,6 +916,16 @@ SCENARIOS = {
     "multitenant_org_join": scenario_multitenant_org_join,
     "cross_tenant_default_weakened": scenario_cross_tenant_default_weakened,
     "federated_domain_backdoor": scenario_federated_domain_backdoor,
+    "user_account_created": scenario_user_account_created,
+    "user_account_deleted": scenario_user_account_deleted,
+    "short_lived_account": scenario_short_lived_account,
+    "multiple_admin_role_removals": scenario_multiple_admin_role_removals,
+    "pim_member_removal": scenario_pim_member_removal,
+    "pim_role_settings_change": scenario_pim_role_settings_change,
+    "sp_created": scenario_sp_created,
+    "sp_removed": scenario_sp_removed,
+    "auth_method_added": scenario_auth_method_added,
+    "unverified_domain_added": scenario_unverified_domain_added,
 }
 
 

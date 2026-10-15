@@ -380,6 +380,15 @@ def scenario_exchange_audit_log_disabled(config=None):
                          target_user=tgt)]
 
 
+def scenario_cas_mailbox_changed(config=None):
+    """Client Access settings on a mailbox are changed to re-enable legacy protocols (IMAP/POP/
+    ActiveSync) that bypass modern-auth controls -> 'Mailbox Client Access Setting (CAS) changed'."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
+    return [admin_cmdlet("Set-CASMailbox", admin, _param(Identity=tgt["upn"],
+                         ImapEnabled="True", PopEnabled="True", ActiveSyncEnabled="True"),
+                         target_user=tgt)]
+
+
 def scenario_compliance_search_created(config=None):
     """eDiscovery/content search created -> 'Exchange compliance search created'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
@@ -497,6 +506,7 @@ SCENARIOS = {
     "single_ip_multi_mailbox": scenario_single_ip_multi_mailbox,
     "anti_phish_policy_disabled": scenario_anti_phish_policy_disabled,
     "exchange_audit_log_disabled": scenario_exchange_audit_log_disabled,
+    "cas_mailbox_changed": scenario_cas_mailbox_changed,
     "compliance_search_created": scenario_compliance_search_created,
     "dkim_disabled": scenario_dkim_disabled,
     "malware_filter_removed": scenario_malware_filter_removed,
