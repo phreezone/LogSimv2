@@ -236,6 +236,35 @@ def scenario_inbox_forwarding_rule(config=None):
                          StopProcessingRules="True"), target_user=u)]
 
 
+def scenario_inbox_forwarding_delegate(config=None):
+    """New-InboxRule with external forwarding set by a DELEGATE on another user's mailbox ->
+    'Exchange inbox forwarding rule configured by a delegate user' variant."""
+    delegate = ac.pick_user(config); victim = ac.pick_user(config)
+    ext = f"{victim['username'].replace('.', '')}@{random.choice(_EXT_DOMAINS)}"
+    return [admin_cmdlet("New-InboxRule", delegate, _param(Name="Archive", ForwardTo=ext,
+                         StopProcessingRules="True"), target_user=victim, external=True)]
+
+
+def scenario_inbox_forwarding_suspicious(config=None):
+    """New-InboxRule forwarding externally AND filtering on sensitive keywords -> 'Suspicious
+    Exchange inbox forwarding rule configured' variant (Medium)."""
+    u = ac.pick_user(config)
+    ext = f"{u['username'].replace('.', '')}@{random.choice(_EXT_DOMAINS)}"
+    return [admin_cmdlet("New-InboxRule", u, _param(Name=".", ForwardTo=ext,
+                         SubjectOrBodyContainsWords="invoice;payment;wire transfer;password;confidential",
+                         DeleteMessage="True", StopProcessingRules="True"), target_user=u)]
+
+
+def scenario_mailbox_smtp_forwarding_delegate(config=None):
+    """Set-Mailbox SMTP forwarding set by a DELEGATE on another user's mailbox -> 'Exchange user
+    mailbox forwarding' delegate variant."""
+    delegate = ac.pick_user(config); victim = ac.pick_user(config)
+    ext = f"{victim['username'].replace('.', '')}@{random.choice(_EXT_DOMAINS)}"
+    return [admin_cmdlet("Set-Mailbox", delegate, _param(Identity=victim["upn"],
+                         ForwardingSmtpAddress=f"smtp:{ext}", DeliverToMailboxAndForward="False"),
+                         target_user=victim, external=True)]
+
+
 def scenario_email_hiding_rule(config=None):
     """New-InboxRule that deletes/hides incoming mail -> 'Exchange email-hiding inbox rule'."""
     u = ac.pick_user(config)
@@ -443,6 +472,9 @@ def scenario_audit_bypass(config=None):
 
 SCENARIOS = {
     "inbox_forwarding_rule": scenario_inbox_forwarding_rule,
+    "inbox_forwarding_delegate": scenario_inbox_forwarding_delegate,
+    "inbox_forwarding_suspicious": scenario_inbox_forwarding_suspicious,
+    "mailbox_smtp_forwarding_delegate": scenario_mailbox_smtp_forwarding_delegate,
     "email_hiding_rule": scenario_email_hiding_rule,
     "catch_all_hiding_rule": scenario_catch_all_hiding_rule,
     "mailbox_smtp_forwarding": scenario_mailbox_smtp_forwarding,
