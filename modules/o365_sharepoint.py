@@ -339,6 +339,16 @@ def scenario_mass_file_upload(config=None, count=40):
                 offset_s=-(count - i)) for i in range(count)]
 
 
+def scenario_aip_sensitive_file_access(config=None, count=15):
+    """A user accesses many sensitivity-labeled (AIP/MIP) files in a short window -> 'User accessed
+    multiple O365 AIP sensitive files'."""
+    u = ac.pick_user(config); site = random.choice(_SITES)
+    label = ac._stable_guid("label:Highly Confidential")
+    return [_sp("FileAccessed", u, site=site, doc=random.choice(_SENSITIVE_DOCS),
+                extra={"SensitivityLabelId": label, "SensitivityLabelOwnerEmail": "mip@examplecorp.com"},
+                offset_s=-(count - i) * 5) for i in range(count)]
+
+
 def scenario_full_sync_download(config=None):
     """OneDrive full-library sync download -> bulk data staging/exfil."""
     u = ac.pick_user(config)
@@ -425,6 +435,7 @@ SCENARIOS = {
     "mass_file_deletion": scenario_mass_file_deletion,
     "mass_file_editing": scenario_mass_file_editing,
     "mass_file_upload": scenario_mass_file_upload,
+    "aip_sensitive_file_access": scenario_aip_sensitive_file_access,
 }
 
 

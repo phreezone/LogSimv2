@@ -141,6 +141,18 @@ def scenario_dlp_sharepoint_block(config=None):
                  "High", ["BlockAccess", "GenerateIncidentReport"], random.randint(50, 500))]
 
 
+def scenario_dlp_sensitive_external(config=None):
+    """Sensitive data (DLP match) shared/sent to EXTERNAL recipients -> 'DLP sensitive data exposed
+    to external users'. SharePoint file shared externally, high severity."""
+    u = ac.pick_user(config)
+    r = _dlp(u, "SharePoint", random.choice(["U.S. PII", "PCI DSS", "Financial Data"]),
+             "Sensitive data shared externally", random.sample(_SIT, 2), "High",
+             ["GenerateIncidentReport", "NotifyUser"], random.randint(10, 60))
+    r["SharePointMetaData"]["SharedWithExternalUsers"] = True
+    r["SharePointMetaData"]["ExternalRecipients"] = [f"recipient@{random.choice(_EXT_DOMAINS)}"]
+    return [r]
+
+
 def scenario_dlp_match_burst(config=None, count=15):
     """Many DLP matches in a short window for one user -> mass sensitive-data movement."""
     u = ac.pick_user(config)
@@ -153,6 +165,7 @@ SCENARIOS = {
     "dlp_exfil_block": scenario_dlp_exfil_block,
     "dlp_sharepoint_block": scenario_dlp_sharepoint_block,
     "dlp_match_burst": scenario_dlp_match_burst,
+    "dlp_sensitive_external": scenario_dlp_sensitive_external,
 }
 
 

@@ -736,9 +736,32 @@ def scenario_account_unlock_password_reset(config=None):
                   by_user(admin), [t_user(tgt)], [_ua(admin)], reason=act)]
 
 
+def scenario_mfa_fraud_reported(config=None):
+    """A user reported an MFA prompt as fraud -> 'Suspicious MFA request reported by user in Entra
+    ID' (a sign of MFA-fatigue / push-bombing against the account)."""
+    u = ac.pick_user(config)
+    return [audit("Fraud reported - user is blocked for MFA", "UserManagement",
+                  "Multi-Factor Authentication", "Update", by_user(u),
+                  [t_user(u, [mp("FraudReported", None, "True")])], [_ua(u)])]
+
+
+def scenario_onprem_sync_collision(config=None):
+    """The directory-sync service binds an on-prem object to an EXISTING cloud account for the first
+    time (soft-match hijack) -> 'First-time directory sync of an on-premises domain user to an
+    existing cloud account'."""
+    tgt = ac.pick_user(config)
+    return [audit("Update user", "UserManagement", "Core Directory", "Update",
+                  by_app("Microsoft Azure AD Connect"),
+                  [t_user(tgt, [mp("SourceAnchor", None, ac._stable_guid("anchor:" + tgt["username"])),
+                                mp("DirSyncEnabled", "False", "True"),
+                                mp("Included Updated Properties", None, "SourceAnchor, DirSyncEnabled")])])]
+
+
 SCENARIOS = {
     "admin_role_add": scenario_admin_role_add,
     "consent_risky_app": scenario_consent_risky_app,
+    "mfa_fraud_reported": scenario_mfa_fraud_reported,
+    "onprem_sync_collision": scenario_onprem_sync_collision,
     "ca_policy_removed": scenario_ca_policy_removed,
     "ca_operation_unusual": scenario_ca_operation_unusual,
     "tap_registered": scenario_tap_registered,
