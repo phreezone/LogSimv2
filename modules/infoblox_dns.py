@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from ipaddress import ip_network, IPv4Address
 
 try:
-    from modules.session_utils import get_random_user, rand_ip_from_network
+    from modules.session_utils import get_random_user, rand_ip_from_network, correlated_or_random_user
 except ImportError:
-    from session_utils import get_random_user, rand_ip_from_network
+    from session_utils import get_random_user, rand_ip_from_network, correlated_or_random_user
 
 NAME = "Infoblox NIOS"
 DESCRIPTION = "Simulates Infoblox DNS, DHCP, Audit, RPZ, and Threat Protect logs in raw syslog/CEF format."
@@ -312,7 +312,7 @@ def _get_random_dhcp_client_details(config, session_context=None):
     client_hostname = "UNKNOWN-HOST"
 
     if session_context:
-        user_info = get_random_user(session_context, preferred_device_type='workstation')
+        user_info = correlated_or_random_user(session_context, preferred_device_type='workstation')
         if user_info:
             client_ip       = user_info['ip'] or client_ip
             client_hostname = user_info['hostname'] or client_hostname

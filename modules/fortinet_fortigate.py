@@ -71,11 +71,13 @@ from ipaddress import ip_network, AddressValueError
 try:
     from modules.session_utils import (get_random_user, find_user_by_ip, rand_ip_from_network,
                                        stable_vpn_ip, stable_mail_servers, weighted_destination,
-                                       novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+                                       novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
+                                       correlated_or_random_user)
 except ImportError:
     from session_utils import (get_random_user, find_user_by_ip, rand_ip_from_network,
                                stable_vpn_ip, stable_mail_servers, weighted_destination,
-                                       novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+                                       novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
+                                       correlated_or_random_user)
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -1360,7 +1362,9 @@ def _generate_benign_log(config, session_context=None):
                       "vpn_login_benign", "vpn_failure_benign",
                       "vpn_new_country_login"):
         if session_context:
-            user_info = get_random_user(session_context, preferred_device_type="workstation")
+            # follow-on egress: prefer a recently-active user so the flow's src IP + identity match
+            # a current logon (cross-plane correlation)
+            user_info = correlated_or_random_user(session_context, preferred_device_type="workstation")
             if user_info:
                 user   = user_info["username"]
                 src_ip = user_info["ip"]

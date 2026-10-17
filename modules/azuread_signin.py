@@ -207,10 +207,12 @@ def generate_benign(config=None, context=None):
                         resource=ac.pick_baseline_resource(user),
                         conditional=random.choice(["success", "notApplied"]))]
     if r < 0.68:   # interactive success evaluated by Conditional Access
+        ac.publish_signin(user, loc)   # session start -> on-prem/network follow-on correlates
         return [_signin(user, loc, interactive=True, app=ac.pick_baseline_app(user),
                         resource=ac.pick_baseline_resource(user),
                         ca_result="success", conditional="success")]
     if r < 0.76:   # interactive sign-in that completed an MFA challenge
+        ac.publish_signin(user, loc)
         return [_signin(user, loc, interactive=True, app=ac.pick_baseline_app(user),
                         resource=ac.pick_baseline_resource(user),
                         ca_result="success", conditional="success", mfa=True,

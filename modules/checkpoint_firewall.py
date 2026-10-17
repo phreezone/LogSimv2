@@ -11,11 +11,11 @@ from ipaddress import ip_network
 try:
     from modules.session_utils import (get_random_user, get_user_by_name, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, correlated_or_random_user)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, correlated_or_random_user)
 
 NAME = "Check Point Firewall"
 DESCRIPTION = "Simulates Check Point traffic, threat prevention, URL filtering, and identity logs in CEF format."
@@ -475,7 +475,8 @@ def _format_checkpoint_cef(config, extensions_dict, device_product=None, event_t
 
 def _generate_benign_log(config, session_context=None):
     """Generates a variety of benign log types (traffic, dns, icmp)."""
-    user_info = get_random_user(session_context, preferred_device_type='workstation') if session_context else None
+    # follow-on traffic: prefer a recently-active user so src IP + identity match a current logon
+    user_info = correlated_or_random_user(session_context, preferred_device_type='workstation') if session_context else None
     if user_info:
         user, src_ip, shost = user_info['username'], user_info['ip'], user_info['hostname']
     else:
