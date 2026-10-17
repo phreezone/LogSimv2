@@ -17,9 +17,10 @@ import random
 import time
 
 try:
-    from modules.session_utils import get_random_user
+    from modules.session_utils import get_random_user, get_user_by_name
 except Exception:  # pragma: no cover
     get_random_user = None
+    get_user_by_name = None
 
 UPN_DOMAIN = "examplecorp.com"   # match LogSim's identity model (user emails are @examplecorp.com)
 HOME_TENANT_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
@@ -536,11 +537,86 @@ def pick_nonstandard_actor(config=None, context=None):
     pick_user() if no role metadata is available."""
     profiles = (config or {}).get("user_profiles") or {}
     if profiles:
-        non_admin = [u for u, p in profiles.items() if p.get("role") not in _ADMIN_ROLE_NAMES]
+        non_admin = [u for u, p in profiles.items()
+                     if p.get("role") not in _ADMIN_ROLE_NAMES and lifecycle_cohort(u) == "active"]
         if non_admin:
             u = random.choice(non_admin)
             return _norm(u, profiles[u])
     return pick_user(config, context)
+
+
+# ── identity lifecycle (active / dormant / departed cohorts) ──────────────────────────
+# Every identity is deterministically assigned a lifecycle cohort. The benign baseline draws ONLY
+# from 'active' identities (pick_user excludes the reserved cohorts by default), so dormant and
+# departed accounts have NO recent activity in the training window — exactly what the state-based
+# detectors key on:
+#   active    — the normal working population; appears throughout the baseline.
+#   dormant   — exists in the directory but is never signed in by the baseline (stale/service/leave
+#               accounts). A sign-in by one reads as 'login/auth by a dormant account'.
+#   departed  — a former employee / decommissioned account, also never active in the baseline. A
+#               sign-in attempt reads as a disabled/leaver account trying to authenticate.
+# Cohorts are a pure hash of the username, so they're stable across runs and independent of the
+# roster source (session_context or config['user_profiles']).
+_LIFECYCLE_DORMANT_PCT = 6
+_LIFECYCLE_DEPARTED_PCT = 6
+
+
+def lifecycle_cohort(username):
+    """Deterministic lifecycle cohort for an identity: 'active' | 'dormant' | 'departed'."""
+    b = _h("lifecycle:v1:" + str(username)) % 100
+    if b < _LIFECYCLE_DORMANT_PCT:
+        return "dormant"
+    if b < _LIFECYCLE_DORMANT_PCT + _LIFECYCLE_DEPARTED_PCT:
+        return "departed"
+    return "active"
+
+
+def _session_ctx(context):
+    return (context or {}).get("session_context") if isinstance(context, dict) else None
+
+
+def _roster(config=None, context=None):
+    """Usernames available this run: session_context roster if present, else config profiles."""
+    sc = _session_ctx(context)
+    if sc:
+        return list(sc.keys())
+    return list(((config or {}).get("user_profiles") or {}).keys())
+
+
+def _user_info(uname, config, context):
+    """Build a normalized identity dict for a specific username from whichever roster is live."""
+    sc = _session_ctx(context)
+    if sc and get_user_by_name and uname in sc:
+        u = get_user_by_name(sc, uname)
+        if u:
+            return {"username": uname, "upn": u.get("email") or f"{uname}@{UPN_DOMAIN}",
+                    "display_name": u.get("display_name", uname),
+                    "department": u.get("department", "Unknown"),
+                    "os_type": u.get("os_type", "Windows"), "os_version": u.get("os_version", "10")}
+    profiles = (config or {}).get("user_profiles") or {}
+    if uname in profiles:
+        return _norm(uname, profiles[uname])
+    return {"username": uname, "upn": f"{uname}@{UPN_DOMAIN}", "display_name": uname,
+            "department": "Unknown", "os_type": "Windows", "os_version": "10"}
+
+
+def _pick_cohort_user(config, context, cohort):
+    """Pick an identity in a specific lifecycle cohort (dormant/departed). Returns a normalized
+    identity dict, or falls back to pick_user() if the roster has no member of that cohort."""
+    roster = [u for u in _roster(config, context) if lifecycle_cohort(u) == cohort]
+    if roster:
+        return _user_info(random.choice(roster), config, context)
+    return pick_user(config, context)
+
+
+def pick_dormant_user(config=None, context=None):
+    """A dormant identity (exists, but never active in the baseline) — for dormant-account scenarios."""
+    return _pick_cohort_user(config, context, "dormant")
+
+
+def pick_departed_user(config=None, context=None):
+    """A departed/decommissioned identity — for disabled/leaver sign-in scenarios."""
+    return _pick_cohort_user(config, context, "departed")
 
 
 # ── threat gating ────────────────────────────────────────────────────────────────────
@@ -620,26 +696,38 @@ def auth_details(method="Password", succeeded=True, step_ts=None):
              "authenticationStepRequirement": ""}]
 
 
-def pick_user(config=None, context=None):
+def pick_user(config=None, context=None, include_reserved=False):
     """Return a normalized identity from LogSim's user model.
 
     Prefers the run's session_context; falls back to config['user_profiles']; last resort a
     stub. Keys: username, upn, display_name, department, os_type, os_version.
+
+    By default only ACTIVE-cohort identities are returned, so the benign baseline (and ordinary
+    threat scenarios, which also call this) never touch the reserved dormant/departed accounts —
+    those stay absent from the baseline until a dormant/leaver scenario explicitly summons one via
+    pick_dormant_user()/pick_departed_user(). include_reserved=True disables the filter.
     """
     sc = (context or {}).get("session_context") if isinstance(context, dict) else None
     if sc and get_random_user:
-        u = get_random_user(sc)
-        if u:
+        for _ in range(12):
+            u = get_random_user(sc)
+            if not u:
+                break
             uname = u["username"]
-            return {"username": uname,
-                    "upn": u.get("email") or f"{uname}@{UPN_DOMAIN}",
-                    "display_name": u.get("display_name", uname),
-                    "department": u.get("department", "Unknown"),
-                    "os_type": u.get("os_type", "Windows"),
-                    "os_version": u.get("os_version", "10")}
+            if include_reserved or lifecycle_cohort(uname) == "active":
+                return {"username": uname,
+                        "upn": u.get("email") or f"{uname}@{UPN_DOMAIN}",
+                        "display_name": u.get("display_name", uname),
+                        "department": u.get("department", "Unknown"),
+                        "os_type": u.get("os_type", "Windows"),
+                        "os_version": u.get("os_version", "10")}
     profiles = (config or {}).get("user_profiles") or {}
     if profiles:
-        uname = random.choice(list(profiles))
+        names = list(profiles)
+        if not include_reserved:
+            active = [n for n in names if lifecycle_cohort(n) == "active"]
+            names = active or names
+        uname = random.choice(names)
         p = profiles[uname]
         dev = (p.get("devices") or [{}])[0]
         return {"username": uname,
@@ -672,9 +760,13 @@ def pick_by_role(config, roles, departments=None):
     profiles = (config or {}).get("user_profiles") or {}
     key = (tuple(roles), tuple(departments or ()))
     if key not in _ROLE_POOLS:
-        pool = [u for u, p in profiles.items() if p.get("role") in roles]
+        # Admins who "do the work" are active by definition — never draw a reserved (dormant/
+        # departed) account for a baseline admin action.
+        pool = [u for u, p in profiles.items()
+                if p.get("role") in roles and lifecycle_cohort(u) == "active"]
         if not pool and departments:
-            pool = [u for u, p in profiles.items() if p.get("department") in departments]
+            pool = [u for u, p in profiles.items()
+                    if p.get("department") in departments and lifecycle_cohort(u) == "active"]
         _ROLE_POOLS[key] = sorted(pool)
     pool = _ROLE_POOLS[key]
     if not pool:

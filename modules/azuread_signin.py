@@ -420,10 +420,23 @@ _SUSPICIOUS_COUNTRIES = [
 
 def scenario_disabled_user_signin(config=None, user=None):
     """A disabled account attempts SSO -> 'A disabled user attempted to authenticate via SSO'
-    (errorCode 50057)."""
-    u = ac.pick_user(config)
+    (errorCode 50057). Draws a DEPARTED-cohort identity (a decommissioned/former account the benign
+    baseline never signs in), so the attempt is coherent with a genuinely disabled account."""
+    u = ac.pick_departed_user(config)
     return [_signin(u, ac.egress(u), interactive=True, success=False, error_code=50057,
                     failure="The user account is disabled.", conditional="notApplied")]
+
+
+def scenario_dormant_account_signin(config=None, user=None):
+    """A long-dormant account successfully signs in after being unused for a long period (a stale
+    account reactivated by an attacker). Draws a DORMANT-cohort identity the benign baseline never
+    signs in, so from the analytics' view it has no recent activity -> dormant-account reuse. Feeds
+    ITDR / Identity Analytics (the named dormant detectors also require XDR Agent / firewall data)."""
+    u = ac.pick_dormant_user(config)
+    rec = _signin(u, ac.egress(u), interactive=True, ca_result="success", conditional="success",
+                  risk_level="low", risk_state="atRisk")
+    rec["riskEventTypes_v2"] = ["unfamiliarFeatures"]
+    return [rec]
 
 
 def scenario_honey_user_signin(config=None, user=None):
@@ -623,6 +636,7 @@ SCENARIOS = {
     "multi_sso_anon_proxy": scenario_multi_sso_anon_proxy,
     "aad_connect_sync_unusual_host": scenario_aad_connect_sync_unusual_host,
     "disabled_user_signin": scenario_disabled_user_signin,
+    "dormant_account_signin": scenario_dormant_account_signin,
     "honey_user_signin": scenario_honey_user_signin,
     "suspicious_country_signin": scenario_suspicious_country_signin,
     "sso_abnormal_user_agent": scenario_sso_abnormal_user_agent,
