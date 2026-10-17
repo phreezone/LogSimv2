@@ -272,10 +272,27 @@ _SENSITIVE_DOCS = ["Salary Bands.xlsx", "Customer List.xlsx", "Board Deck.pptx",
                    "Acquisition Terms.docx", "Employee SSNs.xlsx", "Patent Filing.pdf"]
 
 
+# The organization's USUAL external collaboration partners — a stable, bounded set. Benign external
+# sharing goes to these, so XSIAM learns them as 'normal external domains'; a share to any other
+# (rare) domain then reads as 'unusual domain'. Keeping this bounded is the whole point — it must NOT
+# grow, or nothing is ever unusual.
+_PARTNER_DOMAINS = ["partner-co.com", "contoso.com", "fabrikam.com", "northwind.com",
+                    "adatum.com", "wingtiptoys.com", "proseware.com", "consolidated-messenger.com",
+                    "lucernepublishing.com", "graphicdesigninstitute.com"]
+
+
 def _b_sharing(cfg):
-    """A routine internal sharing or access-request outcome (RecordType 14)."""
+    """A routine sharing or access-request outcome (RecordType 14): mostly internal colleagues, and a
+    realistic minority to the org's USUAL external partner domains (the external-sharing baseline)."""
     u = ac.pick_user(cfg)
     op = random.choice(_SHARING_OPS)
+    if random.random() < 0.15 and op in ("SharingInvitationCreated", "SharingInvitationAccepted",
+                                         "CompanyLinkCreated", "SecureLinkCreated"):
+        # routine external collaboration with a known partner (normal external-domain baseline)
+        ext = f"{random.choice(['j.doe','contact','projects','team','ap','sales'])}@{random.choice(_PARTNER_DOMAINS)}"
+        return _sp(op, u, record_type=14,
+                   extra={"TargetUserOrGroupName": ext, "TargetUserOrGroupType": "Guest",
+                          "EventData": "<Edit>", "ResultStatus": "Succeeded"})
     tgt = ac.pick_user(cfg)   # internal colleague
     status = "Failed" if (op == "AccessRequestRejected" and random.random() < 0.5) else "Succeeded"
     return _sp(op, u, record_type=14,
@@ -407,9 +424,10 @@ def scenario_anon_link_used_external(config=None):
 
 def scenario_external_sharing_unusual_domain(config=None):
     """External sharing invitation to an UNUSUAL/rare recipient domain -> 'SaaS external file
-    sharing to an unusual domain'."""
+    sharing to an unusual domain'. The domain is drawn from the unbounded rare pool (never one of
+    the org's usual partner domains), so it always reads as a never-seen external destination."""
     u = ac.pick_user(config)
-    ext = f"recipient@{random.choice(_UNUSUAL_SHARE_DOMAINS)}"
+    ext = ac.rare_ext_email()
     return [_sp("SharingInvitationCreated", u, record_type=14, doc=random.choice(_SENSITIVE_DOCS),
                 extra={"TargetUserOrGroupName": ext, "TargetUserOrGroupType": "Guest",
                        "EventData": "<Edit>"})]
