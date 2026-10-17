@@ -11,12 +11,12 @@ try:
     from modules.session_utils import (get_random_user, get_user_by_name,
         get_zscaler_device_info, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, correlated_or_random_user)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name,
         get_zscaler_device_info, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, correlated_or_random_user)
 
 def _cef_escape(value):
     """Encode an NSS extension value the way a real Zscaler feed does.
@@ -169,8 +169,8 @@ def _get_user_and_device_info(config, user_override=None, session_context=None):
     if session_context:
         if user_override:
             user_info = get_user_by_name(session_context, user_override)
-        else:
-            user_info = get_random_user(session_context, preferred_device_type='workstation')
+        else:   # follow-on proxy traffic: prefer a currently-active (recently-logged-on) user
+            user_info = correlated_or_random_user(session_context, preferred_device_type='workstation')
         if user_info:
             device_info = get_zscaler_device_info(user_info)
             return user_info['username'], user_info.get('department', 'Unknown'), user_info['ip'], device_info

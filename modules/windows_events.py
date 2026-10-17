@@ -68,9 +68,32 @@ except ImportError:
     _HAS_LXML = False
 
 try:
-    from modules.session_utils import get_random_user, get_user_by_name, get_random_anon_ip_ctx
+    from modules.session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
+                                        publish_activity, pick_active_session, CORRELATE_PROB)
 except ImportError:
-    from session_utils import get_random_user, get_user_by_name, get_random_anon_ip_ctx
+    from session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
+                               publish_activity, pick_active_session, CORRELATE_PROB)
+
+
+def _publish_logon(u):
+    """Publish a Windows logon as an active session (session start) for cross-plane correlation."""
+    if u:
+        publish_activity(u.get("username"), private_ip=u.get("ip"), hostname=u.get("hostname"),
+                         department=u.get("department"), email=u.get("email"),
+                         display_name=u.get("display_name"))
+
+
+def _pick_windows_user_corr(session_context):
+    """Follow-on Windows picker: prefer a currently-active Windows user (correlates to a recent
+    logon), else a random Windows user."""
+    if session_context and pick_active_session and random.random() < CORRELATE_PROB:
+        s = pick_active_session()
+        if s:
+            wins = _get_windows_users(session_context)
+            for w in wins:
+                if w.get("username") == s["username"]:
+                    return w
+    return _pick_windows_user(session_context)
 
 
 # ---------------------------------------------------------------------------
@@ -3258,6 +3281,7 @@ def _benign_interactive_logon(config, session_context):
     u = _pick_windows_user(session_context)
     if not u:
         return None
+    _publish_logon(u)   # session start -> cloud sign-in + network traffic for this user correlate
 
     t0 = time.time()
     logon_id = _new_logon_id()
@@ -3303,6 +3327,7 @@ def _benign_workstation_unlock(config, session_context):
     u = _pick_windows_user(session_context)
     if not u:
         return None
+    _publish_logon(u)
     return json.dumps(_build_4624(u, config, logon_type=7, auth_pkg=_NEG_PACKAGE))
 
 
@@ -3418,6 +3443,7 @@ def _benign_cached_logon(config, session_context):
     u = _pick_windows_user(session_context)
     if not u:
         return None
+    _publish_logon(u)
     return json.dumps(_build_4624(u, config, logon_type=11, auth_pkg=_NEG_PACKAGE))
 
 
@@ -3428,6 +3454,7 @@ def _benign_rdp_logon(config, session_context):
     u = _pick_windows_user(session_context)
     if not u:
         return None
+    _publish_logon(u)
     src = _pick_windows_user(session_context)
     src_ip = src["ip"] if src and src["ip"] != u["ip"] else "10.10.10.200"
 
@@ -3448,7 +3475,7 @@ def _benign_rdp_logon(config, session_context):
 
 def _benign_sql_access(config, session_context):
     """User connects to SQL Server — 4769 TGS for MSSQLSvc SPN with AES."""
-    u = _pick_windows_user(session_context)
+    u = _pick_windows_user_corr(session_context)
     if not u:
         return None
     sql_spns = [s for s in _SERVICE_ACCOUNT_SPNS if s.startswith("MSSQLSvc/")]
@@ -3458,7 +3485,7 @@ def _benign_sql_access(config, session_context):
 
 def _benign_web_app_access(config, session_context):
     """User accesses intranet web app — 4769 TGS for HTTP SPN with AES."""
-    u = _pick_windows_user(session_context)
+    u = _pick_windows_user_corr(session_context)
     if not u:
         return None
     http_spns = [s for s in _SERVICE_ACCOUNT_SPNS if s.startswith("HTTP/")]
@@ -3468,7 +3495,7 @@ def _benign_web_app_access(config, session_context):
 
 def _benign_ldap_query(config, session_context):
     """Workstation queries AD — 4769 TGS for LDAP SPN with AES."""
-    u = _pick_windows_user(session_context)
+    u = _pick_windows_user_corr(session_context)
     if not u:
         return None
     ldap_spns = [s for s in _SERVICE_ACCOUNT_SPNS if s.startswith("LDAP/")]
@@ -3486,7 +3513,7 @@ def _benign_ntlm_validation(config, session_context):
 
 def _benign_explicit_cred_runas(config, session_context):
     """User uses runas to launch a process as another local account."""
-    u = _pick_windows_user(session_context)
+    u = _pick_windows_user_corr(session_context)
     if not u:
         return None
     target_user = u["username"] + "_admin"
@@ -3653,7 +3680,7 @@ def _benign_process_creation(config, session_context):
     establishes the UEBA baseline that makes attack tool 4688 events
     (mimikatz, Rubeus, procdump) detectable as anomalous.
     """
-    u = _pick_windows_user(session_context)
+    u = _pick_windows_user_corr(session_context)
     if not u:
         return None
 

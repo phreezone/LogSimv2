@@ -28,11 +28,11 @@ from ipaddress import ip_network, AddressValueError
 try:
     from modules.session_utils import (get_random_user, find_user_by_ip, get_user_by_name,
         rand_ip_from_network, stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, correlated_or_random_user)
 except ImportError:
     from session_utils import (get_random_user, find_user_by_ip, get_user_by_name,
         rand_ip_from_network, stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, correlated_or_random_user)
 
 last_threat_event_time = 0
 
@@ -633,7 +633,8 @@ def _simulate_benign_office_traffic(config, session_context=None):
     User and source IP resolved from session_utils (preferred) or legacy map.
     """
     if session_context:
-        user_info = get_random_user(session_context, preferred_device_type='workstation')
+        # follow-on session: prefer a recently-active user so src IP + identity match a current logon
+        user_info = correlated_or_random_user(session_context, preferred_device_type='workstation')
         if user_info:
             user   = user_info['username']
             src_ip = user_info['ip']
@@ -790,7 +791,8 @@ def _simulate_internal_traffic(config, session_context=None):
       xdm.target.port            ← common internal service port
     """
     if session_context:
-        user_info = get_random_user(session_context, preferred_device_type='workstation')
+        # follow-on session: prefer a recently-active user so src IP + identity match a current logon
+        user_info = correlated_or_random_user(session_context, preferred_device_type='workstation')
         if user_info:
             user   = user_info['username']
             src_ip = user_info['ip']

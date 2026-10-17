@@ -19,10 +19,25 @@ import random
 import time
 
 try:
-    from modules.session_utils import get_random_user, get_user_by_name
+    from modules.session_utils import (get_random_user, get_user_by_name,
+                                        pick_active_session, publish_activity as _publish_activity,
+                                        CORRELATE_PROB)
 except Exception:  # pragma: no cover
     get_random_user = None
     get_user_by_name = None
+    pick_active_session = None
+    _publish_activity = None
+    CORRELATE_PROB = 0.6
+
+
+def publish_signin(user, loc=None):
+    """Publish a cloud interactive sign-in as an active session (so on-prem/network follow-on for the
+    same user correlates). No-op if the activity bus is unavailable."""
+    if _publish_activity is None or not isinstance(user, dict):
+        return
+    _publish_activity(user.get("username"), egress_ip=(loc or {}).get("ip"),
+                      department=user.get("department"), email=user.get("upn"),
+                      display_name=user.get("display_name"))
 
 UPN_DOMAIN = "examplecorp.com"   # match LogSim's identity model (user emails are @examplecorp.com)
 HOME_TENANT_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
@@ -711,6 +726,19 @@ def pick_user(config=None, context=None, include_reserved=False):
     """
     sc = (context or {}).get("session_context") if isinstance(context, dict) else None
     if sc and get_random_user:
+        # Correlation: prefer a currently-active session user (someone who just logged on elsewhere),
+        # so cloud activity clusters with the on-prem/network activity for the same identity.
+        if not include_reserved and pick_active_session and random.random() < CORRELATE_PROB:
+            s = pick_active_session()
+            if s and s["username"] in sc and lifecycle_cohort(s["username"]) == "active":
+                info = get_user_by_name(sc, s["username"]) if get_user_by_name else None
+                if info:
+                    return {"username": s["username"],
+                            "upn": info.get("email") or f'{s["username"]}@{UPN_DOMAIN}',
+                            "display_name": info.get("display_name", s["username"]),
+                            "department": info.get("department", "Unknown"),
+                            "os_type": info.get("os_type", "Windows"),
+                            "os_version": info.get("os_version", "10")}
         for _ in range(12):
             u = get_random_user(sc)
             if not u:

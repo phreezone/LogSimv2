@@ -6,7 +6,87 @@
 
 import random
 import hashlib
+import threading
+import time
 from ipaddress import ip_address, ip_network
+
+
+# ---------------------------------------------------------------------------
+# Activity-correlation bus
+# ---------------------------------------------------------------------------
+# Every module shares one session_context, so the same user/IP already appears across the Windows,
+# cloud and network feeds -- but each module independently random-picks a different user per tick, so
+# a given user's activity never clusters in time across planes. The bus fixes that: LOGON-type events
+# (Windows interactive/RDP/cached, cloud interactive sign-in, VPN) PUBLISH a short-lived session for a
+# user; FOLLOW-ON generators (network flows, DNS, proxy, token refresh, file ops, email, web) CONSUME
+# -- with probability CORRELATE_PROB they emit for a currently-active user instead of a random one.
+# So around a logon you get the AD auth + a cloud sign-in + firewall/proxy/DNS from the SAME user/IP
+# within a window, joinable by identity (the universal key; each plane uses its own IP). The active
+# set is bounded (ACTIVITY_MAX, ACTIVITY_WINDOW_S) so "active now" stays a realistic few dozen users.
+_ACTIVITY_LOCK = threading.Lock()
+_ACTIVITY = {}                 # username -> session dict (ts + private_ip/egress_ip/hostname/...)
+ACTIVITY_WINDOW_S = 1800.0     # a session stays "active" ~30 min
+ACTIVITY_MAX = 64              # cap on concurrently-active users (keeps correlation meaningful)
+CORRELATE_PROB = 0.6           # P(a follow-on event attaches to an active session)
+
+
+def _activity_prune(now):
+    stale = [u for u, s in _ACTIVITY.items() if now - s["ts"] > ACTIVITY_WINDOW_S]
+    for u in stale:
+        _ACTIVITY.pop(u, None)
+    if len(_ACTIVITY) > ACTIVITY_MAX:
+        for u in sorted(_ACTIVITY, key=lambda k: _ACTIVITY[k]["ts"])[:len(_ACTIVITY) - ACTIVITY_MAX]:
+            _ACTIVITY.pop(u, None)
+
+
+def publish_activity(username, *, private_ip=None, egress_ip=None, hostname=None,
+                     department=None, email=None, display_name=None, ts=None):
+    """Record (or refresh) an active session for a user — called by logon-type generators."""
+    if not username:
+        return
+    now = ts or time.time()
+    with _ACTIVITY_LOCK:
+        _ACTIVITY[username] = {"username": username, "ts": now, "private_ip": private_ip,
+                               "egress_ip": egress_ip, "hostname": hostname,
+                               "department": department, "email": email, "display_name": display_name}
+        _activity_prune(now)
+
+
+def active_sessions(now=None):
+    now = now or time.time()
+    with _ACTIVITY_LOCK:
+        _activity_prune(now)
+        return list(_ACTIVITY.values())
+
+
+def pick_active_session(now=None):
+    s = active_sessions(now)
+    return random.choice(s) if s else None
+
+
+def correlated_or_random_user(session_context, prob=None, preferred_device_type=None):
+    """With probability `prob` return the session-context user_info for a currently-active user (so
+    this event correlates to a recent logon), else a random user. Falls back to random when no active
+    user is present in this session_context."""
+    prob = CORRELATE_PROB if prob is None else prob
+    if session_context and random.random() < prob:
+        s = pick_active_session()
+        if s and s["username"] in session_context:
+            info = get_user_by_name(session_context, s["username"], preferred_device_type)
+            if info:
+                return info
+    return get_random_user(session_context, preferred_device_type)
+
+
+def correlated_private_ip(session_context, prob=None):
+    """An active session's private IP (to seed a correlated network flow from a real recent logon),
+    or None to let the caller pick its own IP."""
+    prob = CORRELATE_PROB if prob is None else prob
+    if session_context and random.random() < prob:
+        s = pick_active_session()
+        if s and s.get("private_ip") and s["username"] in session_context:
+            return s["private_ip"]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +793,8 @@ def reset_caches():
     _USER_DEST_WEIGHTS.clear()
     _USER_BYTE_BANDS.clear()
     _USER_DOMAIN_WEIGHTS.clear()
+    with _ACTIVITY_LOCK:
+        _ACTIVITY.clear()
 
 
 def get_users_by_department(session_context):
