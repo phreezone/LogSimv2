@@ -13,6 +13,7 @@ on-demand via fire()/fire_all() (the way named threats run).
 Mapped to the highest-severity identity detectors / ATT&CK techniques on the Analytics
 pages (TOR sign-in High; federation/consent/credential/role persistence; account takeover).
 """
+import inspect
 import random
 import time
 
@@ -23,6 +24,7 @@ from modules import azuread_audit as aaud
 from modules import o365_sharepoint as spo
 from modules import o365_exchange as exch
 from modules import o365_dlp as dlp
+from modules import windows_events as winev
 
 O365_SRC, O365_INT = o365.SOURCE_IDENTIFIER, o365.INTEGRATION_IDENTIFIER
 AAD_SRC, AAD_INT = aad.SOURCE_IDENTIFIER, aad.INTEGRATION_IDENTIFIER
@@ -30,6 +32,9 @@ AUD_SRC, AUD_INT = aaud.SOURCE_IDENTIFIER, aaud.INTEGRATION_IDENTIFIER
 SP_SRC, SP_INT = spo.SOURCE_IDENTIFIER, spo.INTEGRATION_IDENTIFIER
 EX_SRC, EX_INT = exch.SOURCE_IDENTIFIER, exch.INTEGRATION_IDENTIFIER
 DLP_SRC, DLP_INT = dlp.SOURCE_IDENTIFIER, dlp.INTEGRATION_IDENTIFIER
+# Sentinel source for on-prem Windows events: these ride the WEC transport (not Cribl), so fire()
+# and the harness route a WIN_SRC tuple's record (a windows event dict) through the WEC path.
+WIN_SRC, WIN_INT = "__wec__", "logsim:windows"
 
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
 FOREIGN = {"ip": "103.21.244.12", "city": "Singapore", "state": "", "countryOrRegion": "SG",
@@ -73,6 +78,11 @@ def _exch(rec):
 
 def _dlp_(rec):
     return (DLP_SRC, DLP_INT, rec)
+
+
+def _win(rec):
+    """Wrap an on-prem Windows event DICT for the WEC transport (rendered to XML at fire time)."""
+    return (WIN_SRC, WIN_INT, rec)
 
 
 # ── sequences ─────────────────────────────────────────────────────────────────────────
@@ -417,7 +427,62 @@ def seq_stale_account_reactivation(config):
     return out
 
 
+def seq_hybrid_onprem_cloud(config, context=None):
+    """Hybrid on-prem -> cloud kill chain for ONE identity: the user logs on at their workstation
+    (on-prem AD Kerberos), an attacker harvests creds there and moves laterally, then the SAME
+    identity's token surfaces in the cloud from a hosting ASN (AiTM/token theft), registers MFA
+    persistence, and exfiltrates mail. Spans the WEC Windows feed AND the cloud feeds, joined by the
+    shared identity (EXAMPLECORP\\user on-prem == user@domain in cloud) -- the correlation ITDR needs
+    the CIE identity map populated to fully asset-join, but the events line up by identity + time.
+
+    Returns WIN_SRC tuples (routed via WEC) interleaved with cloud tuples (routed via Cribl)."""
+    sc = (context or {}).get("session_context") if isinstance(context, dict) else None
+    wu = winev._pick_windows_user(sc) if sc else None
+    if not wu:
+        # No on-prem user available (no session_context) -> degrade to the cloud half only.
+        return seq_aitm_token_theft(config)
+
+    # cloud identity for the SAME person (username -> UPN)
+    uname = wu["username"]
+    cu = {"username": uname, "upn": wu.get("email") or f"{uname}@{ac.UPN_DOMAIN}",
+          "display_name": wu.get("display_name", uname), "department": wu.get("department", "Unknown"),
+          "os_type": wu.get("os_type", "Windows"), "os_version": wu.get("os_version", "10")}
+    t0 = time.time()
+    lid1 = winev._new_logon_id()
+    out = []
+
+    # 1) ON-PREM: legitimate morning workstation logon (TGT -> DC logon -> endpoint logon)
+    out.append(_win(winev._build_4768(wu, config, ts=t0 - 1800)))
+    out.append(_win(winev._dc_logon_event(wu, config, ip_override=wu.get("ip"), logon_id=lid1, ts=t0 - 1799)))
+    out.append(_win(winev._build_4624(wu, config, logon_type=2, auth_pkg=winev._NEG_PACKAGE,
+                                      target_logon_id=lid1, ts=t0 - 1798)))
+    # 2) ON-PREM: attacker on the box requests a TGS for a sensitive service (lateral movement prep)
+    out.append(_win(winev._build_4769(wu, config, service_spn=f"MSSQLSvc/finance-sql01.{winev._get_dns_domain(config)}:1433",
+                                      encryption="0x17", ts=t0 - 900)))   # 0x17 = RC4 (roast-flavored)
+    lid2 = winev._new_logon_id()
+    out.append(_win(winev._build_4624(wu, config, logon_type=3, auth_pkg=winev._KRB_PACKAGE,
+                                      target_logon_id=lid2, workstation_override=f"FINANCE-SQL01.{winev._get_dns_domain(config)}",
+                                      ts=t0 - 880)))
+
+    # 3) CLOUD: the same identity's token is replayed from a hosting ASN (AiTM / token theft, High)
+    s = aad._signin(cu, ac.rare_asn_loc(), interactive=True, risk_level="high", risk_state="atRisk",
+                    offset_s=-600)
+    s["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures", "tokenIssuerAnomaly"]
+    out.append(_aad(s))
+    # 4) CLOUD: attacker registers an MFA method on the account (persistence)
+    out.append(_o365(o365._audit("User registered security info.", cu, s["ipAddress"],
+                                 modified=[{"Name": "SecurityInfo.Method", "NewValue": "Phone (SMS)", "OldValue": ""}])))
+    # 5) CLOUD: mail exfiltration to a never-seen external address
+    ext = ac.rare_ext_email()
+    out.append(_exch(exch.mailbox_action("Send", cu, client="REST",
+               item={"Subject": "Financials - export", "ParentFolder": {"Path": "\\Sent Items"}},
+               extra={"Recipients": [ext], "ExternalAccess": True})))
+    out.append(_exch(exch.mail_items_accessed(cu, count=10, offset_s=-120)))
+    return out
+
+
 SEQUENCES = {
+    "hybrid_onprem_cloud": seq_hybrid_onprem_cloud,
     "bec_campaign": seq_bec_campaign,
     "ransomware_campaign": seq_ransomware_campaign,
     "oauth_app_abuse": seq_oauth_app_abuse,
@@ -444,31 +509,60 @@ def get_sequence_names():
     return list(SEQUENCES.keys())
 
 
-def build(name, config=None):
-    """Return the ordered (source_id, integration_id, record) tuples for a sequence."""
-    return SEQUENCES[name](config or {})
+def build(name, config=None, context=None):
+    """Return the ordered (source_id, integration_id, record) tuples for a sequence.
+
+    Sequences that correlate on-prem + cloud (e.g. hybrid_onprem_cloud) take a second `context`
+    argument carrying session_context; single-plane sequences take only config."""
+    fn = SEQUENCES[name]
+    if len(inspect.signature(fn).parameters) >= 2:
+        return fn(config or {}, context)
+    return fn(config or {})
 
 
-def fire(name, config=None, sender=None):
-    """Send one sequence via the cribl_direct transport, grouping records per source."""
+def _send_windows(win_events, source_host="logsim.examplecorp.local"):
+    """Deliver on-prem Windows event dicts via the WEC transport (mirrors the harness on-prem path).
+    No-op (returns a skip marker) when WEC env/credentials aren't configured."""
+    import os
+    broker = os.getenv("WEC_BROKER_URL"); pfx = os.getenv("WEC_PFX_PATH"); pw = os.getenv("WEC_PFX_PASSWORD")
+    if not (broker and pfx):
+        return ("__wec__", "skipped: WEC_BROKER_URL/WEC_PFX_PATH not set", 0)
+    from modules.wec_transport import WecClient
+    client = WecClient(broker, pfx, pw, source_host)
+    client.enumerate()
+    xmls = [winev._render_event_xml(e) for e in win_events]
+    client.deliver_events(xmls)
+    return ("__wec__", "delivered", len(xmls))
+
+
+def fire(name, config=None, sender=None, context=None):
+    """Send one sequence: cloud records via cribl_direct (grouped per source), on-prem Windows
+    records via the WEC transport."""
     from integrations.cribl_direct import CriblDirectSender
-    sender = sender or CriblDirectSender()
     groups = {}
-    for src, integ, rec in build(name, config):
-        groups.setdefault((src, integ), []).append(rec)
+    win_events = []
+    for src, integ, rec in build(name, config, context):
+        if src == WIN_SRC:
+            win_events.append(rec)
+        else:
+            groups.setdefault((src, integ), []).append(rec)
     results = []
-    for (src, integ), recs in groups.items():
-        results.append((name, sender.send(recs, src, integ)))
+    if groups:
+        sender = sender or CriblDirectSender()
+        for (src, integ), recs in groups.items():
+            results.append((name, sender.send(recs, src, integ)))
+    if win_events:
+        results.append((name, _send_windows(win_events)))
     return results
 
 
-def fire_all(config=None):
+def fire_all(config=None, context=None):
     """Fire every sequence; returns [(name, [(src,(code,text,n)),...]), ...]."""
     sender = None
     from integrations.cribl_direct import CriblDirectSender
     sender = CriblDirectSender()
     out = []
     for name in SEQUENCES:
-        out.append((name, fire(name, config, sender)))
+        out.append((name, fire(name, config, sender, context)))
         time.sleep(0.3)
     return out
