@@ -67,7 +67,7 @@ def _signin(operation, user, ip, *, result_status="Success", error_number="0",
            {"Name": "RequestType", "Value": request_type}]
     if extended:
         ext = extended + ext
-    app_name = random.choice(_APPS)
+    app_name = ac.pick_baseline_app(user)   # per-user baseline app set (tight sign-in baseline)
     app_guid = ac.app_id(app_name)   # stable per app; sign-in ObjectId==ApplicationId==Target.ID
     return {
         "CreationTime": _now(offset_s), "Id": rid, "Operation": operation,
@@ -133,7 +133,7 @@ def _benign_audit(actor, ip, config):
         target = random.choice(["Helpdesk Administrator", "User Administrator", "Security Reader",
                                 "Exchange Administrator", "Application Administrator"])
     elif category == "ApplicationManagement":
-        target = random.choice(["Salesforce", "ServiceNow", "Workday", "GitHub Enterprise"])
+        target = ac.baseline_saas_app()          # recurring/onboarded estate (never a rare app)
     elif category == "DirectoryManagement":
         target = ac.UPN_DOMAIN
     return _audit(op, actor, ip, target_name=target, modified=modified)
@@ -213,7 +213,7 @@ def scenario_federation_change(config=None, user=None):
     actor = ac.pick_user(config)
     return [_audit("Set federation settings on domain.", actor, ac.egress(actor)["ip"],
                    target_name=ac.UPN_DOMAIN,
-                   modified=[{"Name": "IssuerUri", "NewValue": "http://any.sts/malicious", "OldValue": ""}])]
+                   modified=[{"Name": "IssuerUri", "NewValue": "http://any.sts/adfs/services/trust", "OldValue": ""}])]
 
 
 def scenario_user_deletion(config=None, user=None):
@@ -249,7 +249,7 @@ def scenario_atypical_account_deletion(config=None, user=None):
 def scenario_account_created_nonstandard(config=None, user=None):
     """A new Azure AD account is created BY an actor who does not normally create accounts (a
     regular non-admin user) -> 'Azure account created by non-standard account'."""
-    actor = ac.pick_user(config)   # non-admin / non-standard creator
+    actor = ac.pick_nonstandard_actor(config)   # non-admin / non-standard creator
     new = f"svc_temp_{random.randint(1000, 9999)}@{ac.UPN_DOMAIN}"
     return [_audit("Add user.", actor, ac.egress(actor)["ip"], target_name=new,
                    modified=[{"Name": "AccountEnabled", "NewValue": "True", "OldValue": ""}])]

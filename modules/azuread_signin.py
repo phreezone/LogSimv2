@@ -109,7 +109,9 @@ def _sp_signin(loc, offset_s=0):
     """Service-principal (app-only) sign-in — no user, servicePrincipal identity."""
     name = random.choice(["Microsoft Graph", "Office 365 Exchange Online", "LogSim Reporting App",
                           "Microsoft Intune", "Azure Resource Manager"])
-    _res = random.choice(ac.RESOURCES)
+    # Each SP has a stable, narrow set of resources it normally calls (its baseline); drawing from
+    # it keeps the per-app resource baseline tight so 'unusual resource access by app' can fire.
+    _res = ac.pick_baseline_resource("sp:" + name)
     return {
         "id": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name), "appDisplayName": name,
         "servicePrincipalId": ac.user_oid("sp:" + name), "servicePrincipalName": name,
@@ -197,13 +199,16 @@ def generate_benign(config=None, context=None):
     if r < 0.004:  # AAD Connect sync account's periodic auth FROM ITS NORMAL HOST (baseline for the
         return [_sync_signin(_AADCONNECT_HOST_LOC)]   # 'unusual host' anomaly to measure against)
     if r < 0.50:   # non-interactive token refresh — highest volume
-        return [_signin(user, loc, interactive=False, app=random.choice(ac.APPS_NONINTERACTIVE),
+        return [_signin(user, loc, interactive=False, app=ac.pick_baseline_app(user, interactive=False),
+                        resource=ac.pick_baseline_resource(user),
                         conditional=random.choice(["success", "notApplied"]))]
     if r < 0.68:   # interactive success evaluated by Conditional Access
-        return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
+        return [_signin(user, loc, interactive=True, app=ac.pick_baseline_app(user),
+                        resource=ac.pick_baseline_resource(user),
                         ca_result="success", conditional="success")]
     if r < 0.76:   # interactive sign-in that completed an MFA challenge
-        return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
+        return [_signin(user, loc, interactive=True, app=ac.pick_baseline_app(user),
+                        resource=ac.pick_baseline_resource(user),
                         ca_result="success", conditional="success", mfa=True,
                         auth_method=random.choice(ac.MFA_METHODS[:3]))]
     if r < 0.78:   # mobile sign-in from a phone (cellular egress + registered mobile device)
@@ -229,7 +234,8 @@ def generate_benign(config=None, context=None):
                         conditional="success",
                         ca_result=random.choice(["reportOnlySuccess", "reportOnlyFailure"]))]
     if r < 0.95:   # first-seen / new device for this user (benign — new laptop, reinstall)
-        return [_signin(user, loc, interactive=True, app=random.choice(ac.APPS_INTERACTIVE),
+        return [_signin(user, loc, interactive=True, app=ac.pick_baseline_app(user),
+                        resource=ac.pick_baseline_resource(user),
                         ca_result="success", conditional="success", device=ac.device_for(user, new=True))]
     if r < 0.97:   # low/medium sign-in risk that Identity Protection auto-remediated/dismissed (benign noise)
         lvl = random.choice(["low", "medium"])
@@ -484,7 +490,7 @@ def scenario_first_sso_resource_org(config=None, user=None):
     """A sign-in accessing an app/resource never before seen in the org -> 'First SSO Resource
     Access in the Organization' (Informational baseline)."""
     u = ac.pick_user(config)
-    novel = f"Custom LOB App {random.randint(1000, 9999)}"
+    novel = ac.rare_app_name()     # a never-before-seen app/resource for the whole org (unbounded)
     return [_signin(u, ac.egress(u), interactive=True, app=novel, resource=novel, ca_result="success")]
 
 
@@ -492,10 +498,7 @@ def scenario_first_sso_new_asn(config=None, user=None):
     """A sign-in from an ASN this user has never used (a hosting/VPS ASN, same country) -> 'First
     SSO access from ASN for user' (Informational baseline / 'Suspicious SSO access from ASN')."""
     u = ac.pick_user(config)
-    loc = {"ip": f"165.1.{random.randint(0,255)}.{random.randint(2,250)}", "city": "Ashburn",
-           "state": "Virginia", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 39.04, "longitude": -77.49},
-           "asn": 14061, "isp": "DigitalOcean LLC"}
+    loc = ac.rare_asn_loc()        # a hosting ASN this user/org has never signed in from (unbounded)
     return [_signin(u, loc, interactive=True, ca_result="success")]
 
 
@@ -526,11 +529,10 @@ def scenario_unusual_resource_access_by_app(config=None, user=None):
     'Unusual resource access by Azure application'. The app itself is a stable entity (pinned
     appId) so UEBA learns its normal resource set; here it touches a sensitive resource
     (Key Vault / ARM / Directory) it does not normally call."""
-    loc = {"ip": random.choice(RISKY_IPS), "city": "Unknown", "state": "", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    loc = ac.rare_asn_loc()
     rec = _sp_signin(loc)
-    res = random.choice(["Azure Key Vault", "Windows Azure Service Management API",
-                         "Windows Azure Active Directory", "Azure Storage"])
+    # Resource OUTSIDE this SP's learned baseline set -> genuinely unusual for this application.
+    res = ac.rare_resource_for("sp:" + rec["appDisplayName"])
     rec["resourceDisplayName"] = res
     rec["resourceId"] = ac.resource_id(res)
     rec["riskState"] = "atRisk"
@@ -542,10 +544,10 @@ def scenario_app_access_unknown_tenant(config=None, user=None):
     """An app sign-in originating from a foreign/unknown tenant via cross-tenant access ->
     'Attempted Azure application access from unknown tenant'. Carries a homeTenantId that is NOT
     this tenant and crossTenantAccessType=b2bCollaboration, from an anonymized IP."""
-    loc = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    loc = ac.rare_asn_loc()
     rec = _sp_signin(loc)
-    rec["homeTenantId"] = ac._stable_guid("rogue-tenant")
+    tenant = ac.rare_tenant()                        # a never-seen external tenant (unbounded)
+    rec["homeTenantId"] = tenant["tenant_id"]
     rec["resourceTenantId"] = ac.HOME_TENANT_ID
     rec["crossTenantAccessType"] = "b2bCollaboration"
     rec["riskState"] = "atRisk"
@@ -587,8 +589,7 @@ def scenario_mi_token_remote_usage(config=None, user=None):
     """An Azure Managed Identity token used from OUTSIDE Azure (non-Azure egress) -> 'Remote usage
     of an Azure Managed Identity token'. MI tokens are bound to an Azure resource; external use
     means the token (e.g. from IMDS) was exfiltrated and replayed."""
-    loc = {"ip": random.choice(RISKY_IPS), "city": "Unknown", "state": "", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    loc = ac.rare_asn_loc()                            # hosting/VPS egress, never in the baseline
     rec = _mi_signin(loc)
     rec["riskState"] = "atRisk"
     rec["riskLevelDuringSignIn"] = "high"
@@ -601,8 +602,7 @@ def scenario_sp_token_remote_usage(config=None, user=None):
     'Remote usage of an Azure Service Principal token'. The SP is a stable entity whose tokens
     normally originate from Azure/Microsoft ranges; here the app-only token is replayed from an
     external datacenter/residential IP."""
-    loc = {"ip": random.choice(RISKY_IPS), "city": "Unknown", "state": "", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    loc = ac.rare_asn_loc()                            # hosting/VPS egress, never in the baseline
     rec = _sp_signin(loc)
     rec["clientCredentialType"] = "clientAssertion"
     rec["riskState"] = "atRisk"

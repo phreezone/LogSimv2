@@ -244,6 +244,305 @@ def workspace_name(rnd=None):
     return (rnd or random).choice(_PBI_WS_CATALOG)
 
 
+# ══ cardinality: baseline vs. reserved-rare pools ════════════════════════════════════════
+# Rarity detectors ("first seen", "unusual app/resource/tenant/domain for this entity/org") only
+# work if the thing that is supposed to be rare is NEVER produced by the benign baseline and almost
+# never repeats. We keep THREE disjoint tiers:
+#
+#   1. BASELINE   — small, recurring pools the benign baseline draws from. Each entity (user, SP)
+#                   gets a stable, narrow SUBSET (its "normal" apps/resources), so a draw outside
+#                   that subset reads anomalous. These are what the ML learns as "normal".
+#   2. ONBOARDING — a slowly growing set (wall-clock schedule) the benign baseline is allowed to add
+#                   to over time, so "first seen app/consent" fires organically without baking the
+#                   whole roster in within hours at 1 log/sec (~86k events/day per generator).
+#   3. RARE       — effectively unbounded combinatorial spaces (>1e9) that ONLY threat scenarios
+#                   draw from, disjoint from tiers 1-2 by construction + an explicit membership
+#                   filter. Random draw from a space this large makes repeats negligible over months
+#                   of runtime, so no persisted "already used" counter is needed (same approach as
+#                   the SharePoint cold-tail). This guarantees a rare scenario ALWAYS has a genuinely
+#                   never-before-seen entity available, no matter how long the sim runs.
+
+# ── SaaS application catalogs (shared by the Graph + O365 directory feeds) ─────────────
+# Common apps that recur in everyday delegated consent / app-role events — the hot core that
+# forms the baseline (familiar, always-present apps).
+SAAS_CORE = ["Salesforce", "ServiceNow", "Zoom", "Slack", "Workday", "DocuSign", "Atlassian Cloud",
+              "GitHub Enterprise", "Adobe Acrobat Sign", "Box", "Tableau Online", "Power BI",
+              "Microsoft Graph Command Line Tools"]
+
+# Enterprise integrations that realistically receive tenant-wide admin consent. A large, varied
+# roster: each app is a stable entity (deterministic appId + SP objectId). Benign consent onboards
+# these GRADUALLY (see onboarding schedule) rather than all at once.
+ADMIN_CONSENT_APPS = [
+    # Collaboration / productivity
+    "Slack", "Zoom", "Webex", "Google Workspace", "Dropbox Business", "Box", "Egnyte",
+    "Citrix ShareFile", "Notion", "Confluence", "Atlassian Cloud", "Asana", "Monday.com", "Trello",
+    "Smartsheet", "Miro", "Mural", "Lucidchart", "Figma", "Airtable", "ClickUp", "Basecamp", "Wrike",
+    "Coda", "Evernote Business", "Calendly", "Loom", "Grammarly Business", "Zapier", "Workato",
+    "Tray.io", "Make", "Doodle",
+    # E-signature / documents / content
+    "DocuSign", "Adobe Acrobat Sign", "PandaDoc", "Dropbox Sign", "Adobe Creative Cloud", "Canva",
+    "Contentful", "Webflow", "Wistia", "Vimeo", "Brightcove", "DocuWare", "M-Files", "Nintex",
+    # CRM / sales / marketing
+    "Salesforce", "HubSpot", "Zoho CRM", "Pipedrive", "Microsoft Dynamics 365", "Marketo",
+    "Salesforce Pardot", "Outreach", "Salesloft", "Gong", "ZoomInfo", "Clearbit", "Drift",
+    "Intercom", "Mailchimp", "SendGrid", "Constant Contact", "Braze", "Iterable", "Segment",
+    "Amplitude", "Mixpanel", "Pendo", "Heap", "Marqeta", "Apollo.io", "6sense", "Demandbase",
+    # Support / ITSM / customer success
+    "ServiceNow", "Jira Service Management", "Freshservice", "Freshdesk", "Zendesk", "Help Scout",
+    "Front", "Gainsight", "Totango", "ChurnZero", "Vitally", "ServiceTitan",
+    # Observability / IT ops
+    "PagerDuty", "Opsgenie", "Splunk Cloud", "Datadog", "New Relic", "Dynatrace", "AppDynamics",
+    "Grafana Cloud", "Sumo Logic", "Elastic Cloud", "LogicMonitor", "SolarWinds", "ManageEngine",
+    "NinjaOne", "Automox", "ConnectWise", "Jamf Pro", "Kandji", "Rippling", "JumpCloud",
+    # Security / identity
+    "Okta", "Ping Identity", "OneLogin", "Duo Security", "CyberArk", "SailPoint IdentityNow",
+    "BeyondTrust", "CrowdStrike Falcon", "SentinelOne", "Proofpoint", "Mimecast", "Abnormal Security",
+    "KnowBe4", "Netskope", "Zscaler", "Cloudflare", "Palo Alto Prisma Access", "Tenable.io", "Qualys",
+    "Rapid7 InsightVM", "Wiz", "Lacework", "Snyk", "Veracode", "Checkmarx", "1Password Business",
+    "LastPass", "Dashlane", "Keeper Security", "HashiCorp Vault", "Twingate", "Tailscale",
+    "Vanta", "Drata", "Secureframe", "OneTrust", "LogicGate", "AuditBoard",
+    # HR / recruiting / people
+    "Workday", "BambooHR", "Gusto", "ADP Workforce Now", "UKG Pro", "Paylocity", "Paycom", "Namely",
+    "Greenhouse", "Lever", "SmartRecruiters", "Workable", "Culture Amp", "Lattice", "15Five", "Deel",
+    "Remote", "Cornerstone OnDemand", "Docebo", "LinkedIn Learning", "Udemy Business", "Pluralsight",
+    "Coursera for Business", "Degreed", "WalkMe",
+    # Finance / ERP / procurement
+    "SAP Concur", "Coupa", "Bill.com", "Ramp", "Brex", "NetSuite", "Sage Intacct", "QuickBooks Online",
+    "Xero", "Stripe", "Avalara", "Navan", "Airbase", "Tipalti", "Expensify", "Divvy", "Anaplan",
+    "Workiva", "BlackLine",
+    # Dev / engineering / CI-CD
+    "GitHub Enterprise", "GitLab", "Bitbucket", "CircleCI", "Jenkins", "Harness", "Octopus Deploy",
+    "JFrog Artifactory", "SonarCloud", "Sentry", "Rollbar", "Bugsnag", "LaunchDarkly", "Split.io",
+    "Postman", "SwaggerHub", "Terraform Cloud", "Pulumi", "Docker Hub", "Databricks",
+    # Data / analytics / BI
+    "Snowflake", "dbt Cloud", "Fivetran", "Airbyte", "Looker", "Tableau Online", "Power BI",
+    "Qlik Sense", "Mode Analytics", "Sisense", "ThoughtSpot", "Metabase", "Hex", "Alteryx",
+    "Celonis", "Collibra", "Monte Carlo",
+    # Automation / RPA / misc platform
+    "UiPath", "Automation Anywhere", "Blue Prism", "MuleSoft", "Boomi", "BetterCloud", "Torii",
+    "Productiv", "Zluri",
+    # Storage / backup / DR
+    "Druva", "Rubrik", "Cohesity", "Veeam", "Backblaze",
+    # Comms / telephony
+    "Twilio", "RingCentral", "Dialpad", "Aircall", "8x8", "Five9", "Talkdesk", "Genesys Cloud",
+    "Vonage",
+    # Microsoft first-party admin tooling
+    "Microsoft Graph Command Line Tools", "Microsoft Graph PowerShell", "Azure CLI",
+    # Design / construction / vertical
+    "Autodesk Construction Cloud", "Procore", "Bluebeam", "Qualtrics", "SurveyMonkey", "Typeform",
+]
+
+# Vendor/product tokens used to synthesize app-registration names for the unbounded RARE app space.
+APP_VENDORS = [
+    "Asana", "Monday", "Notion", "Airtable", "Smartsheet", "Miro", "Figma", "Lucidchart", "Calendly",
+    "Dropbox", "Egnyte", "Mural", "Coda", "ClickUp", "Wrike", "Basecamp", "Trello", "Jira",
+    "Confluence", "Bitbucket", "GitLab", "CircleCI", "Datadog", "Grafana", "Splunk", "PagerDuty",
+    "Opsgenie", "New Relic", "Sumo Logic", "Okta", "Ping Identity", "OneLogin", "Duo", "CyberArk",
+    "SailPoint", "CrowdStrike", "SentinelOne", "Proofpoint", "Mimecast", "Netskope", "Zscaler",
+    "Cloudflare", "Snyk", "Veracode", "1Password", "LastPass", "HashiCorp", "Twilio", "SendGrid",
+    "Mailchimp", "HubSpot", "Marketo", "Segment", "Amplitude", "Mixpanel", "Pendo", "Intercom",
+    "Drift", "Gong", "Outreach", "Salesloft", "Gainsight", "Totango", "Greenhouse", "Lever",
+    "BambooHR", "Gusto", "Rippling", "Deel", "Expensify", "Coupa", "Ramp", "Brex", "Bill.com",
+    "NetSuite", "Xero", "Stripe", "Snowflake", "Databricks", "Fivetran", "Looker", "Qlik",
+    "ThoughtSpot", "Metabase", "Alteryx", "UiPath", "Workato", "Zapier", "Boomi", "MuleSoft",
+    "Celonis", "Vanta", "Drata", "OneTrust", "AuditBoard", "Procore", "Qualtrics", "SurveyMonkey",
+    "Typeform", "Loom", "Grammarly", "Webex", "RingCentral", "Twingate", "Tailscale", "JumpCloud"]
+
+APP_PRODUCTS = [
+    "Connector", "for Microsoft 365", "SSO", "Integration", "Sync", "Cloud", "Enterprise",
+    "Analytics", "API", "Automation", "Add-in", "Teams App", "Reporting", "Gateway", "Provisioning",
+    "SCIM", "for Outlook", "for Teams", "for SharePoint", "Insights", "Workspace", "Platform",
+    "Admin", "Service", "Bot"]
+
+
+# ── onboarding drift: benign app estate grows on a wall-clock schedule ─────────────────
+# At 1 log/sec a generator emits ~86k events/day, so uniformly sampling the whole 258-app consent
+# roster in the baseline would let XSIAM "see" every app within hours and the "first seen" detectors
+# would saturate. Instead the consented estate grows a few apps per week (wall-clock), so new apps
+# keep appearing for ~a year of runtime. Order is seeded (stable across restarts); the admitted
+# count is a pure function of elapsed time, so no state file is needed.
+_RUN_T0 = time.time()
+ONBOARDING_BASE_APPS = 40            # apps already consented when the tenant "starts"
+ONBOARDING_HOURS_PER_APP = 36.0      # ~4-5 newly consented apps per week
+
+_ONBOARD_ORDER = None
+
+
+def _onboard_order():
+    global _ONBOARD_ORDER
+    if _ONBOARD_ORDER is None:
+        order = list(dict.fromkeys(ADMIN_CONSENT_APPS))      # dedup, stable
+        random.Random("logsim-onboard-order-v1").shuffle(order)
+        _ONBOARD_ORDER = order
+    return _ONBOARD_ORDER
+
+
+def onboarded_apps(now=None):
+    """The subset of the consent roster the tenant has onboarded by `now` (grows with wall-clock)."""
+    order = _onboard_order()
+    hrs = max(0.0, ((now if now is not None else time.time()) - _RUN_T0) / 3600.0)
+    n = min(len(order), ONBOARDING_BASE_APPS + int(hrs / ONBOARDING_HOURS_PER_APP))
+    return order[:n]
+
+
+def baseline_saas_app(now=None):
+    """Benign app pick: the recurring core plus apps onboarded so far (never a rare/unseen app)."""
+    return random.choice(SAAS_CORE + onboarded_apps(now))
+
+
+def admin_consent_app(now=None):
+    """Benign admin-consent target: an app from the onboarded estate (the newest is the organic
+    'first seen admin consent')."""
+    ob = onboarded_apps(now)
+    return random.choice(ob) if ob else random.choice(SAAS_CORE)
+
+
+# ── per-entity baseline subsets (stable, narrow) ──────────────────────────────────────
+# A user/SP does not touch every app and resource — it has a small habitual set. Benign draws from
+# that set so the ML learns a tight per-entity baseline; a draw outside it (rare pool) is anomalous.
+def _stable_subset(seed, pool, k):
+    """Deterministic k-element subset of pool for a given seed (stable across runs)."""
+    k = max(1, min(k, len(pool)))
+    return random.Random(seed).sample(sorted(pool), k)
+
+
+def baseline_apps_for(user, interactive=True, k=None):
+    pool = APPS_INTERACTIVE if interactive else APPS_NONINTERACTIVE
+    un = user["username"] if isinstance(user, dict) else str(user)
+    k = k or (7 if interactive else 6)
+    return _stable_subset(f"appset:{interactive}:{un}", pool, k)
+
+
+def pick_baseline_app(user, interactive=True):
+    return random.choice(baseline_apps_for(user, interactive))
+
+
+def baseline_resources_for(entity, k=4):
+    """Stable subset of RESOURCES this user/SP normally accesses (entity may be a user dict or a
+    string key like 'sp:<name>')."""
+    key = entity["username"] if isinstance(entity, dict) else str(entity)
+    return _stable_subset(f"resset:{key}", RESOURCES, k)
+
+
+def pick_baseline_resource(entity):
+    return random.choice(baseline_resources_for(entity))
+
+
+def rare_resource_for(entity, rnd=None):
+    """A resource OUTSIDE this entity's baseline set (an 'unusual resource for this app/user')."""
+    r = rnd or random
+    base = set(baseline_resources_for(entity))
+    outside = [x for x in RESOURCES if x not in base]
+    return r.choice(outside) if outside else r.choice(RESOURCES)
+
+
+# ── reserved RARE pools (unbounded, disjoint from baseline) ────────────────────────────
+_RARE_APP_EDITIONS = ["", "", "Pro", "Enterprise", "Cloud", "EU", "US", "Global", "Partner",
+                      "Dev", "Sandbox", "Beta", "Labs", "Premium", "Team", "Online", "X"]
+# Baseline app name set — rare app names are filtered against this so the spaces can never overlap.
+_BASELINE_APP_SET = frozenset(SAAS_CORE) | frozenset(ADMIN_CONSENT_APPS)
+
+
+def rare_app_name(rnd=None):
+    """A never-before-seen application-registration name from an unbounded space (>1e9), guaranteed
+    disjoint from every baseline/onboarded app. For first-seen app / illicit-consent scenarios."""
+    r = rnd or random
+    for _ in range(8):
+        name = (f"{r.choice(APP_VENDORS)} {r.choice(APP_PRODUCTS)} "
+                f"{r.choice(_RARE_APP_EDITIONS)}{r.randint(1000, 999999)}").replace("  ", " ").strip()
+        if name not in _BASELINE_APP_SET:
+            return name
+    return name  # astronomically unlikely to loop out; name already carries a unique number
+
+
+# Hosting / VPS / anonymizer ASNs — sign-ins from these never occur in the benign baseline (which
+# uses corporate office / residential / mobile egress), so any is anomalous. IP is drawn across the
+# full ASN range, giving an unbounded attacker-IP space.
+_RARE_ASNS = [
+    (14061, "DigitalOcean, LLC", "165"), (16509, "Amazon.com, Inc.", "3"),
+    (14618, "Amazon.com, Inc.", "18"), (396982, "Google LLC", "35"),
+    (8075, "Microsoft Corporation", "20"), (20473, "The Constant Company (Vultr)", "45"),
+    (63949, "Akamai (Linode)", "139"), (24940, "Hetzner Online", "88"),
+    (16276, "OVH SAS", "51"), (51167, "Contabo GmbH", "161"),
+    (9009, "M247 Europe", "146"), (49505, "Selectel", "92"),
+    (200019, "Alexhost SRL", "176"), (44477, "Stark Industries Solutions", "185"),
+    (210644, "Aeza International", "194"), (401120, "Censys", "162"),
+    (60068, "Datacamp (CDN77)", "212"), (3214, "xTom", "23"),
+]
+
+
+def rare_asn_loc(rnd=None, country="US"):
+    """Egress from a hosting/VPS/anonymizer ASN (never seen in the benign baseline). Returns the same
+    shape as egress(): {ip, city, state, countryOrRegion, geoCoordinates, asn, isp}."""
+    r = rnd or random
+    asn, isp, octet = r.choice(_RARE_ASNS)
+    ip = f"{octet}.{r.randint(0, 255)}.{r.randint(0, 255)}.{r.randint(2, 254)}"
+    return {"ip": ip, "city": "", "state": "", "countryOrRegion": country,
+            "geoCoordinates": {"latitude": 0, "longitude": 0}, "asn": asn, "isp": isp}
+
+
+# Combinatorial pieces for rogue tenants / backdoor domains (unbounded).
+_RARE_ORG_WORDS = ["corp", "cloud", "sync", "secure", "global", "services", "systems", "tenant",
+                   "identity", "federation", "partner", "group", "holdings", "digital", "online",
+                   "mail", "connect", "access", "verify", "portal", "office", "msft", "entra",
+                   "admin", "gateway", "trust", "data", "net", "hub", "soft", "tech", "labs"]
+_RARE_TLDS = ["com", "net", "org", "io", "co", "cloud", "app", "info", "biz", "xyz", "online",
+              "site", "live", "pro", "email", "link"]
+
+
+def _rare_label(rnd):
+    r = rnd
+    a, b = r.choice(_RARE_ORG_WORDS), r.choice(_RARE_ORG_WORDS)
+    sep = r.choice(["", "", "-"])
+    tail = r.choice(["", "", "", str(r.randint(1, 999)), r.choice(["hq", "intl", "grp", "co"])])
+    return f"{a}{sep}{b}{tail}"
+
+
+def rare_domain(rnd=None, kind="generic"):
+    """A never-seen external domain from an unbounded space. kind: 'generic', 'federation'
+    (IdP/backdoor flavored), or 'onmicrosoft' (a fake external tenant vanity domain)."""
+    r = rnd or random
+    label = _rare_label(r)
+    if kind == "onmicrosoft":
+        return f"{label}.onmicrosoft.com"
+    if kind == "federation":
+        label = r.choice(["login", "sts", "adfs", "auth", "sso", "idp", "secure"]) + \
+            r.choice(["-", ""]) + label
+    return f"{label}.{r.choice(_RARE_TLDS)}"
+
+
+def rare_tenant(rnd=None):
+    """A never-seen external Entra tenant: returns {domain, tenant_id} (both unbounded/unique)."""
+    r = rnd or random
+    dom = rare_domain(r, kind="onmicrosoft")
+    return {"domain": dom, "tenant_id": _stable_guid("rtenant:" + dom + ":" + str(r.random()))}
+
+
+def rare_ext_email(rnd=None):
+    """A never-seen external recipient address on a rare domain (for exfil/forwarding targets)."""
+    r = rnd or random
+    first = r.choice(_EXT_FIRST)
+    return f"{first}{r.randint(1, 9999)}@{rare_domain(r)}"
+
+
+# Actors who are NOT part of any admin baseline — a 'non-standard account' for admin-type operations.
+_ADMIN_ROLE_NAMES = frozenset({"IT Administrator", "IT Director", "Systems Engineer", "Help Desk",
+                               "Security Engineer", "Security Analyst"})
+
+
+def pick_nonstandard_actor(config=None, context=None):
+    """Pick an identity whose directory role is NOT an admin/helpdesk/security role, so an
+    admin-type action by them reads as 'performed by a non-standard account'. Falls back to
+    pick_user() if no role metadata is available."""
+    profiles = (config or {}).get("user_profiles") or {}
+    if profiles:
+        non_admin = [u for u, p in profiles.items() if p.get("role") not in _ADMIN_ROLE_NAMES]
+        if non_admin:
+            u = random.choice(non_admin)
+            return _norm(u, profiles[u])
+    return pick_user(config, context)
+
+
 # ── threat gating ────────────────────────────────────────────────────────────────────
 # Threats are modeled as wall-clock EPISODES, not a per-log percentage. A detection fires on an
 # episode (a burst/sequence: a spray, a mass-download, an impossible-travel pair), once per episode,

@@ -38,121 +38,25 @@ ADMIN_ROLES = ("IT Administrator", "IT Director", "Systems Engineer")
 HELPDESK_ROLES = ("Help Desk", "IT Administrator")
 _ID_PREFIX = {"Core Directory": "Directory", "Self-service Password Management": "SSPR",
               "Authentication Methods": "Authentication Methods", "Account Provisioning": "Sync"}
-# Common apps that recur in everyday delegated consent / app-role events — the hot core that
-# forms the baseline (familiar, always-present apps).
-_SAAS_CORE = ["Salesforce", "ServiceNow", "Zoom", "Slack", "Workday", "DocuSign", "Atlassian Cloud",
-              "GitHub Enterprise", "Adobe Acrobat Sign", "Box", "Tableau Online", "Power BI",
-              "Microsoft Graph Command Line Tools"]
-# Enterprise integrations that realistically receive tenant-wide admin consent. A large, varied
-# roster (200+): each app is a stable entity (deterministic appId + SP objectId), so the same app
-# always appears with the same identity across events -- what a real tenant's consented-app estate
-# looks like. The roster is intentionally broad so a never-before-seen app keeps appearing even after
-# months of runtime, letting XSIAM's "first seen" admin-consent detector keep firing organically.
-_ADMIN_CONSENT_APPS = [
-    # Collaboration / productivity
-    "Slack", "Zoom", "Webex", "Google Workspace", "Dropbox Business", "Box", "Egnyte",
-    "Citrix ShareFile", "Notion", "Confluence", "Atlassian Cloud", "Asana", "Monday.com", "Trello",
-    "Smartsheet", "Miro", "Mural", "Lucidchart", "Figma", "Airtable", "ClickUp", "Basecamp", "Wrike",
-    "Coda", "Evernote Business", "Calendly", "Loom", "Grammarly Business", "Zapier", "Workato",
-    "Tray.io", "Make", "Doodle",
-    # E-signature / documents / content
-    "DocuSign", "Adobe Acrobat Sign", "PandaDoc", "Dropbox Sign", "Adobe Creative Cloud", "Canva",
-    "Contentful", "Webflow", "Wistia", "Vimeo", "Brightcove", "DocuWare", "M-Files", "Nintex",
-    # CRM / sales / marketing
-    "Salesforce", "HubSpot", "Zoho CRM", "Pipedrive", "Microsoft Dynamics 365", "Marketo",
-    "Salesforce Pardot", "Outreach", "Salesloft", "Gong", "ZoomInfo", "Clearbit", "Drift",
-    "Intercom", "Mailchimp", "SendGrid", "Constant Contact", "Braze", "Iterable", "Segment",
-    "Amplitude", "Mixpanel", "Pendo", "Heap", "Marqeta", "Apollo.io", "6sense", "Demandbase",
-    # Support / ITSM / customer success
-    "ServiceNow", "Jira Service Management", "Freshservice", "Freshdesk", "Zendesk", "Help Scout",
-    "Front", "Gainsight", "Totango", "ChurnZero", "Vitally", "ServiceTitan",
-    # Observability / IT ops
-    "PagerDuty", "Opsgenie", "Splunk Cloud", "Datadog", "New Relic", "Dynatrace", "AppDynamics",
-    "Grafana Cloud", "Sumo Logic", "Elastic Cloud", "LogicMonitor", "SolarWinds", "ManageEngine",
-    "NinjaOne", "Automox", "ConnectWise", "Jamf Pro", "Kandji", "Rippling", "JumpCloud",
-    # Security / identity
-    "Okta", "Ping Identity", "OneLogin", "Duo Security", "CyberArk", "SailPoint IdentityNow",
-    "BeyondTrust", "CrowdStrike Falcon", "SentinelOne", "Proofpoint", "Mimecast", "Abnormal Security",
-    "KnowBe4", "Netskope", "Zscaler", "Cloudflare", "Palo Alto Prisma Access", "Tenable.io", "Qualys",
-    "Rapid7 InsightVM", "Wiz", "Lacework", "Snyk", "Veracode", "Checkmarx", "1Password Business",
-    "LastPass", "Dashlane", "Keeper Security", "HashiCorp Vault", "Twingate", "Tailscale",
-    "Vanta", "Drata", "Secureframe", "OneTrust", "LogicGate", "AuditBoard",
-    # HR / recruiting / people
-    "Workday", "BambooHR", "Gusto", "ADP Workforce Now", "UKG Pro", "Paylocity", "Paycom", "Namely",
-    "Greenhouse", "Lever", "SmartRecruiters", "Workable", "Culture Amp", "Lattice", "15Five", "Deel",
-    "Remote", "Cornerstone OnDemand", "Docebo", "LinkedIn Learning", "Udemy Business", "Pluralsight",
-    "Coursera for Business", "Degreed", "WalkMe",
-    # Finance / ERP / procurement
-    "SAP Concur", "Coupa", "Bill.com", "Ramp", "Brex", "NetSuite", "Sage Intacct", "QuickBooks Online",
-    "Xero", "Stripe", "Avalara", "Navan", "Airbase", "Tipalti", "Expensify", "Divvy", "Anaplan",
-    "Workiva", "BlackLine",
-    # Dev / engineering / CI-CD
-    "GitHub Enterprise", "GitLab", "Bitbucket", "CircleCI", "Jenkins", "Harness", "Octopus Deploy",
-    "JFrog Artifactory", "SonarCloud", "Sentry", "Rollbar", "Bugsnag", "LaunchDarkly", "Split.io",
-    "Postman", "SwaggerHub", "Terraform Cloud", "Pulumi", "Docker Hub", "Databricks",
-    # Data / analytics / BI
-    "Snowflake", "dbt Cloud", "Fivetran", "Airbyte", "Looker", "Tableau Online", "Power BI",
-    "Qlik Sense", "Mode Analytics", "Sisense", "ThoughtSpot", "Metabase", "Hex", "Alteryx",
-    "Celonis", "Collibra", "Monte Carlo",
-    # Automation / RPA / misc platform
-    "UiPath", "Automation Anywhere", "Blue Prism", "MuleSoft", "Boomi", "BetterCloud", "Torii",
-    "Productiv", "Zluri",
-    # Storage / backup / DR
-    "Druva", "Rubrik", "Cohesity", "Veeam", "Backblaze",
-    # Comms / telephony
-    "Twilio", "RingCentral", "Dialpad", "Aircall", "8x8", "Five9", "Talkdesk", "Genesys Cloud",
-    "Vonage",
-    # Microsoft first-party admin tooling
-    "Microsoft Graph Command Line Tools", "Microsoft Graph PowerShell", "Azure CLI",
-    # Design / construction / vertical
-    "Autodesk Construction Cloud", "Procore", "Bluebeam", "Qualtrics", "SurveyMonkey", "Typeform",
-]
+# Directory-lifecycle operators: the only admins who create/delete users in the baseline. Other
+# admins (IT Director, Systems Engineer) carry heavy admin activity but never delete accounts, so
+# a deletion by one of them reads as 'deletion by a non-standard account'.
+LIFECYCLE_ROLES = ("Help Desk", "IT Administrator")
+_LIFECYCLE_ACTIVITIES = {"Add user", "Delete user", "Hard Delete user", "Restore user"}
 
-# A long tail of less-common apps so new/first-seen apps keep appearing for a long time and the
-# baseline does NOT saturate quickly. Built from the admin-consent roster plus generated vendor
-# app registrations — deterministic and bounded (~800), so apps remain stable entities (each a
-# fixed appId via ac.app_id), not an infinite stream. Everyday app events draw heavy-tailed:
-# ~80% from the small hot core (recurs -> baseline), ~20% from this tail (rare -> first-seen fuel).
-_APP_VENDORS = [
-    "Asana", "Monday", "Notion", "Airtable", "Smartsheet", "Miro", "Figma", "Lucidchart", "Calendly",
-    "Dropbox", "Egnyte", "Mural", "Coda", "ClickUp", "Wrike", "Basecamp", "Trello", "Jira",
-    "Confluence", "Bitbucket", "GitLab", "CircleCI", "Datadog", "Grafana", "Splunk", "PagerDuty",
-    "Opsgenie", "New Relic", "Sumo Logic", "Okta", "Ping Identity", "OneLogin", "Duo", "CyberArk",
-    "SailPoint", "CrowdStrike", "SentinelOne", "Proofpoint", "Mimecast", "Netskope", "Zscaler",
-    "Cloudflare", "Snyk", "Veracode", "1Password", "LastPass", "HashiCorp", "Twilio", "SendGrid",
-    "Mailchimp", "HubSpot", "Marketo", "Segment", "Amplitude", "Mixpanel", "Pendo", "Intercom",
-    "Drift", "Gong", "Outreach", "Salesloft", "Gainsight", "Totango", "Greenhouse", "Lever",
-    "BambooHR", "Gusto", "Rippling", "Deel", "Expensify", "Coupa", "Ramp", "Brex", "Bill.com",
-    "NetSuite", "Xero", "Stripe", "Snowflake", "Databricks", "Fivetran", "Looker", "Qlik",
-    "ThoughtSpot", "Metabase", "Alteryx", "UiPath", "Workato", "Zapier", "Boomi", "MuleSoft",
-    "Celonis", "Vanta", "Drata", "OneTrust", "AuditBoard", "Procore", "Qualtrics", "SurveyMonkey",
-    "Typeform", "Loom", "Grammarly", "Webex", "RingCentral", "Twingate", "Tailscale", "JumpCloud"]
-_APP_PRODUCTS = [
-    "Connector", "for Microsoft 365", "SSO", "Integration", "Sync", "Cloud", "Enterprise",
-    "Analytics", "API", "Automation", "Add-in", "Teams App", "Reporting", "Gateway", "Provisioning",
-    "SCIM", "for Outlook", "for Teams", "for SharePoint", "Insights", "Workspace", "Platform",
-    "Admin", "Service", "Bot"]
-
-
-def _build_app_tail():
-    rnd = random.Random("logsim-saas-tail-v1")   # seeded -> identical across runs/machines
-    tail = set(_ADMIN_CONSENT_APPS)
-    while len(tail) < 800:
-        tail.add(f"{rnd.choice(_APP_VENDORS)} {rnd.choice(_APP_PRODUCTS)}")
-    return sorted(tail)
-
-
-_SAAS_TAIL = _build_app_tail()
+# SaaS app catalogs live in azure_common (shared with the O365 directory feed). Benign events draw
+# only from the baseline (recurring core + apps admitted by the wall-clock onboarding schedule);
+# threat scenarios that need a never-seen app draw from ac.rare_app_name().
+_SAAS_CORE = ac.SAAS_CORE
 _SAAS_APPS = _SAAS_CORE   # back-compat alias (the recurring core)
-_TAIL_PROB = 0.20         # share of everyday app events drawn from the long tail
+_ADMIN_CONSENT_APPS = ac.ADMIN_CONSENT_APPS
+_APP_VENDORS = ac.APP_VENDORS
+_APP_PRODUCTS = ac.APP_PRODUCTS
 
 
 def _saas_app():
-    """Heavy-tailed app pick: mostly the recurring core (baseline), sometimes a long-tail app
-    (so first-seen / new-app detectors keep firing for a long time instead of saturating)."""
-    if random.random() < _TAIL_PROB:
-        return random.choice(_SAAS_TAIL)
-    return random.choice(_SAAS_CORE)
+    """Baseline app pick (benign): recurring core, plus apps already onboarded by the schedule."""
+    return ac.baseline_saas_app()
 
 
 _CA_POLICIES = [n for n, _ in ac.CA_POLICIES]
@@ -286,7 +190,7 @@ def _b_admin_consent(cfg, app=None):
     # The target app is pinned: a stable appId + SP objectId per app name, drawn from a
     # varied roster, so repeated consents reference a consistent application identity.
     admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",))
-    app = app or random.choice(_ADMIN_CONSENT_APPS)
+    app = app or ac.admin_consent_app()   # onboarded estate (grows on a wall-clock schedule)
     app_id = ac.app_id(app)
     mods = [mp("ConsentContext.IsAdminConsent", None, "True"),
             mp("ConsentContext.OnBehalfOfAll", None, "True"),
@@ -456,11 +360,12 @@ def scenario_consent_risky_app(config=None):
     detector is 'an ADMINISTRATIVE identity consented permissions to an application', so the
     initiator is an admin and ConsentContext.IsAdminConsent is True)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    app = ac.rare_app_name()   # a never-before-seen app -> genuine first-seen high-privilege consent
     mods = [mp("ConsentContext.IsAdminConsent", None, "True"),
             mp("ConsentContext.OnBehalfOfAll", None, "True"),
             mp("ConsentAction.Permissions", None, "Mail.Read Files.ReadWrite.All Directory.Read.All offline_access")]
     return [audit("Consent to application", "ApplicationManagement", "Core Directory", "Assign",
-                  by_user(admin), [t_obj("ServicePrincipal", "External Reporting Connector", mods)],
+                  by_user(admin), [t_obj("ServicePrincipal", app, mods)],
                   [{"key": "User-Agent", "value": "EvoSTS"}])]
 
 
@@ -482,20 +387,24 @@ def scenario_security_info_disabled(config=None):
 
 
 # A rogue external Entra tenant an attacker attaches via cross-tenant access + cross-tenant sync —
-# the cloud equivalent of standing up a rogue forest and establishing a trust. Stable fake tenant.
-_ROGUE_TENANT_ID = ac._stable_guid("rogue-tenant:evilcorp.onmicrosoft.com")
-_ROGUE_TENANT_DOMAIN = "evilcorp.onmicrosoft.com"
+# the cloud equivalent of standing up a rogue forest and establishing a trust. Each fire uses a
+# fresh, never-seen external tenant (ac.rare_tenant(), unbounded); multi-step sequences generate one
+# rogue tenant and thread it through every step via the `rogue=` parameter so the chain stays
+# coherent. A module-level default is kept only as a last-resort fallback.
+def _rogue():
+    return ac.rare_tenant()
 
 
-def scenario_cross_tenant_trust_abuse(config=None):
+def scenario_cross_tenant_trust_abuse(config=None, rogue=None):
     """Attacker trusts a rogue external tenant and opens inbound B2B + cross-tenant sync
     (the cloud 'rogue forest trust'): CrossTenantAccessSettings + CrossTenantIdentitySyncSettings
     changes granting inbound collaboration/direct-connect, MFA trust, auto-redemption and inbound
     user provisioning from the attacker tenant -> anomalous directory/trust change + privilege path."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
-    tgt = t_obj("Other", _ROGUE_TENANT_DOMAIN)
+    rogue = rogue or _rogue(); dom, tid = rogue["domain"], rogue["tenant_id"]
+    tgt = t_obj("Other", dom)
     tgt["modifiedProperties"] = [
-        mp("tenantId", None, _ROGUE_TENANT_ID),
+        mp("tenantId", None, tid),
         mp("b2bCollaborationInbound.usersAndGroups", '{"accessType":"blocked"}',
            '{"accessType":"allowed"}'),
         mp("b2bDirectConnectInbound.usersAndGroups", '{"accessType":"blocked"}',
@@ -508,41 +417,42 @@ def scenario_cross_tenant_trust_abuse(config=None):
               "Core Directory", "Add", by_user(admin), [tgt], [_ua(admin)]),
         audit("Update a partner cross-tenant access setting", "CrossTenantAccessSettings",
               "Core Directory", "Update", by_user(admin),
-              [t_obj("Other", _ROGUE_TENANT_DOMAIN,
+              [t_obj("Other", dom,
                      [mp("inboundTrust.isMfaAccepted", "false", "true"),
                       mp("automaticUserConsentSettings.inboundAllowed", "false", "true")])],
               [_ua(admin)]),
         audit("Create a partner cross-tenant identity sync setting", "CrossTenantIdentitySyncSettings",
               "Core Directory", "Add", by_user(admin),
-              [t_obj("Other", _ROGUE_TENANT_DOMAIN,
-                     [mp("tenantId", None, _ROGUE_TENANT_ID),
+              [t_obj("Other", dom,
+                     [mp("tenantId", None, tid),
                       mp("userSyncInbound.isSyncAllowed", "false", "true")])],
               [_ua(admin)])]
 
 
-def scenario_cross_tenant_sync_outbound(config=None):
+def scenario_cross_tenant_sync_outbound(config=None, rogue=None):
     """Outbound cross-tenant sync: OUR users are provisioned OUT to the rogue tenant (user/data
     exfiltration via the identity fabric, T1537)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    rogue = rogue or _rogue(); dom, tid = rogue["domain"], rogue["tenant_id"]
     return [
         audit("Update a partner cross-tenant access setting", "CrossTenantAccessSettings",
               "Core Directory", "Update", by_user(admin),
-              [t_obj("Other", _ROGUE_TENANT_DOMAIN,
-                     [mp("tenantId", None, _ROGUE_TENANT_ID),
+              [t_obj("Other", dom,
+                     [mp("tenantId", None, tid),
                       mp("b2bCollaborationOutbound.usersAndGroups",
                          '{"accessType":"blocked"}', '{"accessType":"allowed"}')])], [_ua(admin)]),
         audit("Create a partner cross-tenant identity sync setting", "CrossTenantIdentitySyncSettings",
               "Core Directory", "Add", by_user(admin),
-              [t_obj("Other", _ROGUE_TENANT_DOMAIN,
-                     [mp("tenantId", None, _ROGUE_TENANT_ID),
+              [t_obj("Other", dom,
+                     [mp("tenantId", None, tid),
                       mp("userSyncOutbound.isSyncAllowed", "false", "true")])], [_ua(admin)])]
 
 
-def scenario_delegated_admin_partner_abuse(config=None):
+def scenario_delegated_admin_partner_abuse(config=None, rogue=None):
     """External delegated-admin (GDAP/DAP) partner promoted with Global Admin over the tenant —
     partner-tenant takeover (T1098 Account Manipulation / abuse of delegated administration)."""
     admin = ac.pick_by_role(config, ("IT Director",), ("IT",))
-    partner = "msp-partner-eval.onmicrosoft.com"
+    partner = (rogue or _rogue())["domain"]
     pid = ac._stable_guid("gdap:" + partner)
     return [
         audit("Add partner to company", "DirectoryManagement", "Core Directory", "Add",
@@ -553,14 +463,15 @@ def scenario_delegated_admin_partner_abuse(config=None):
                       mp("AccessAssignment", None, "Microsoft Entra Global Administrator")])], [_ua(admin)])]
 
 
-def scenario_multitenant_org_join(config=None):
+def scenario_multitenant_org_join(config=None, rogue=None):
     """Tenant joined into an attacker-run multi-tenant org with identity sync — cloud cross-tenant
     fabric persistence (the cloud analog of joining a rogue forest)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
-    mto = "Contoso Global MTO"
+    rogue = rogue or _rogue()
+    mto = rogue["domain"].split(".")[0].replace("-", " ").title() + " MTO"
     return [
         audit("Create a MultiTenantOrg", "MultiTenantOrg", "Core Directory", "Add", by_user(admin),
-              [t_obj("Other", mto, [mp("tenantId", None, _ROGUE_TENANT_ID),
+              [t_obj("Other", mto, [mp("tenantId", None, rogue["tenant_id"]),
                                     mp("role", None, "owner"), mp("state", None, "active")])], [_ua(admin)]),
         audit("Update a multi tenant org identity sync policy template",
               "MultiTenantOrgIdentitySyncPolicyUpdate", "Core Directory", "Update", by_user(admin),
@@ -581,28 +492,29 @@ def scenario_cross_tenant_default_weakened(config=None):
                           mp("automaticUserConsentSettings.inboundAllowed", "false", "true")])], [_ua(admin)])]
 
 
-def scenario_federated_domain_backdoor(config=None):
+def scenario_federated_domain_backdoor(config=None, dom=None):
     """A new domain is added and federated to an attacker IdP — persistent Golden SAML backdoor
-    (T1484.002 Trust Modification)."""
+    (T1484.002 Trust Modification). The IssuerUri is the Mandiant-known-bad 'http://any.sts/...'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
-    dom = "login-security-update.com"
+    dom = dom or ac.rare_domain(kind="federation")   # never-seen backdoor domain (unbounded)
     return [
         audit("Add unverified domain", "DirectoryManagement", "Core Directory", "Add",
               by_user(admin), [t_obj("Directory", dom)], [_ua(admin)]),
         audit("Set federation settings on domain", "DirectoryManagement", "Core Directory", "Update",
               by_user(admin), [t_obj("Directory", dom,
                      [mp("IssuerUri", None, "http://any.sts/adfs/services/trust"),
-                      mp("PassiveSignInUri", None, "https://attacker-idp.example/adfs/ls/"),
+                      mp("PassiveSignInUri", None, f"https://{ac.rare_domain(kind='federation')}/adfs/ls/"),
                       mp("SigningCertificate", None, "<attacker-cert-thumbprint>")])], [_ua(admin)])]
 
 
-def scenario_failed_federation_change(config=None):
+def scenario_failed_federation_change(config=None, dom=None):
     """A FAILED attempt to modify domain federation settings (permission denied) -> the 'failed'
     half of 'Azure domain federation settings modification (successful/failed)'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    dom = dom or ac.rare_domain(kind="federation")
     return [audit("Set federation settings on domain", "DirectoryManagement", "Core Directory",
                   "Update", by_user(admin),
-                  [t_obj("Directory", "login-security-update.com",
+                  [t_obj("Directory", dom,
                          [mp("IssuerUri", None, "http://any.sts/adfs/services/trust")])],
                   [_ua(admin)], result="failure",
                   reason="Insufficient privileges to complete the operation.")]
@@ -635,7 +547,7 @@ def scenario_ca_policy_removed(config=None):
 def scenario_ca_operation_unusual(config=None):
     """A Conditional Access policy is weakened by an identity that doesn't normally touch CA ->
     'Unusual Conditional Access operation for an identity'."""
-    actor = ac.pick_user(config)   # not a typical CA admin
+    actor = ac.pick_nonstandard_actor(config)   # not a typical CA admin
     pol = random.choice(_CA_POLICIES)
     return [audit("Update conditional access policy", "Policy", "Conditional Access", "Update",
                   by_user(actor), [t_obj("Policy", pol,
@@ -719,12 +631,12 @@ def scenario_device_registration_policy_mod(config=None):
 def scenario_unusual_guest_invitation(config=None):
     """An external guest is invited by an identity that doesn't normally invite guests ->
     'Successful unusual guest user invitation'."""
-    inviter = ac.pick_user(config)
-    guest = f"contractor_{random.randint(100,999)}#EXT#@examplecorp.com"
+    inviter = ac.pick_nonstandard_actor(config)
+    ext = ac.rare_ext_email()                        # never-seen external invitee (unbounded)
+    guest = f"{ext.split('@')[0]}#EXT#@examplecorp.com"
     return [audit("Invite external user", "UserManagement", "Core Directory", "Add", by_user(inviter),
                   [t_user({"username": "guest", "upn": guest, "display_name": "external guest"},
-                   [mp("Invitation.InvitedUserEmailAddress", None,
-                       f"contractor{random.randint(100,999)}@proton.me")])], [_ua(inviter)])]
+                   [mp("Invitation.InvitedUserEmailAddress", None, ext)])], [_ua(inviter)])]
 
 
 def scenario_account_unlock_password_reset(config=None):
@@ -777,7 +689,7 @@ def scenario_onprem_sync_collision(config=None):
 def scenario_user_account_created(config=None):
     """A new directory user is created by an identity that does not normally provision accounts ->
     'Azure account creation by a non-standard account' (rogue account persistence)."""
-    actor = ac.pick_user(config)
+    actor = ac.pick_nonstandard_actor(config)
     newu = f"svc_{random.randint(1000,9999)}"
     return [audit("Add user", "UserManagement", "Core Directory", "Add", by_user(actor),
                   [t_user({"username": newu, "upn": f"{newu}@examplecorp.com",
@@ -789,7 +701,7 @@ def scenario_user_account_created(config=None):
 def scenario_user_account_deleted(config=None):
     """A directory user is deleted by an identity that does not normally delete accounts ->
     'Azure account deletion by a non-standard account' (destruction / covering tracks)."""
-    actor = ac.pick_user(config); tgt = ac.pick_user(config)
+    actor = ac.pick_nonstandard_actor(config); tgt = ac.pick_user(config)
     return [audit("Delete user", "UserManagement", "Core Directory", "Delete", by_user(actor),
                   [t_user(tgt)], [_ua(actor)])]
 
@@ -847,7 +759,7 @@ def scenario_sp_created(config=None):
     """A new service principal / application is registered (persistence via an app identity) ->
     'Azure Service principal/Application creation'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
-    app = _saas_app()
+    app = ac.rare_app_name()     # a brand-new application identity (unbounded)
     return [audit("Add service principal", "ApplicationManagement", "Core Directory", "Add",
                   by_user(admin), [t_obj("ServicePrincipal", app,
                    [mp("AccountEnabled", None, "True"),
@@ -881,7 +793,7 @@ def scenario_unverified_domain_added(config=None):
     """An unverified custom domain is added to the tenant (precursor to federation backdoor /
     domain takeover) -> 'Unverified domain added to Azure AD'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
-    dom = random.choice(["corp-mail-sync.com", "m365-verify.net", "tenant-federation.org"])
+    dom = ac.rare_domain(kind="generic")             # never-seen custom domain (unbounded)
     return [audit("Add unverified domain", "DirectoryManagement", "Core Directory", "Add",
                   by_user(admin), [t_obj("Domain", dom,
                    [mp("Capability", None, "Email"), mp("IsVerified", None, "False")])], [_ua(admin)])]

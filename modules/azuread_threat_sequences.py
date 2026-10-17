@@ -104,7 +104,8 @@ def seq_golden_saml_federation(config):
             _o365(o365._audit("Set federation settings on domain.", admin, ip, target_name=ac.UPN_DOMAIN,
                               modified=[{"Name": "IssuerUri", "NewValue": "http://any.sts/adfs/services/trust", "OldValue": ""},
                                         {"Name": "TokenSigningCertificate", "NewValue": "<attacker-cert-thumbprint>", "OldValue": "<orig>"}])),
-            _o365(o365._audit("Add unverified domain.", admin, ip, target_name="attacker-backdoor.com"))]
+            _o365(o365._audit("Add unverified domain.", admin, ip,
+                              target_name=ac.rare_domain(kind="federation")))]
 
 
 def seq_illicit_oauth_consent(config):
@@ -112,7 +113,7 @@ def seq_illicit_oauth_consent(config):
     u = ac.pick_user(config); ip = ac.egress(u)["ip"]
     app_loc = _loc(random.choice(RISKY_IPS))
     return [_aad(aad._signin(u, ac.egress(u), interactive=True, app="My Apps", offset_s=-300)),
-            _o365(o365._audit("Consent to application.", u, ip, target_name="O365 Mail Reader (malicious)",
+            _o365(o365._audit("Consent to application.", u, ip, target_name=ac.rare_app_name(),
                               modified=[{"Name": "ConsentContext.IsAdminConsent", "NewValue": "False", "OldValue": ""},
                                         {"Name": "ConsentAction.Permissions", "NewValue": "Mail.Read Files.ReadWrite.All offline_access", "OldValue": ""}])),
             _aad(aad._sp_signin(app_loc))]
@@ -188,7 +189,8 @@ def seq_rogue_tenant_cross_tenant_sync(config):
     the rogue tenant. Spans sign-ins, O365 directory audit, and the Graph directory-audit feed."""
     admin = ac.pick_by_role(config, aaud.ADMIN_ROLES, ("IT", "Security"))
     ip = _tor(config)
-    guest_upn = f"intern_{aaud._ROGUE_TENANT_DOMAIN.split('.')[0]}#EXT#@{ac.UPN_DOMAIN}"
+    rogue = ac.rare_tenant()            # one never-seen rogue tenant threaded through every step
+    guest_upn = f"intern_{rogue['domain'].split('.')[0]}#EXT#@{ac.UPN_DOMAIN}"
     out = []
     # 1) admin account takeover from an anonymized/foreign IP (High)
     s = aad._signin(admin, _loc(ip), interactive=True, risk_level="high", risk_state="atRisk",
@@ -196,12 +198,12 @@ def seq_rogue_tenant_cross_tenant_sync(config):
     s["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures"]
     out.append(_aad(s))
     # 2) trust the rogue external tenant: cross-tenant access + cross-tenant sync (3 audit records)
-    for rec in aaud.scenario_cross_tenant_trust_abuse(config):
+    for rec in aaud.scenario_cross_tenant_trust_abuse(config, rogue=rogue):
         out.append(_aaud(rec))
     # 3) inbound B2B guest provisioned from the rogue tenant
     out.append(_o365(o365._audit("Add user.", admin, ip, target_name=guest_upn,
                                  modified=[{"Name": "UserType", "NewValue": "Guest", "OldValue": ""},
-                                           {"Name": "Source", "NewValue": aaud._ROGUE_TENANT_DOMAIN, "OldValue": ""}])))
+                                           {"Name": "Source", "NewValue": rogue["domain"], "OldValue": ""}])))
     # 4) privileged role granted to the provisioned guest (privilege path through the trust)
     out.append(_o365(o365._audit("Add member to role.", admin, ip, target_name=guest_upn,
                                  modified=[{"Name": "Role.DisplayName", "NewValue": "Privileged Role Administrator", "OldValue": ""}])))
@@ -216,14 +218,16 @@ def seq_delegated_admin_partner_takeover(config):
     """GDAP/DAP partner takeover: admin takeover -> an external partner is added and promoted with
     Global Admin over the tenant -> the partner acts (adds a role) -> partner signs in cross-tenant."""
     admin = ac.pick_by_role(config, aaud.ADMIN_ROLES, ("IT",)); ip = _tor(config)
+    rogue = ac.rare_tenant()
     out = [_aad(aad._signin(admin, _loc(ip), interactive=True, risk_level="high",
                             risk_state="atRisk", offset_s=-700))]
-    for rec in aaud.scenario_delegated_admin_partner_abuse(config):
+    for rec in aaud.scenario_delegated_admin_partner_abuse(config, rogue=rogue):
         out.append(_aaud(rec))
     # partner-controlled admin grants itself a directory role, then signs in from the partner tenant
-    out.append(_o365(o365._audit("Add member to role.", admin, ip, target_name="partner-admin#EXT#@" + ac.UPN_DOMAIN,
+    partner_upn = f"partner-admin_{rogue['domain'].split('.')[0]}#EXT#@" + ac.UPN_DOMAIN
+    out.append(_o365(o365._audit("Add member to role.", admin, ip, target_name=partner_upn,
                                  modified=[{"Name": "Role.DisplayName", "NewValue": "Global Administrator", "OldValue": ""}])))
-    g = dict(admin); g["upn"] = "partner-admin#EXT#@" + ac.UPN_DOMAIN; g["username"] = "partner_admin"
+    g = dict(admin); g["upn"] = partner_upn; g["username"] = "partner_admin"
     out.append(_aad(aad._signin(g, _loc(ip), interactive=True, user_type="guest",
                                 cross_tenant="b2bCollaboration", app="Azure Portal", offset_s=-20)))
     return out
@@ -233,13 +237,15 @@ def seq_multitenant_org_join(config):
     """Tenant folded into an attacker-run multi-tenant org with inbound identity sync -> members
     provisioned from the attacker tenant (cloud 'rogue forest' persistence)."""
     admin = ac.pick_by_role(config, aaud.ADMIN_ROLES, ("IT", "Security")); ip = _tor(config)
+    rogue = ac.rare_tenant()
     out = [_aad(aad._signin(admin, _loc(ip), interactive=True, risk_level="high",
                             risk_state="atRisk", offset_s=-600))]
-    for rec in aaud.scenario_multitenant_org_join(config):
+    for rec in aaud.scenario_multitenant_org_join(config, rogue=rogue):
         out.append(_aaud(rec))
-    out.append(_o365(o365._audit("Add user.", admin, ip, target_name="mto_member#EXT#@" + ac.UPN_DOMAIN,
+    out.append(_o365(o365._audit("Add user.", admin, ip,
+                                 target_name=f"mto_member_{rogue['domain'].split('.')[0]}#EXT#@" + ac.UPN_DOMAIN,
                                  modified=[{"Name": "UserType", "NewValue": "Member", "OldValue": ""},
-                                           {"Name": "Source", "NewValue": "MultiTenantOrg sync", "OldValue": ""}])))
+                                           {"Name": "Source", "NewValue": rogue["domain"] + " (MTO sync)", "OldValue": ""}])))
     return out
 
 
@@ -247,15 +253,16 @@ def seq_cross_tenant_sync_outbound(config):
     """Outbound cross-tenant sync: admin takeover -> outbound B2B + user sync to the rogue tenant ->
     our users are provisioned OUT (user/data exfiltration via the identity fabric)."""
     admin = ac.pick_by_role(config, aaud.ADMIN_ROLES, ("IT", "Security")); ip = _tor(config)
+    rogue = ac.rare_tenant()
     out = [_aad(aad._signin(admin, _loc(ip), interactive=True, risk_level="high",
                             risk_state="atRisk", offset_s=-500))]
-    for rec in aaud.scenario_cross_tenant_sync_outbound(config):
+    for rec in aaud.scenario_cross_tenant_sync_outbound(config, rogue=rogue):
         out.append(_aaud(rec))
     # a couple of our users get provisioned outbound (modeled as directory reads of the sync job)
     for _ in range(2):
         v = ac.pick_user(config)
         out.append(_o365(o365._audit("Add user.", admin, ip, target_name=v["upn"],
-                                     modified=[{"Name": "Source", "NewValue": aaud._ROGUE_TENANT_DOMAIN + " (outbound sync)", "OldValue": ""}])))
+                                     modified=[{"Name": "Source", "NewValue": rogue["domain"] + " (outbound sync)", "OldValue": ""}])))
     return out
 
 
