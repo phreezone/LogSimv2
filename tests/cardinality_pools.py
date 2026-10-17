@@ -105,11 +105,41 @@ def test_onboarding_grows_slowly():
     check(n_month < len(ac.ADMIN_CONSENT_APPS), "estate not fully baked in after a month")
 
 
+def test_lifecycle_cohorts():
+    print("[identity lifecycle cohorts]")
+    roster = list(CFG["user_profiles"])
+    cohorts = {u: ac.lifecycle_cohort(u) for u in roster}
+    n_dormant = sum(1 for c in cohorts.values() if c == "dormant")
+    n_departed = sum(1 for c in cohorts.values() if c == "departed")
+    check(n_dormant > 0 and n_departed > 0, f"roster has dormant ({n_dormant}) and departed ({n_departed}) cohorts")
+    check(ac.lifecycle_cohort("some.user") == ac.lifecycle_cohort("some.user"), "cohort assignment stable")
+
+    reserved = {u for u, c in cohorts.items() if c != "active"}
+    # Benign signin/audit/o365 must never emit a reserved-cohort ROSTER identity.
+    feeds = {"signin": aadsi, "audit": aaud, "o365_aad": o365a}
+    for name, mod in feeds.items():
+        leaked = 0
+        for _ in range(15000):
+            for rec in mod.generate_benign(CFG, {}):
+                upn = rec.get("userPrincipalName") or rec.get("UserId") or ""
+                un = str(upn).split("@")[0]
+                if un in reserved:
+                    leaked += 1
+        check(leaked == 0, f"{name}: benign never signs in a dormant/departed roster account ({leaked})")
+
+    # The state scenarios draw the right cohort.
+    dis = {aadsi.SCENARIOS["disabled_user_signin"](CFG)[0]["userPrincipalName"].split("@")[0] for _ in range(100)}
+    check(all(ac.lifecycle_cohort(u) == "departed" for u in dis), "disabled_user_signin draws departed cohort")
+    dor = {aadsi.SCENARIOS["dormant_account_signin"](CFG)[0]["userPrincipalName"].split("@")[0] for _ in range(100)}
+    check(all(ac.lifecycle_cohort(u) == "dormant" for u in dor), "dormant_account_signin draws dormant cohort")
+
+
 if __name__ == "__main__":
     test_rare_pools_unbounded_and_disjoint()
     test_baseline_never_emits_rare()
     test_baseline_subsets_are_narrow_and_stable()
     test_onboarding_grows_slowly()
+    test_lifecycle_cohorts()
     print()
     if _FAILS:
         print(f"FAILED ({len(_FAILS)}):")
