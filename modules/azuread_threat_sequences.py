@@ -451,23 +451,33 @@ def seq_hybrid_onprem_cloud(config, context=None):
     lid1 = winev._new_logon_id()
     out = []
 
-    # 1) ON-PREM: legitimate morning workstation logon (TGT -> DC logon -> endpoint logon)
+    # 1) ON-PREM: legitimate morning workstation logon (TGT -> DC logon -> endpoint logon). The
+    #    Kerberos artifact here is a TGT request (4768) -- ticket METADATA (enc type, options, SIDs),
+    #    not the ticket bytes, exactly as a DC logs it.
     out.append(_win(winev._build_4768(wu, config, ts=t0 - 1800)))
     out.append(_win(winev._dc_logon_event(wu, config, ip_override=wu.get("ip"), logon_id=lid1, ts=t0 - 1799)))
     out.append(_win(winev._build_4624(wu, config, logon_type=2, auth_pkg=winev._NEG_PACKAGE,
                                       target_logon_id=lid1, ts=t0 - 1798)))
-    # 2) ON-PREM: attacker on the box requests a TGS for a sensitive service (lateral movement prep)
-    out.append(_win(winev._build_4769(wu, config, service_spn=f"MSSQLSvc/finance-sql01.{winev._get_dns_domain(config)}:1433",
-                                      encryption="0x17", ts=t0 - 900)))   # 0x17 = RC4 (roast-flavored)
+    # 2) ON-PREM: Kerberoast -- attacker requests a WEAKLY-ENCRYPTED (RC4, 0x17) service ticket for a
+    #    USER service-account SPN. Use the module's roastable SPN inventory so ServiceName resolves to
+    #    a user account (svc_*), NOT a computer account ($) -- XSIAM's Kerberoasting rule discards
+    #    ServiceName values ending in "$", so a machine-account target would never fire.
+    roast_spn = random.choice(winev._KERBEROAST_SPNS)
+    svc_host = roast_spn.split("/")[1].split(":")[0]
+    out.append(_win(winev._build_4769(wu, config, service_spn=roast_spn, encryption="0x17", ts=t0 - 900)))
+    # attacker then uses cracked creds to reach the service host (lateral, Kerberos logon type 3)
     lid2 = winev._new_logon_id()
     out.append(_win(winev._build_4624(wu, config, logon_type=3, auth_pkg=winev._KRB_PACKAGE,
-                                      target_logon_id=lid2, workstation_override=f"FINANCE-SQL01.{winev._get_dns_domain(config)}",
+                                      target_logon_id=lid2, workstation_override=svc_host.split(".")[0].upper(),
                                       ts=t0 - 880)))
 
-    # 3) CLOUD: the same identity's token is replayed from a hosting ASN (AiTM / token theft, High)
-    s = aad._signin(cu, ac.rare_asn_loc(), interactive=True, risk_level="high", risk_state="atRisk",
+    # 3) CLOUD: a DIFFERENT token system. The attacker replays a stolen Primary Refresh Token (PRT)
+    #    from a hosting ASN -> a NON-interactive sign-in whose incomingTokenType is primaryRefreshToken
+    #    (how Entra records a token replay), high risk + anonymized IP. This is OAuth/PRT, not the
+    #    on-prem Kerberos ticket; the two planes link by IDENTITY, not by one token crossing over.
+    s = aad._signin(cu, ac.rare_asn_loc(), interactive=False, risk_level="high", risk_state="atRisk",
                     offset_s=-600)
-    s["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures", "tokenIssuerAnomaly"]
+    s["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures"]
     out.append(_aad(s))
     # 4) CLOUD: attacker registers an MFA method on the account (persistence)
     out.append(_o365(o365._audit("User registered security info.", cu, s["ipAddress"],
