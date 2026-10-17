@@ -22,12 +22,14 @@ from modules import azuread_signin as aad
 from modules import azuread_audit as aaud
 from modules import o365_sharepoint as spo
 from modules import o365_exchange as exch
+from modules import o365_dlp as dlp
 
 O365_SRC, O365_INT = o365.SOURCE_IDENTIFIER, o365.INTEGRATION_IDENTIFIER
 AAD_SRC, AAD_INT = aad.SOURCE_IDENTIFIER, aad.INTEGRATION_IDENTIFIER
 AUD_SRC, AUD_INT = aaud.SOURCE_IDENTIFIER, aaud.INTEGRATION_IDENTIFIER
 SP_SRC, SP_INT = spo.SOURCE_IDENTIFIER, spo.INTEGRATION_IDENTIFIER
 EX_SRC, EX_INT = exch.SOURCE_IDENTIFIER, exch.INTEGRATION_IDENTIFIER
+DLP_SRC, DLP_INT = dlp.SOURCE_IDENTIFIER, dlp.INTEGRATION_IDENTIFIER
 
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
 FOREIGN = {"ip": "103.21.244.12", "city": "Singapore", "state": "", "countryOrRegion": "SG",
@@ -67,6 +69,10 @@ def _spo(rec):
 
 def _exch(rec):
     return (EX_SRC, EX_INT, rec)
+
+
+def _dlp_(rec):
+    return (DLP_SRC, DLP_INT, rec)
 
 
 # ── sequences ─────────────────────────────────────────────────────────────────────────
@@ -295,7 +301,127 @@ def seq_insider_threat(config):
     return out
 
 
+# ── correlated cross-feed campaigns ────────────────────────────────────────────────────
+# Each threads ONE victim identity through several feeds so XSIAM stitches the events into a single
+# incident. Rare entities (apps/domains/IPs) come from the reserved pools, so each campaign uses
+# never-seen indicators. Compromised identities are ACTIVE accounts (pick_user) except where a stale
+# account is the point (stale-reactivation uses the departed cohort).
+
+def seq_bec_campaign(config):
+    """Business Email Compromise: TOR account takeover -> MFA method added (persistence) -> hiding
+    inbox rule + external auto-forward -> wire-fraud mail to an external party -> heavy mailbox read.
+    Spans sign-ins, O365 directory audit, and Exchange."""
+    u = ac.pick_user(config); ip = _tor(config)
+    ext = ac.rare_ext_email()
+    s = aad._signin(u, _loc(ip), interactive=True, risk_level="high", risk_state="atRisk", offset_s=-900)
+    s["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures"]
+    return [
+        _aad(s),
+        _o365(o365._audit("User registered security info.", u, ip,
+                          modified=[{"Name": "SecurityInfo.Method", "NewValue": "Phone (SMS)", "OldValue": ""}])),
+        _exch(exch.admin_cmdlet("New-InboxRule", u, exch._param(
+            Name=".", SubjectOrBodyContainsWords="invoice;wire;payment;bank;routing",
+            ForwardTo=ext, DeleteMessage="True", StopProcessingRules="True"),
+            target_user=u, external=True, offset_s=-600)),
+        _exch(exch.admin_cmdlet("New-TransportRule", u, exch._param(
+            Name="External Archive", BlindCopyTo=ext, Enabled="True"), external=True, offset_s=-500)),
+        _exch(exch.mailbox_action("Send", u, client="OWA",
+              item={"Subject": "UPDATED WIRE INSTRUCTIONS - action required",
+                    "ParentFolder": {"Path": "\\Sent Items"}},
+              extra={"Recipients": [ext], "ExternalAccess": True})),
+        _exch(exch.mail_items_accessed(u, count=14, offset_s=-120)),
+    ]
+
+
+def seq_ransomware_campaign(config):
+    """Cloud ransomware / destruction: compromised sign-in -> mass download (staging) -> mass
+    encrypt-in-place (modify) -> mass delete, with DLP matches firing on the bulk movement. Spans
+    sign-ins, SharePoint/OneDrive, and DLP."""
+    u = ac.pick_user(config); ip = _tor(config)
+    out = []
+    s = aad._signin(u, _loc(ip), interactive=True, risk_level="high", risk_state="atRisk", offset_s=-1200)
+    s["riskEventTypes_v2"] = ["anonymizedIPAddress"]
+    out.append(_aad(s))
+    site = random.choice(spo._SITES)
+    for i in range(20):
+        out.append(_spo(spo._sp("FileDownloaded", u, site=site, offset_s=-(1000 - i * 8))))
+    for i in range(30):
+        out.append(_spo(spo._sp("FileModified", u, site=site, offset_s=-(700 - i * 8))))
+    for i in range(30):
+        out.append(_spo(spo._sp(random.choice(["FileDeleted", "FileRecycled"]), u, site=site,
+                                offset_s=-(300 - i * 6))))
+    out.append(_dlp_(dlp._dlp(u, "SharePoint", "PCI DSS", "Cardholder Data - High",
+                              random.sample(dlp._SIT, 2), "High",
+                              ["BlockAccess", "GenerateIncidentReport"], random.randint(50, 400))))
+    return out
+
+
+def seq_oauth_app_abuse(config):
+    """Illicit-consent OAuth abuse, end to end: a user consents a never-seen app high-privilege Graph
+    scopes -> a credential is added to the app -> the app's service principal signs in from a hosting
+    ASN -> it enumerates mailboxes and exfiltrates sensitive mail. Spans O365 audit, Graph directory
+    audit, sign-ins, and Exchange."""
+    u = ac.pick_user(config); ip = ac.egress(u)["ip"]
+    app = ac.rare_app_name()
+    out = [
+        _o365(o365._audit("Consent to application.", u, ip, target_name=app,
+                          modified=[{"Name": "ConsentContext.IsAdminConsent", "NewValue": "False", "OldValue": ""},
+                                    {"Name": "ConsentAction.Permissions",
+                                     "NewValue": "Mail.Read Mail.ReadWrite Files.ReadWrite.All offline_access",
+                                     "OldValue": ""}])),
+        _aaud(aaud.audit("Add service principal credentials", "ApplicationManagement", "Core Directory",
+                         "Add", aaud.by_user(u),
+                         [aaud.t_obj("ServicePrincipal", app,
+                          [aaud.mp("KeyDescription", None, "[KeyType=AsymmetricX509Cert, KeyUsage=Verify]")])],
+                         [aaud._ua(u)])),
+    ]
+    sp = aad._sp_signin(ac.rare_asn_loc())
+    sp["appDisplayName"] = app; sp["appId"] = ac.app_id(app)
+    sp["riskState"] = "atRisk"; sp["riskLevelDuringSignIn"] = "high"
+    out.append(_aad(sp))
+    # app reads many mailboxes, then exfiltrates sensitive mail externally
+    for i in range(8):
+        v = ac.pick_user(config)
+        out.append(_exch(exch.mail_items_accessed(v, count=1, offset_s=-(200 - i * 10))))
+    ext = ac.rare_ext_email()
+    out.append(_exch(exch.mailbox_action("Send", u, client="REST",
+               item={"Subject": "Export - confidential", "ParentFolder": {"Path": "\\Sent Items"}},
+               extra={"Recipients": [ext], "ExternalAccess": True})))
+    return out
+
+
+def seq_stale_account_reactivation(config):
+    """Stale-account reuse: a DEPARTED account (never active in the baseline) is targeted — disabled
+    sign-in attempts, then a successful sign-in from a hosting ASN once re-enabled, a privileged role
+    granted to it, and data access. Uses the identity lifecycle: attackers favor forgotten accounts.
+    Spans sign-ins, O365 directory audit, and SharePoint."""
+    dead = ac.pick_departed_user(config); ip = _tor(config)
+    out = []
+    for i in range(3):   # the account is still disabled -> 50057 failures
+        out.append(_aad(aad._signin(dead, _loc(ip), interactive=True, success=False, error_code=50057,
+                                    failure="The user account is disabled.", conditional="notApplied",
+                                    offset_s=-(900 - i * 30))))
+    # admin (compromised) re-enables + a successful takeover sign-in from a hosting ASN
+    admin = ac.pick_by_role(config, aaud.ADMIN_ROLES, ("IT",))
+    out.append(_o365(o365._audit("Update user.", admin, ac.egress(admin)["ip"], target_name=dead["upn"],
+                                 modified=[{"Name": "AccountEnabled", "NewValue": "True", "OldValue": "False"}])))
+    rec = aad._signin(dead, ac.rare_asn_loc(), interactive=True, ca_result="success",
+                      conditional="success", risk_level="high", risk_state="atRisk", offset_s=-200)
+    rec["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures"]
+    out.append(_aad(rec))
+    out.append(_o365(o365._audit("Add member to role.", admin, ac.egress(admin)["ip"], target_name=dead["upn"],
+                                 modified=[{"Name": "Role.DisplayName", "NewValue": "Privileged Role Administrator", "OldValue": ""}])))
+    site = random.choice(spo._SITES)
+    for i in range(12):
+        out.append(_spo(spo._sp("FileDownloaded", dead, site=site, offset_s=-(120 - i * 6))))
+    return out
+
+
 SEQUENCES = {
+    "bec_campaign": seq_bec_campaign,
+    "ransomware_campaign": seq_ransomware_campaign,
+    "oauth_app_abuse": seq_oauth_app_abuse,
+    "stale_account_reactivation": seq_stale_account_reactivation,
     "insider_threat": seq_insider_threat,
     "rogue_tenant_cross_tenant_sync": seq_rogue_tenant_cross_tenant_sync,
     "delegated_admin_partner_takeover": seq_delegated_admin_partner_takeover,
