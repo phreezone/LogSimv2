@@ -67,7 +67,7 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
         methods_used = ["Password"] if success and interactive else []
     app_name = app or random.choice(ac.APPS_INTERACTIVE)
     res_name = resource or random.choice(ac.RESOURCES)
-    return {
+    rec = {
         "id": _g(), "createdDateTime": ts,
         "userDisplayName": user["display_name"], "userPrincipalName": user["upn"],
         "userId": ac.user_oid(user["username"]),
@@ -103,6 +103,10 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
         "appliedConditionalAccessPolicies": (ac.applied_ca(ca_result, n=random.randint(1, 2))
                                              if ca_result else []),
     }
+    # When the CIE identity map covers this user, attach the real on-prem SID / sAMAccountName so
+    # ITDR identity-asset enrichment joins (no-op until the map is provided).
+    rec.update(ac.cie_identity_overrides(user))
+    return rec
 
 
 def _sp_signin(loc, offset_s=0):
