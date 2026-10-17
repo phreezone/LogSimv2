@@ -12,7 +12,9 @@ Research basis (Microsoft Entra sign-in / audit schema + typical tenant volume):
   directory-audit activity. generate-side weighting reflects that.
 """
 import hashlib
+import json
 import math
+import os
 import random
 import time
 
@@ -847,6 +849,97 @@ def user_agent(user, mobile=False):
     return _profile(user, mobile=mobile)[4]
 
 
+# ── CIE identity alignment (ITDR asset enrichment) ────────────────────────────────────
+# XSIAM's ITDR enriches events with identity-asset context (User Risk View, asset-role, risk
+# scoring) only when an event's identity key matches an identity the Cloud Identity Engine synced.
+# For this tenant CIE is connected to a directory whose users were replicated from our roster, but
+# the synthetic Entra object GUID (hash-derived) does NOT match the real objectGUID there, so
+# enrichment does not attach (contains_featured_user = NO). To fix that WITHOUT hard-coding anyone's
+# real IDs, we load an OPTIONAL identity map: when present, user_oid()/on_prem_sid() return the real
+# objectId / on-prem SID from the map so every emitted event joins to the CIE identity; when absent,
+# they fall back to the deterministic hash (current behavior). Drop the file in and enrichment
+# attaches with no code change. Map format (JSON), keyed by username and/or UPN:
+#   { "a.tucker": {"object_id": "<entra objectGUID>", "on_prem_sid": "S-1-5-21-...", "sam": "a.tucker"} }
+# Path: $LOGSIM_CIE_IDENTITY_MAP, else config['cie_identity_map_path'], else state/cie_identity_map.json.
+_IDENTITY_MAP = None
+_IDENTITY_MAP_LOADED = False
+
+
+def _identity_map_path(config=None):
+    p = os.environ.get("LOGSIM_CIE_IDENTITY_MAP") or (config or {}).get("cie_identity_map_path")
+    if p:
+        return p
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(here, "state", "cie_identity_map.json")
+
+
+def load_identity_map(config=None, force=False):
+    """Load (once) the optional CIE identity map. Returns {} when no file is present."""
+    global _IDENTITY_MAP, _IDENTITY_MAP_LOADED
+    if _IDENTITY_MAP_LOADED and not force:
+        return _IDENTITY_MAP
+    path = _identity_map_path(config)
+    data = {}
+    try:
+        if os.path.exists(path):
+            raw = json.load(open(path, encoding="utf-8"))
+            if isinstance(raw, dict):
+                # index by both username and upn local-part for flexible lookup
+                for key, val in raw.items():
+                    if not isinstance(val, dict):
+                        continue
+                    data[key] = val
+                    data[key.split("@")[0]] = val
+                    if val.get("upn"):
+                        data[val["upn"]] = val
+                        data[val["upn"].split("@")[0]] = val
+    except Exception:
+        data = {}
+    _IDENTITY_MAP = data
+    _IDENTITY_MAP_LOADED = True
+    return data
+
+
+def _identity_entry(username):
+    m = _IDENTITY_MAP if _IDENTITY_MAP_LOADED else load_identity_map()
+    return m.get(str(username)) if m else None
+
+
+def write_identity_map_template(config, path=None):
+    """Write a fill-in CIE identity-map template for every roster user (blank object_id/on_prem_sid),
+    so the real values can be exported from the CIE-connected directory and dropped straight in.
+    Returns the path written."""
+    profiles = (config or {}).get("user_profiles") or {}
+    tmpl = {}
+    for uname, p in profiles.items():
+        tmpl[uname] = {"upn": p.get("email") or f"{uname}@{UPN_DOMAIN}",
+                       "object_id": "", "on_prem_sid": "", "sam": uname}
+    path = path or _identity_map_path(config)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    json.dump(tmpl, open(path, "w", encoding="utf-8"), indent=2)
+    return path
+
+
+def on_prem_sid(username):
+    """Real on-premises SID for a user when the CIE identity map supplies one, else None."""
+    e = _identity_entry(username)
+    return e.get("on_prem_sid") if e else None
+
+
+def cie_identity_overrides(user):
+    """Optional on-prem identity fields (onPremisesSecurityIdentifier / sAMAccountName) to merge into
+    a sign-in record, populated only when the CIE identity map covers this user."""
+    e = _identity_entry(user["username"] if isinstance(user, dict) else user)
+    if not e:
+        return {}
+    out = {}
+    if e.get("on_prem_sid"):
+        out["onPremisesSecurityIdentifier"] = e["on_prem_sid"]
+    if e.get("sam"):
+        out["onPremisesSamAccountName"] = e["sam"]
+    return out
+
+
 # ── stable-per-entity identifiers (cardinality) ──────────────────────────────────────
 # These MUST be stable per entity, not random per event, or the analytics see every
 # sign-in as a brand-new user/app (infinite cardinality) and the baseline never forms and
@@ -854,7 +947,13 @@ def user_agent(user, mobile=False):
 # (id/Id, correlationId, InterSystemsId, IntraSystemId, sessionId) are left random.
 
 def user_oid(username):
-    """Stable directory object id for a user (Graph userId / O365 UserKey)."""
+    """Stable directory object id for a user (Graph userId / O365 UserKey).
+
+    If a CIE identity map is loaded and covers this user, returns the directory's REAL objectId so
+    the event joins to the ITDR identity asset; otherwise a deterministic hash (stable per user)."""
+    e = _identity_entry(username)
+    if e and e.get("object_id"):
+        return e["object_id"]
     return _stable_guid("oid:" + str(username))
 
 
