@@ -491,8 +491,52 @@ def seq_hybrid_onprem_cloud(config, context=None):
     return out
 
 
+_MAB_APP_ID = "29d9ed98-a469-4536-ade2-f981bc1d605e"   # Microsoft Authentication Broker
+
+
+def seq_rt_to_prt_transition(config):
+    """OAuth token-abuse bridge: RT -> PRT transition (Elastic: 'Entra ID RT to PRT Transition from
+    Same User and Device'). An attacker with a stolen refresh token uses the Microsoft Authentication
+    Broker to mint a Primary Refresh Token, then signs in with that PRT from an UNMANAGED device --
+    both events for the SAME user + device within an hour. This is the genuine cloud-side token
+    transition (OAuth RT->PRT), distinct from the on-prem Kerberos chain.
+
+    Matches the rule's field conditions: step 1 appId = Microsoft Authentication Broker,
+    incomingTokenType=refreshToken, AAD-joined device, session 'unbound'; step 2
+    incomingTokenType=primaryRefreshToken, same deviceId, isManaged not true, resource !=
+    Device Registration Service."""
+    u = ac.pick_user(config)
+    dev_id = ac._stable_guid("dev:" + u["username"])
+    loc = ac.egress(u)
+
+    # Step 1 — refresh-token sign-in via the Microsoft Authentication Broker on the AAD-joined device
+    rt = aad._signin(u, loc, interactive=False, app="Microsoft Authentication Broker",
+                     resource="Microsoft Graph", success=True, offset_s=-1800)
+    rt["appId"] = _MAB_APP_ID
+    rt["incomingTokenType"] = "refreshToken"
+    rt["deviceDetail"] = {"deviceId": dev_id, "displayName": f'{u["username"].upper().replace(".", "")}-PC',
+                          "operatingSystem": "Windows 10", "browser": "", "isCompliant": True,
+                          "isManaged": True, "trustType": "Azure AD joined"}
+    rt["tokenProtectionStatusDetails"] = {"signInSessionStatus": "unbound",
+                                          "signInSessionStatusCode": 0}
+    rt["userType"] = "member"
+
+    # Step 2 — PRT sign-in from the SAME device, now UNMANAGED (the abuse the rule flags)
+    prt = aad._signin(u, loc, interactive=False, app="Microsoft Office",
+                      resource=random.choice(["Office 365 Exchange Online", "Microsoft Graph",
+                                              "Office 365 SharePoint Online"]),
+                      success=True, risk_level="high", risk_state="atRisk", offset_s=-120)
+    prt["incomingTokenType"] = "primaryRefreshToken"
+    prt["deviceDetail"] = {"deviceId": dev_id, "displayName": f'{u["username"].upper().replace(".", "")}-PC',
+                           "operatingSystem": "Windows 10", "browser": "", "isCompliant": False,
+                           "isManaged": False, "trustType": "Azure AD joined"}
+    prt["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures"]
+    return [_aad(rt), _aad(prt)]
+
+
 SEQUENCES = {
     "hybrid_onprem_cloud": seq_hybrid_onprem_cloud,
+    "rt_to_prt_transition": seq_rt_to_prt_transition,
     "bec_campaign": seq_bec_campaign,
     "ransomware_campaign": seq_ransomware_campaign,
     "oauth_app_abuse": seq_oauth_app_abuse,

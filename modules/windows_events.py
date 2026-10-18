@@ -56,6 +56,7 @@ import re
 import time
 import json
 import uuid
+import base64
 import hashlib
 import threading
 import queue as _queue_mod
@@ -153,7 +154,7 @@ _EVENT_META = {
     4648: {"task": 12544, "category": "Logon",                 "version": 0, "outcome": "success"},
     4740: {"task": 13824, "category": "User Account Management","version": 0, "outcome": "success"},
     4768: {"task": 14339, "category": "Kerberos Authentication Service", "version": 2, "outcome": "success"},
-    4769: {"task": 14337, "category": "Kerberos Service Ticket Operations", "version": 0, "outcome": "success"},
+    4769: {"task": 14337, "category": "Kerberos Service Ticket Operations", "version": 2, "outcome": "success"},
     4771: {"task": 14339, "category": "Kerberos Authentication Service", "version": 0, "outcome": "failure"},
     4776: {"task": 14336, "category": "Credential Validation", "version": 0, "outcome": "success"},
     4672: {"task": 12548, "category": "Special Logon",          "version": 0, "outcome": "success"},
@@ -1561,6 +1562,11 @@ def _new_logon_id() -> str:
 def _new_logon_guid() -> str:
     """UUID in the braced form Windows uses."""
     return "{" + str(uuid.uuid4()) + "}"
+
+
+def _ticket_hash() -> str:
+    """Base64(SHA-256) ticket hash, as the Jan-2025-CU 4768/4769 events log Request/ResponseTicketHash."""
+    return base64.b64encode(hashlib.sha256(uuid.uuid4().bytes).digest()).decode()
 
 
 def _format_logon_ip(ip, logon_type):
@@ -3051,6 +3057,13 @@ def _build_4769(user_info, config, *, service_spn=None, encryption=None,
         svc_name = spn.split("/")[1].split(":")[0].split(".")[0].upper() + "$"
     else:
         svc_name = spn
+    # Post-Jan-2025 CU (event Version 2) adds ticket-hash and per-principal encryption-capability
+    # fields. We model the SERVICE as AES-capable (msds-SET includes AES), so an RC4 (0x17) service
+    # ticket against it is a DOWNGRADE — the modern Kerberoasting signal the newer detectors use
+    # (weak ticket enc vs. AES-capable account), independent of the legacy "0x17 only" heuristic.
+    svc_supported = "0x1F (DES, RC4, AES128-SHA96, AES256-SHA96)"
+    client_adv = ("\n\t\tAES256-CTS-HMAC-SHA1-96\n\t\tAES128-CTS-HMAC-SHA1-96"
+                  "\n\t\tRC4-HMAC-NT\n\t\tRC4-HMAC-NT-EXP\n\t\tRC4-HMAC-OLD-EXP")
     event_data = {
         "TargetUserName":        f"{user_info['username']}@{_get_dns_domain(config).upper()}",
         "TargetDomainName":      _get_dns_domain(config).upper(),
@@ -3063,9 +3076,19 @@ def _build_4769(user_info, config, *, service_spn=None, encryption=None,
         "Status":                status,
         "LogonGuid":             _new_logon_guid(),
         "TransmittedServices":   "-",
+        # --- Version 2 (Jan 2025 CU) fields ---
+        "RequestTicketHash":     _ticket_hash() if success else "N/A",
+        "ResponseTicketHash":    _ticket_hash() if success else "N/A",
+        "AccountSupportedEncryptionTypes": "N/A",
+        "AccountAvailableKeys":  "N/A",
+        "ServiceSupportedEncryptionTypes": svc_supported if success else "N/A",
+        "ServiceAvailableKeys":  "AES-SHA1, RC4" if success else "N/A",
+        "DCSupportedEncryptionTypes": "0x1F (DES, RC4, AES128-SHA96, AES256-SHA96)",
+        "DCAvailableKeys":       "AES-SHA1, RC4",
+        "ClientAdvertizedEncryptionTypes": client_adv,
+        # modern DCs issue an AES session key even when the service ticket itself is RC4
+        "SessionKeyEncryptionType": "0x12" if success else "0xFFFFFFFF",
     }
-    # 4769 on newer DCs may also include encryption detail fields
-    # but they are less consistently present than in 4768
     return _build_event(4769, dc_host, event_data, success=success, ts=ts,
 )
 
