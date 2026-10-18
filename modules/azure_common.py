@@ -663,10 +663,12 @@ class ThreatGate:
     or how large each scenario burst is, and withholds all threats during a benign warmup so
     baselines form first. `scenarios` is accepted for call-site compatibility and not required."""
 
-    def __init__(self, scenarios=None, warmup=THREAT_WARMUP_EVENTS, max_dt=_THREAT_MAX_DT):
+    def __init__(self, scenarios=None, warmup=THREAT_WARMUP_EVENTS, max_dt=_THREAT_MAX_DT,
+                 rate_scale=1.0):
         self._scenarios = scenarios
         self._warmup = warmup
         self._max_dt = max_dt
+        self._rate_scale = rate_scale   # <1 makes this source rarer (e.g. multi-step campaigns)
         self.count = 0
         self._last = None
 
@@ -677,7 +679,7 @@ class ThreatGate:
         last, self._last = self._last, t
         if self.count <= self._warmup:                  # still accruing baseline
             return False
-        rate_hr = THREAT_EPISODES_PER_HOUR.get(threat_level, THREAT_EPISODES_PER_HOUR["Realistic"])
+        rate_hr = THREAT_EPISODES_PER_HOUR.get(threat_level, THREAT_EPISODES_PER_HOUR["Realistic"]) * self._rate_scale
         if rate_hr <= 0 or last is None:
             return False
         dt = min(max(0.0, t - last), self._max_dt)      # seconds since last call (capped)
