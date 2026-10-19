@@ -3187,6 +3187,90 @@ def _generate_honey_user_sso(config, session_context=None):
     )
 
 
+# --- BREAK-GLASS (EMERGENCY ACCESS) ACCOUNTS ---
+
+_DEFAULT_BREAK_GLASS = [
+    ("breakglass.admin", "Emergency Access Admin"),
+    ("okta.emergency",   "Okta Emergency Account"),
+]
+
+
+def _break_glass_accounts(config):
+    """Configured emergency-access accounts (okta_config.break_glass_accounts:
+    [[username, display name], ...]); these exist only for an IdP outage, so ANY
+    authentication by one is the finding."""
+    accts = (config.get("okta_config", {}) or {}).get("break_glass_accounts")
+    return [tuple(a) for a in accts] if accts else _DEFAULT_BREAK_GLASS
+
+
+def _generate_break_glass_login(config, user_info, session_context=None):
+    """
+    Emergency-access account used outside an outage: password-only user.session.start
+    (break-glass accounts are exempt from MFA by design) from a non-corporate address,
+    straight into the Okta admin console, then a persistence action -- a privilege
+    grant to a regular user or a new API token.
+    Detection: any authentication by a break-glass account (no native analytic).
+    """
+    print("    - Okta Module generating break-glass account use sequence...")
+    username, fullname = random.choice(_break_glass_accounts(config))
+    bg = _build_actor(username, fullname)
+    ip_ctx = _get_random_ip_and_context(config, "external_traffic_sources")
+    sec_ctx = _build_security_context(ip_ctx)
+    client = _build_client(ip_ctx, config, interactive_only=True)
+    session = f"ext-session-{uuid.uuid4()}"
+
+    def _uri(path):
+        # Pin the endpoint each step really hits (the default draws a random one).
+        return {"requestUri": path.rstrip("?"), "url": path}
+
+    logs = [_assemble(
+        "user.session.start", bg, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="INFO", display_message="User login to Okta",
+        authentication_context=_build_authentication_context("PASSWORD"),
+        security_context=sec_ctx,
+        # An account that never signs in is new on every behavioural axis.
+        debug_context=_build_debug_context("PASSWORD", include_auth_signals=True, extra={
+            "risk": "{level=MEDIUM}",
+            "behaviors": "{New Geo-Location=POSITIVE, New Device=POSITIVE, New IP=POSITIVE, "
+                         "New State=POSITIVE, New Country=POSITIVE, Velocity Behavior=NEGATIVE, "
+                         "New City=POSITIVE}",
+            **_uri("/idp/idx/identify?")}),
+        session_id=session)]
+    logs.append(_assemble(
+        "user.session.access_admin_app", bg, client,
+        outcome={"result": "SUCCESS", "reason": None},
+        severity="INFO", display_message="User accessing Okta admin app",
+        security_context=sec_ctx,
+        debug_context=_build_debug_context("PASSWORD", extra=_uri("/home/admin-entry")),
+        target=_target_app("Okta Admin Console"), session_id=session))
+    if random.random() < 0.5:
+        grantee = _build_actor(user_info["username"], user_info["full_name"])
+        logs.append(_assemble(
+            "user.account.privilege.grant", bg, client,
+            outcome={"result": "SUCCESS", "reason": None}, severity="INFO",
+            display_message="Grant user privilege",
+            security_context=sec_ctx, debug_context=_build_debug_context("PASSWORD",
+                extra={"privilegeGranted": "Super administrator",
+                       **_uri(f"/api/v1/users/{grantee['id']}/roles")}),
+            target=_build_target_user(grantee), session_id=session))
+    else:
+        name = random.choice(["Okta Sync", "Directory Integration", "SIEM Integration"])
+        logs.append(_assemble(
+            "system.api_token.create", bg, client,
+            outcome={"result": "SUCCESS", "reason": None}, severity="INFO",
+            display_message="Create API token",
+            security_context=sec_ctx,
+            debug_context=_build_debug_context("PASSWORD", extra=_uri("/api/internal/tokens")),
+            # Okta API token ids are "00T" + 17 base62 characters.
+            target=[{"id": "00T" + "".join(random.choices(
+                         "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", k=17)),
+                     "type": "Token",
+                     "displayName": name, "alternateId": name, "detailEntry": None}],
+            session_id=session))
+    return logs
+
+
 # --- MISC BEHAVIOURAL ---
 
 def _generate_sso_multiple_unusual_resources(config, user_info, session_context=None):
@@ -6959,6 +7043,7 @@ def _make_threat_dict(config, user_info, session_context):
         "sso_multi_unusual":      lambda: _generate_sso_multiple_unusual_resources(config, user_info, session_context),
         "honey_auth":             lambda: [_generate_honey_user_auth(config)],
         "honey_sso":              lambda: [_generate_honey_user_sso(config)],
+        "break_glass_login":      lambda: _generate_break_glass_login(config, user_info, session_context),
         # High-signal single events promoted to threat tier
         "attack_start":           lambda: [_gen_security_attack_start(config, user_info, session_context)],
         "breached_credential":    lambda: [_gen_security_breached_credential(config, user_info, session_context)],
@@ -7041,7 +7126,7 @@ ANALYTIC_ALERTS = {
     # log_stream_evasion, radius_brute_force, cross_idp_hijack, scim_bulk_create,
     # device_assurance_bypass, registration_abuse, group_privilege_escalation,
     # refresh_token_persistence, sms_otp_bombing, aitm_phishing, event_hook_deletion,
-    # malicious_oauth_app.
+    # malicious_oauth_app, break_glass_login.
     "brute_force":              "SSO Brute Force",
     "tor_login":                "A successful SSO sign-in from TOR",
     "mfa_bombing":              "Multiple Okta MFA requests sent to a user with unusual characteristics",
