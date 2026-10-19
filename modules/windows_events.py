@@ -61,6 +61,7 @@ import base64
 import hashlib
 import threading
 import collections
+import functools
 import queue as _queue_mod
 from datetime import datetime, timezone, timedelta
 
@@ -1779,6 +1780,49 @@ def _iso_ts(t: float = None) -> str:
         t = time.time()
     dt = datetime.fromtimestamp(t, tz=timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond:06d}000Z"
+
+
+def _parse_iso_ts(s: str) -> float:
+    """Inverse of _iso_ts (sub-microsecond digits dropped)."""
+    dt = datetime.strptime(s[:26], "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _end_by_now(events, now=None):
+    """Rebase a built sequence so its LAST event lands at or just before now.
+
+    Multi-step generators start at time.time() and add random gaps (dwell, process
+    lifetime, per-account pacing), so their tail used to carry a time_created minutes
+    ahead of wall clock -- something no real WEC source ships, and which skews any
+    time-windowed correlation. Every event shifts back by the same amount, so the gaps
+    between them are unchanged. Sequences already ending in the past are left alone.
+    """
+    if not events:
+        return events
+    if not isinstance(events, list):                       # one record
+        return _end_by_now([events], now)[0]
+    now = now or time.time()
+    recs = [json.loads(e) if isinstance(e, str) else e for e in events]
+    times = [_parse_iso_ts(r["time_created"]) for r in recs if r.get("time_created")]
+    if not times or max(times) <= now:
+        return events
+    delta = max(times) - now + random.uniform(0.2, 3.0)
+    out = []
+    for e, r in zip(events, recs):
+        if r.get("time_created"):
+            r["time_created"] = _iso_ts(_parse_iso_ts(r["time_created"]) - delta)
+        out.append(json.dumps(r) if isinstance(e, str) else r)
+    return out
+
+
+def _ending_by_now(fn):
+    """Wrap a (config, session_context) generator so its output passes _end_by_now.
+    Applied to every entry of _BENIGN_GENERATORS / _THREAT_GENERATORS and to the
+    scenario dispatch, so no current or future generator can ship future events."""
+    @functools.wraps(fn)
+    def run(config, session_context):
+        return _end_by_now(fn(config, session_context))
+    return run
 
 
 # Configuration helpers
@@ -4690,6 +4734,7 @@ def _threat_lateral_movement_chain(config, session_context):
 
 _BENIGN_WEIGHTS["lateral_movement"] = 3
 _BENIGN_GENERATORS["lateral_movement"] = _threat_lateral_movement_chain
+_BENIGN_GENERATORS = {k: _ending_by_now(v) for k, v in _BENIGN_GENERATORS.items()}
 
 
 # dMSA privilege escalation targets — privileged accounts whose privileges
@@ -8187,6 +8232,7 @@ _THREAT_GENERATORS = {
     "mailbox_export_log_removal":       _threat_mailbox_export_log_removal,
     "mailbox_cas_change":               _threat_mailbox_cas_change,
 }
+_THREAT_GENERATORS = {k: _ending_by_now(v) for k, v in _THREAT_GENERATORS.items()}
 
 
 # Threat -> the XSIAM analytics alert it is built to trigger. Only these threats are
@@ -8395,7 +8441,7 @@ def _generate_scenario_event(scenario_event, config, context):
         "MAILBOX_CAS_CHANGE":               _threat_mailbox_cas_change,
     }
     if ev in _threat_dispatch:
-        result = _threat_dispatch[ev](config, session_context)
+        result = _end_by_now(_threat_dispatch[ev](config, session_context))
         return (result, ev.lower()) if result else None
     return None
 
