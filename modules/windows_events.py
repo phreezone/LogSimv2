@@ -64,6 +64,7 @@ import collections
 import functools
 import queue as _queue_mod
 from datetime import datetime, timezone, timedelta
+from xml.sax.saxutils import escape as _xml_escape
 
 try:
     from lxml import etree as _etree
@@ -197,6 +198,10 @@ _EVENT_META = {
     # DCShadow — detailed directory-service replication (rogue DC pushing changes)
     4928: {"task": 14083, "category": "Detailed Directory Service Replication", "version": 0, "outcome": "success"},
     4929: {"task": 14083, "category": "Detailed Directory Service Replication", "version": 0, "outcome": "success"},
+    4698: {"task": 12804, "category": "Other Object Access Events", "version": 1, "outcome": "success"},
+    4699: {"task": 12804, "category": "Other Object Access Events", "version": 1, "outcome": "success"},
+    5140: {"task": 12808, "category": "File Share",                 "version": 1, "outcome": "success"},
+    5145: {"task": 12811, "category": "Detailed File Share",        "version": 0, "outcome": "success"},
 }
 
 def _format_message(event_id: int, ed: dict) -> str:
@@ -993,6 +998,95 @@ def _msg_4697(d):
     )
 
 
+def _msg_4698(d):
+    return (
+        "A scheduled task was created.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Task Information:\r\n"
+        f"\tTask Name: \t\t{d.get('TaskName','')}\r\n"
+        f"\tTask Content: \t\t{d.get('TaskContent','')}\r\n\r\n"
+        "Other Information:\r\n"
+        f"\tProcessCreationTime: \t\t{d.get('ClientProcessStartKey','')}\r\n"
+        f"\tClientProcessId: \t\t\t{d.get('ClientProcessId','')}\r\n"
+        f"\tParentProcessId: \t\t\t{d.get('ParentProcessId','')}\r\n"
+        f"\tFQDN: \t\t{d.get('FQDN','')}"
+    )
+
+
+def _msg_4699(d):
+    return (
+        "A scheduled task was deleted.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Task Information:\r\n"
+        f"\tTask Name: \t\t{d.get('TaskName','')}\r\n"
+        f"\tTask Content: \t\t{d.get('TaskContent','')}"
+    )
+
+
+def _msg_5140(d):
+    return (
+        "A network share object was accessed.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Network Information:\t\r\n"
+        f"\tObject Type:\t\t{d.get('ObjectType','')}\r\n"
+        f"\tSource Address:\t\t{d.get('IpAddress','')}\r\n"
+        f"\tSource Port:\t\t{d.get('IpPort','')}\r\n\r\n"
+        "Share Information:\r\n"
+        f"\tShare Name:\t\t{d.get('ShareName','')}\r\n"
+        f"\tShare Path:\t\t{d.get('ShareLocalPath','')}\r\n\r\n"
+        "Access Request Information:\r\n"
+        f"\tAccess Mask:\t\t{d.get('AccessMask','')}\r\n"
+        f"\tAccesses:\t\t{d.get('AccessList','')}"
+    )
+
+
+def _msg_5145(d):
+    return (
+        "A network share object was checked to see whether client can be granted "
+        "desired access.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Network Information:\t\r\n"
+        f"\tObject Type:\t\t{d.get('ObjectType','')}\r\n"
+        f"\tSource Address:\t\t{d.get('IpAddress','')}\r\n"
+        f"\tSource Port:\t\t{d.get('IpPort','')}\r\n\r\n"
+        "Share Information:\r\n"
+        f"\tShare Name:\t\t{d.get('ShareName','')}\r\n"
+        f"\tShare Path:\t\t{d.get('ShareLocalPath','')}\r\n"
+        f"\tRelative Target Name:\t{d.get('RelativeTargetName','')}\r\n\r\n"
+        "Access Request Information:\r\n"
+        f"\tAccess Mask:\t\t{d.get('AccessMask','')}\r\n"
+        f"\tAccesses:\t\t{d.get('AccessList','')}\r\n"
+        f"\tAccess Check Results:\r\n\t\t\t\t{d.get('AccessReason','')}"
+    )
+
+
+def _msg_7045(d):
+    return (
+        "A service was installed in the system.\r\n\r\n"
+        f"Service Name:  {d.get('ServiceName','')}\r\n"
+        f"Service File Name:  {d.get('ImagePath','')}\r\n"
+        f"Service Type:  {d.get('ServiceType','')}\r\n"
+        f"Service Start Type:  {d.get('StartType','')}\r\n"
+        f"Service Account:  {d.get('AccountName','')}"
+    )
+
+
 def _msg_4720(d):
     return (
         "A user account was created.\r\n\r\n"
@@ -1263,6 +1357,10 @@ _MSG_BUILDERS = {
     4766: _msg_4766,
     4928: _msg_4928,
     4929: _msg_4929,
+    4698: _msg_4698,
+    4699: _msg_4699,
+    5140: _msg_5140,
+    5145: _msg_5145,
     4722: _msg_4722,
     4724: _msg_4724,
     4725: _msg_4725,
@@ -1707,7 +1805,17 @@ def _reserve_record_block(host, cur):
         tmp = _RECORD_STATE_PATH + f".{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(state, f)
-        os.replace(tmp, _RECORD_STATE_PATH)
+        # On Windows, replacing a file another process holds open (Defender or the
+        # search indexer scanning the copy just written) fails with WinError 5 for a
+        # few milliseconds. Seen once in ~23k events; retry rather than fail the event.
+        for attempt in range(40):
+            try:
+                os.replace(tmp, _RECORD_STATE_PATH)
+                break
+            except PermissionError:
+                if attempt == 39:
+                    raise
+                time.sleep(0.025)
     _RECORD_RESERVED[host] = start + _RECORD_BLOCK
     return start
 
@@ -2017,7 +2125,12 @@ def _render_event_xml(event: dict) -> str:
     provider.set("Name", event.get("provider_name", ""))
     provider.set("Guid", event.get("provider_guid", ""))
 
-    SE(system, "EventID").text = str(event.get("event_id", "0"))
+    eid_el = SE(system, "EventID")
+    eid_el.text = str(event.get("event_id", "0"))
+    # Classic (pre-Crimson) providers such as the Service Control Manager carry the
+    # high word of the message ID as Qualifiers (7045: Qualifiers='16384').
+    if event.get("event_qualifiers"):
+        eid_el.set("Qualifiers", str(event["event_qualifiers"]))
     SE(system, "Version").text = str(event.get("version", "0"))
 
     # Level: 0 for audit events (both success and failure). Non-Security channels
@@ -2258,6 +2371,164 @@ def _build_4697(config, *, computer, actor_user=None, actor_sid=None,
         "ServiceAccount":    service_account or "LocalSystem",
     }
     return _build_event(4697, comp, event_data, success=True, ts=ts)
+
+
+# 7045 is written by the Service Control Manager to the SYSTEM channel, not by LSASS to
+# Security, so it is built here as its own record (like the PowerShell 4104) rather than
+# through _build_event. It pairs with the Security-channel 4697 for the same install; a
+# WEC subscription that collects only Security sees the 4697 alone.
+_SCM_PROVIDER = "Service Control Manager"
+_SCM_GUID     = "{555908d1-a6d7-4695-8e1e-26931d2012f4}"
+_SCM_START_TYPES = {2: "auto start", 3: "demand start", 4: "disabled"}
+
+
+def _services_pid(computer):
+    """services.exe PID for a host -- stable for the boot, like _lsass_pid."""
+    h = int(hashlib.md5(("services:" + computer.lower()).encode()).hexdigest()[:6], 16)
+    return str(600 + (h % 300) * 4)
+
+
+def _build_7045(config, *, computer, service_name, image_path, start_type=3,
+                account="LocalSystem", installer_sid=None, ts=None) -> dict:
+    """7045 – A service was installed in the system (System channel, SCM)."""
+    ts = ts if ts is not None else time.time()
+    comp = _fqdn(computer, config)
+    return {
+        "event_id": "7045", "event_qualifiers": "16384",
+        "provider_name": _SCM_PROVIDER, "provider_guid": _SCM_GUID,
+        "channel": "System", "computer_name": comp, "host_name": comp,
+        "time_created": _iso_ts(ts),
+        "message": _msg_7045({"ServiceName": service_name, "ImagePath": image_path,
+                              "ServiceType": "user mode service",
+                              "StartType": _SCM_START_TYPES.get(start_type, "demand start"),
+                              "AccountName": account}),
+        "keywords": "0x8080000000000000", "level_num": "4", "log_level": "Information",
+        "rendering_provider": _SCM_PROVIDER, "rendering_keyword": "Classic",
+        "event_result": "success", "event_action": "None",
+        "task": "0", "opcode": "Info", "op_code": "0", "version": "0",
+        "os_subtype": _BUILD_EVENT_OS_SUBTYPE,
+        "record_id": str(_next_record_number(comp + "|System")),
+        "activity_id": "",
+        "process_pid": _services_pid(comp),
+        "process_thread_id": str(random.randint(500, 15000)),
+        "process_name": "services.exe",
+        "process_path": r"C:\Windows\System32\services.exe",
+        "security_user_id": installer_sid or _SID_SYSTEM,
+        "event_data": {"ServiceName": service_name, "ImagePath": image_path,
+                       "ServiceType": "user mode service",
+                       "StartType": _SCM_START_TYPES.get(start_type, "demand start"),
+                       "AccountName": account},
+    }
+
+
+def _build_4698(user_info, config, *, computer=None, task_name, command, arguments="",
+                author=None, run_as="S-1-5-18", hidden=False, trigger="boot",
+                logon_id=None, ts=None) -> dict:
+    """4698 – A scheduled task was created (Security channel).
+
+    TaskContent is the task's registration XML, which is what detections read the
+    action (Command/Arguments), principal (RunAs), Hidden flag and author from."""
+    domain = _get_domain(config)
+    comp = _fqdn(computer or user_info["hostname"], config)
+    author = author or f"{domain}\\{user_info['username']}"
+    ts_val = ts if ts is not None else time.time()
+    when = datetime.fromtimestamp(ts_val, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    trig = {
+        "boot":  "<BootTrigger><Enabled>true</Enabled></BootTrigger>",
+        "logon": "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>",
+        "daily": (f"<CalendarTrigger><StartBoundary>{when}</StartBoundary><Enabled>true</Enabled>"
+                  "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>"),
+        "once":  f"<TimeTrigger><StartBoundary>{when}</StartBoundary><Enabled>true</Enabled></TimeTrigger>",
+    }[trigger]
+    # TaskContent is the task's XML, so its text values are XML-escaped (a redirect '>'
+    # in the arguments is logged as '&gt;').
+    author, command, arguments = (_xml_escape(author), _xml_escape(command),
+                                  _xml_escape(arguments))
+    args_el = f"<Arguments>{arguments}</Arguments>" if arguments else ""
+    content = (
+        '<?xml version="1.0" encoding="UTF-16"?>\r\n'
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\r\n'
+        f"  <RegistrationInfo>\r\n    <Date>{when}</Date>\r\n    <Author>{author}</Author>\r\n"
+        f"    <URI>{task_name}</URI>\r\n  </RegistrationInfo>\r\n"
+        f"  <Triggers>\r\n    {trig}\r\n  </Triggers>\r\n"
+        f'  <Principals>\r\n    <Principal id="Author">\r\n      <UserId>{run_as}</UserId>\r\n'
+        "      <RunLevel>HighestAvailable</RunLevel>\r\n    </Principal>\r\n  </Principals>\r\n"
+        f"  <Settings>\r\n    <Enabled>true</Enabled>\r\n    <Hidden>{'true' if hidden else 'false'}</Hidden>\r\n"
+        "  </Settings>\r\n"
+        f'  <Actions Context="Author">\r\n    <Exec>\r\n      <Command>{command}</Command>\r\n'
+        f"      {args_el}\r\n    </Exec>\r\n  </Actions>\r\n</Task>"
+    )
+    # A machine-account subject (HOST$) is the SYSTEM context of an elevated installer.
+    is_machine = user_info["username"].endswith("$")
+    event_data = {
+        "SubjectUserSid":        _SID_SYSTEM if is_machine else _stable_user_sid(user_info["username"]),
+        "SubjectUserName":       user_info["username"],
+        "SubjectDomainName":     domain,
+        "SubjectLogonId":        logon_id or _new_logon_id(),
+        "TaskName":              task_name,
+        "TaskContent":           content,
+        "ClientProcessStartKey": str(random.randint(10**15, 10**16 - 1)),
+        "ClientProcessId":       str(random.randint(1000, 30000)),
+        "ParentProcessId":       str(random.randint(600, 1200)),
+        "RpcCallClientLocality": "0",
+        "FQDN":                  comp,
+    }
+    return _build_event(4698, comp, event_data, success=True, ts=ts)
+
+
+def _build_5140(user_info, config, *, computer, share_name, share_path,
+                ip=None, logon_id=None, access_mask="0x1", ts=None) -> dict:
+    """5140 – A network share object was accessed (logged on the SERVER, once per
+    session per share). ShareName is the UNC form '\\\\*\\NAME'."""
+    domain = _get_domain(config)
+    comp = _fqdn(computer, config)
+    event_data = {
+        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserName":   user_info["username"],
+        "SubjectDomainName": domain,
+        "SubjectLogonId":    logon_id or _new_logon_id(),
+        "ObjectType":        "File",
+        "IpAddress":         ip or user_info.get("ip") or "-",
+        "IpPort":            str(random.randint(49152, 65535)),
+        "ShareName":         share_name,
+        "ShareLocalPath":    share_path,
+        "AccessMask":        access_mask,
+        "AccessList":        "%%4416\r\n\t\t\t\t",
+    }
+    return _build_event(5140, comp, event_data, success=True, ts=ts)
+
+
+# 5145 access masks / access lists for the operations detections distinguish.
+_5145_READ  = ("0x120089", "%%1538\r\n\t\t\t\t%%1541\r\n\t\t\t\t%%4416\r\n\t\t\t\t%%4419\r\n\t\t\t\t%%4423\r\n\t\t\t\t")
+_5145_WRITE = ("0x2",      "%%4417\r\n\t\t\t\t")
+_5145_PIPE  = ("0x12019f", "%%1538\r\n\t\t\t\t%%1541\r\n\t\t\t\t%%4416\r\n\t\t\t\t%%4417\r\n\t\t\t\t"
+                           "%%4418\r\n\t\t\t\t%%4419\r\n\t\t\t\t%%4420\r\n\t\t\t\t%%4423\r\n\t\t\t\t%%4424\r\n\t\t\t\t")
+
+
+def _build_5145(user_info, config, *, computer, share_name, share_path,
+                relative_target, access=_5145_READ, ip=None, logon_id=None,
+                ts=None) -> dict:
+    """5145 – A network share object was checked to see whether client can be
+    granted desired access (Detailed File Share; one per file/pipe touched)."""
+    domain = _get_domain(config)
+    comp = _fqdn(computer, config)
+    mask, alist = access
+    event_data = {
+        "SubjectUserSid":     _stable_user_sid(user_info["username"]),
+        "SubjectUserName":    user_info["username"],
+        "SubjectDomainName":  domain,
+        "SubjectLogonId":     logon_id or _new_logon_id(),
+        "ObjectType":         "File",
+        "IpAddress":          ip or user_info.get("ip") or "-",
+        "IpPort":             str(random.randint(49152, 65535)),
+        "ShareName":          share_name,
+        "ShareLocalPath":     share_path,
+        "RelativeTargetName": relative_target,
+        "AccessMask":         mask,
+        "AccessList":         alist,
+        "AccessReason":       "-",
+    }
+    return _build_event(5145, comp, event_data, success=True, ts=ts)
 
 
 def _build_1102(user_info, config, *, ts=None) -> dict:
@@ -3597,7 +3868,115 @@ def _benign_network_share_logon(config, session_context):
     result.append(json.dumps(_build_4624(u, config, logon_type=3, auth_pkg=_KRB_PACKAGE,
                                          workstation_override=server_fqdn,
                                          target_logon_id=logon_id, ts=t0)))
+    # Server-side share audit for the same logon session: 5140 once per share
+    # connection, and a 5145 for the file opened when Detailed File Share is audited.
+    share, path, files = random.choice(_server_shares(server_fqdn))
+    t1 = t0 + random.uniform(0.02, 0.2)
+    result.append(json.dumps(_build_5140(u, config, computer=server_fqdn, share_name=share,
+                                         share_path=path, logon_id=logon_id, ts=t1)))
+    if random.random() < 0.35:
+        result.append(json.dumps(_build_5145(
+            u, config, computer=server_fqdn, share_name=share, share_path=path,
+            relative_target=random.choice(files), logon_id=logon_id,
+            ts=t1 + random.uniform(0.05, 2.0))))
     return result
+
+
+# Shares per file server (UNC share name, local path, typical relative targets).
+_FILE_SERVER_SHARES = {
+    "fs": [
+        (r"\\*\Shared",      r"\??\D:\Shares\Shared",
+         [r"Finance\Q3 Forecast.xlsx", r"HR\Benefits 2026.pdf", r"Projects\Roadmap.pptx",
+          r"Templates\Letterhead.dotx", r"IT\Install\README.txt"]),
+        (r"\\*\Departments", r"\??\D:\Shares\Departments",
+         [r"Sales\Pipeline.xlsx", r"Marketing\Brand Guide.pdf", r"Legal\NDA Template.docx"]),
+        (r"\\*\Home$",       r"\??\D:\Home",
+         [r"Documents\notes.txt", r"Desktop\todo.docx", "desktop.ini"]),
+    ],
+    "backup": [
+        (r"\\*\Backups",     r"\??\E:\Backups",
+         [r"Daily\catalog.xml", r"Weekly\manifest.json"]),
+    ],
+}
+
+
+def _server_shares(server_fqdn):
+    short = server_fqdn.split(".")[0].lower()
+    return _FILE_SERVER_SHARES["backup" if short.startswith("backup") else "fs"]
+
+
+# Software that registers its own scheduled tasks / services as part of routine
+# install and self-update. (task name, command, arguments, trigger)
+_BENIGN_SCHED_TASKS = [
+    (r"\GoogleSystem\GoogleUpdater\GoogleUpdaterTaskSystem{ver}",
+     r"C:\Program Files (x86)\Google\GoogleUpdater\{ver}\updater.exe", "--wake --system", "daily"),
+    (r"\MicrosoftEdgeUpdateTaskMachineCore{{{guid}}}",
+     r"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe", "/c", "logon"),
+    (r"\MicrosoftEdgeUpdateTaskMachineUA{{{guid}}}",
+     r"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe", "/ua /installsource scheduler", "daily"),
+    (r"\Adobe Acrobat Update Task",
+     r"C:\Program Files (x86)\Common Files\Adobe\ARM\1.0\AdobeARM.exe", "", "logon"),
+    (r"\Mozilla\Firefox Default Browser Agent {hex}",
+     r"C:\Program Files\Mozilla Firefox\default-browser-agent.exe", "do-task \"{hex}\"", "daily"),
+    (r"\Microsoft\Office\Office Automatic Updates 2.0",
+     r"C:\Program Files\Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe",
+     "/frequentupdate SCHEDULEDTASK displaylevel=False", "daily"),
+]
+
+_BENIGN_SERVICES = [
+    ("GoogleUpdaterService{ver}", r'"C:\Program Files (x86)\Google\GoogleUpdater\{ver}\updater.exe" --system --windows-service', 2),
+    ("edgeupdate",  r'"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe" /svc', 2),
+    ("edgeupdatem", r'"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe" /medsvc', 3),
+    ("MozillaMaintenance", r'"C:\Program Files (x86)\Mozilla Maintenance Service\maintenanceservice.exe"', 3),
+    ("ZoomCptService", r'"C:\Program Files\Common Files\Zoom\Support\CptService.exe" -user_path "C:\Users\Public"', 3),
+    ("AdobeARMservice", r'"C:\Program Files (x86)\Common Files\Adobe\ARM\1.0\armsvc.exe"', 2),
+]
+
+
+_UPDATER_VERSIONS = ["128.0.6537.0", "129.0.6668.0", "130.0.6723.0"]
+
+
+def _software_tokens():
+    """One token set per install, so a task/service name and its binary path agree."""
+    tok = {"{ver}": random.choice(_UPDATER_VERSIONS),
+           "{guid}": str(uuid.uuid4()).upper(),
+           "{hex}": uuid.uuid4().hex[:16].upper()}
+
+    def fill(s):
+        for k, v in tok.items():
+            s = s.replace(k, v)
+        return s
+    return fill
+
+
+def _benign_scheduled_task_create(config, session_context):
+    """Software updater registers its scheduled task (4698, Subject = SYSTEM machine
+    account during an elevated installer run)."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    name, cmd, args, trig = random.choice(_BENIGN_SCHED_TASKS)
+    fill = _software_tokens()
+    machine = {**u, "username": u["hostname"].split(".")[0].upper() + "$"}
+    return json.dumps(_build_4698(machine, config, task_name=fill(name), command=fill(cmd),
+                                  arguments=fill(args),
+                                  author=f"{_get_domain(config)}\\{u['username']}",
+                                  trigger=trig, logon_id="0x3e7"))
+
+
+def _benign_service_install(config, session_context):
+    """Software installer registers a Windows service (4697 Security + 7045 System)."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    name, image, start = random.choice(_BENIGN_SERVICES)
+    fill = _software_tokens()
+    name, image = fill(name), fill(image)
+    t = time.time()
+    return [json.dumps(_build_4697(config, computer=u["hostname"], service_name=name,
+                                   service_file=image, start_type=start, ts=t)),
+            json.dumps(_build_7045(config, computer=u["hostname"], service_name=name,
+                                   image_path=image, start_type=start, ts=t + 0.01))]
 
 
 def _benign_workstation_unlock(config, session_context):
@@ -4293,6 +4672,10 @@ _BENIGN_WEIGHTS = {
     "account_unlock":         3,
     "account_disable":        1,
     "process_creation":      30,
+    # Server-side share audit rides on network_share_logon; these are the
+    # low-rate software-install registrations that baseline 4698 / 4697+7045.
+    "scheduled_task_create":  2,
+    "service_install":        1,
 }
 
 _BENIGN_GENERATORS = {
@@ -4318,6 +4701,8 @@ _BENIGN_GENERATORS = {
     "audited_file_access":  _benign_audited_file_access,
     "account_unlock":       _benign_account_unlock,
     "account_disable":      _benign_account_disable,
+    "scheduled_task_create": _benign_scheduled_task_create,
+    "service_install":      _benign_service_install,
 }
 
 
@@ -8155,6 +8540,202 @@ def _threat_rogue_forest_trust(config, session_context):
     return events
 
 
+# ── Remote execution / persistence over SMB (5140 / 5145 / 4698 / 4697 + 7045) ──
+# No Cortex "Windows Event Collector" analytic keys on these EventIDs (checked
+# 2026-10-19), so they are background-only here; surfacing them needs correlation
+# rules (not yet written). Each chain is the server-side record of a real tool run.
+
+def _remote_logon(attacker, config, target_host, src_ip, t, auth_pkg=_NTLM_PACKAGE_SHORT):
+    """Network logon of the operator onto target_host (4624 type 3 + 4672).
+    Returns (events, logon_id)."""
+    lid = _new_logon_id()
+    on_target = {**attacker, "hostname": target_host}
+    ev = _build_4624(attacker, config, logon_type=3, auth_pkg=auth_pkg,
+                     workstation_override=target_host, ip_override=src_ip,
+                     target_logon_id=lid, elevated=True, ts=t)
+    return [json.dumps(ev),
+            json.dumps(_build_4672(on_target, config, logon_id=lid, is_admin=True,
+                                   ts=t + 0.02))], lid
+
+
+def _lateral_pair(session_context):
+    """(operator, target_host) -- the operator's own box is the source."""
+    users = _get_windows_users(session_context)
+    if len(users) < 2:
+        return None, None
+    op = random.choice(users)
+    targets = [u["hostname"] for u in users if u["hostname"] != op["hostname"]]
+    targets += ["FS01", "FS02", "SQL01", "APP01"]
+    return op, random.choice(targets)
+
+
+def _threat_psexec_lateral(config, session_context):
+    """PsExec / Impacket smbexec remote service execution on a peer host.
+
+    Server-side trail: type-3 admin logon, ADMIN$ / IPC$ share connects (5140), the
+    service binary write and svcctl pipe (5145), the service install (4697 + 7045),
+    then the named-pipe I/O (PsExec) or the C$ output file (smbexec)."""
+    op, target = _lateral_pair(session_context)
+    if not op:
+        return None
+    src_ip = op.get("ip") or "10.10.20.50"
+    src_short = op["hostname"].split(".")[0].upper()
+    t = time.time()
+    events, lid = _remote_logon(op, config, target, src_ip, t)
+    t += random.uniform(0.2, 0.6)
+    kw = dict(ip=src_ip, logon_id=lid)
+    events.append(json.dumps(_build_5140(op, config, computer=target, share_name=r"\\*\IPC$",
+                                         share_path="", ts=t, **kw)))
+    if random.random() < 0.6:
+        # Sysinternals PsExec
+        svc, image = "PSEXESVC", r"%SystemRoot%\PSEXESVC.exe"
+        t += 0.1
+        events.append(json.dumps(_build_5140(op, config, computer=target, share_name=r"\\*\ADMIN$",
+                                             share_path=r"\??\C:\Windows", ts=t, **kw)))
+        events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\ADMIN$",
+                                             share_path=r"\??\C:\Windows", relative_target="PSEXESVC.exe",
+                                             access=_5145_WRITE, ts=t + 0.05, **kw)))
+        cli_pid = random.randint(1000, 30000)     # the PsExec client's PID names all three
+        pipes = ["svcctl"] + [f"PSEXESVC-{src_short}-{cli_pid}-{s}"
+                              for s in ("stdin", "stdout", "stderr")]
+        child = (r"C:\Windows\System32\cmd.exe", "cmd.exe", r"C:\Windows\PSEXESVC.exe")
+    else:
+        # Impacket smbexec: the service IS the command, output lands on C$.
+        svc = "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ", k=random.choice([6, 8])))
+        image = (r"%COMSPEC% /Q /c echo cd ^> \\127.0.0.1\C$\__output 2^>^&1 > "
+                 r"%SYSTEMROOT%\execute.bat & %COMSPEC% /Q /c %SYSTEMROOT%\execute.bat & "
+                 r"del %SYSTEMROOT%\execute.bat")
+        pipes = ["svcctl"]
+        child = (r"C:\Windows\System32\cmd.exe", image.replace("%COMSPEC%", "cmd.exe"),
+                 r"C:\Windows\System32\services.exe")
+    t += 0.3
+    events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\IPC$",
+                                         share_path="", relative_target=pipes[0],
+                                         access=_5145_PIPE, ts=t, **kw)))
+    t += 0.2
+    events.append(json.dumps(_build_4697(config, computer=target, service_name=svc,
+                                         service_file=image, start_type=3, ts=t)))
+    events.append(json.dumps(_build_7045(config, computer=target, service_name=svc,
+                                         image_path=image, start_type=3,
+                                         installer_sid=_stable_user_sid(op["username"]),
+                                         ts=t + 0.01)))
+    t += 0.4
+    events.append(json.dumps(_build_4688({**op, "hostname": target}, config,
+                                         process_name=child[0], command_line=child[1],
+                                         parent_process=child[2], ts=t)))
+    for p in pipes[1:]:
+        t += 0.05
+        events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\IPC$",
+                                             share_path="", relative_target=p,
+                                             access=_5145_PIPE, ts=t, **kw)))
+    if svc != "PSEXESVC":
+        t += random.uniform(0.5, 2.0)
+        # Windows logs the C$ root as \??\C:\ -- one trailing backslash. Not a raw
+        # string: r"...\" cannot end in a single backslash, and r"...\\" keeps two.
+        c_root = "\\??\\C:\\"
+        events.append(json.dumps(_build_5140(op, config, computer=target, share_name=r"\\*\C$",
+                                             share_path=c_root, ts=t, **kw)))
+        events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\C$",
+                                             share_path=c_root, relative_target="__output",
+                                             ts=t + 0.05, **kw)))
+    return events
+
+
+_ATEXEC_COMMANDS = [
+    "whoami /all", "net group \"Domain Admins\" /domain", "ipconfig /all",
+    "tasklist /v", "quser", "net localgroup administrators",
+]
+
+
+def _threat_remote_scheduled_task(config, session_context):
+    """Impacket atexec / schtasks /S: a hidden SYSTEM task registered over the atsvc
+    pipe, run once, its output read back over ADMIN$, then the task deleted."""
+    op, target = _lateral_pair(session_context)
+    if not op:
+        return None
+    src_ip = op.get("ip") or "10.10.20.50"
+    t = time.time()
+    events, lid = _remote_logon(op, config, target, src_ip, t)
+    kw = dict(ip=src_ip, logon_id=lid)
+    t += 0.3
+    events.append(json.dumps(_build_5140(op, config, computer=target, share_name=r"\\*\IPC$",
+                                         share_path="", ts=t, **kw)))
+    events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\IPC$",
+                                         share_path="", relative_target="atsvc",
+                                         access=_5145_PIPE, ts=t + 0.05, **kw)))
+    tname = "".join(random.choices("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", k=8))
+    tmp = "".join(random.choices("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", k=8)) + ".tmp"
+    args = f"/C {random.choice(_ATEXEC_COMMANDS)} > %windir%\\Temp\\{tmp} 2>&1"
+    t += 0.3
+    task = _build_4698(op, config, computer=target, task_name="\\" + tname,
+                       command="cmd.exe", arguments=args, run_as="S-1-5-18",
+                       hidden=True, trigger="once", logon_id=lid, ts=t)
+    events.append(json.dumps(task))
+    t += random.uniform(1.5, 4.0)
+    events.append(json.dumps(_build_4688({**op, "hostname": target}, config,
+                                         process_name=r"C:\Windows\System32\cmd.exe",
+                                         command_line=f"cmd.exe {args}",
+                                         parent_process=r"C:\Windows\System32\svchost.exe",
+                                         ts=t)))
+    t += random.uniform(0.5, 1.5)
+    deleted = _build_event(4699, _fqdn(target, config),
+                           {k: task["event_data"][k] for k in
+                            ("SubjectUserSid", "SubjectUserName", "SubjectDomainName",
+                             "SubjectLogonId", "TaskName", "TaskContent",
+                             "ClientProcessStartKey", "ClientProcessId", "ParentProcessId",
+                             "RpcCallClientLocality", "FQDN")}, ts=t)
+    events.append(json.dumps(deleted))
+    t += 0.4
+    events.append(json.dumps(_build_5140(op, config, computer=target, share_name=r"\\*\ADMIN$",
+                                         share_path=r"\??\C:\Windows", ts=t, **kw)))
+    events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\ADMIN$",
+                                         share_path=r"\??\C:\Windows",
+                                         relative_target=f"Temp\\{tmp}", ts=t + 0.05, **kw)))
+    return events
+
+
+def _threat_share_enumeration(config, session_context):
+    """SMB share discovery sweep (SharpShares / PowerView Find-DomainShare /
+    CrackMapExec --shares): one source connects IPC$ and calls srvsvc
+    NetShareEnum on many hosts within a minute or two."""
+    users = _get_windows_users(session_context)
+    if len(users) < 2:
+        return None
+    op = random.choice(users)
+    src_ip = op.get("ip") or "10.10.20.50"
+    hosts = list({u["hostname"] for u in users if u["hostname"] != op["hostname"]})
+    hosts += ["FS01", "FS02", "SQL01", "APP01", "BACKUP01"]
+    random.shuffle(hosts)
+    t = time.time()
+    events = []
+    for host in hosts[:random.randint(8, 15)]:
+        evs, lid = _remote_logon(op, config, host, src_ip, t, auth_pkg=_KRB_PACKAGE)
+        events.append(evs[0])           # plain user: 4624 only, no 4672
+        kw = dict(ip=src_ip, logon_id=lid)
+        events.append(json.dumps(_build_5140(op, config, computer=host, share_name=r"\\*\IPC$",
+                                             share_path="", ts=t + 0.05, **kw)))
+        events.append(json.dumps(_build_5145(op, config, computer=host, share_name=r"\\*\IPC$",
+                                             share_path="", relative_target="srvsvc",
+                                             access=_5145_PIPE, ts=t + 0.1, **kw)))
+        t += random.uniform(1.0, 8.0)
+    return events
+
+
+def _threat_malicious_service_install(config, session_context):
+    """Local service persistence: an implant registered as an auto-start service
+    from a user-writable path (4697 + 7045)."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    name = random.choice(_IMPLANT_SERVICE_NAMES)
+    image = random.choice(_IMPLANT_SERVICE_FILES).replace("{n}", name)
+    t = time.time()
+    return [json.dumps(_build_4697(config, computer=u["hostname"], service_name=name,
+                                   service_file=image, start_type=2, ts=t)),
+            json.dumps(_build_7045(config, computer=u["hostname"], service_name=name,
+                                   image_path=image, start_type=2, ts=t + 0.01))]
+
+
 _THREAT_WEIGHTS = {
     "rogue_forest_trust":                3,
     "existing_trust_sid_filter_downgrade": 3,
@@ -8193,6 +8774,10 @@ _THREAT_WEIGHTS = {
     "mailbox_export":              3,
     "mailbox_export_log_removal":  3,
     "mailbox_cas_change":          3,
+    "psexec_lateral":              4,
+    "remote_scheduled_task":       3,
+    "share_enumeration":           3,
+    "malicious_service_install":   3,
 }
 
 _THREAT_GENERATORS = {
@@ -8231,6 +8816,10 @@ _THREAT_GENERATORS = {
     "mailbox_export":                   _threat_mailbox_export,
     "mailbox_export_log_removal":       _threat_mailbox_export_log_removal,
     "mailbox_cas_change":               _threat_mailbox_cas_change,
+    "psexec_lateral":                   _threat_psexec_lateral,
+    "remote_scheduled_task":            _threat_remote_scheduled_task,
+    "share_enumeration":                _threat_share_enumeration,
+    "malicious_service_install":        _threat_malicious_service_install,
 }
 _THREAT_GENERATORS = {k: _ending_by_now(v) for k, v in _THREAT_GENERATORS.items()}
 
@@ -8245,6 +8834,8 @@ ANALYTIC_ALERTS = {
     # Windows Event Collector analytic; LSASS access is an XDR-agent detection), and
     # wip_irregular_service_tgs -- it only ever raises the weak-encryption alert that
     # multiple_service_tickets owns; irregular_tgt_burst covers its intended target.
+    # Also unmapped: psexec_lateral, remote_scheduled_task, share_enumeration and
+    # malicious_service_install -- no WEC analytic reads 4698/7045/5140/5145.
     "as_rep_roasting":             "An excessive number of TGT requests were sent for users that do not require Kerberos pre-authentication",
     "account_lockout":             "Multiple user accounts failed login due to account lockouts",
     "suspicious_account_lockout":  "Excessive account lockouts on suspicious users",
@@ -8349,10 +8940,16 @@ def _generate_scenario_event(scenario_event, config, context):
                                       domain_override=_dom)), "network_logon"
     if ev in ("SERVICE_INSTALL", "IMPLANT_SERVICE"):
         # 4697 – a service was installed on the victim host (malware persistence).
+        # The SCM's System-channel 7045 accompanies it, with the same name and image.
         _host = (context or {}).get("hostname") or user.get("hostname")
-        return json.dumps(_build_4697(config, computer=_host,
-                                      service_name=(context or {}).get("service_name"),
-                                      service_file=(context or {}).get("service_file"))), "service_install"
+        _sec = _build_4697(config, computer=_host,
+                           service_name=(context or {}).get("service_name"),
+                           service_file=(context or {}).get("service_file"))
+        _ed = _sec["event_data"]
+        return [json.dumps(_sec),
+                json.dumps(_build_7045(config, computer=_host, service_name=_ed["ServiceName"],
+                                       image_path=_ed["ServiceFileName"],
+                                       start_type=int(_ed["ServiceStartType"])))], "service_install"
     if ev in ("PROCESS_TREE", "MALWARE_EXECUTION"):
         # A linked chain of 4688s: Office → hidden PowerShell → cmd → LOLBin.
         return _build_process_tree(user, config, c2_ip=(context or {}).get("c2_ip")), "process_tree"
@@ -8439,6 +9036,10 @@ def _generate_scenario_event(scenario_event, config, context):
         "MAILBOX_EXPORT":                   _threat_mailbox_export,
         "MAILBOX_EXPORT_LOG_REMOVAL":       _threat_mailbox_export_log_removal,
         "MAILBOX_CAS_CHANGE":               _threat_mailbox_cas_change,
+        "PSEXEC_LATERAL":                   _threat_psexec_lateral,
+        "REMOTE_SCHEDULED_TASK":            _threat_remote_scheduled_task,
+        "SHARE_ENUMERATION":                _threat_share_enumeration,
+        "MALICIOUS_SERVICE_INSTALL":        _threat_malicious_service_install,
     }
     if ev in _threat_dispatch:
         result = _end_by_now(_threat_dispatch[ev](config, session_context))
@@ -8577,6 +9178,8 @@ _WKS_BENIGN_GENS = {
     "lateral_movement":      3,
     # 4656/4663 on SACL'd file objects -- workstation-side, via the file share.
     "audited_file_access":  12,
+    "scheduled_task_create": 2,
+    "service_install":       1,
 }
 
 
