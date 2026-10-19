@@ -9,6 +9,11 @@ against the Cortex Analytics Alert Reference. Detectors have a 14-day activation
 30-day training period. Several fixes below also change the data those detectors
 baseline on, so don't treat silence before **2026-10-16** as evidence.
 
+Device administration (admin logins, config/route changes, logging suppression, config
+harvesting, SNMP abuse) is covered separately in
+[firewall-management-plane.md](firewall-management-plane.md); no shipped analytic
+consumes it.
+
 ## 1. What each dataset can carry into XDM
 
 This constrains everything else: a generator can't drive a detector with a field its

