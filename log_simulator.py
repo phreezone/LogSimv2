@@ -1086,6 +1086,52 @@ def shift_timestamps(payload, delta_seconds, anchor_epoch=None):
     return s
 
 
+_cribl_sender = None
+_cribl_sender_lock = threading.Lock()
+
+
+def _get_cribl_sender():
+    """Lazily build one CriblDirectSender (shared, thread-safe)."""
+    global _cribl_sender
+    if _cribl_sender is None:
+        with _cribl_sender_lock:
+            if _cribl_sender is None:
+                from integrations.cribl_direct import CriblDirectSender
+                _cribl_sender = CriblDirectSender()
+    return _cribl_sender
+
+
+def send_cribl_message(record, module, config):
+    """Push one record into XSIAM's integrated Cribl receiver (cribl_direct transport).
+
+    The record goes under the module's dedicated Source-Identifier UUID so XSIAM parses it
+    into the native dataset (Fusion/analytics-eligible). No Cribl instance is involved;
+    CRIBL_COLLECTOR_URL + CRIBL_TOKEN come from the environment.
+    """
+    src = getattr(module, 'SOURCE_IDENTIFIER', None)
+    if not src:
+        _tprint(f"Error: {getattr(module, 'NAME', '?')} cribl transport requires module.SOURCE_IDENTIFIER.")
+        return
+    integ = getattr(module, 'INTEGRATION_IDENTIFIER', 'logsim:synthetic')
+    if isinstance(record, str):
+        try:
+            record = json.loads(record)
+        except (json.JSONDecodeError, TypeError):
+            _tprint(f"Warning: {module.NAME} cribl transport received non-JSON string. Skipping.")
+            return
+    if not isinstance(record, dict):
+        _tprint(f"Warning: {module.NAME} cribl transport expects a dict record. Skipping.")
+        return
+    try:
+        code, text, _ = _get_cribl_sender().send([record], src, integ)
+        if code not in (200, 201, 202, 204):
+            _tprint(f"Cribl send error for {module.NAME}: HTTP {code} — {text[:120]}")
+        elif not _quiet_sends:
+            _tprint(f"Cribl send for {module.NAME}: {code} (src={src[:8]}…)")
+    except Exception as exc:
+        _tprint(f"Cribl send exception for {module.NAME}: {exc}")
+
+
 def process_and_send(log_content, module, config, event_name=None):
     """Determines how to send the log and sends it. Counts logs for throughput reporting."""
     transport = "syslog"
@@ -1155,6 +1201,17 @@ def process_and_send(log_content, module, config, event_name=None):
         else:
             event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} wants Pub/Sub transport but did not return a string or list of strings. Skipping.")
+    elif transport == "cribl":
+        if isinstance(log_content, list):
+            for rec in log_content:
+                send_cribl_message(rec, module, config)
+                _increment_throughput()
+        elif isinstance(log_content, (dict, str)):
+            send_cribl_message(log_content, module, config)
+            _increment_throughput()
+        else:
+            event_str = f" ({event_name})" if event_name else ""
+            _tprint(f"Warning: Module {module.NAME}{event_str} wants cribl transport but did not return a dict/str/list. Skipping.")
     else:  # Default to syslog
         syslog_host = os.getenv('SYSLOG_HOST')
         syslog_port = int(module_config.get("syslog_port", config.get('SYSLOG_PORT', '514')))

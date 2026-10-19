@@ -73,7 +73,7 @@ try:
                                        stable_vpn_ip, stable_mail_servers, weighted_destination,
                                        novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
                                        rare_external_ip, rare_internal_host, rare_domain, ip_country,
-                                       vpn_username, impossible_travel_ips)
+                                       vpn_username, impossible_travel_ips, correlated_or_random_user)
     from modules import resolver
     from modules import threat_domains
     from modules import mgmt_plane
@@ -82,7 +82,7 @@ except ImportError:
                                stable_vpn_ip, stable_mail_servers, weighted_destination,
                                        novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
                                        rare_external_ip, rare_internal_host, rare_domain, ip_country,
-                                       vpn_username, impossible_travel_ips)
+                                       vpn_username, impossible_travel_ips, correlated_or_random_user)
     import resolver
     import mgmt_plane
     import threat_domains
@@ -1535,7 +1535,9 @@ def _generate_benign_log(config, session_context=None):
                       "vpn_login_benign", "vpn_failure_benign",
                       "vpn_new_country_login", "mgmt_admin_session", "snmp_poll"):
         if session_context:
-            user_info = get_random_user(session_context, preferred_device_type="workstation")
+            # follow-on egress: prefer a recently-active user so the flow's src IP + identity match
+            # a current logon (cross-plane correlation)
+            user_info = correlated_or_random_user(session_context, preferred_device_type="workstation")
             if user_info:
                 user   = user_info["username"]
                 src_ip = user_info["ip"]
