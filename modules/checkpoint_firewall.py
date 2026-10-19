@@ -11,6 +11,7 @@ from ipaddress import ip_network
 try:
     from modules import resolver
     from modules import threat_domains
+    from modules import mgmt_plane
     from modules.session_utils import (get_random_user, weighted_dns_domain, get_user_by_name, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
@@ -18,6 +19,7 @@ try:
 except ImportError:
     import resolver
     import threat_domains
+    import mgmt_plane
     from session_utils import (get_random_user, weighted_dns_domain, get_user_by_name, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
@@ -141,6 +143,13 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Abnormal RDP session to a remote host from a rarely seen host"},
     {"event": "rare_smtp_session",     "weight": 2,  "analytic": True,
      "xsiam_alert": "Rare SMTP/S Session"},
+    # Management plane (2026-10-19, gocortexio advisory corpus MANAGEMENT patterns).
+    # No shipped Cortex analytic covers device administration: hunting / correlation.
+    {"event": "mgmt_admin_unexpected_source", "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_config_route_change",     "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_logging_suppressed",      "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_config_harvest",          "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "snmp_unexpected_source",       "weight": 1, "analytic": False, "xsiam_alert": None},
 ]
 
 
@@ -555,6 +564,14 @@ def _generate_benign_log(config, session_context=None):
                  2],
         k=1,
     )[0]
+
+    # Management plane baseline, ahead of the draw: ~40 admin sessions and ~800 SNMP
+    # polls a day at one call per second.
+    mroll = random.random()
+    if mroll < 0.0005:
+        return _simulate_mgmt_admin_session(config, session_context)
+    if mroll < 0.01:
+        return _simulate_snmp_poll(config, session_context)
 
     if log_type == 'vpn_new_country_login':
         return _simulate_vpn_new_country_login(config, user)
@@ -2681,6 +2698,188 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost):
     return _format_checkpoint_cef(config, extensions)
 
 
+# Management plane
+#
+# Check Point administration is recorded as SmartConsole / management-server AUDIT
+# logs, which Log Exporter sends with Device Product "SmartConsole" and the audit
+# fields operation / subject / administrator / client_ip / audit_status / machine.
+# XSIAM routes them by product, so they do NOT land in check_point_vpn_1_firewall_1_raw,
+# and the CheckpointFirewall pack ships modeling rules for only five datasets
+# (FireWall-1, URL Filtering, SmartDefense, Application Control, Identity Awareness).
+# Audit records are therefore raw-only (hunt / correlation-rule material); see
+# _local_validation/mgmt_plane_probe.py for where they land. SNMP is ordinary
+# FireWall-1 connection data and is modeled.
+
+_CP_MGMT_SERVER = "CP-MGMT-01"
+
+
+def _cp_audit(config, user, src, operation, subject, ts, status="Success", extra=None):
+    ext = {
+        "signatureId": "Log", "name": operation, "severity": "Unknown",
+        "act": operation, "operation": operation, "subject": subject,
+        "administrator": user, "suser": user, "_no_user_qualify": True,
+        "client_ip": src, "src": src,
+        "dst": config.get(CONFIG_KEY, {}).get("management_server_ip", "10.0.30.5"),
+        "machine": src, "audit_status": status, "outcome": status,
+        "origin": config.get(CONFIG_KEY, {}).get("management_server_ip", "10.0.30.5"),
+        "product": "SmartConsole",
+        "session_id": None, "layer_name": None, "layer_uuid": None,
+        "msg": f"{operation}: {subject}",
+    }
+    ext.update(extra or {})
+    return _format_checkpoint_cef(config, ext, device_product="SmartConsole", event_time=ts)
+
+
+def _cp_admin_session(config, user, src, actions, start=None, failures=0, gap=(5, 60),
+                      logout=True, client="SmartConsole"):
+    """[Failed Log In] -> Log In -> actions -> [Publish] -> Log Out.
+    actions: list of (operation, subject, extra)."""
+    t = start or datetime.now(timezone.utc) - timedelta(seconds=(len(actions) + 3) * gap[1])
+    out = []
+    for _ in range(failures):
+        out.append(_cp_audit(config, user, src, "Log In", "Administrator Login", t, status="Failure",
+                             extra={"reason": "Wrong password"}))
+        t += timedelta(seconds=random.randint(3, 8))
+    out.append(_cp_audit(config, user, src, "Log In", "Administrator Login", t,
+                         extra={"client_name": client}))
+    for op, subj, extra in actions:
+        t += timedelta(seconds=random.randint(*gap))
+        out.append(_cp_audit(config, user, src, op, subj, t, extra=extra))
+    if logout:
+        t += timedelta(seconds=random.randint(*gap))
+        out.append(_cp_audit(config, user, src, "Log Out", "Administrator Logout", t))
+    return out
+
+
+_CP_ROUTINE_CHANGES = [
+    lambda n: [("Create Object", f"Host SRV-WEB-{n}", {"object_type": "host", "ip": f"10.0.10.{n}"}),
+               ("Publish", "Session published", {"changes": "1"})],
+    lambda n: [("Modify Rule", f"Rule {n % 60 + 1} comments: CHG{n} patch window", {"layer": "Network"}),
+               ("Publish", "Session published", {"changes": "1"}),
+               ("Install Policy", "Standard policy installed on CP-FW-1", {"target": "CP-FW-1"})],
+]
+
+
+def _simulate_mgmt_admin_session(config, session_context=None):
+    """BENIGN: a network admin from the NOC jump host reviews logs/policy; one session
+    in five makes, publishes and installs a routine change."""
+    user, src = mgmt_plane.admin_user(config), mgmt_plane.admin_source(config)
+    acts = [("View", random.choice(["Logs & Monitor", "Gateways & Servers", "Security Policies"]), None)]
+    if random.random() < 0.2:
+        acts += random.choice(_CP_ROUTINE_CHANGES)(random.randint(20, 240))
+    return _cp_admin_session(config, user, src, acts)
+
+
+def _simulate_mgmt_config_backup(config, session_context=None):
+    """BENIGN: nightly backup job (management API) exports the configuration."""
+    host, acct = mgmt_plane.backup(config)
+    return _cp_admin_session(config, acct, host,
+                             [("Export", "Database export (migrate export)", {"client_name": "Web API"})],
+                             gap=(2, 5), client="Web API")
+
+
+def _simulate_snmp_poll(config, session_context=None):
+    """BENIGN: the monitoring poller reads SNMP from infrastructure behind the gateway."""
+    return _cp_conn(config, mgmt_plane.snmp_poller(config), random.choice(mgmt_plane.network_devices(config)),
+                    161, "snmp", "snmp", internal=True, proto="17",
+                    out_b=random.randint(80, 300), in_b=random.randint(200, 1500), duration=1,
+                    rule="Allow_Mgmt_SNMP", reason="UDP session end")
+
+
+def _simulate_mgmt_admin_unexpected_source(config, session_context=None):
+    """THREAT device-admin-from-unexpected-source: SmartConsole / Web API login with a
+    valid admin from outside the admin subnet."""
+    src, kind = mgmt_plane.unexpected_source(config, session_context)
+    print(f"    - Check Point Module simulating: admin login from unexpected source {src} ({kind})")
+    return _cp_admin_session(config, mgmt_plane.admin_user(config), src,
+                             [("View", "Gateways & Servers", None), ("View", "Security Policies", None)],
+                             failures=random.randint(0, 2),
+                             client=random.choice(["SmartConsole", "Web API"]))
+
+
+def _simulate_mgmt_config_route_change(config, session_context=None):
+    """THREAT network-device-config-or-route-change: a static route via an attacker
+    next hop on the gateway, an any-any accept rule, published and installed."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.6 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    rogue = rare_external_ip()
+    gw = config.get(CONFIG_KEY, {}).get("hostname", "CP-FW-1")
+    print(f"    - Check Point Module simulating: route/rule change via {rogue} from {src} ({kind})")
+    acts = [("Modify Object", f"Gateway {gw} static route 10.0.10.0/24 via {rogue}",
+             {"object_type": "simple-gateway", "next_hop": rogue}),
+            ("Create Rule", "Rule 1: Any -> Any Accept (Track: None)", {"layer": "Network"}),
+            ("Publish", "Session published", {"changes": "2"}),
+            ("Install Policy", f"Standard policy installed on {gw}", {"target": gw})]
+    return _cp_admin_session(config, mgmt_plane.admin_user(config), src, acts)
+
+
+_CP_SUPPRESS_KEY = "checkpoint_firewall"
+
+
+def _cp_logging_toggle(config, user, src, ts, enable):
+    gw = config.get(CONFIG_KEY, {}).get("hostname", "CP-FW-1")
+    state = "enabled" if enable else "disabled"
+    return [_cp_audit(config, user, src, "Modify Object",
+                      f"Gateway {gw} Logs: send logs to management server {state}",
+                      ts, extra={"object_type": "simple-gateway"}),
+            _cp_audit(config, user, src, "Install Policy", f"Standard policy installed on {gw}",
+                      ts + timedelta(seconds=20), extra={"target": gw})]
+
+
+def _simulate_mgmt_logging_suppressed(config, session_context=None, backdate=False):
+    """THREAT network-device-logging-suppressed-for-a-window: the gateway's log
+    forwarding is turned off, the gateway goes silent, then it is turned back on."""
+    user = mgmt_plane.admin_user(config)
+    src, _ = (mgmt_plane.unexpected_source(config, session_context)
+              if random.random() < 0.5 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    window = mgmt_plane.suppression_window_seconds()
+    now = datetime.now(timezone.utc)
+    print(f"    - Check Point Module simulating: logging suppressed by {user} from {src} for {window}s")
+    start = now - timedelta(seconds=window + 120) if backdate else now - timedelta(seconds=60)
+    off = _cp_admin_session(config, user, src, [], start=start, logout=False)
+    off += _cp_logging_toggle(config, user, src, start + timedelta(seconds=30), enable=False)
+    if backdate:
+        return off + _cp_logging_toggle(config, user, src, now - timedelta(seconds=30), enable=True) \
+            + [_cp_audit(config, user, src, "Log Out", "Administrator Logout", now)]
+    mgmt_plane.open_suppression(_CP_SUPPRESS_KEY, window, user, src)
+    return off
+
+
+def _simulate_mgmt_config_harvest(config, session_context=None):
+    """THREAT scripted-device-config-harvesting: Web API logins from one source to
+    several management domains / gateways in minutes, each pulling the full config."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.5 else (random.choice(mgmt_plane.conf(config)["jump_hosts"]), "jump-host"))
+    user = mgmt_plane.admin_user(config)
+    gws = mgmt_plane.sibling_hostnames(config.get(CONFIG_KEY, {}).get("hostname", "CP-FW-1"),
+                                       random.randint(3, 5))
+    print(f"    - Check Point Module simulating: config harvest of {len(gws)} gateways from {src} ({kind})")
+    t, out = datetime.now(timezone.utc) - timedelta(seconds=60 * len(gws)), []
+    for gw in gws:
+        out += _cp_admin_session(config, user, src, [
+            ("Show", f"show-gateways-and-servers details-level full ({gw})", {"client_name": "Web API"}),
+            ("Show", f"show-access-rulebase Network ({gw})", {"client_name": "Web API"}),
+            ("Export", f"show configuration ({gw}) via gaia-api", {"client_name": "Web API", "target": gw})],
+            start=t, gap=(1, 3), client="Web API")
+        t += timedelta(seconds=random.randint(10, 45))
+    return out
+
+
+def _simulate_snmp_unexpected_source(config, src_ip, user, shost):
+    """THREAT snmp-from-unexpected-source: a workstation walks every network device."""
+    t, out = datetime.now(timezone.utc) - timedelta(seconds=40), []
+    for dev in mgmt_plane.network_devices(config):
+        out.append(_cp_conn(config, src_ip, dev, 161, "snmp", "snmp", user=user, shost=shost,
+                            internal=True, proto="17", out_b=random.randint(60, 200),
+                            in_b=random.randint(800, 40000), duration=random.randint(0, 3),
+                            event_time=t, rule="Allow_Internal", reason="UDP session end"))
+        t += timedelta(seconds=random.randint(1, 4))
+    return out
+
+
+_MGMT_BACKDATE = {"on": False}
+
+
 def _generate_threat_log(config, session_context=None, forced_event=None):
     """Generates a random threat event (IPS, URL Filtering, Identity, or Analytics-based).
     If forced_event is given, that specific event is generated instead of a random pick.
@@ -2719,6 +2918,19 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     # Convert raw event key to display name for the returned tuple so the
     # dashboard / CLI threat_names set (built from get_threat_names()) matches.
     display_name = _EVENT_DISPLAY_NAMES.get(threat_type, threat_type)
+
+    # --- management plane (sources come from mgmt_plane) ---
+    if threat_type == 'mgmt_admin_unexpected_source':
+        return (_simulate_mgmt_admin_unexpected_source(config, session_context), display_name)
+    if threat_type == 'mgmt_config_route_change':
+        return (_simulate_mgmt_config_route_change(config, session_context), display_name)
+    if threat_type == 'mgmt_logging_suppressed':
+        return (_simulate_mgmt_logging_suppressed(config, session_context,
+                                                  backdate=_MGMT_BACKDATE["on"]), display_name)
+    if threat_type == 'mgmt_config_harvest':
+        return (_simulate_mgmt_config_harvest(config, session_context), display_name)
+    if threat_type == 'snmp_unexpected_source':
+        return (_simulate_snmp_unexpected_source(config, src_ip, user, shost), display_name)
 
     # --- multi-event generators ---
     if threat_type == 'large_upload':
@@ -3047,10 +3259,26 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
             return (logs, "C2_EGRESS")
 
         # Named threat from dashboard — dispatch to the specific event
-        return _generate_threat_log(config, session_context, forced_event=scenario_event)
+        _MGMT_BACKDATE["on"] = bool(ctx.get("mgmt_backdate"))
+        try:
+            return _generate_threat_log(config, session_context, forced_event=scenario_event)
+        finally:
+            _MGMT_BACKDATE["on"] = False
 
     if scenario:
         return _generate_scenario_log(config, scenario)
+
+    # Logging suppressed: the gateway is silent until the window closes, then the same
+    # admin turns log forwarding back on and logs out (_simulate_mgmt_logging_suppressed).
+    _sup = mgmt_plane.suppression_state(_CP_SUPPRESS_KEY)
+    if _sup == "active":
+        return None
+    if _sup:
+        now = datetime.now(timezone.utc)
+        return (_cp_logging_toggle(config, _sup["user"], _sup["src"], now - timedelta(seconds=25), enable=True)
+                + [_cp_audit(config, _sup["user"], _sup["src"], "Log Out", "Administrator Logout", now)])
+    if mgmt_plane.backup_due(_CP_SUPPRESS_KEY):
+        return _simulate_mgmt_config_backup(config, session_context)
 
     if benign_only:
         return _generate_benign_log(config, session_context)

