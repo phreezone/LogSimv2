@@ -1,6 +1,27 @@
 {
   "syslog_port": 514,
   "base_event_interval_seconds": 1.0,
+  "o365_azure_ad_config": {
+    "transport": "cribl"
+  },
+  "azure_ad_signin_config": {
+    "transport": "cribl"
+  },
+  "azure_ad_audit_config": {
+    "transport": "cribl"
+  },
+  "o365_exchange_config": {
+    "transport": "cribl"
+  },
+  "o365_sharepoint_config": {
+    "transport": "cribl"
+  },
+  "o365_dlp_config": {
+    "transport": "cribl"
+  },
+  "o365_general_config": {
+    "transport": "cribl"
+  },
   "threat_generation_levels": {
     "Benign Traffic Only": 86400,
     "Realistic": 7200,

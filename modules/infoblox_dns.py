@@ -12,12 +12,12 @@ from ipaddress import ip_network, IPv4Address
 
 try:
     from modules.session_utils import (get_random_user, rand_ip_from_network,
-                                       weighted_dns_domain, rare_external_ip, host_mac)
+                                       weighted_dns_domain, rare_external_ip, host_mac, correlated_or_random_user)
     from modules import resolver
     from modules import threat_domains
 except ImportError:
     from session_utils import (get_random_user, rand_ip_from_network,
-                               weighted_dns_domain, rare_external_ip, host_mac)
+                               weighted_dns_domain, rare_external_ip, host_mac, correlated_or_random_user)
     import resolver
     import threat_domains
 
@@ -738,7 +738,7 @@ def _get_random_dhcp_client_details(config, session_context=None):
     device_type = os_type = None
 
     if session_context:
-        user_info = get_random_user(session_context, preferred_device_type='workstation')
+        user_info = correlated_or_random_user(session_context, preferred_device_type='workstation')
         if user_info:
             client_ip       = user_info['ip'] or client_ip
             client_hostname = user_info['hostname'] or client_hostname
