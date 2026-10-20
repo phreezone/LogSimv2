@@ -8,7 +8,8 @@ A modular, high-fidelity log simulation tool for **Palo Alto Networks Cortex XSI
 - **Flask Web Dashboard** — real-time UI for controlling all modules, adjusting threat levels and event rates, firing individual threats, scheduling jobs, and monitoring health checks
 - **Centralized Configuration** — all settings (IPs, users, hostnames, threat intel, transport) in a single `config.json`
 - **Generated High-Cardinality Values** — threat domains, file names, cloud resource identifiers and browser user-agents are *composed* per event rather than drawn from fixed lists, so a month-long run never recycles the same 25 C2 domains or 26 EC2 instance IDs. The curated `config.json` pools remain in circulation as a recognisable head for manual hunting — see [docs/value-cardinality.md](docs/value-cardinality.md)
-- **Multiple Transports** — Syslog (TCP with persistent connections), HTTP Collector, AWS S3 (cached client), Google Cloud Pub/Sub, WEC (Windows Event Collector via WS-Management)
+- **Multiple Transports** — Syslog (TCP with persistent connections), HTTP Collector, AWS S3 (cached client), Google Cloud Pub/Sub, WEC (Windows Event Collector via WS-Management), and the **XSIAM Cribl receiver** for the Microsoft Entra ID / Office 365 feeds (direct, no Cribl Stream instance or Microsoft tenant needed — see [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#transport-the-cribl-receiver-no-cribl-instance-needed))
+- **Microsoft Entra ID & Office 365** — seven native-shaped feeds (Graph sign-ins and directory audit, O365 Azure AD, Exchange Online, SharePoint/OneDrive, DLP, General) plus cross-feed identity campaigns, all on the same users as every other module
 - **Dynamic Threat Levels** — six levels from Benign Traffic Only to Insane; controls threat event frequency per module
 - **XSIAM Detection-Ready Sequences** — attack generators produce complete detection patterns (e.g., failed logins followed by success) that trigger XSIAM UEBA analytics out of the box
 - **Correlated Attack Scenarios** — 23 pre-built multi-module kill chains (phishing, cloud pentest, ransomware precursor, AiTM session hijack, VPN compromise, web app compromise, insider threat, DNS C2, and more) — including 6 *advanced linked kill chains* (Domain Dominance, Beaconing Implant, Server Breach → Cloud, Cloud Ransomware, Perimeter Intrusion, Identity Attack → Cloud) built around a single pivot entity with full alert-field enrichment
@@ -54,6 +55,12 @@ The web dashboard provides full control over log generation without touching the
 | High | 1800s (30 min) | Regular threat events |
 | Extreme | 600s (10 min) | Frequent threat events |
 | Insane | 0s | Every other event is a threat (50/50 split) |
+
+The intervals apply per module. The **Microsoft Entra / Office 365** feeds pace threats
+differently: as *episodes* from a wall-clock Poisson process, after a 500-record benign
+warmup. Episodes per module per hour: Realistic 0.03 (about 5 a day across the seven
+feeds), Elevated 0.15, High 0.6, Extreme 2.0, Insane 6.0. See
+[docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#threat-model).
 
 ## XSIAM Detection Patterns
 
@@ -166,8 +173,10 @@ Set these environment variables in your `.env` file:
 WEC_BROKER_URL=https://brokervm1.local.lab:5986/wsman
 WEC_PFX_PATH=/path/to/broker-vm-cert.pfx
 WEC_PFX_PASSWORD=your-pfx-export-password
-WEC_ISSUER_CA=471F21505EB2B0F12A5E6063E2DDA5FF6D7534B1
 ```
+
+The IssuerCA thumbprint is not needed: LogSim authenticates with the PFX alone. An older
+`WEC_ISSUER_CA` setting is harmless, but nothing reads it.
 
 In `config.json`, set the transport to `"wec"` in the `windows_events_config` section:
 
@@ -181,7 +190,18 @@ In `config.json`, set the transport to `"wec"` in the `windows_events_config` se
 
 ### Broker VM Subscription Filter
 
-Configure the Broker VM WEC subscription to accept **all Event IDs** from the Security channel rather than listing specific Event IDs. LogSim generates 20+ different Event IDs (4624, 4625, 4634, 4647, 4648, 4656, 4662, 4663, 4672, 4688, 4689, 4720, 4722, 4724, 4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4741, 4742, 4756, 4757, 4767, 4768, 4769, 4771, 4776, 4886, 4887, 4888, 5136, 5137), and accepting all Security events avoids needing to update the filter every time a new generator is added.
+Configure the Broker VM WEC subscription to accept **all Event IDs** rather than listing
+specific ones. LogSim generates 45+ Event IDs, and accepting everything avoids updating
+the filter every time a generator is added. Include these channels:
+
+- **Security**: logon, Kerberos, account and group management, object access, AD
+  replication and trusts, certificate services, share access (5140/5145), scheduled tasks
+  (4698/4699), service install (4697), log clear (1102).
+- **System**: 7045, service installed (Service Control Manager).
+- **Microsoft-Windows-PowerShell/Operational**: 4104 script-block logging (Exchange
+  mailbox-export threats).
+
+A Security-only filter silently drops the 7045 and 4104 events.
 
 ### How It Works
 
@@ -204,28 +224,130 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 | Training Mode (deterministic bulk stage + live stream) | [docs/training-mode.md](docs/training-mode.md) |
 | Adding a new module | [docs/extensibility.md](docs/extensibility.md) |
 | Value cardinality (generated domains, files, cloud IDs, user-agents) | [docs/value-cardinality.md](docs/value-cardinality.md) |
+| Microsoft Entra ID feeds, the Cribl receiver transport, identity campaigns | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Microsoft 365 workloads (Exchange, SharePoint/OneDrive, DLP, General) | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Microsoft detection research and coverage | [MICROSOFT_DETECTION_CATALOG.md](MICROSOFT_DETECTION_CATALOG.md) |
+| Firewall & VPN analytics — what each firewall can fire, and why the rest can't | [docs/firewall-analytics.md](docs/firewall-analytics.md) |
+| Firewall management plane (device admin, config changes, logging suppression, SNMP) | [docs/firewall-management-plane.md](docs/firewall-management-plane.md) |
 
 ## Module Reference
 
 | Module | Transport | Benign Event Types | Threat Event Types | Reference |
 |---|---|---|---|---|
-| Windows Events | WEC (WS-Management) | 20 types (interactive logon, network share, RDP, service, cached, unlock, logoff, process, DC Kerberos, DC directory service, LDAP, NTLM, SQL, web app access) | 21 named threat generators (13 confirmed, 8 WIP) + endpoint execution (4688 trees, 4697, 1102) | [docs/modules/windows.md](docs/modules/windows.md) |
-| AWS CloudTrail | S3 | 69 event types across 15+ AWS services | 40 named threat scenarios | [docs/modules/aws.md](docs/modules/aws.md) |
-| GCP Cloud Audit Logs | Pub/Sub | 42 event types with @type proto annotations and LRO operation pairs | 75 named threat scenarios | [docs/modules/gcp.md](docs/modules/gcp.md) |
-| Okta SSO | HTTP Collector | 183+ event types across auth, SSO, MFA, lifecycle, policy, OAuth2, IAM, device, and zone domains | 82 named threat scenarios | [docs/modules/okta.md](docs/modules/okta.md) |
-| Check Point Firewall | Syslog (TCP) | 5 types (web, DNS, VPN session, internal traffic, connection logs) | 25 types | [docs/modules/checkpoint.md](docs/modules/checkpoint.md) |
-| Cisco ASA Firewall | Syslog (TCP) | 6 types (office traffic, DHCP, DNS, inbound block, VPN, connections) | 23 types | [docs/modules/cisco-asa.md](docs/modules/cisco-asa.md) |
-| Cisco Firepower | Syslog (TCP) | 14 types (web, FTP, SSH, SMB, RDP, DNS, VPN, mail, connections) | 28 types | [docs/modules/cisco-firepower.md](docs/modules/cisco-firepower.md) |
-| Fortinet FortiGate | Syslog (TCP) | 10 types (traffic forward, web filter, DNS, email, inbound block, VPN, connections) | 24 types | [docs/modules/fortinet.md](docs/modules/fortinet.md) |
-| Zscaler Web Gateway | Syslog (TCP) | 17 types (web, DNS, email, FTP, firewall, VPN, cloud app, DLP, sandbox) | 25 types | [docs/modules/zscaler.md](docs/modules/zscaler.md) |
+Threat counts are named threats (`get_threat_names()`), with the number offered on demand
+from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--analytics-only)).
+
+| Module | Transport | Benign Event Types | Threat Event Types | Reference |
+|---|---|---|---|---|
+| Windows Events | WEC (WS-Management) | 25 generators (interactive logon, network share + server-side 5140/5145 share audit, RDP, service, cached, unlock, logoff, process 4688/4689, DC Kerberos, DC directory service, LDAP, NTLM, SQL, web app, audited file access, account unlock/disable, updater scheduled tasks 4698, service installs 4697+7045) | 39 (27 on demand) + endpoint execution (4688 trees, 4697, 1102) and SMB remote execution (PsExec/smbexec, atexec, share enumeration) | [docs/modules/windows.md](docs/modules/windows.md) |
+| AWS CloudTrail | S3 | 69 event types across 15+ AWS services | 70 (61 on demand) | [docs/modules/aws.md](docs/modules/aws.md) |
+| GCP Cloud Audit Logs | Pub/Sub | 42 event types with @type proto annotations and LRO operation pairs | 75 (60 on demand) | [docs/modules/gcp.md](docs/modules/gcp.md) |
+| Okta SSO | HTTP Collector | 183+ event types across auth, SSO, MFA, lifecycle, policy, OAuth2, IAM, device, and zone domains | 83 (42 on demand), incl. break-glass account use | [docs/modules/okta.md](docs/modules/okta.md) |
+| Azure AD / Entra sign-ins | Cribl receiver | Graph signIns: non-interactive token refresh, interactive sign-in, routine failures | 31 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Azure AD / Entra directory audit | Cribl receiver | Graph directoryAudits: user, group, app and device maintenance, admin actions in business hours | 38 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Office 365 Azure AD | Cribl receiver | Management Activity RecordType 15 sign-ins / 8 directory ops | 14 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Office 365 Exchange Online | Cribl receiver | MailItemsAccessed, Send, Move, inbox rules, light admin | 28 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Office 365 SharePoint / OneDrive | Cribl receiver | File and sharing operations, business-hours weighted | 15 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Office 365 DLP | Cribl receiver | Low-severity notify-only rule matches | 4 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Office 365 General | Cribl receiver | Copilot interactions, Power BI views | 2 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Identity Threat Campaigns | *(coordinator — Cribl + WEC)* | *(none — opt-in)* | 21 cross-feed identity kill chains | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
+| Check Point Firewall | Syslog (TCP) | 5 types (web, DNS, VPN session, internal traffic, connection logs) + management plane (SmartConsole admin sessions, nightly backup, SNMP polling) | 45 (29 on demand) | [docs/modules/checkpoint.md](docs/modules/checkpoint.md) |
+| Cisco ASA Firewall | Syslog (TCP) | 6 types (office traffic, DHCP, DNS, inbound block, VPN, connections) + management plane (CLI admin sessions, nightly backup, SNMP polling) | 38 (29 on demand) | [docs/modules/cisco-asa.md](docs/modules/cisco-asa.md) |
+| Cisco Firepower | Syslog (TCP) | 14 types (web, FTP, SSH, SMB, RDP, DNS, VPN, mail, connections) + management plane | 46 (30 on demand) | [docs/modules/cisco-firepower.md](docs/modules/cisco-firepower.md) |
+| Fortinet FortiGate | Syslog (TCP) | 10 types (traffic forward, web filter, DNS, email, inbound block, VPN, connections) + management plane | 49 (32 on demand) | [docs/modules/fortinet.md](docs/modules/fortinet.md) |
+| Zscaler Web Gateway | Syslog (TCP) | 17 types (web, DNS, email, FTP, firewall, VPN, cloud app, DLP, sandbox) | 38 (28 on demand) | [docs/modules/zscaler.md](docs/modules/zscaler.md) |
 | Apache httpd | Syslog (TCP) | 5 types | 12 attack types | [docs/modules/httpd.md](docs/modules/httpd.md) |
 | Infoblox NIOS | Syslog (TCP) | 15 types | 11 types | [docs/modules/infoblox.md](docs/modules/infoblox.md) |
 | Proofpoint Email | HTTP Collector | 1 type (delivered email) | 11 types | [docs/modules/proofpoint.md](docs/modules/proofpoint.md) |
 | XDR Attack Orchestration | WinRM (real endpoint) + network transports | *(coordinator — real Atomic Red Team techniques on a live Cortex-agent box + synthetic network logs pinned to its identity)* | *Phase 1 — foundation validated; stories in progress* | [docs/modules/xdr-orchestration.md](docs/modules/xdr-orchestration.md) |
 
-**Totals:** 377 unique threat event types and 420+ benign event types across all modules.
+**Totals:** 649 named threats across the 19 log-source modules, 338 of them offered on demand, plus 21 cross-feed identity campaigns.
 
 ## Recent Changes
+
+### Microsoft Entra ID & Office 365 — Seven Native Feeds over the Cribl Receiver
+
+New modules emit Microsoft records in the shapes XSIAM's own collectors store:
+- Graph sign-ins and Graph directory audit.
+- O365 Management Activity for the Azure AD, Exchange Online, SharePoint/OneDrive, DLP
+  and General workloads.
+
+All share LogSim's user model, so an Entra sign-in, a Windows logon and a Zscaler session
+belong to the same person. Details: [Entra](docs/modules/microsoft-entra.md) and
+[Microsoft 365](docs/modules/microsoft-365.md).
+
+- **New transport `cribl`.** Records post straight into XSIAM's integrated Cribl receiver
+  (`integrations/cribl_direct.py`), each under its feed's catalog Source-Identifier, and
+  land *parsed* in the native dataset. They're eligible for analytics once the Microsoft
+  content packs are installed. No Cribl Stream instance or Microsoft tenant is involved;
+  set `CRIBL_COLLECTOR_URL` and `CRIBL_TOKEN` from XSIAM's free Cribl integration (see
+  `.env.example`).
+- **Episode-based threat rate.** Microsoft threats fire as wall-clock Poisson episodes
+  after a benign warmup, so rate doesn't depend on poll frequency or burst size.
+- **Identity Threat Campaigns** (opt-in): 21 cross-feed kill chains (BEC, ransomware,
+  OAuth abuse, golden SAML, AiTM token theft, hybrid on-prem→cloud, and more) that span
+  the Graph, O365 and Windows datasets. They're sent over Cribl and WEC together.
+- **Validation:** `_local_validation/threat_harness.py` fires a threat, confirms
+  ingestion and polls for the alert. Confirmed firing so far: *Suspicious Azure AD
+  Administrator Role assignment*, *Rare unverified domain addition to Azure AD*, *A
+  successful Azure domain federation settings modification*.
+
+### Firewall Management Plane — Device Administration on All Four Firewalls
+
+ASA, FortiGate, Check Point and Firepower now carry a device-administration baseline
+from one shared operations team (`modules/mgmt_plane.py`): admins on an admin subnet,
+jump hosts, a nightly config-backup job and an SNMP poller. On top of that are five
+threats from the management-plane detection patterns:
+- admin login from an unexpected source;
+- configuration or route change (rogue next hop, permit-any, capture/tunnel);
+- logging suppressed for a window — the device really goes silent, then re-enables;
+- scripted config harvesting across several devices;
+- SNMP from anything but the poller.
+
+The vendor message IDs and where each lands in XSIAM are in
+[docs/firewall-management-plane.md](docs/firewall-management-plane.md).
+
+### Windows — SMB Remote Execution, and Record IDs That Follow Time
+
+- **New events:** share access 5140/5145, scheduled task created/deleted 4698/4699, and
+  System-channel service install 7045, alongside 4697.
+- **New threats:** PsExec / Impacket smbexec lateral movement, atexec remote scheduled
+  task, SMB share enumeration, malicious service install.
+- **New baseline:** server-side share audit on every file-server logon, plus updater
+  scheduled tasks and service installs a few times a month per host, with stable
+  per-host task names.
+- **Time-ordered release.** Workers schedule events and a release thread hands each one
+  out when its timestamp arrives, assigning its `EventRecordID` at that moment. Per host
+  and channel, IDs now rise with time as on a real machine; about 16% of consecutive IDs
+  used to run backwards. A sequence arrives over its own duration: a process's 4689 exit
+  lands when the process exits.
+- **Single-threaded mode removed.** The per-host workers are the only ambient path, and
+  `parallel_hosts` is no longer read. The subscription filter must now include the
+  System and PowerShell/Operational channels (see
+  [Broker VM Subscription Filter](#broker-vm-subscription-filter)).
+
+### Timing — Nothing Is Stamped in the Future
+
+A debug pass found multi-event sequences built as "start now, add gaps", which shipped
+their tails ahead of wall clock:
+- Windows process exits and AdminSDHolder chains: ~9 minutes ahead.
+- Okta MFA bombing: ~90 seconds ahead.
+- Okta "SSO at an unusual time": hours ahead between 00:00 and 05:00 UTC.
+
+Every generator now ends at or before now, and training packs keep time-of-day events
+inside their window. Rates were also corrected:
+- FortiGate's legacy admin login: from ~3,500 to ~40 a day.
+- Windows software-install registrations: from ~1,300 to a few a month per host.
+
+Guarded by `_local_validation/mgmt_timing_cardinality_audit.py` and
+`_local_validation/windows_smoke.py`.
+
+### Okta — Break-Glass Account Use
+
+`break_glass_login`: an emergency-access account (`okta_config.break_glass_accounts`)
+signs in password-only from a non-corporate address, opens the Admin Console, then
+grants Super Administrator to a regular user or creates an API token. These accounts
+exist only for an IdP outage, so any authentication by one is the finding.
 
 ### On-Demand Threats — Analytics Only
 

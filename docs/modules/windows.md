@@ -34,7 +34,8 @@ Named threat generators (via `scenario_event` = the key below, or fired individu
 **Confirmed detections:**
 
 > **Names verified against live alerts on 2026-07-30** via
-> `python tests/detector_loop.py --controls` (see [Detector Test Loop](../detector-test-loop.md)).
+> the detector test loop of that time (since retired; `_local_validation/threat_harness.py`
+> now does fire → ingest → detect validation, with `win:` keys for on-prem threats).
 > Eight of the names previously in this table were wrong — the tenant's wording differs
 > from the detector's description. Do not re-transcribe them by hand; re-run the sweep.
 
