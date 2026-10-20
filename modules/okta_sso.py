@@ -1014,13 +1014,18 @@ def _okta_timestamp(dt=None):
 def _event_times(count, base=None, gap_range=(1, 15)):
     """Return a list of `count` datetime objects with realistic inter-event gaps.
     Each subsequent event is 1-15 seconds after the previous (default).
-    Use for multi-event generators to avoid identical timestamps."""
+    Use for multi-event generators to avoid identical timestamps.
+
+    With no `base` the sequence ENDS now (the first event is backdated by the sum of
+    the gaps). It used to START now, which shipped the tail of every multi-event
+    sequence up to ~90 s ahead of wall clock (mfa_bombing). An explicit base keeps
+    the old meaning: the first event's time."""
+    gaps = [timedelta(seconds=random.uniform(*gap_range), milliseconds=random.randint(0, 999))
+            for _ in range(count - 1)]
     if base is None:
-        base = datetime.now(timezone.utc)
+        base = datetime.now(timezone.utc) - sum(gaps, timedelta())
     times = [base]
-    for _ in range(count - 1):
-        gap = timedelta(seconds=random.uniform(*gap_range),
-                        milliseconds=random.randint(0, 999))
+    for gap in gaps:
         base = base + gap
         times.append(base)
     return times
@@ -2248,9 +2253,11 @@ def _generate_impossible_travel_sequence(config, user_info, session_context=None
     # Location 1 login, then 5-30 min gap, then location 2 login + SSO
     # Benign login a few minutes ago; attacker login now. Do NOT future-date the
     # attacker login — a future _time falls outside detection search windows.
-    t1 = datetime.now(timezone.utc)
+    # The attacker chain (login + its SSOs) ENDS now; anchoring its login AT now put the
+    # SSOs that follow it up to ~45 s in the future.
+    ts_loc2 = _event_times(1 + len(sso_apps))
+    t1 = ts_loc2[0]
     t0 = t1 - timedelta(minutes=random.randint(2, 6))
-    ts_loc2 = _event_times(1 + len(sso_apps), base=t1)
 
     # Location 1: benign home country
     ip_ctx1 = _get_random_ip_and_context(config, "benign_ingress_sources")
@@ -3223,6 +3230,10 @@ def _generate_break_glass_login(config, user_info, session_context=None):
         # Pin the endpoint each step really hits (the default draws a random one).
         return {"requestUri": path.rstrip("?"), "url": path}
 
+    # login -> admin console -> persistence: tens of seconds between hands-on steps,
+    # ending now (all three used to share one timestamp).
+    ts = _event_times(3, gap_range=(10, 120))
+
     logs = [_assemble(
         "user.session.start", bg, client,
         outcome={"result": "SUCCESS", "reason": None},
@@ -3236,14 +3247,15 @@ def _generate_break_glass_login(config, user_info, session_context=None):
                          "New State=POSITIVE, New Country=POSITIVE, Velocity Behavior=NEGATIVE, "
                          "New City=POSITIVE}",
             **_uri("/idp/idx/identify?")}),
-        session_id=session)]
+        session_id=session, published_override=ts[0])]
     logs.append(_assemble(
         "user.session.access_admin_app", bg, client,
         outcome={"result": "SUCCESS", "reason": None},
         severity="INFO", display_message="User accessing Okta admin app",
         security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra=_uri("/home/admin-entry")),
-        target=_target_app("Okta Admin Console"), session_id=session))
+        target=_target_app("Okta Admin Console"), session_id=session,
+        published_override=ts[1]))
     if random.random() < 0.5:
         grantee = _build_actor(user_info["username"], user_info["full_name"])
         logs.append(_assemble(
@@ -3253,7 +3265,8 @@ def _generate_break_glass_login(config, user_info, session_context=None):
             security_context=sec_ctx, debug_context=_build_debug_context("PASSWORD",
                 extra={"privilegeGranted": "Super administrator",
                        **_uri(f"/api/v1/users/{grantee['id']}/roles")}),
-            target=_build_target_user(grantee), session_id=session))
+            target=_build_target_user(grantee), session_id=session,
+            published_override=ts[2]))
     else:
         name = random.choice(["Okta Sync", "Directory Integration", "SIEM Integration"])
         logs.append(_assemble(
@@ -3267,7 +3280,8 @@ def _generate_break_glass_login(config, user_info, session_context=None):
                          "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", k=17)),
                      "type": "Token",
                      "displayName": name, "alternateId": name, "detailEntry": None}],
-            session_id=session))
+            session_id=session,
+            published_override=ts[2]))
     return logs
 
 
@@ -3305,7 +3319,11 @@ def _generate_sso_unusual_time(config, user_info, session_context=None):
     # Override published timestamp to 2-5 AM
     odd_hour   = random.randint(2, 4)
     odd_minute = random.randint(0, 59)
-    ts = datetime.utcnow().replace(hour=odd_hour, minute=odd_minute, second=0, microsecond=0)
+    ts = datetime.now(timezone.utc).replace(hour=odd_hour, minute=odd_minute, second=0, microsecond=0)
+    # The most recent PAST occurrence of that hour: between 00:00 and 05:00 UTC
+    # "today at 02-04" is still ahead, which shipped this event hours in the future.
+    if ts > datetime.now(timezone.utc):
+        ts -= timedelta(days=1)
     published  = _okta_timestamp(ts)
 
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")

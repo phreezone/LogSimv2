@@ -1515,7 +1515,9 @@ def _generate_benign_log(config, session_context=None):
                    "ad_auth", "vpn_new_country_login",
                    "mgmt_admin_session", "snmp_poll"]
         weights = [36,               18,              9,                7,
-                   3,             3,            2,
+                   # admin_event: ~40 device-admin logins a day at 1 call/s (was 3,
+                   # i.e. ~2,500/day -- no network team logs in that often).
+                   0.05,          3,            2,
                    4,           3,              2,
                    3,              2,              3,
                    3,                  1,                  2,

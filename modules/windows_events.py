@@ -3936,11 +3936,16 @@ _BENIGN_SERVICES = [
 _UPDATER_VERSIONS = ["128.0.6537.0", "129.0.6668.0", "130.0.6723.0"]
 
 
-def _software_tokens():
-    """One token set per install, so a task/service name and its binary path agree."""
-    tok = {"{ver}": random.choice(_UPDATER_VERSIONS),
-           "{guid}": str(uuid.uuid4()).upper(),
-           "{hex}": uuid.uuid4().hex[:16].upper()}
+def _software_tokens(host):
+    """The token set of one host's installs, so a task/service name and its binary path
+    agree. The Edge task GUID and the Firefox install hash are fixed per machine in
+    reality -- drawn per call they made every re-registration a new, never-seen task
+    name. The updater version steps forward every two weeks, staggered per host."""
+    h = int(hashlib.sha256(f"sw:{host.lower()}".encode()).hexdigest(), 16)
+    fortnight = int(time.time() // (14 * 86400))
+    tok = {"{ver}": _UPDATER_VERSIONS[(h + fortnight) % len(_UPDATER_VERSIONS)],
+           "{guid}": str(uuid.UUID(int=h >> 128)).upper(),
+           "{hex}": f"{h & ((1 << 64) - 1):016X}"}
 
     def fill(s):
         for k, v in tok.items():
@@ -3956,7 +3961,7 @@ def _benign_scheduled_task_create(config, session_context):
     if not u:
         return None
     name, cmd, args, trig = random.choice(_BENIGN_SCHED_TASKS)
-    fill = _software_tokens()
+    fill = _software_tokens(u["hostname"])
     machine = {**u, "username": u["hostname"].split(".")[0].upper() + "$"}
     return json.dumps(_build_4698(machine, config, task_name=fill(name), command=fill(cmd),
                                   arguments=fill(args),
@@ -3970,7 +3975,7 @@ def _benign_service_install(config, session_context):
     if not u:
         return None
     name, image, start = random.choice(_BENIGN_SERVICES)
-    fill = _software_tokens()
+    fill = _software_tokens(u["hostname"])
     name, image = fill(name), fill(image)
     t = time.time()
     return [json.dumps(_build_4697(config, computer=u["hostname"], service_name=name,
@@ -4674,8 +4679,11 @@ _BENIGN_WEIGHTS = {
     "process_creation":      30,
     # Server-side share audit rides on network_share_logon; these are the
     # low-rate software-install registrations that baseline 4698 / 4697+7045.
-    "scheduled_task_create":  2,
-    "service_install":        1,
+    # Real updaters register a task or service a few times a month per machine. At one
+    # draw a second across the estate (single-threaded mode) these give ~17 task and
+    # ~8 service registrations a day estate-wide.
+    "scheduled_task_create":  0.04,
+    "service_install":        0.02,
 }
 
 _BENIGN_GENERATORS = {
@@ -9178,8 +9186,11 @@ _WKS_BENIGN_GENS = {
     "lateral_movement":      3,
     # 4656/4663 on SACL'd file objects -- workstation-side, via the file share.
     "audited_file_access":  12,
-    "scheduled_task_create": 2,
-    "service_install":       1,
+    # Per workstation worker (one draw a second): ~0.07 task and ~0.03 service
+    # registrations per host per day -- a few a month. At weight 2/1 this was ~1,300
+    # and ~440 per host per day.
+    "scheduled_task_create": 0.00013,
+    "service_install":       0.00006,
 }
 
 

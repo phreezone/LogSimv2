@@ -2610,14 +2610,19 @@ def _asa_logging_off_lines(config, user, src, start):
                               start=start, gap=(3, 20), logout=False)
 
 
-def _asa_logging_on_lines(config, user, src, start):
-    t = start
+def _asa_logging_on_lines(config, user, src, end):
+    """'logging enable' -> write memory -> logout, the LAST line stamped `end` (the
+    caller passes now), so the re-enable never lands in the future."""
+    msgs = (_asa_cmd_line(user, src, "logging enable"),
+            f"%ASA-5-111008: User '{user}' executed the 'write memory' command.",
+            f"%ASA-5-611103: User logged out: Uname: {user}")
+    gaps = [random.randint(2, 8) for _ in msgs[1:]]
+    t = end - timedelta(seconds=sum(gaps))
     lines = []
-    for msg in (_asa_cmd_line(user, src, "logging enable"),
-                f"%ASA-5-111008: User '{user}' executed the 'write memory' command.",
-                f"%ASA-5-611103: User logged out: Uname: {user}"):
+    for i, msg in enumerate(msgs):
         lines.append(_generate_full_syslog_message(config, msg, t))
-        t += timedelta(seconds=random.randint(2, 8))
+        if i < len(gaps):
+            t += timedelta(seconds=gaps[i])
     return lines
 
 
