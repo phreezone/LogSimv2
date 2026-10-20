@@ -645,13 +645,18 @@ def pick_departed_user(config=None, context=None):
 # feeds) are noted. The gate uses a Poisson process over elapsed real time, so episodes occur at the
 # target wall-clock rate however often the module is polled. A benign warmup still withholds all
 # threats until a baseline has accrued.
+# Keyed by EXACTLY the six levels every other module uses (config.json
+# threat_generation_levels): the Microsoft feeds differ only in HOW a level paces threats
+# (Poisson episodes rather than a minimum interval), never in WHICH levels exist. This table
+# used to carry two private levels (Low, Medium) that nothing could select, and lacked
+# Elevated and Extreme, which therefore fell back to Realistic.
 THREAT_EPISODES_PER_HOUR = {
     "Benign Traffic Only": 0.0,
-    "Low": 0.01,         # ~1-2 episodes/day tenant-wide
     "Realistic": 0.03,   # ~5/day tenant-wide — a handful, like a real low-incident tenant
-    "Medium": 0.15,      # ~25/day tenant-wide
-    "High": 0.6,         # ~100/day tenant-wide
-    "Insane": 6.0,       # stress/demo — ~1000/day tenant-wide
+    "Elevated":  0.15,   # ~25/day tenant-wide (the former "Medium" rate)
+    "High":      0.6,    # ~100/day tenant-wide
+    "Extreme":   2.0,    # ~340/day tenant-wide
+    "Insane":    6.0,    # stress/demo — ~1000/day tenant-wide
 }
 THREAT_WARMUP_EVENTS = 500   # benign records per module before any threat may fire
 _THREAT_MAX_DT = 600.0       # cap elapsed-time per call so a long idle gap can't dump an episode
