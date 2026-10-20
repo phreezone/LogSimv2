@@ -58,9 +58,9 @@ The web dashboard provides full control over log generation without touching the
 
 The intervals apply per module. The **Microsoft Entra / Office 365** feeds pace threats
 differently: as *episodes* from a wall-clock Poisson process, after a 500-record benign
-warmup. Realistic is ~0.03 episodes per module per hour (about 5 a day across the seven
-feeds), High 0.6, Insane 6.0. Elevated and Extreme currently fall back to the Realistic
-rate for those feeds. See [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#threat-model).
+warmup. Episodes per module per hour: Realistic 0.03 (about 5 a day across the seven
+feeds), Elevated 0.15, High 0.6, Extreme 2.0, Insane 6.0. See
+[docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#threat-model).
 
 ## XSIAM Detection Patterns
 

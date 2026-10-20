@@ -63,11 +63,15 @@ benign records as a warmup so a baseline exists before any threat.
 |---|---|---|
 | Benign Traffic Only | 0 | none |
 | Realistic | 0.03 | ~5 a day |
+| Elevated | 0.15 | ~25 a day |
 | High | 0.6 | ~100 a day |
+| Extreme | 2.0 | ~340 a day |
 | Insane | 6.0 | ~1,000 a day |
 
-The dashboard's **Elevated** and **Extreme** levels are not in the episode table, and
-currently fall back to the Realistic rate for these feeds.
+These are the same six levels as every other module (`threat_generation_levels` in
+`config.json`); only the pacing differs. Before 2026-10-20 this table also had two private
+levels (Low, Medium) that nothing could select, and lacked Elevated and Extreme, which fell
+back to the Realistic rate.
 
 The Microsoft threats are not offered on the dashboard's **Fire Individual Threat** panel,
 because no module maps them to a named analytic (`ANALYTIC_ALERTS`). They run in

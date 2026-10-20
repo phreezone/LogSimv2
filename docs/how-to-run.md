@@ -113,7 +113,7 @@ Applies to **Mode 1 only**. Controls the minimum interval between threat events 
 
 > **Tip — threat level vs. scenario:** Threat levels only affect the frequency of randomly-injected threats in Mode 1. Attack Scenarios (Mode 2) and Specific Threats (Mode 3) are unaffected by this setting and always run at full intensity.
 
-> **Microsoft Entra ID / Office 365 modules** don't use the intervals above. They fire threats as *episodes* from a wall-clock Poisson process, after a 500-record benign warmup. Realistic is ~0.03 episodes per module per hour (about 5 a day across the seven feeds), High 0.6, Insane 6.0. Elevated and Extreme currently fall back to the Realistic rate for these feeds. See [microsoft-entra.md](modules/microsoft-entra.md#threat-model).
+> **Microsoft Entra ID / Office 365 modules** don't use the intervals above. They fire threats as *episodes* from a wall-clock Poisson process, after a 500-record benign warmup. Episodes per module per hour: Realistic 0.03 (about 5 a day across the seven feeds), Elevated 0.15, High 0.6, Extreme 2.0, Insane 6.0. See [microsoft-entra.md](modules/microsoft-entra.md#threat-model).
 
 > **Firewall logging suppression:** a firewall's `mgmt_logging_suppressed` threat turns the device's logging off for 10–40 minutes, and that module really emits nothing in that window. At high threat levels this can look like a stalled module; it re-enables on its own.
 
