@@ -7,9 +7,14 @@ Follow these steps to get the simulator up and running.
 - **Python 3.10+** — developed and tested on 3.10; 3.11/3.12 also supported
 - **Cortex XSIAM instance** with at least one data collection method configured:
   - Broker VM for Syslog-based modules (firewall, proxy, DNS, web server)
+  - Broker VM Windows Event Collector (WEC) + client PFX for the Windows module
   - S3 bucket + SQS queue for the AWS module
-  - HTTP Collector URL + API key for Okta, Proofpoint, and GCP
+  - HTTP Collector URL + API key for Okta and Proofpoint
   - Google Cloud Pub/Sub topic + subscription for the GCP module
+  - The free **Cribl** integration (Settings → Data Sources → add Cribl → generate token) for
+    the Microsoft Entra ID / Office 365 modules, plus the Office 365 and Azure AD content
+    packs. No Cribl Stream instance or Microsoft tenant is needed — see
+    [microsoft-entra.md](modules/microsoft-entra.md#transport-the-cribl-receiver-no-cribl-instance-needed)
 
 ---
 
@@ -27,7 +32,10 @@ Follow these steps to get the simulator up and running.
    │   ├── aws.py
    │   ├── gcp.py
    │   ├── cisco_asa.py
+   │   ├── azuread_signin.py
    │   └── ...
+   ├── integrations/        ← transports and API clients (cribl_direct, xsiam_client, mcp_server)
+   ├── dashboard/           ← Flask web UI
    ├── terraform/
    │   └── gcp_pubsub/
    └── CloudFormation/
@@ -65,7 +73,7 @@ The key packages and what they support:
 | Package | Used by |
 |---|---|
 | `flask` | Dashboard web UI and REST API |
-| `requests` | HTTP Collector transport (Okta, Proofpoint, GCP) |
+| `requests` | HTTP Collector transport (Okta, Proofpoint) and the Cribl receiver transport (Microsoft modules) |
 | `python-dotenv` | Loads `.env` secrets into the runtime environment |
 | `boto3` | AWS module — writes gzip-compressed CloudTrail JSON to S3 |
 | `google-cloud-pubsub` | GCP module — publishes LogEntry objects to Google Cloud Pub/Sub |
@@ -73,9 +81,9 @@ The key packages and what they support:
 | `requests-pkcs12` | WEC module — client certificate authentication |
 | `cryptography` | WEC module — PFX/PKCS#12 certificate handling |
 
-> **IAM requirement:** The AWS IAM user (created by the CloudFormation stack) needs `s3:PutObject` on the log bucket. The CloudFormation template creates this automatically — see [CloudFormation setup in Configuration](configuration.md#aws-s3-setup-cloudformation--recommended).
+> **IAM requirement:** The AWS IAM user (created by the CloudFormation stack) needs `s3:PutObject` on the log bucket. The CloudFormation template creates this automatically — see [CloudFormation setup in Configuration](configuration.md#aws-s3-setup--cloudformation-recommended).
 
-> **Auth requirement:** The GCP module requires a service account key with `roles/pubsub.publisher` on the topic. The Terraform template creates this automatically — see [Terraform setup in Configuration](configuration.md#gcp-pubsub-setup-terraform--recommended).
+> **Auth requirement:** The GCP module requires a service account key with `roles/pubsub.publisher` on the topic. The Terraform template creates this automatically — see [Terraform setup in Configuration](configuration.md#gcp-pubsub-setup--terraform-recommended).
 
 ---
 
@@ -85,7 +93,9 @@ Create a `.env` file at the **project root** (same directory as `log_simulator.p
 
 Format: one `KEY=value` per line, no spaces around `=`, no quotes required (but allowed).
 
-Below is a complete example showing every supported key. Only include the sections relevant to the modules you are running.
+Below is an annotated example of the transport and cloud-module keys. Only include the sections relevant to the modules you are running. The complete list — including dashboard auth (`LOGSIM_API_KEY`), the send-pipeline tuning knobs, XDR orchestration and the XSIAM API keys used by the validation scripts — is in [`.env.example`](../.env.example); copy it to `.env` as a starting point.
+
+> **Use UPPERCASE names.** Linux and Docker environments are case-sensitive; a lowercase name (e.g. `aws_access_key_id`) only happens to work on Windows.
 
 ```bash
 # =============================================================================
@@ -114,6 +124,34 @@ OKTA_KEY=your-okta-collector-api-key-here
 
 # API key for the Proofpoint HTTP Collector
 PROOFPOINT_KEY=your-proofpoint-collector-api-key-here
+
+
+# =============================================================================
+# TRANSPORT — CRIBL RECEIVER
+# Required for the Microsoft modules: Azure AD sign-ins, Azure AD audit,
+# O365 Azure AD, Exchange Online, SharePoint Online, DLP, General
+# (and the Identity Threat Campaigns coordinator).
+# From XSIAM: Settings > Data Sources > add "Cribl" > generate token; copy the
+# integration's API URL. No Cribl Stream instance is involved.
+# =============================================================================
+
+# Ends in /logs/v1/integrated/cribl/data
+CRIBL_COLLECTOR_URL=https://api-myorg.xdr.us.paloaltonetworks.com/logs/v1/integrated/cribl/data
+
+# The token generated with the integration — enter it bare; LogSim adds "Bearer ".
+CRIBL_TOKEN=your-cribl-integration-token-here
+
+
+# =============================================================================
+# TRANSPORT — WEC (Windows Event Collector)
+# Required for the Windows module (transport "wec", the default).
+# See "WEC Transport Setup" in the README for exporting the PFX.
+# =============================================================================
+
+# Subscription Manager URL up to /wsman (everything before /SubscriptionManager)
+WEC_BROKER_URL=https://<your-broker-vm-hostname>:5986/wsman
+WEC_PFX_PATH=/path/to/broker-vm-cert.pfx
+WEC_PFX_PASSWORD=your-pfx-export-password
 
 
 # =============================================================================
