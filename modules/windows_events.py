@@ -62,6 +62,8 @@ import hashlib
 import threading
 import collections
 import functools
+import heapq
+import itertools
 import queue as _queue_mod
 from datetime import datetime, timezone, timedelta
 from xml.sax.saxutils import escape as _xml_escape
@@ -1656,6 +1658,87 @@ _orchestrator_started = False
 _orchestrator_lock = threading.Lock()
 _workers_stop = threading.Event()
 
+
+# ── Time-ordered release: record ids follow time ─────────────────────────────────────
+# A real host assigns EventRecordID when it writes the event, so per channel the ids
+# rise with time. The workers used to build a whole sequence at once (ids taken then)
+# and ship it immediately, with timestamps spread over seconds to minutes -- so ~16%
+# of a host's consecutive ids ran backwards in time. Workers now build events with a
+# placeholder id and SCHEDULE them; one release thread hands each event out when its
+# timestamp arrives and assigns the real id at that moment. A sequence that would
+# start in the past is shifted to start now (gaps kept), so nothing is released out
+# of time order and nothing is ever stamped in the future.
+#
+# Only the worker threads defer. Scenario events, the harness and other direct callers
+# of the generator tables run on other threads and stay immediate (ids at build).
+_DEFER_IDS = threading.local()          # .on is True only inside worker threads
+_RID_PENDING = "@rid:"                  # placeholder record_id, "@rid:<counter key>"
+_release_heap: list = []                # (ts, seq, threat_group|None, threat_name, record)
+_release_cond = threading.Condition()
+_release_seq = itertools.count()
+_RELEASE_MAX_PENDING = 200_000          # schedulers wait above this (memory bound)
+
+
+def _deferring() -> bool:
+    return getattr(_DEFER_IDS, "on", False)
+
+
+def _schedule(items, stop_event, threat_name=None) -> bool:
+    """Queue one generator result for release at its own timestamps. A threat's
+    events share a group, so only its first released chunk carries its name (the
+    dashboard counts one threat per labelled chunk). False only when stopping."""
+    recs = [json.loads(i) if isinstance(i, str) else i for i in items if i]
+    if not recs:
+        return True
+    times = [_parse_iso_ts(r["time_created"]) for r in recs]
+    shift = max(0.0, time.time() - min(times))       # never start in the past
+    group = next(_release_seq) if threat_name else None
+    with _release_cond:
+        while len(_release_heap) >= _RELEASE_MAX_PENDING and not stop_event.is_set():
+            _release_cond.wait(timeout=1.0)
+        if stop_event.is_set():
+            return False
+        for r, t in zip(recs, times):
+            if shift:
+                r["time_created"] = _iso_ts(t + shift)
+            heapq.heappush(_release_heap, (t + shift, next(_release_seq), group, threat_name, r))
+        _release_cond.notify_all()
+    return True
+
+
+def _releaser(stop_event):
+    """Single release thread: pops events whose time has come, in time order, assigns
+    their record ids, and feeds the queues generate_log() drains."""
+    labelled = set()
+    while not stop_event.is_set():
+        with _release_cond:
+            now = time.time()
+            due = []
+            while _release_heap and _release_heap[0][0] <= now:
+                due.append(heapq.heappop(_release_heap))
+            if not due:
+                wait = (_release_heap[0][0] - now) if _release_heap else 1.0
+                _release_cond.wait(timeout=min(1.0, max(0.01, wait)))
+                continue
+            _release_cond.notify_all()                   # room for waiting schedulers
+        benign, threats = [], {}
+        for _ts, _seq, group, name, r in due:            # release order == time order
+            rid = str(r.get("record_id", ""))
+            if rid.startswith(_RID_PENDING):
+                r["record_id"] = str(_next_record_number(rid[len(_RID_PENDING):]))
+            line = json.dumps(r)
+            if group is not None and group not in labelled:
+                threats.setdefault(group, (name, []))[1].append(line)
+            else:
+                benign.append(line)
+        for group, (name, lines) in threats.items():
+            labelled.add(group)
+            if not _put_backpressured(_threat_queue, (name, lines), stop_event):
+                return
+        for line in benign:
+            if not _put_backpressured(_output_queue, line, stop_event):
+                return
+
 # Worker threads used to swallow every exception, so a generator that raised on
 # every call simply produced nothing -- no log line, no counter, no clue.  These
 # run in a loop, so failures are counted and reported at most once per interval
@@ -1720,6 +1803,8 @@ def reset_state():
         _RECORD_RESERVED.clear()
         _RECORD_NUMBERS_HERMETIC.clear()
         _USER_SIDS.clear()
+    with _release_cond:
+        _release_heap.clear()           # scheduled-but-unreleased events of the last run
     last_threat_event_time = 0
     _BUILD_EVENT_OS_SUBTYPE = "Windows 10"
     _orchestrator_started = False
@@ -1837,6 +1922,8 @@ def _next_record_number(host: str) -> int:
     Inside a deterministic Training Mode run (session_utils.hermetic()) numbering is the
     original seeded, in-memory scheme instead, so the same seed reproduces the same ids
     -- and the live, persistent counters are never touched by a training run."""
+    if _deferring():                    # worker thread: the releaser assigns it later
+        return _RID_PENDING + host
     if _in_hermetic_run():
         with _STATE_LOCK:
             cur = _RECORD_NUMBERS_HERMETIC.get(host)
@@ -4647,45 +4734,8 @@ def _benign_dc_service_activity(config, session_context):
     return events
 
 
-_BENIGN_WEIGHTS = {
-    # Higher weights → more realistic day-in-the-life (Windows auth volume
-    # is dominated by unlocks, network-share access, and routine interactive
-    # logons).  SQL/web/LDAP access generates steady 4769 AES baseline that
-    # UEBA uses to contrast against RC4 Kerberoasting bursts.
-    "interactive_logon":     18,
-    "network_share_logon":   22,
-    "workstation_unlock":    18,
-    "logoff":                10,
-    "service_logon":          6,
-    "scheduled_task_logon":   4,
-    "cached_logon":           2,
-    "rdp_logon":              3,
-    "sql_access":            10,
-    "web_app_access":         8,
-    "ldap_query":             6,
-    "ntlm_validation":        4,
-    "explicit_cred_runas":    1,
-    "password_typo":          2,
-    "dc_self_logon":          8,
-    "dc_kerberos_traffic":   15,
-    "dc_directory_service":   8,
-    "dc_service_activity":   10,
-    # Object-access and DC account administration.  Audited-object access is
-    # common but not dominant (only SACL'd paths emit it); unlocks and disables
-    # are low-rate administrative events.
-    "audited_file_access":   12,
-    "account_unlock":         3,
-    "account_disable":        1,
-    "process_creation":      30,
-    # Server-side share audit rides on network_share_logon; these are the
-    # low-rate software-install registrations that baseline 4698 / 4697+7045.
-    # Real updaters register a task or service a few times a month per machine. At one
-    # draw a second across the estate (single-threaded mode) these give ~17 task and
-    # ~8 service registrations a day estate-wide.
-    "scheduled_task_create":  0.04,
-    "service_install":        0.02,
-}
-
+# Benign generators by name. Ambient scheduling -- which run, and how often -- lives in
+# the per-host worker tables _DC_BENIGN_GENS / _WKS_BENIGN_GENS (see generate_log).
 _BENIGN_GENERATORS = {
     "interactive_logon":    _benign_interactive_logon,
     "network_share_logon":  _benign_network_share_logon,
@@ -4712,20 +4762,6 @@ _BENIGN_GENERATORS = {
     "scheduled_task_create": _benign_scheduled_task_create,
     "service_install":      _benign_service_install,
 }
-
-
-def _select_benign(config, session_context):
-    """Pick a weighted benign generator and run it."""
-    cfg_mix = _cf(config).get("event_mix", {}).get("benign", {})
-    weights = {k: cfg_mix.get(k, v) for k, v in _BENIGN_WEIGHTS.items()}
-    choice = random.choices(list(weights.keys()), weights=list(weights.values()), k=1)[0]
-    fn = _BENIGN_GENERATORS[choice]
-    result = fn(config, session_context)
-    # Some generators (logoff) return None if no state allows them — retry once
-    if result is None:
-        fn2 = _BENIGN_GENERATORS["interactive_logon"]
-        result = fn2(config, session_context)
-    return result
 
 
 # Threat generators
@@ -5125,7 +5161,6 @@ def _threat_lateral_movement_chain(config, session_context):
 
     return events
 
-_BENIGN_WEIGHTS["lateral_movement"] = 3
 _BENIGN_GENERATORS["lateral_movement"] = _threat_lateral_movement_chain
 _BENIGN_GENERATORS = {k: _ending_by_now(v) for k, v in _BENIGN_GENERATORS.items()}
 
@@ -9064,10 +9099,11 @@ def generate_log(config, scenario=None, scenario_event=None,
     Returns:
       • str            — one JSON record
       • list[str]      — several JSON records (one per event)
-      • (obj, name)    — scenario dispatch returns (result, event_name)
-      • None           — no eligible Windows users in session_context
+      • (obj, name)    — scenario dispatch, or one whole worker threat: (result, name)
+      • None           — no eligible Windows users, or nothing buffered by the
+                         workers since the last call
     """
-    global last_threat_event_time, _BUILD_EVENT_OS_SUBTYPE
+    global _BUILD_EVENT_OS_SUBTYPE
     session_context = (context or {}).get("session_context")
 
     # --- Scenario / story mode (always synchronous) ---
@@ -9082,71 +9118,42 @@ def generate_log(config, scenario=None, scenario_event=None,
     if not _get_windows_users(session_context):
         return None
 
-    # --- Parallel host mode ---
-    if _cf(config).get("parallel_hosts", False):
-        _ensure_orchestrator(config, session_context, threat_level, benign_only)
-        # A whole threat first, returned on its own and labelled with its own name.
-        # Labelling used to come from _status_queue and attach to whichever 50-event
-        # batch happened to drain it, so a threat split across batches was labelled once
-        # and counted approximately.
-        try:
-            threat_name, items = _threat_queue.get_nowait()
-            return ((items if len(items) > 1 else items[0]), threat_name)
-        except _queue_mod.Empty:
-            pass
-        # Take everything buffered at this moment. This used to stop at 50 events per
-        # call -- with one call a second, a fixed 50 events/s ceiling on Windows that
-        # silently discarded whatever the workers produced beyond it. Volume is now set
-        # by the workers' own pacing (dc/wks_interval_multiplier in windows_events_
-        # config), like every other module. The snapshot keeps one call finite while
-        # backpressured workers refill the queue behind it.
-        batch = []
-        try:
-            for _ in range(_output_queue.qsize()):
-                batch.append(_output_queue.get_nowait())
-        except _queue_mod.Empty:
-            pass
-        if not batch:
-            return None
-        return batch if len(batch) > 1 else batch[0]
-
-    # --- Original single-threaded behavior ---
-    _BUILD_EVENT_OS_SUBTYPE = _get_os_subtype(config)
-
-    if benign_only:
-        return _select_benign(config, session_context)
-
-    # --- Insane mode: 50% threat, 50% benign ---
-    if threat_level == "Insane":
-        if random.random() < 0.50:
-            result, threat_name = _select_threat(config, session_context)
-            if result is not None:
-                return (result, threat_name)
-        return _select_benign(config, session_context)
-
-    # --- Normal paced mode: threats released on the configured interval ---
-    interval     = _get_threat_interval(threat_level, config)
-    current_time = time.time()
-    with _STATE_LOCK:
-        if interval > 0 and (current_time - last_threat_event_time) > interval:
-            last_threat_event_time = current_time
-            should_fire = True
-        else:
-            should_fire = False
-    if should_fire:
-        result, threat_name = _select_threat(config, session_context)
-        if result is not None:
-            return (result, threat_name)
-
-    return _select_benign(config, session_context)
+    # --- Ambient generation: per-host worker threads ---
+    # One worker per workstation, one for the DC and one for threats, all feeding the
+    # queues drained below. (A single-threaded mode that drew from its own weight
+    # table was removed 2026-10-20: the shipped config never used it, and keeping a
+    # second table in step with the worker tables kept going wrong.)
+    _ensure_orchestrator(config, session_context, threat_level, benign_only)
+    # A whole threat first, returned on its own and labelled with its own name.
+    # Labelling used to come from _status_queue and attach to whichever 50-event
+    # batch happened to drain it, so a threat split across batches was labelled once
+    # and counted approximately.
+    try:
+        threat_name, items = _threat_queue.get_nowait()
+        return ((items if len(items) > 1 else items[0]), threat_name)
+    except _queue_mod.Empty:
+        pass
+    # Take everything buffered at this moment. This used to stop at 50 events per
+    # call -- with one call a second, a fixed 50 events/s ceiling on Windows that
+    # silently discarded whatever the workers produced beyond it. Volume is now set
+    # by the workers' own pacing (dc/wks_interval_multiplier in windows_events_
+    # config), like every other module. The snapshot keeps one call finite while
+    # backpressured workers refill the queue behind it.
+    batch = []
+    try:
+        for _ in range(_output_queue.qsize()):
+            batch.append(_output_queue.get_nowait())
+    except _queue_mod.Empty:
+        pass
+    if not batch:
+        return None
+    return batch if len(batch) > 1 else batch[0]
 
 
-# Per-host parallel generation (multi-threaded mode)
+# Per-host worker generation
 
-# NOTE: parallel_hosts mode does NOT use _BENIGN_WEIGHTS -- these two tables are
-# the live dispatch, and config.json ships parallel_hosts=true.  A generator added
-# only to _BENIGN_WEIGHTS/_BENIGN_GENERATORS will never fire ambiently.  Keep all
-# three in step.
+# NOTE: these two tables ARE the ambient benign schedule -- _BENIGN_GENERATORS is only
+# the name -> function map. A generator added there but to neither table never fires.
 #
 # The Windows event mix is deliberately code-only.  windows_events_config used to
 # carry an "event_mix" block, but these workers never consulted it, so its benign
@@ -9155,7 +9162,7 @@ def generate_log(config, scenario=None, scenario_event=None,
 # to the module default.  It was removed rather than repaired: the selectors below
 # already default cleanly when the key is absent (both test suites ship configs
 # with no event_mix and pass).  If you want config-tunable weights back, the
-# workers must read the override the way _select_benign/_select_threat do --
+# workers must read the override the way _select_threat does --
 # re-adding the config block alone will silently do nothing.
 _DC_BENIGN_GENS = {
     "dc_kerberos_traffic":  15,
@@ -9196,6 +9203,7 @@ _WKS_BENIGN_GENS = {
 
 def _dc_worker(config, session_context, interval, stop_event):
     """Background thread generating DC-specific benign events."""
+    _DEFER_IDS.on = True
     stats = _worker_stats["dc"]
     gens = list(_DC_BENIGN_GENS.keys())
     weights = list(_DC_BENIGN_GENS.values())
@@ -9206,10 +9214,9 @@ def _dc_worker(config, session_context, interval, stop_event):
             result = fn(config, session_context)
             if result:
                 items = result if isinstance(result, list) else [result]
-                for item in items:
-                    if not _put_backpressured(_output_queue, item, stop_event):
-                        return
-                    stats["events_generated"] += 1
+                if not _schedule(items, stop_event):
+                    return
+                stats["events_generated"] += len(items)
                 stats["last_event_time"] = time.time()
         except Exception as exc:
             _note_worker_error("dc", exc)
@@ -9218,6 +9225,7 @@ def _dc_worker(config, session_context, interval, stop_event):
 
 def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
     """Background thread generating workstation-specific benign events."""
+    _DEFER_IDS.on = True
     stats = _worker_stats[hostname]
     gens = list(_WKS_BENIGN_GENS.keys())
     weights = list(_WKS_BENIGN_GENS.values())
@@ -9230,10 +9238,9 @@ def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
                 stop_event.wait(timeout=interval)
                 continue
             items = result if isinstance(result, list) else [result]
-            for item in items:
-                if not _put_backpressured(_output_queue, item, stop_event):
-                    return
-                stats["events_generated"] += 1
+            if not _schedule(items, stop_event):
+                return
+            stats["events_generated"] += len(items)
             stats["last_event_time"] = time.time()
         except Exception as exc:
             _note_worker_error(f"wks:{hostname}", exc)
@@ -9243,6 +9250,7 @@ def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
 def _threat_worker(config, session_context, threat_level, interval, stop_event):
     """Background thread that fires threats on a cadence."""
     global last_threat_event_time
+    _DEFER_IDS.on = True
     stats = _worker_stats["threats"]
     threat_interval = _get_threat_interval(threat_level, config)
 
@@ -9263,8 +9271,8 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
                 result, threat_name = _select_threat(config, session_context)
                 if result:
                     items = result if isinstance(result, list) else [result]
-                    # One queue entry per threat, so it is delivered whole or not at all.
-                    if not _put_backpressured(_threat_queue, (threat_name, items), stop_event):
+                    # Released at its own timestamps; the first chunk carries the name.
+                    if not _schedule(items, stop_event, threat_name=threat_name):
                         return
                     stats["events_generated"] += len(items)
                     stats["last_event_time"] = time.time()
@@ -9340,6 +9348,12 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
             daemon=True,
             name=f"logsim-win-{hostname.split('.')[0]}",
         ).start()
+
+    # Release thread: hands scheduled events out at their timestamps (ids assigned then)
+    threading.Thread(
+        target=_releaser, args=(_workers_stop,),
+        daemon=True, name="logsim-win-release",
+    ).start()
 
     # Threat worker (skipped in benign-only mode)
     if not benign_only:

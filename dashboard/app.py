@@ -1719,7 +1719,7 @@ def _wec_worker_checks():
         _WEC_ACTIVE_SINCE["ts"] = None
         return [{"group": "Windows WEC Workers", "check": "parallel mode",
                  "status": "skip",
-                 "detail": "not running (parallel_hosts off, or module not started)"}]
+                 "detail": "not running (Windows module not started)"}]
 
     if _WEC_ACTIVE_SINCE["ts"] is None:
         _WEC_ACTIVE_SINCE["ts"] = time.time()

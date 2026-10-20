@@ -20550,7 +20550,6 @@
     "dns_domain": "examplecorp.local",
     "domain_controller_hostname": "DC01.examplecorp.local",
     "use_fqdn_hostnames": false,
-    "parallel_hosts": true,
     "dc_interval_multiplier": 0.5,
     "wks_interval_multiplier": 1.0,
     "threat_interval_multiplier": 2.0,
