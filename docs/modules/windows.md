@@ -114,10 +114,21 @@ Multi-event generators (process trees, some threats) return a Python **list** of
 
 WEC broker configuration (certificate export, subscription URL, subscription filter) is documented in **WEC Transport Setup** in the [README](../../README.md#wec-transport-setup). In brief: the Broker VM's Windows Event Collector must be activated, and LogSim's `.env` must supply `WEC_BROKER_URL`, `WEC_PFX_PATH`, and `WEC_PFX_PASSWORD`.
 
-## Delivery and Volume (parallel mode)
+## Delivery and Volume
 
-In parallel mode (`parallel_hosts: true`, the default) one worker per workstation plus a
-DC worker and a threats worker generate events into buffers that `generate_log()` drains.
+One worker per workstation plus a DC worker and a threats worker generate events into
+buffers that `generate_log()` drains. This is the only ambient mode: the old
+single-threaded mode (`parallel_hosts: false`) was removed on 2026-10-20, and the key is
+no longer read.
+
+- **Events are released at their own timestamps.** Workers schedule each generated
+  sequence into a time-ordered queue and a release thread hands every event out when its
+  time arrives, assigning its `EventRecordID` at that moment. Per host and channel, ids
+  therefore rise with time exactly as on a real machine (before, ~16% of consecutive ids
+  ran backwards), and nothing is ever stamped in the future. A sequence that spans time
+  arrives over that time: a process's 4689 exit is delivered when the process exits,
+  minutes after its 4688. Scenario fires and other direct generator calls are not
+  deferred; they return their events immediately.
 
 - **Volume is set by pacing, not by a cap.** `wks_interval_multiplier` (default 10.0) sets
   how often each workstation emits; see [Delivery: buffers, not limits](../configuration.md).
