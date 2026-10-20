@@ -40,7 +40,7 @@ Runs a single pre-built, multi-step kill chain one time and then returns to the 
 
 **Flow:** Select a numbered scenario from the list → the scenario runs → the menu reappears.
 
-All 17 available scenarios are documented in detail in [Attack Scenarios](attack-scenarios.md). A summary:
+All 23 available scenarios are documented in detail in [Attack Scenarios](attack-scenarios.md). A summary:
 
 > **XSIAM OOB detection coverage:** XSIAM includes built-in detectors for only a subset of steps across these scenarios. Most steps produce raw dataset events that are **visible in search but will not automatically trigger an alert** without a custom correlation rule. See [attack-scenarios.md](attack-scenarios.md) for which steps have OOB coverage.
 
@@ -112,3 +112,26 @@ Applies to **Mode 1 only**. Controls the minimum interval between threat events 
 > **Tip — building a clean baseline:** Run on **Benign Traffic Only** for a period before switching to a threat level. XSIAM analytics engines (UEBA, XDR) need a baseline window of normal activity to establish behavioural profiles. Introducing threats immediately on a cold dataset produces unreliable anomaly scores.
 
 > **Tip — threat level vs. scenario:** Threat levels only affect the frequency of randomly-injected threats in Mode 1. Attack Scenarios (Mode 2) and Specific Threats (Mode 3) are unaffected by this setting and always run at full intensity.
+
+> **Microsoft Entra ID / Office 365 modules** don't use the intervals above. They fire threats as *episodes* from a wall-clock Poisson process, after a 500-record benign warmup. Realistic is ~0.03 episodes per module per hour (about 5 a day across the seven feeds), High 0.6, Insane 6.0. Elevated and Extreme currently fall back to the Realistic rate for these feeds. See [microsoft-entra.md](modules/microsoft-entra.md#threat-model).
+
+> **Firewall logging suppression:** a firewall's `mgmt_logging_suppressed` threat turns the device's logging off for 10–40 minutes, and that module really emits nothing in that window. At high threat levels this can look like a stalled module; it re-enables on its own.
+
+---
+
+## Available Modules
+
+Every module in `modules/` with a `NAME` is auto-discovered and offered in Mode 1 and the dashboard.
+
+| Module | Transport | Page |
+|---|---|---|
+| Windows Event Log | WEC (WS-Management to the Broker VM) | [windows.md](modules/windows.md) |
+| AWS CloudTrail | S3 | [aws.md](modules/aws.md) |
+| GCP Cloud Audit Logs | Pub/Sub | [gcp.md](modules/gcp.md) |
+| Okta SSO | HTTP Collector | [okta.md](modules/okta.md) |
+| Proofpoint Email Gateway | HTTP Collector | [proofpoint.md](modules/proofpoint.md) |
+| Azure AD Sign-ins, Azure AD Audit, Office 365 Azure AD | Cribl receiver | [microsoft-entra.md](modules/microsoft-entra.md) |
+| Office 365 Exchange Online, SharePoint Online, DLP, General | Cribl receiver | [microsoft-365.md](modules/microsoft-365.md) |
+| Identity Threat Campaigns *(opt-in coordinator)* | Cribl receiver + WEC | [microsoft-entra.md](modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
+| Cisco ASA, Cisco Firepower, Check Point, Fortinet FortiGate | Syslog (TCP) | [firewall-analytics.md](firewall-analytics.md), [firewall-management-plane.md](firewall-management-plane.md) |
+| Zscaler Web Gateway, Apache httpd, Infoblox NIOS | Syslog (TCP) | [zscaler.md](modules/zscaler.md), [httpd.md](modules/httpd.md), [infoblox.md](modules/infoblox.md) |
