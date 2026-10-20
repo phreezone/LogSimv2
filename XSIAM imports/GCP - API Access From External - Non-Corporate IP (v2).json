@@ -1,0 +1,46 @@
+[
+ {
+  "name": "GCP — API Access From External / Non-Corporate IP (v2)",
+  "alert_name": "GCP — API Access From External / Non-Corporate IP (v2)",
+  "description": "GCP Cloud Audit activity from a caller outside RFC1918 and outside GCP's IAP forwarding range (35.235.240.0/20) - >=5 API calls per hour from one external address. Replaces the original, which errored every run, grouped by event description rather than by caller, and emitted no address entity at all. NOTE: google_cloud_logging_raw is empty (0 rows/30d) because GCP Pub/Sub delivery is failing authentication, so this cannot fire until that is fixed.",
+  "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.source.ipv4 != null\n| filter not (incidr(xdm.source.ipv4, \"10.0.0.0/8\")\n              or incidr(xdm.source.ipv4, \"192.168.0.0/16\")\n              or incidr(xdm.source.ipv4, \"172.16.0.0/12\")\n              or incidr(xdm.source.ipv4, \"35.235.240.0/20\"))\n| bin _time span = 1h\n| comp count() as api_calls,\n       count_distinct(xdm.event.description) as distinct_operations,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| filter api_calls >= 5\n| alter caller_ip = xdm.source.ipv4\n| fields caller_ip, api_calls, distinct_operations, users, events_seen\n",
+  "severity": "SEV_040_HIGH",
+  "alert_category": "PRIVILEGE_ESCALATION",
+  "mitre_defs": {
+   "TA0001 - Initial Access": [
+    "T1078.004 - Valid Accounts: Cloud Accounts"
+   ],
+   "TA0005 - Defense Evasion": [
+    "T1090 - Proxy"
+   ]
+  },
+  "alert_fields": {
+   "action_remote_ip": "caller_ip",
+   "actor_effective_username": "users",
+   "action_evtlog_message": "events_seen"
+  },
+  "search_window": "1 hours",
+  "suppression_duration": "1 hours",
+  "suppression_fields": [
+   "caller_ip"
+  ],
+  "is_enabled": true,
+  "alert_type": null,
+  "alert_description": null,
+  "alert_domain": "DOMAIN_SECURITY",
+  "dataset": "alerts",
+  "user_defined_severity": null,
+  "user_defined_category": null,
+  "investigation_query_link": "",
+  "drilldown_query_timeframe": "ALERT",
+  "mapping_strategy": "CUSTOM",
+  "action": "ALERTS",
+  "lookup_mapping": [],
+  "execution_mode": "SCHEDULED",
+  "simple_schedule": "10 minutes",
+  "crontab": "*/10 * * * *",
+  "timezone": "America/New_York",
+  "suppression_enabled": true,
+  "rule_id": 1680
+ }
+]

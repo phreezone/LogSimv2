@@ -39,7 +39,11 @@ _print_lock    = threading.Lock()   # ensures one complete line prints at a time
 # connections instead of doing a fresh handshake per event (the dominant cost in bulk
 # training runs). pool_maxsize covers the concurrent bulk sender threads.
 _http_session = requests.Session()
-_http_adapter = requests.adapters.HTTPAdapter(pool_connections=32, pool_maxsize=32, max_retries=0)
+# Pool size is a connection-reuse setting, not a throughput cap: requests beyond it still
+# go out on fresh connections. HTTP_POOL_SIZE raises it for very high sender counts.
+_HTTP_POOL_SIZE = max(1, int(os.getenv("HTTP_POOL_SIZE", "32")))
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=_HTTP_POOL_SIZE,
+                                              pool_maxsize=_HTTP_POOL_SIZE, max_retries=0)
 _http_session.mount('https://', _http_adapter)
 _http_session.mount('http://', _http_adapter)
 
@@ -54,21 +58,6 @@ def _tprint(*args, **kwargs):
     with _print_lock:
         print(*args, **kwargs)
 
-def _prepare_event_context(shared_session=None):
-    ctx = {
-        'user_identity': None,
-        'target_user': None,
-        'ip_address': None,
-        'aws_region': None
-    }
-    if isinstance(shared_session, dict):
-        # overlay known session values (ip, user_identity, aws_region)
-        for k in ('user_identity','target_user','ip_address','aws_region'):
-            if k in shared_session and shared_session[k] is not None:
-                ctx[k] = shared_session[k]
-    return ctx
-
-
 def fetch_tor_exit_nodes():
     """Fetches the current list of Tor exit node IP addresses."""
     url = "https://check.torproject.org/torbulkexitlist"
@@ -78,9 +67,21 @@ def fetch_tor_exit_nodes():
         response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
         
         ips = response.text.strip().splitlines()
-        tor_nodes = [{"ip": ip, "country": "Unknown"} for ip in ips]
-        
+        tor_nodes = [{"ip": ip.strip()} for ip in ips if ip.strip()]
+
+        # The bulk list is IPs only.  Onionoo supplies the country and hosting AS
+        # that a GeoIP-backed vendor would report for an exit node, so events do
+        # not go out with country="Unknown" and a null ISP/ASN.
+        from modules.tor_enrichment import enrich_tor_nodes
+        tor_nodes, geo_stats = enrich_tor_nodes(tor_nodes)
+
         print(f"Successfully fetched {len(tor_nodes)} live Tor exit nodes.")
+        if geo_stats["onionoo"]:
+            print(f"  Onionoo enriched {geo_stats['resolved']}/{geo_stats['total']} "
+                  f"({geo_stats['join_rate']}%) with country + AS.")
+        else:
+            print("  WARNING: Onionoo enrichment unavailable — Tor events will carry a "
+                  "null country and no ASN.")
         return tor_nodes
     except requests.exceptions.RequestException as e:
         # config.json no longer ships a static fallback list (it went stale — only 1 of
@@ -381,10 +382,8 @@ def _get_s3_client(region: str):
 # S3 object; doing the same here means one object per run for the collector to
 # pull instead of ~8 tiny objects, which eliminates the per-object partial
 # pickup we were seeing (steps landing intermittently).
-# Batches are keyed PER MODULE so different AWS log types (CloudTrail vs GuardDuty)
-# never merge into one object — they use different S3 prefixes AND different on-disk
-# formats (CloudTrail = {"Records":[...]}.json.gz, GuardDuty = newline-delimited
-# .jsonl.gz), which the collector parses with different log-type parsers.
+# Batches are keyed PER MODULE so events from different S3-transport modules never
+# merge into one object.
 _s3_batches = {}          # module.NAME -> {"blobs": [...], "module": mod, "config": cfg}
 _s3_batch_lock = threading.Lock()
 
@@ -398,9 +397,20 @@ _s3_flusher_started = [False]
 # batch grew in memory forever and nothing was ever uploaded. Size and age caps
 # guarantee delivery under continuous load while keeping the batching behaviour that
 # lets a whole scenario ride one collector pull.
+# Defaults; aws_config.s3_flush_idle_s / s3_flush_max_age_s / s3_flush_max_events
+# override them. These shape CloudTrail OBJECTS (when to cut one), not throughput: more
+# events simply mean more objects.
 _S3_FLUSH_IDLE_S = 4        # quiet period => end of a burst, flush what we have
 _S3_FLUSH_MAX_AGE_S = 30    # never let an event sit buffered longer than this
-_S3_FLUSH_MAX_EVENTS = 500  # cap batch size so one object stays reasonable
+_S3_FLUSH_MAX_EVENTS = 500  # events per object before it is cut
+
+
+def _apply_s3_flush_config(config):
+    global _S3_FLUSH_IDLE_S, _S3_FLUSH_MAX_AGE_S, _S3_FLUSH_MAX_EVENTS
+    aws = (config or {}).get("aws_config") or {}
+    _S3_FLUSH_IDLE_S = float(aws.get("s3_flush_idle_s", _S3_FLUSH_IDLE_S))
+    _S3_FLUSH_MAX_AGE_S = float(aws.get("s3_flush_max_age_s", _S3_FLUSH_MAX_AGE_S))
+    _S3_FLUSH_MAX_EVENTS = int(aws.get("s3_flush_max_events", _S3_FLUSH_MAX_EVENTS))
 
 
 def _ensure_s3_flusher():
@@ -436,6 +446,7 @@ def _ensure_s3_flusher():
 
 def _enqueue_s3(content_bytes, module, config):
     """Buffer one gzipped single-event blob for the current run, grouped by module."""
+    _apply_s3_flush_config(config)
     with _s3_batch_lock:
         key = getattr(module, 'NAME', 'unknown')
         grp = _s3_batches.setdefault(key, {"blobs": [], "module": module, "config": config})
@@ -487,14 +498,8 @@ def flush_s3_batch():
         if not records:
             continue
 
-        # Format the merged object per the module's declared S3 record format.
-        fmt = getattr(module, 'S3_RECORD_FORMAT', 'cloudtrail_records')
-        if fmt == 'jsonl':
-            # GuardDuty findings export: newline-delimited JSON, one finding per line.
-            body = "\n".join(json.dumps(r, default=str) for r in records)
-        else:
-            # CloudTrail: single {"Records":[...]} envelope.
-            body = json.dumps({"Records": records}, default=str)
+        # CloudTrail: single {"Records":[...]} envelope.
+        body = json.dumps({"Records": records}, default=str)
         merged = gzip.compress(body.encode("utf-8"))
         send_s3_message(merged, module, config, f"batch:{len(records)} events")
 
@@ -521,27 +526,15 @@ def send_s3_message(content_bytes, module, config, event_name):
         # AWS_REGION
         region = os.getenv('AWS_REGION', aws_conf.get('aws_region', 'us-east-1'))
 
-        # S3 bucket. A module may declare its own bucket env var (S3_BUCKET_ENV) so a
-        # separate log type (e.g. GuardDuty) can land in its own bucket; otherwise it
-        # falls back to the shared S3_BUCKET_NAME (same bucket, different prefix).
-        bucket_env = getattr(module, 'S3_BUCKET_ENV', None)
-        bucket_name = (os.getenv(bucket_env) if bucket_env else None) \
-                      or os.getenv('S3_BUCKET_NAME') or aws_conf.get('s3_bucket_name')
+        bucket_name = os.getenv('S3_BUCKET_NAME') or aws_conf.get('s3_bucket_name')
 
         if not bucket_name:
-            print(f"ERROR: S3 bucket is not defined ({bucket_env or 'S3_BUCKET_NAME'} in .env / '{conf_key}' in config.json). Cannot upload log.")
+            print(f"ERROR: S3 bucket is not defined (S3_BUCKET_NAME in .env / '{conf_key}' in config.json). Cannot upload log.")
             return
 
-        # Build the object key from the module's declared log type. GuardDuty's native
-        # export is <prefix>/<UUID>.jsonl.gz (flat, no date partition); CloudTrail is a
-        # date-partitioned {"Records":[...]}.json.gz object.
-        log_type = getattr(module, 'S3_LOG_TYPE', 'CloudTrail')
-        if log_type == 'GuardDuty':
-            file_name = f"{uuid.uuid4().hex}.jsonl.gz"
-            s3_key = f"AWSLogs/{account_id}/GuardDuty/{region}/{file_name}"
-        else:
-            file_name = f"{account_id}_CloudTrail_{region}_{now.strftime('%Y%m%dT%H%MZ')}_{str(uuid.uuid4())[:6].upper()}.json.gz"
-            s3_key = f"AWSLogs/{account_id}/CloudTrail/{region}/{now.strftime('%Y/%m/%d')}/{file_name}"
+        # CloudTrail's native layout: a date-partitioned {"Records":[...]}.json.gz object.
+        file_name = f"{account_id}_CloudTrail_{region}_{now.strftime('%Y%m%dT%H%MZ')}_{str(uuid.uuid4())[:6].upper()}.json.gz"
+        s3_key = f"AWSLogs/{account_id}/CloudTrail/{region}/{now.strftime('%Y/%m/%d')}/{file_name}"
 
         _tprint(f"Sending S3 for {module.NAME}{event_str}: Uploading {file_name} to {bucket_name}/{s3_key}")
 
@@ -668,6 +661,56 @@ _wec_batch = []
 _wec_batch_lock = threading.Lock()
 _wec_batch_timer = None
 _wec_cb_state = {"fails": 0, "open_since": None}
+# Delivery used to start a NEW thread for every 20-event POST, with no retry: a failed
+# POST lost its events, and more volume meant more threads with nothing bounding them.
+# Now a fixed pool (wec_sender_threads) sends, each chunk is retried with backoff
+# (wec_send_retries, wec_retry_backoff_s), and every outcome is counted.
+_wec_executor = None
+_wec_executor_lock = threading.Lock()
+_wec_flush_pending = [False]
+WEC_STATS = {"sent_events": 0, "posts": 0, "retries": 0,
+             "failed_events": 0, "breaker_dropped": 0, "last_error": None}
+
+
+def _wec_cfg(config):
+    return (config or {}).get("windows_events_config") or {}
+
+
+def _wec_pool(config):
+    global _wec_executor
+    if _wec_executor is None:
+        with _wec_executor_lock:
+            if _wec_executor is None:
+                from concurrent.futures import ThreadPoolExecutor
+                n = max(1, int(_wec_cfg(config).get("wec_sender_threads", 4)))
+                _wec_executor = ThreadPoolExecutor(max_workers=n,
+                                                   thread_name_prefix="wec-send")
+    return _wec_executor
+
+
+def wec_backlog():
+    """Events accepted for WEC delivery but not yet sent."""
+    with _wec_batch_lock:
+        return len(_wec_batch)
+
+
+def wait_for_transport(module, config, stop_event=None):
+    """Hold a module's generation loop while its transport is backed up.
+
+    Backpressure belongs on the PRODUCING module, not in the senders: the dashboard's
+    sender threads are shared by every module, so blocking them on a slow WEC broker
+    would stall Okta, AWS and the firewalls too. Today only WEC buffers enough to need
+    this; its threshold is windows_events_config.wec_max_pending (default 10000)."""
+    conf_key = getattr(module, "CONFIG_KEY", None)
+    transport = (config.get(conf_key) or {}).get("transport") if conf_key else None
+    if transport != "wec":
+        return
+    limit = int(_wec_cfg(config).get("wec_max_pending", 10000))
+    while wec_backlog() >= limit and not (stop_event and stop_event.is_set()):
+        with _wec_batch_lock:
+            if _wec_cb_state["open_since"]:
+                return       # broker down: send_wec_message counts what it cannot deliver
+        time.sleep(0.2)
 
 def _get_wec_client(config):
     """Lazy-init the WecClient singleton. Returns None on failure."""
@@ -701,38 +744,62 @@ def _get_wec_client(config):
 
 
 def _flush_wec_batch(config):
-    """Send accumulated WEC events in a single SOAP POST."""
+    """Send everything accumulated for WEC, in wec_batch_size chunks, each retried."""
     global _wec_batch_timer
     with _wec_batch_lock:
         batch = _wec_batch[:]
         _wec_batch.clear()
         _wec_batch_timer = None
+        _wec_flush_pending[0] = False
     if not batch:
         return
     client = _get_wec_client(config)
     if not client:
+        with _wec_batch_lock:
+            WEC_STATS["failed_events"] += len(batch)
+            WEC_STATS["last_error"] = "WEC client unavailable"
         return
-    try:
-        client.deliver_events(batch)
-        with _wec_batch_lock:
-            _wec_cb_state["fails"] = 0
-            _wec_cb_state["open_since"] = None
-    except Exception as exc:
-        with _wec_batch_lock:
-            _wec_cb_state["fails"] += 1
-            if _wec_cb_state["fails"] >= HTTP_CB_THRESHOLD:
-                if _wec_cb_state["open_since"] is None:
-                    _wec_cb_state["open_since"] = time.time()
-                    _tprint(f"WEC circuit breaker OPEN after {HTTP_CB_THRESHOLD} failures: {exc}")
+    cfg = _wec_cfg(config)
+    size = max(1, int(cfg.get("wec_batch_size", 20)))
+    retries = max(0, int(cfg.get("wec_send_retries", 3)))
+    backoff = float(cfg.get("wec_retry_backoff_s", 1.0))
+    for i in range(0, len(batch), size):
+        chunk = batch[i:i + size]
+        for attempt in range(retries + 1):
+            try:
+                client.deliver_events(chunk)
+                with _wec_batch_lock:
+                    WEC_STATS["sent_events"] += len(chunk)
+                    WEC_STATS["posts"] += 1
+                    _wec_cb_state["fails"] = 0
+                    _wec_cb_state["open_since"] = None
+                break
+            except Exception as exc:
+                if attempt < retries:
+                    with _wec_batch_lock:
+                        WEC_STATS["retries"] += 1
+                    time.sleep(backoff * (2 ** attempt))
+                    continue
+                with _wec_batch_lock:
+                    WEC_STATS["failed_events"] += len(chunk)
+                    WEC_STATS["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
+                    _wec_cb_state["fails"] += 1
+                    if (_wec_cb_state["fails"] >= HTTP_CB_THRESHOLD
+                            and _wec_cb_state["open_since"] is None):
+                        _wec_cb_state["open_since"] = time.time()
+                        _tprint(f"WEC circuit breaker OPEN after {HTTP_CB_THRESHOLD} "
+                                f"failed sends ({retries} retries each): {exc}")
 
 
 def send_wec_message(message, module, config):
     """Queue a Windows event for WEC transport (batched delivery)."""
     global _wec_batch_timer
-    # Circuit breaker check
+    # Circuit breaker: while the broker is down, events cannot be delivered or held
+    # indefinitely -- but they are counted (WEC_STATS["breaker_dropped"]), never silent.
     with _wec_batch_lock:
         if _wec_cb_state["open_since"]:
             if time.time() - _wec_cb_state["open_since"] < HTTP_CB_COOLDOWN:
+                WEC_STATS["breaker_dropped"] += 1
                 return
             _wec_cb_state["open_since"] = None
             _wec_cb_state["fails"] = 0
@@ -757,8 +824,10 @@ def send_wec_message(message, module, config):
     with _wec_batch_lock:
         _wec_batch.append(xml_str)
         if len(_wec_batch) >= batch_size:
-            threading.Thread(target=_flush_wec_batch, args=(config,),
-                             daemon=True).start()
+            # One flush in flight at a time is enough: it takes everything queued so far.
+            if not _wec_flush_pending[0]:
+                _wec_flush_pending[0] = True
+                _wec_pool(config).submit(_flush_wec_batch, config)
         elif _wec_batch_timer is None:
             _wec_batch_timer = threading.Timer(
                 batch_interval_ms / 1000.0,
@@ -1017,6 +1086,52 @@ def shift_timestamps(payload, delta_seconds, anchor_epoch=None):
     return s
 
 
+_cribl_sender = None
+_cribl_sender_lock = threading.Lock()
+
+
+def _get_cribl_sender():
+    """Lazily build one CriblDirectSender (shared, thread-safe)."""
+    global _cribl_sender
+    if _cribl_sender is None:
+        with _cribl_sender_lock:
+            if _cribl_sender is None:
+                from integrations.cribl_direct import CriblDirectSender
+                _cribl_sender = CriblDirectSender()
+    return _cribl_sender
+
+
+def send_cribl_message(record, module, config):
+    """Push one record into XSIAM's integrated Cribl receiver (cribl_direct transport).
+
+    The record goes under the module's dedicated Source-Identifier UUID so XSIAM parses it
+    into the native dataset (Fusion/analytics-eligible). No Cribl instance is involved;
+    CRIBL_COLLECTOR_URL + CRIBL_TOKEN come from the environment.
+    """
+    src = getattr(module, 'SOURCE_IDENTIFIER', None)
+    if not src:
+        _tprint(f"Error: {getattr(module, 'NAME', '?')} cribl transport requires module.SOURCE_IDENTIFIER.")
+        return
+    integ = getattr(module, 'INTEGRATION_IDENTIFIER', 'logsim:synthetic')
+    if isinstance(record, str):
+        try:
+            record = json.loads(record)
+        except (json.JSONDecodeError, TypeError):
+            _tprint(f"Warning: {module.NAME} cribl transport received non-JSON string. Skipping.")
+            return
+    if not isinstance(record, dict):
+        _tprint(f"Warning: {module.NAME} cribl transport expects a dict record. Skipping.")
+        return
+    try:
+        code, text, _ = _get_cribl_sender().send([record], src, integ)
+        if code not in (200, 201, 202, 204):
+            _tprint(f"Cribl send error for {module.NAME}: HTTP {code} — {text[:120]}")
+        elif not _quiet_sends:
+            _tprint(f"Cribl send for {module.NAME}: {code} (src={src[:8]}…)")
+    except Exception as exc:
+        _tprint(f"Cribl send exception for {module.NAME}: {exc}")
+
+
 def process_and_send(log_content, module, config, event_name=None):
     """Determines how to send the log and sends it. Counts logs for throughput reporting."""
     transport = "syslog"
@@ -1029,8 +1144,10 @@ def process_and_send(log_content, module, config, event_name=None):
     if _rc is not None:
         try:
             _rc.record(getattr(module, 'NAME', '?'), event_name, log_content)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Run-manifest bookkeeping only -- must never block the send, but a
+            # persistent failure means the emitted manifest is wrong.
+            _tprint(f"[run-collector] record failed: {type(exc).__name__}: {exc}")
     if _dry_run:
         return
     if _bulk_collector is not None:
@@ -1084,6 +1201,17 @@ def process_and_send(log_content, module, config, event_name=None):
         else:
             event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} wants Pub/Sub transport but did not return a string or list of strings. Skipping.")
+    elif transport == "cribl":
+        if isinstance(log_content, list):
+            for rec in log_content:
+                send_cribl_message(rec, module, config)
+                _increment_throughput()
+        elif isinstance(log_content, (dict, str)):
+            send_cribl_message(log_content, module, config)
+            _increment_throughput()
+        else:
+            event_str = f" ({event_name})" if event_name else ""
+            _tprint(f"Warning: Module {module.NAME}{event_str} wants cribl transport but did not return a dict/str/list. Skipping.")
     else:  # Default to syslog
         syslog_host = os.getenv('SYSLOG_HOST')
         syslog_port = int(module_config.get("syslog_port", config.get('SYSLOG_PORT', '514')))
@@ -1147,6 +1275,7 @@ def run_module_loop(module, config, threat_level, benign_mode, context, interval
     """Runs a single module in its own continuous loop (used by parallel mode)."""
     while not stop_event.is_set():
         try:
+            wait_for_transport(module, config, stop_event)
             result = module.generate_log(config=config, threat_level=threat_level,
                                           benign_only=benign_mode, context=context)
             _dispatch_result(result, module, config)
@@ -1219,26 +1348,25 @@ def select_specific_threat_mode(all_modules):
     if not selected_modules:
         return None, None, False
 
-    # Collect (module, threat_name) pairs from modules that expose get_threat_names()
-    threat_entries = []
+    # Only threats tied to an XSIAM analytics alert are offered here (the same list the
+    # dashboard's Fire panel shows); every other threat still runs in long-running mode.
+    from modules import threat_catalog
+    threat_entries = []   # (module, threat_name, target_alert)
     for module in selected_modules:
-        threat_fn = getattr(module, 'get_threat_names', None)
-        names = threat_fn() if callable(threat_fn) else None
-        if names:
-            for name in names:
-                threat_entries.append((module, name))
+        for t in threat_catalog.analytic_threats(module):
+            threat_entries.append((module, t["event"], t["alert"]))
 
     if not threat_entries:
-        print("No named threats are available for the selected modules.")
+        print("None of the selected modules has a threat tied to an XSIAM analytics alert.")
         return None, None, False
 
-    print("\nAvailable Threats:")
+    print("\nAvailable Threats (-> the XSIAM analytic each triggers):")
     current_module = None
-    for i, (module, name) in enumerate(threat_entries, 1):
+    for i, (module, name, alert) in enumerate(threat_entries, 1):
         if module is not current_module:
             print(f"\n  [{module.NAME}]")
             current_module = module
-        print(f"    {i:>3}. {name}")
+        print(f"    {i:>3}. {name}  ->  {alert}")
 
     try:
         choice = int(input(f"\nSelect threat number (1-{len(threat_entries)}): ").strip())
@@ -1249,7 +1377,7 @@ def select_specific_threat_mode(all_modules):
         print("Invalid input.")
         return None, None, False
 
-    selected_module, threat_name = threat_entries[choice - 1]
+    selected_module, threat_name, _alert = threat_entries[choice - 1]
 
     repeat_choice = input("Run once [1] or repeat until Ctrl+C [2]? ").strip()
     repeat = (repeat_choice == "2")
@@ -1374,118 +1502,6 @@ def _get_random_user_from_template(config, user_template):
             
     return final_identity
 
-def run_compromised_account_gdrive_exfil_scenario(modules, config):
-    """Generates a sequence of logs simulating data exfiltration from Google Drive."""
-    print("\n--- Running 'Compromised Account & G-Drive Exfil' Scenario ---")
-
-    gworkspace_module = modules.get("google_workspace")
-    okta_module = modules.get("okta")
-    asa_module = modules.get("cisco_asa")
-
-    if not gworkspace_module or not (okta_module or asa_module):
-        print("ERROR: This scenario requires the 'google_workspace' module and at least one of 'okta' or 'cisco_asa'.")
-        return
-        
-    attacker_ip = _fresh_attacker_ip()   # fresh per run — avoids source-IP alert suppression
-    compromised_user_short = 'c.lewis' 
-    compromised_user_email = f"{compromised_user_short}@{config.get('google_workspace_config', {}).get('domains', ['examplecorp.com'])[0]}"
-    sensitive_file = next((f for f in config.get('google_workspace_config',{}).get('drive_files', []) if f.get('sensitive')), None)
-    
-    if not sensitive_file:
-        print("ERROR: No sensitive files found in 'google_workspace_config' for this scenario.")
-        return
-
-    print(f"  - Attacker IP: {attacker_ip}")
-    print(f"  - Compromised User: {compromised_user_email}")
-    print(f"  - Target File: {sensitive_file['title']}")
-    
-    try:
-        if okta_module and hasattr(okta_module, 'generate_log'):
-            print("\n[STEP 1] Generating Okta login from suspicious IP...")
-            context = {'ip': attacker_ip, 'user': compromised_user_short, 'outcome': 'SUCCESS'}
-            okta_log = okta_module.generate_log(config, scenario_event="LOGIN", context=context)
-            
-            # UPDATED: Handle tuple return from Okta module
-            if isinstance(okta_log, tuple): 
-                log_content, event_name = okta_log
-            else: 
-                log_content, event_name = okta_log, None
-            process_and_send(log_content, okta_module, config, event_name)
-            time.sleep(1)
-
-        print("[STEP 2] Generating Google Workspace login from same IP...")
-        g_context = {'ip': attacker_ip, 'user_email': compromised_user_email}
-        gdrive_log_1 = gworkspace_module.generate_log(config, scenario_event="LOGIN_SUCCESS", context=g_context)
-        if isinstance(gdrive_log_1, tuple): 
-            log_content, event_name = gdrive_log_1
-        else: 
-            log_content, event_name = gdrive_log_1, None
-        process_and_send(log_content, gworkspace_module, config, event_name)
-        time.sleep(2)
-
-        print("[STEP 3] Generating Google Drive access to sensitive file...")
-        g_context.update({'file': sensitive_file})
-        gdrive_log_2 = gworkspace_module.generate_log(config, scenario_event="DRIVE_VIEW_SENSITIVE", context=g_context)
-        if isinstance(gdrive_log_2, tuple): 
-            log_content, event_name = gdrive_log_2
-        else: 
-            log_content, event_name = gdrive_log_2, None
-        process_and_send(log_content, gworkspace_module, config, event_name)
-        time.sleep(1)
-
-        print("[STEP 4] Generating Google Drive public sharing event...")
-        gdrive_log_3 = gworkspace_module.generate_log(config, scenario_event="DRIVE_PUBLIC_SHARE", context=g_context)
-        if isinstance(gdrive_log_3, tuple): 
-            log_content, event_name = gdrive_log_3
-        else: 
-            log_content, event_name = gdrive_log_3, None
-        process_and_send(log_content, gworkspace_module, config, event_name)
-        time.sleep(2)
-
-        print("[STEP 5] Generating Google Drive download event...")
-        gdrive_log_4 = gworkspace_module.generate_log(config, scenario_event="DRIVE_DOWNLOAD", context=g_context)
-        if isinstance(gdrive_log_4, tuple): 
-            log_content, event_name = gdrive_log_4
-        else: 
-            log_content, event_name = gdrive_log_4, None
-        process_and_send(log_content, gworkspace_module, config, event_name)
-        time.sleep(1)
-
-        if asa_module and hasattr(asa_module, 'generate_log'):
-            print("[STEP 6] Generating ASA log for large data egress...")
-            asa_context = {'src_ip': attacker_ip, 'bytes': random.randint(20000000, 50000000)}
-            asa_log = asa_module.generate_log(config, scenario_event="LARGE_EGRESS", context=asa_context)
-            if isinstance(asa_log, tuple):
-                log_content, event_name = asa_log
-            else: 
-                log_content, event_name = asa_log, None
-            process_and_send(log_content, asa_module, config, event_name)
-
-    except Exception as e:
-        print(f"\nAn error occurred during scenario execution: {e}")
-        import traceback
-        traceback.print_exc()
-
-    print("\n--- Scenario Complete ---")
-
-def _emit_guardduty(all_modules, config, context, finding_event):
-    """Fire a corroborating Amazon GuardDuty finding on the SAME pivot/context as the
-    CloudTrail step it backs up, if the 'AWS GuardDuty' module is loaded. Optional —
-    silently skipped when the module isn't present, like other optional scenario modules.
-    GuardDuty findings model to xdm.alert.* (an alert), so they raise the corroborating
-    step from a raw event to a vendor-confirmed detection on the same account/principal/IP."""
-    gd = all_modules.get("AWS GuardDuty")
-    if not gd:
-        return
-    try:
-        result = gd.generate_log(config, context=context, scenario_event=finding_event)
-        if result:
-            process_and_send(result, gd, config, finding_event)
-            print(f"    -> GuardDuty finding: {finding_event}")
-    except Exception as e:
-        print(f"    (GuardDuty finding {finding_event} skipped: {e})")
-
-
 def run_aws_pentest_scenario(modules, config):
     """Generates a sequence of logs simulating a pentest/attack scenario in AWS."""
     print("\n--- Running 'AWS Pentest & Defense Evasion' Scenario ---")
@@ -1556,20 +1572,15 @@ def run_aws_pentest_scenario(modules, config):
             log_2, name_2 = aws_module.generate_log(config, scenario_event="TOR_LOGIN", context=tor_context)
             process_and_send(log_2, aws_module, config, name_2)
             time.sleep(1)
-        # GuardDuty corroboration: Tor-sourced API call on the hijacked identity.
-        _emit_guardduty(modules, config,
-                        {'ip_address': tor_ips[0], 'user_identity': tor_user}, "GD_TOR_LOGIN")
 
         print("[STEP 3] Simulating Privilege Escalation (Attach Admin Policy to pentest user)...")
         log_3, name_3 = aws_module.generate_log(config, scenario_event="ATTACH_ADMIN_POLICY", context=context)
         process_and_send(log_3, aws_module, config, name_3)
-        _emit_guardduty(modules, config, context, "GD_ADMIN_PRIVESC")
         time.sleep(1)
 
         print("[STEP 4] Simulating Defense Evasion (Stop CloudTrail)...")
         log_4, name_4 = aws_module.generate_log(config, scenario_event="STOP_CLOUDTRAIL", context=context)
         process_and_send(log_4, aws_module, config, name_4)
-        _emit_guardduty(modules, config, context, "GD_CLOUDTRAIL_DISABLED")
         time.sleep(1)
 
         print("[STEP 5] Simulating Defense Evasion (Disable GuardDuty)...")
@@ -1580,7 +1591,6 @@ def run_aws_pentest_scenario(modules, config):
         print("[STEP 6] Simulating Persistence (Make S3 Bucket Public)...")
         log_6, name_6 = aws_module.generate_log(config, scenario_event="MAKE_S3_PUBLIC", context=context)
         process_and_send(log_6, aws_module, config, name_6)
-        _emit_guardduty(modules, config, context, "GD_S3_PUBLIC")
         time.sleep(1)
 
     except Exception as e:
@@ -1652,7 +1662,6 @@ def run_phishing_kill_chain_scenario(modules, config):
     base_ctx = {"session_context": session_context}
 
     try:
-        # STEP 1 — Phishing email delivered (slipped past TAP)
         print("\n[STEP 1] Proofpoint: Phishing email delivered to victim mailbox...")
         pp_ctx = {**base_ctx, "target_email": victim_email,
                   "sender_ip": attacker_ip, "shared_guid": shared_guid}
@@ -1664,7 +1673,6 @@ def run_phishing_kill_chain_scenario(modules, config):
         process_and_send(log_content, pp_module, config, event_name)
         time.sleep(2)
 
-        # STEP 2 — Victim clicks the link (click-permitted: TAP allowed it at click time)
         print("[STEP 2] Proofpoint: Victim clicks malicious URL (click-permitted)...")
         click_ctx = {**base_ctx, "target_email": victim_email,
                      "sender_ip": attacker_ip, "shared_guid": shared_guid}
@@ -1687,9 +1695,15 @@ def run_phishing_kill_chain_scenario(modules, config):
             cfg_domains = config.get('proofpoint_config', {}).get('phishing_domains', [])
             phishing_domains = list(dict.fromkeys(_malicious + cfg_domains))[:3]
             print(f"[STEP 2b] Infoblox: Victim browser resolves {len(phishing_domains)} phishing domains in DNS...")
+            # The LAST domain is the one the proxy step then reaches, so it must
+            # RESOLVE (pinned answer). The others fall to RPZ/NXDOMAIN, which is
+            # the blocked-attempt half of the story. Previously step 3's proxy
+            # block named a domain nobody had looked up.
+            _reached_domain, _reached_ip = _scenario_target(config, phishing_domains[-1])
             for pdom in phishing_domains:
+                _ans = _reached_ip if pdom == _reached_domain else None
                 dns_logs, dns_name = infoblox_module.generate_dns_pair(
-                    config, victim_ip, pdom, q_type="A"
+                    config, victim_ip, pdom, q_type="A", answer_ip=_ans
                 )
                 process_and_send(dns_logs, infoblox_module, config, dns_name)
                 time.sleep(0.3)
@@ -1697,7 +1711,8 @@ def run_phishing_kill_chain_scenario(modules, config):
         # STEP 3 — Zscaler sees the victim's browser hit the phishing domain
         if zs_module and hasattr(zs_module, "generate_log"):
             print("[STEP 3] Zscaler: Victim browser reaches phishing domain...")
-            zs_ctx = {**base_ctx, "src_ip": victim_ip, "user": victim_user}
+            zs_ctx = {**base_ctx, "src_ip": victim_ip, "user": victim_user,
+                      "domain": _reached_domain, "dst_ip": _reached_ip}
             result = zs_module.generate_log(config, scenario_event="THREAT_BLOCK", context=zs_ctx)
             if isinstance(result, tuple):
                 log_content, event_name = result
@@ -1882,7 +1897,6 @@ def run_insider_threat_scenario(modules, config):
             print("[STEP 1] Okta module not loaded — skipping.")
         time.sleep(2)
 
-        # STEP 2 — AWS: access cloud credentials
         print("[STEP 2] AWS: Insider accesses cloud credentials (Secrets Manager/SSM)...")
         aws_cred_ctx = {**base_ctx, "user_identity": aws_identity, "ip_address": insider_ip}
         result = aws_module.generate_log(config, scenario_event="CREDENTIAL_FILE_ACCESS", context=aws_cred_ctx)
@@ -1894,7 +1908,6 @@ def run_insider_threat_scenario(modules, config):
             process_and_send(log_content, aws_module, config, event_name)
         time.sleep(2)
 
-        # STEP 3 — AWS: disable Security Hub
         print("[STEP 3] AWS: Insider disables Security Hub (defense evasion)...")
         aws_evasion_ctx = {**base_ctx, "user_identity": aws_identity, "ip_address": insider_ip}
         result = aws_module.generate_log(config, scenario_event="DISABLE_SECURITY_HUB", context=aws_evasion_ctx)
@@ -1906,7 +1919,6 @@ def run_insider_threat_scenario(modules, config):
             process_and_send(log_content, aws_module, config, event_name)
         time.sleep(2)
 
-        # STEP 4 — AWS: stop Config recorder
         print("[STEP 4] AWS: Insider stops AWS Config recorder (defense evasion)...")
         result = aws_module.generate_log(config, scenario_event="STOP_CONFIG_RECORDER", context=aws_evasion_ctx)
         if isinstance(result, tuple):
@@ -1917,7 +1929,9 @@ def run_insider_threat_scenario(modules, config):
             process_and_send(log_content, aws_module, config, event_name)
         time.sleep(2)
 
-        # STEP 4b — Infoblox: insider's workstation resolves exfil destination via DNS
+        # STEP 4b — Infoblox: insider's workstation resolves exfil destination via DNS.
+        # exfil_domain / exfil_ip are the one destination steps 4b and 5 share.
+        exfil_domain = exfil_ip = None
         if infoblox_module and hasattr(infoblox_module, 'generate_dns_pair'):
             exfil_domains = config.get('zscaler_config', {}).get('exfil_destinations',
                                        config.get('benign_domains', ['drive.google.com']))
@@ -1926,9 +1940,12 @@ def run_insider_threat_scenario(modules, config):
             # plain strings. generate_dns_pair needs the domain string, not the dict
             # (passing the dict throws "unhashable type: dict" and aborts steps 4b-6).
             exfil_domain  = _exfil_choice.get('domain') if isinstance(_exfil_choice, dict) else _exfil_choice
-            print(f"[STEP 4b] Infoblox: Insider workstation resolves exfil destination ({exfil_domain})...")
+            # The upload in step 5 goes to exactly this answer.
+            exfil_domain, exfil_ip = _scenario_target(config, exfil_domain)
+            print(f"[STEP 4b] Infoblox: Insider workstation resolves exfil destination "
+                  f"({exfil_domain} -> {exfil_ip})...")
             dns_logs, dns_name = infoblox_module.generate_dns_pair(
-                config, insider_ip, exfil_domain, q_type="A"
+                config, insider_ip, exfil_domain, q_type="A", answer_ip=exfil_ip
             )
             process_and_send(dns_logs, infoblox_module, config, dns_name)
             time.sleep(0.5)
@@ -1936,7 +1953,8 @@ def run_insider_threat_scenario(modules, config):
         # STEP 5 — Zscaler: DLP / data exfiltration upload
         if zs_module and hasattr(zs_module, "generate_log"):
             print("[STEP 5] Zscaler: Insider uploads data to external cloud storage (DLP)...")
-            zs_ctx = {**base_ctx, "src_ip": insider_ip, "user": insider_username}
+            zs_ctx = {**base_ctx, "src_ip": insider_ip, "user": insider_username,
+                      "domain": exfil_domain, "dst_ip": exfil_ip}
             result = zs_module.generate_log(config, scenario_event="DATA_EXFIL", context=zs_ctx)
             if isinstance(result, tuple):
                 log_content, event_name = result
@@ -2013,9 +2031,7 @@ def run_infoblox_single_threat(scenario_event_name, all_modules, config):
     print(f"  Sent {count} log(s) for {name}.")
 
 
-# ---------------------------------------------------------------------------
 # Scenario helpers
-# ---------------------------------------------------------------------------
 
 _FW_MODULE_NAMES = [
     "Cisco Firepower",
@@ -2029,6 +2045,26 @@ _FW_MODULE_NAMES = [
 def _collect_fw_modules(all_modules):
     """Returns all loaded network firewall modules in priority order."""
     return [all_modules[n] for n in _FW_MODULE_NAMES if n in all_modules]
+
+
+def _scenario_target(config, domain, pinned_ip=None):
+    """(domain, ip) for a scenario's external destination.
+
+    ONE address per scenario name: the DNS answer Infoblox gives is the address
+    the firewall step then connects to. Before this, each step invented its own
+    destination, so the scenarios' own hunt query -- "join the DNS resolve with
+    the firewall connection" -- could never return a row.
+    """
+    from modules import resolver
+    return domain, pinned_ip or resolver.answer_for(domain, config)
+
+
+def host_mac(hostname, device_type=None, os_type=None):
+    """The host's stable NIC, from session_utils -- the same MAC Infoblox DHCP
+    leases to it and FortiGate logs for it. Imported lazily: log_simulator loads
+    config and modules before session_utils is guaranteed importable."""
+    from modules.session_utils import host_mac as _hm
+    return _hm(hostname, device_type, os_type)
 
 
 def _send_to_all_fw(fw_modules, scenario_event, config, context, step_label):
@@ -2075,7 +2111,7 @@ def run_dns_c2_killchain_scenario(all_modules, config):
     First two domain attempts blocked (DNS RPZ + firewall Security Intel).
     Third domain resolves (new C2 infra not yet on blocklists) — connection established.
 
-    XSIAM datasets touched: infoblox_dhcp_raw, infoblox_dns_raw, plus one network firewall dataset.
+    XSIAM datasets touched: infoblox_infoblox_raw (DHCP + DNS + RPZ), plus one network firewall dataset.
     Hunt: JOIN on xdm.source.ip across DHCP (who is the device?) → DNS (what resolved?) → FW (what connected?).
     """
     print("\n--- Running 'DNS C2 Kill Chain' Scenario ---")
@@ -2098,11 +2134,11 @@ def run_dns_c2_killchain_scenario(all_modules, config):
     if victim_info:
         victim_ip   = victim_info.get("ip", "192.168.1.50")
         victim_host = victim_info.get("hostname", "CORP-WS-001")
-        victim_mac  = f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
+        victim_mac  = host_mac(victim_host)
     else:
         victim_ip   = f"192.168.1.{random.randint(10, 200)}"
         victim_host = "CORP-WS-001"
-        victim_mac  = f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
+        victim_mac  = host_mac(victim_host)
 
     c2_domain_1 = random.choice(config.get('infoblox_threats', {}).get('malicious_domains', ['blocked-c2.ru']))
     c2_domain_3 = f"new-c2-{random.randint(1000,9999)}.com"  # new infra, not yet blocked
@@ -2116,13 +2152,11 @@ def run_dns_c2_killchain_scenario(all_modules, config):
     print(f"  Firewall modules: {fw_names}")
 
     try:
-        # STEP 1 — DHCP: victim device joins the network
         print("\n[STEP 1] Infoblox DHCP: Victim device gets IP lease...")
         dhcp_log, dhcp_name = infoblox_module.generate_dhcp_ack(config, victim_ip, victim_mac, victim_host)
         process_and_send(dhcp_log, infoblox_module, config, dhcp_name)
         time.sleep(1)
 
-        # STEP 2 — Benign DNS: device connectivity check (baseline)
         print("[STEP 2] Infoblox DNS: Normal connectivity check (baseline)...")
         benign_domain = random.choice(config.get('benign_domains', ['www.microsoft.com']))
         dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, benign_domain)
@@ -2143,7 +2177,6 @@ def run_dns_c2_killchain_scenario(all_modules, config):
             process_and_send(log_content, infoblox_module, config, event_name)
         time.sleep(1)
 
-        # STEP 4 — NXDOMAIN storm: DGA cycling (second domain set)
         print("[STEP 4] Infoblox DNS: DGA NXDOMAIN storm (implant cycling through C2 candidates)...")
         result = infoblox_module.generate_log(config, scenario_event="NXDOMAIN_STORM",
                                               context={**base_ctx, "src_ip": victim_ip})
@@ -2155,22 +2188,24 @@ def run_dns_c2_killchain_scenario(all_modules, config):
             process_and_send(log_content, infoblox_module, config, event_name)
         time.sleep(1)
 
-        # STEP 5 — ALL firewalls: Security Intel / URL block on second C2 domain
         print(f"[STEP 5] All firewall modules: Security Intel block on C2 domain...")
         _send_to_all_fw(fw_modules, "THREAT_BLOCK", config,
                         {**base_ctx, "src_ip": victim_ip}, "[STEP 5]")
         time.sleep(1)
 
-        # STEP 6 — DNS resolves: third C2 domain succeeds (new infra)
-        print(f"[STEP 6] Infoblox DNS: Third C2 domain resolves (NOERROR) — {c2_domain_3}...")
-        dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, c2_domain_3)
+        # Steps 6 and 7 are ONE story: the name resolves, then the implant
+        # connects to exactly that address.
+        c2_domain_3, c2_ip_3 = _scenario_target(config, c2_domain_3)
+        print(f"[STEP 6] Infoblox DNS: Third C2 domain resolves (NOERROR) — {c2_domain_3} -> {c2_ip_3}...")
+        dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, c2_domain_3,
+                                                               answer_ip=c2_ip_3)
         process_and_send(dns_logs, infoblox_module, config, dns_name)
         time.sleep(1)
 
-        # STEP 7 — ALL firewalls: outbound connection to C2 IP allowed (not yet on blocklist)
-        print(f"[STEP 7] All firewall modules: Outbound connection to C2 IP established...")
+        print(f"[STEP 7] All firewall modules: Outbound connection to {c2_ip_3} ({c2_domain_3})...")
         _send_to_all_fw(fw_modules, "LARGE_EGRESS", config,
-                        {**base_ctx, "src_ip": victim_ip}, "[STEP 7]")
+                        {**base_ctx, "src_ip": victim_ip,
+                         "domain": c2_domain_3, "dst_ip": c2_ip_3}, "[STEP 7]")
 
     except Exception as e:
         print(f"\nAn error occurred during scenario execution: {e}")
@@ -2179,10 +2214,10 @@ def run_dns_c2_killchain_scenario(all_modules, config):
 
     print("\n--- DNS C2 Kill Chain Scenario Complete ---")
     print("\nHunt queries to run in XSIAM:")
-    print(f"  1. dataset=infoblox_dhcp_raw | filter xdm.source.ip=\"{victim_ip}\" — identify device")
-    print(f"  2. dataset=infoblox_dns_raw  | filter xdm.source.ip=\"{victim_ip}\" and xdm.network.dns.dns_response_code=\"NXDOMAIN\" | stats count — DGA storm")
-    print(f"  3. dataset=infoblox_dns_raw  | filter xdm.source.ip=\"{victim_ip}\" and xdm.network.dns.dns_response_code=\"NOERROR\" — resolving domain")
-    print(f"  4. Join step 3 resolve with firewall allowed connection to confirm C2 establishment")
+    print(f"  1. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" and xdm.event.type=\"DHCP\" — identify device")
+    print(f"  2. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" and xdm.network.dns.response_code=\"NXDOMAIN\" | comp count() — DGA storm")
+    print(f"  3. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" and xdm.network.dns.dns_question.name=\"{c2_domain_3}\" — the resolve")
+    print(f"  4. Join on the ANSWER: the firewall session in step 7 goes to {c2_domain_3}'s address")
 
 
 def run_device_compromise_scenario(all_modules, config):
@@ -2190,7 +2225,7 @@ def run_device_compromise_scenario(all_modules, config):
     Device Compromise (Full Lifecycle) — DHCP → DNS baseline → C2 attempts → detection.
 
     Story: Complete device compromise story from network join through C2 establishment.
-    Spans 4 XSIAM datasets: infoblox_dhcp_raw, infoblox_dns_raw, infoblox_threat_raw,
+    Spans: infoblox_infoblox_raw (DHCP, DNS, RPZ, Threat Protect),
     and one network firewall dataset.
 
     Hunt: Find device MAC in DHCP → find same IP in DNS NXDOMAIN storm → find same IP
@@ -2216,11 +2251,11 @@ def run_device_compromise_scenario(all_modules, config):
     if victim_info:
         victim_ip   = victim_info.get("ip", "192.168.1.60")
         victim_host = victim_info.get("hostname", "CORP-WS-002")
-        victim_mac  = f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
+        victim_mac  = host_mac(victim_host)
     else:
         victim_ip   = f"192.168.1.{random.randint(10, 200)}"
         victim_host = "CORP-WS-002"
-        victim_mac  = f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
+        victim_mac  = host_mac(victim_host)
 
     base_ctx = {"session_context": session_context}
     fw_names = ", ".join(m.NAME for m in fw_modules) if fw_modules else "none"
@@ -2228,20 +2263,17 @@ def run_device_compromise_scenario(all_modules, config):
     print(f"  Firewall modules: {fw_names}")
 
     try:
-        # STEP 1 — DHCP: device joins network
         print("\n[STEP 1] Infoblox DHCP: Device joins network (DHCP ACK)...")
         dhcp_log, dhcp_name = infoblox_module.generate_dhcp_ack(config, victim_ip, victim_mac, victim_host)
         process_and_send(dhcp_log, infoblox_module, config, dhcp_name)
         time.sleep(1)
 
-        # STEP 2 — Benign DNS: normal activity baseline
         print("[STEP 2] Infoblox DNS: Normal web browsing DNS query (baseline)...")
         benign_domain = random.choice(config.get('benign_domains', ['www.office365.com']))
         dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, benign_domain)
         process_and_send(dns_logs, infoblox_module, config, dns_name)
         time.sleep(1)
 
-        # STEP 3 — ALL firewalls: normal outbound web browsing (benign baseline)
         print(f"[STEP 3] All firewall modules: Normal outbound web browsing (benign baseline)...")
         fw_ctx = {**base_ctx, "src_ip": victim_ip}
         if fw_modules:
@@ -2257,7 +2289,6 @@ def run_device_compromise_scenario(all_modules, config):
             print("[STEP 3] No network firewall modules loaded — skipping.")
         time.sleep(1)
 
-        # STEP 4 — RPZ NXDOMAIN: first C2 attempt blocked at DNS
         print("[STEP 4] Infoblox DNS: RPZ NXDOMAIN — first C2 attempt blocked at DNS...")
         result = infoblox_module.generate_log(config, scenario_event="RPZ_BLOCK",
                                               context={**base_ctx, "src_ip": victim_ip})
@@ -2269,20 +2300,17 @@ def run_device_compromise_scenario(all_modules, config):
             process_and_send(log_content, infoblox_module, config, event_name)
         time.sleep(1)
 
-        # STEP 5 — ALL firewalls: URL/Security Intel block on second C2 domain
         print(f"[STEP 5] All firewall modules: URL/Security Intel block — second C2 attempt...")
         _send_to_all_fw(fw_modules, "THREAT_BLOCK", config,
                         {**base_ctx, "src_ip": victim_ip}, "[STEP 5]")
         time.sleep(1)
 
-        # STEP 6 — DNS NOERROR: third C2 domain resolves (not yet on any blocklist)
         print("[STEP 6] Infoblox DNS: Third C2 domain resolves (NOERROR — new infra)...")
         c2_domain = f"c2-infra-{random.randint(1000,9999)}.net"
         dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, c2_domain)
         process_and_send(dns_logs, infoblox_module, config, dns_name)
         time.sleep(1)
 
-        # STEP 7 — Threat Protect: post-connection CEF DROP (BloxOne detects C2 category)
         print("[STEP 7] Infoblox Threat Protect: Post-connection C2 category detection (CEF DROP)...")
         result = infoblox_module.generate_log(config, scenario_event="THREAT_PROTECT",
                                               context={**base_ctx, "src_ip": victim_ip})
@@ -2300,9 +2328,9 @@ def run_device_compromise_scenario(all_modules, config):
 
     print("\n--- Device Compromise Scenario Complete ---")
     print("\nHunt queries to run in XSIAM (pivot from threat-protect alert backward):")
-    print(f"  1. dataset=infoblox_threat_raw | filter xdm.source.ip=\"{victim_ip}\" — Threat Protect alert")
-    print(f"  2. dataset=infoblox_dhcp_raw   | filter xdm.source.ip=\"{victim_ip}\" — who is this device?")
-    print(f"  3. dataset=infoblox_dns_raw    | filter xdm.source.ip=\"{victim_ip}\" | sort _time — full DNS history")
+    print(f"  1. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" and xdm.event.type=\"Threat\" — Threat Protect alert")
+    print(f"  2. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" and xdm.event.type=\"DHCP\" — who is this device?")
+    print(f"  3. datamodel dataset=infoblox_infoblox_raw | filter xdm.source.ipv4=\"{victim_ip}\" | sort asc _time — full DNS history")
     print(f"  4. Correlate MAC from step 2 with other devices — did this MAC appear on multiple IPs?")
 
 
@@ -2358,7 +2386,7 @@ def run_gcp_cloud_pentest_scenario(modules, config):
             process_and_send(log_content, gcp_module, config, event_name)
         time.sleep(2)
 
-        print("[STEP 2] GCP: IAM privilege escalation (SetIamPolicy → roles/owner)...")
+        print("[STEP 2] GCP: IAM privilege escalation (SetIamPolicy -> roles/owner)...")
         result = gcp_module.generate_log(config, scenario_event="IAM_PRIVILEGE_ESCALATION", context=context)
         if isinstance(result, tuple):
             log_content, event_name = result
@@ -2425,7 +2453,7 @@ def run_gcp_cloud_pentest_scenario(modules, config):
     print("\n--- GCP Cloud Pentest Scenario Complete ---")
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. dataset=google_cloud_logging_raw | filter protoPayload.requestMetadata.callerIp=\"{attacker_ip}\"")
-    print(f"  2. Sequence: same principalEmail performs SetIamPolicy → CreateKey → UpdateSink → SetIamPolicy(GCS) within 15 min")
+    print(f"  2. Sequence: same principalEmail performs SetIamPolicy -> CreateKey -> UpdateSink -> SetIamPolicy(GCS) within 15 min")
     print(f"  3. Filter protoPayload.methodName contains \"setIamPolicy\" and resource.type=\"gcs_bucket\" — public bucket pivots")
 
 
@@ -2441,7 +2469,7 @@ def run_web_app_compromise_scenario(modules, config):
     Hunt: Find server IP appearing as *source* (not destination) in firewall outbound Allow
           events shortly after webshell_execution in apache_httpd_raw.
     """
-    print("\n--- Running 'Web Application Compromise → Server C2' Scenario ---")
+    print("\n--- Running 'Web Application Compromise -> Server C2' Scenario ---")
 
     httpd_module = modules.get("Apache httpd")
     fw_modules   = _collect_fw_modules(modules)
@@ -2520,7 +2548,7 @@ def run_web_app_compromise_scenario(modules, config):
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. dataset=apache_httpd_raw | filter src_ip=\"{attacker_ip}\" | sort _time")
     print(f"  2. Pivot: find server IP \"{server_ip}\" as *source* in firewall outbound Allow events (anomalous — servers don't initiate)")
-    print(f"  3. Sequence: apache webshell_execution → firewall server_outbound_http from same server IP within 5 min")
+    print(f"  3. Sequence: apache webshell_execution -> firewall server_outbound_http from same server IP within 5 min")
 
 
 def run_vpn_compromise_scenario(modules, config):
@@ -2536,7 +2564,7 @@ def run_vpn_compromise_scenario(modules, config):
     Hunt: Find same username in ASA vpn_bruteforce AND Okta impossible_travel within 30 min.
           Join on VPN-assigned IP across ASA VPN session logs → firewall SMB lateral events.
     """
-    print("\n--- Running 'VPN Compromise → Lateral Movement' Scenario ---")
+    print("\n--- Running 'VPN Compromise -> Lateral Movement' Scenario ---")
 
     asa_module  = modules.get("Cisco ASA Firewall")
     okta_module = modules.get("Okta SSO")
@@ -2635,11 +2663,11 @@ def run_vpn_compromise_scenario(modules, config):
         import traceback
         traceback.print_exc()
 
-    print("\n--- VPN Compromise → Lateral Movement Scenario Complete ---")
+    print("\n--- VPN Compromise -> Lateral Movement Scenario Complete ---")
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. dataset=cisco_asa_raw | filter xdm.source.user.username=\"{victim_user}\" and event_type in (\"vpn_bruteforce\",\"vpn_impossible_travel\")")
     print(f"  2. Pivot: find IP \"{vpn_inside_ip}\" (VPN-assigned) in firewall SMB lateral events")
-    print(f"  3. Correlate ASA VPN session for \"{victim_user}\" → Okta impossible_travel for same user within 30 min")
+    print(f"  3. Correlate ASA VPN session for \"{victim_user}\" -> Okta impossible_travel for same user within 30 min")
 
 
 def run_aitm_session_hijack_scenario(modules, config):
@@ -2657,7 +2685,7 @@ def run_aitm_session_hijack_scenario(modules, config):
           access key within 10 min. Find Okta user matching AWS principalEmail within session window.
     OOB Detections: Proofpoint phishing delivered; Okta impossible travel may fire.
     """
-    print("\n--- Running 'AiTM Session Hijack → Cloud Abuse' Scenario ---")
+    print("\n--- Running 'AiTM Session Hijack -> Cloud Abuse' Scenario ---")
 
     pp_module   = modules.get("Proofpoint Email Gateway")
     okta_module = modules.get("Okta SSO")
@@ -2786,10 +2814,10 @@ def run_aitm_session_hijack_scenario(modules, config):
         import traceback
         traceback.print_exc()
 
-    print("\n--- AiTM Session Hijack → Cloud Abuse Scenario Complete ---")
+    print("\n--- AiTM Session Hijack -> Cloud Abuse Scenario Complete ---")
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. dataset=okta_raw | filter user=\"{victim_user}\" and event_type in (\"aitm_phishing\",\"token_reuse\",\"session_roaming\") | sort _time")
-    print(f"  2. Correlate Okta session start IP → AWS API calls from same IP or access key within 10 min")
+    print(f"  2. Correlate Okta session start IP -> AWS API calls from same IP or access key within 10 min")
     print(f"  3. dataset=amazon_aws_raw | filter callerIp=\"{attacker_ip}\" and eventName in (\"AssumeRole\",\"DisableSecurityHub\")")
     print(f"  OOB: Okta aitm_phishing and impossible_travel may fire; all other steps need custom correlation rules.")
 
@@ -2941,7 +2969,7 @@ def run_ransomware_precursor_scenario(modules, config):
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. dataset=proofpoint_tap_raw | filter recipient=\"{victim_email}\" and disposition=\"delivered\"")
     print(f"  2. dataset=okta_raw | filter user=\"{victim_user}\" and event_type in (\"brute_force\",\"mfa_bypass\") | sort _time")
-    print(f"  3. Join victim IP \"{victim_ip}\" across firewall datasets: smb_share_enumeration → smb_rare_file_transfer → LARGE_EGRESS sequence")
+    print(f"  3. Join victim IP \"{victim_ip}\" across firewall datasets: smb_share_enumeration -> smb_rare_file_transfer -> LARGE_EGRESS sequence")
     print(f"  4. dataset=amazon_aws_raw | filter eventName in (\"StopConfigurationRecorder\",\"DeleteWebACL\") | same time window")
     print(f"  OOB: Proofpoint malware delivered; Okta brute_force / mfa_bypass may fire. All other steps need custom correlation rules.")
 
@@ -2995,12 +3023,12 @@ def run_domain_dominance_scenario(all_modules, config):
         return
 
     victim_user  = victim.get("username", victim_key)
-    default_dom  = (config.get("google_workspace_config", {}).get("domains") or ["examplecorp.com"])[0]
+    default_dom  = config.get("proofpoint_config", {}).get("internal_domain", "examplecorp.com")
     victim_email = victim.get("email") or f"{victim_user}@{default_dom}"
     victim_ip    = victim.get("ip")
     victim_host  = victim.get("hostname")
-    victim_mac   = victim.get("mac") or (
-        f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}")
+    victim_mac   = victim.get("mac") or host_mac(victim_host, victim.get("device_type"),
+                                                 victim.get("os_type"))
     attacker_ip  = _fresh_attacker_ip()
 
     # Single-victim session_context so EVERY Windows AD threat targets the SAME user+host
@@ -3025,7 +3053,7 @@ def run_domain_dominance_scenario(all_modules, config):
         # alerts can resolve to the same host/user as the AD alerts — the missing rung
         # that lets all stages fold into one incident.
         if ibx_module and victim_ip:
-            print("\n[ANCHOR] Infoblox: DHCP lease — device on network (binds IP ↔ host)...")
+            print("\n[ANCHOR] Infoblox: DHCP lease — device on network (binds IP <-> host)...")
             _emit(ibx_module.generate_log(config, scenario_event="DHCP_ACK",
                                           context={"src_ip": victim_ip, "client_mac": victim_mac,
                                                    "hostname": victim_host}),
@@ -3035,7 +3063,7 @@ def run_domain_dominance_scenario(all_modules, config):
         # BINDING — victim authenticates from their workstation IP (Windows 4624 type-3).
         # This single IP↔user event is what the IP-keyed DNS/SMB detections join against
         # to resolve the user, so they fold into the AD user's incident.
-        print("[BIND] Windows: victim network logon from workstation IP (IP ↔ user)...")
+        print("[BIND] Windows: victim network logon from workstation IP (IP <-> user)...")
         _emit(win_module.generate_log(config, scenario_event="NETWORK_LOGON",
                                       context={"session_context": victim_sc, "user_identity": victim_key,
                                                "src_ip": victim_ip}),
@@ -3067,13 +3095,11 @@ def run_domain_dominance_scenario(all_modules, config):
         else:
             print("[STEP 2] Infoblox module not loaded — skipping DNS recon.")
 
-        # STEP 3 — Credential access: Kerberoasting (RC4 service-ticket burst)
         print("[STEP 3] Windows: Kerberoasting — burst of service-ticket requests from the victim...")
         _emit(win_module.generate_log(config, scenario_event="MULTIPLE_SERVICE_TICKETS", context=win_ctx),
               win_module, "multiple_service_tickets")
         time.sleep(2)
 
-        # STEP 4 — Privilege escalation: DCSync
         print("[STEP 4] Windows: DCSync — directory replication rights abused...")
         _emit(win_module.generate_log(config, scenario_event="DCSYNC", context=win_ctx),
               win_module, "dcsync")
@@ -3103,9 +3129,9 @@ def run_domain_dominance_scenario(all_modules, config):
     print("\n--- Domain Dominance Scenario Complete ---")
     print("\nHunt queries to run in XSIAM:")
     print(f"  1. Timeline the victim across sources: user \"{victim_user}\" / host \"{victim_host}\" / IP \"{victim_ip}\"")
-    print(f"  2. dataset=microsoft_windows_raw | filter user \"{victim_user}\": Kerberoast(4769) → DCSync(4662) → delegation/priv-group")
+    print(f"  2. dataset=microsoft_windows_raw | filter user \"{victim_user}\": Kerberoast(4769) -> DCSync(4662) -> delegation/priv-group")
     print(f"  3. Correlate Infoblox client \"{victim_ip}\" (PTR sweep + zone transfer) with the AD activity on the same host")
-    print(f"  NOTE: Proofpoint↔AD linkage relies on the identity graph resolving {victim_email} ↔ AD user {victim_user}.")
+    print(f"  NOTE: Proofpoint<->AD linkage relies on the identity graph resolving {victim_email} <-> AD user {victim_user}.")
 
 
 def run_beaconing_implant_scenario(all_modules, config):
@@ -3143,12 +3169,15 @@ def run_beaconing_implant_scenario(all_modules, config):
 
     host_ip   = victim.get("ip")
     host_name = victim.get("hostname")
-    host_mac  = victim.get("mac") or (
-        f"00:50:56:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}")
+    host_nic  = victim.get("mac") or host_mac(victim.get("hostname"),
+                                              victim.get("device_type"), victim.get("os_type"))
     c2_ip     = _fresh_attacker_ip()
+    # One C2 identity for the whole story: name and address travel together.
+    c2_domain = random.choice(config.get('infoblox_threats', {}).get(
+        'malicious_domains', ['command-control-server.org']))
     victim_sc = {victim_key: session_context[victim_key]}
 
-    print(f"  Infected host: {host_name} ({host_ip})   C2: {c2_ip}")
+    print(f"  Infected host: {host_name} ({host_ip})   C2: {c2_domain} ({c2_ip})")
 
     def _emit(result, module, default_name):
         if not result:
@@ -3160,9 +3189,9 @@ def run_beaconing_implant_scenario(all_modules, config):
     try:
         # ANCHOR — DHCP lease binds host IP ↔ host name (seeds the identity graph).
         if ibx_module:
-            print("\n[ANCHOR] Infoblox: DHCP lease (binds IP ↔ host)...")
+            print("\n[ANCHOR] Infoblox: DHCP lease (binds IP <-> host)...")
             _emit(ibx_module.generate_log(config, scenario_event="DHCP_ACK",
-                                          context={"src_ip": host_ip, "client_mac": host_mac,
+                                          context={"src_ip": host_ip, "client_mac": host_nic,
                                                    "hostname": host_name}),
                   ibx_module, "DHCP_ACK")
             time.sleep(1)
@@ -3171,7 +3200,7 @@ def run_beaconing_implant_scenario(all_modules, config):
         # lets the IP-keyed DNS detections (C2 beacon, DNS tunnel) resolve the user, so every
         # implant alert carries both host IP and user (full enrichment).
         if win_module:
-            print("[BIND] Windows: host network logon from its IP (IP ↔ user)...")
+            print("[BIND] Windows: host network logon from its IP (IP <-> user)...")
             _emit(win_module.generate_log(config, scenario_event="NETWORK_LOGON",
                                           context={"session_context": victim_sc, "user_identity": victim_key,
                                                    "src_ip": host_ip}),
@@ -3180,7 +3209,7 @@ def run_beaconing_implant_scenario(all_modules, config):
 
         # STEP 0 — Initial execution: phishing doc spawns a hidden-PowerShell process tree.
         if win_module:
-            print("[STEP 0] Windows: initial execution — Office → PowerShell → LOLBin (4688 tree)...")
+            print("[STEP 0] Windows: initial execution — Office -> PowerShell -> LOLBin (4688 tree)...")
             _emit(win_module.generate_log(config, scenario_event="PROCESS_TREE",
                                           context={"session_context": victim_sc, "user_identity": victim_key,
                                                    "c2_ip": c2_ip}),
@@ -3188,10 +3217,14 @@ def run_beaconing_implant_scenario(all_modules, config):
             time.sleep(2)
 
         # STEP 1 — DNS C2 beacon: recurring queries to the C2 domain from the host.
+        # The beacon RESOLVES to c2_ip, the address steps 2b-4 carry traffic to, so
+        # the DNS name and every later session describe one C2. It used to query a
+        # random blocked domain (NXDOMAIN) unrelated to c2_ip.
         if ibx_module:
-            print("[STEP 1] Infoblox: DNS C2 beacon (recurring domain queries)...")
+            print(f"[STEP 1] Infoblox: DNS C2 beacon — {c2_domain} -> {c2_ip}...")
             _emit(ibx_module.generate_log(config, scenario_event="C2_BEACON",
-                                          context={"src_ip": host_ip}),
+                                          context={"src_ip": host_ip,
+                                                   "domain": c2_domain, "dst_ip": c2_ip}),
                   ibx_module, "C2_BEACON")
             time.sleep(2)
 
@@ -3207,7 +3240,8 @@ def run_beaconing_implant_scenario(all_modules, config):
         if zs_module:
             print("[STEP 2b] Zscaler: web-layer C2 beacon (periodic HTTP callbacks)...")
             _emit(zs_module.generate_log(config, scenario_event="web_c2_beacon",
-                                         context={"session_context": victim_sc, "src_ip": host_ip}),
+                                         context={"session_context": victim_sc, "src_ip": host_ip,
+                                                  "domain": c2_domain, "dst_ip": c2_ip}),
                   zs_module, "web_c2_beacon")
             time.sleep(2)
 
@@ -3221,9 +3255,12 @@ def run_beaconing_implant_scenario(all_modules, config):
 
         # STEP 4 — Periodic outbound to the C2 IP across the perimeter firewalls.
         if fw_modules:
-            print("[STEP 4] Firewalls: periodic outbound to C2...")
-            _send_to_all_fw(fw_modules, "server_outbound_http", config,
-                            {"src_ip": host_ip, "dst_ip": c2_ip}, "[STEP 4]")
+            print(f"[STEP 4] Firewalls: periodic outbound to {c2_domain} ({c2_ip})...")
+            # C2_EGRESS (not server_outbound_http): it honours the pinned domain and
+            # address, so these sessions go to the host step 1 resolved.
+            _send_to_all_fw(fw_modules, "C2_EGRESS", config,
+                            {"src_ip": host_ip, "hostname": host_name, "user": victim_key,
+                             "domain": c2_domain, "dst_ip": c2_ip}, "[STEP 4]")
             time.sleep(2)
 
         # STEP 5 — Persistence: implant installs an auto-start service on the host (4697).
@@ -3259,7 +3296,7 @@ def run_server_breach_cloud_scenario(all_modules, config):
     key off it. The cloud stage links via the instance role (server↔role); the cross-tier
     merge lands once XSIAM identity unification ships.
     """
-    print("\n--- Running 'Server Breach → Cloud Takeover' Scenario ---")
+    print("\n--- Running 'Server Breach -> Cloud Takeover' Scenario ---")
 
     httpd_module = all_modules.get("Apache httpd")
     ibx_module   = all_modules.get("Infoblox NIOS")
@@ -3291,21 +3328,18 @@ def run_server_breach_cloud_scenario(all_modules, config):
             process_and_send(content, module, config, name)
 
     try:
-        # STEP 1 — Recon: attacker sweeps the web server (404 burst).
         print("\n[STEP 1] Apache: attacker reconnaissance scan against the web server...")
         _emit(httpd_module.generate_log(config, scenario_event="recon_scan",
                                         context={"session_context": session_context, "src_ip": attacker_ip}),
               httpd_module, "recon_scan")
         time.sleep(2)
 
-        # STEP 2 — Web-shell upload (POST to an upload handler).
         print("[STEP 2] Apache: web-shell upload (POST to upload handler)...")
         _emit(httpd_module.generate_log(config, scenario_event="webshell_execution",
                                         context={"session_context": session_context, "src_ip": attacker_ip}),
               httpd_module, "webshell_execution")
         time.sleep(2)
 
-        # STEP 3 — Command execution via the web shell (SQL/cmd payloads).
         print("[STEP 3] Apache: command execution via web shell (malicious payloads)...")
         _emit(httpd_module.generate_log(config, scenario_event="malicious_payload",
                                         context={"session_context": session_context, "src_ip": attacker_ip}),
@@ -3334,30 +3368,23 @@ def run_server_breach_cloud_scenario(all_modules, config):
                                           context={"session_context": session_context,
                                                    "ip_address": attacker_ip}),
                   aws_module, "IMDS_CREDENTIAL_THEFT")
-            # GuardDuty corroboration: instance-role credentials used from outside AWS.
-            _emit_guardduty(all_modules, config,
-                            {"session_context": session_context, "ip_address": attacker_ip},
-                            "GD_INSTANCE_CRED_EXFIL")
             time.sleep(2)
 
         # STEP 7 — Cloud exfil: the stolen EC2-role credentials bulk-read + exfil S3.
         if aws_module:
-            print("[STEP 7] AWS: EC2-role S3 data exfiltration (ListBuckets → bulk GetObject)...")
+            print("[STEP 7] AWS: EC2-role S3 data exfiltration (ListBuckets -> bulk GetObject)...")
             _emit(aws_module.generate_log(config, scenario_event="S3_READ_EXFIL_CHAIN",
                                           context={"session_context": session_context,
                                                    "ip_address": attacker_ip}),
                   aws_module, "S3_READ_EXFIL_CHAIN")
-            _emit_guardduty(all_modules, config,
-                            {"session_context": session_context, "ip_address": attacker_ip},
-                            "GD_S3_EXFIL")
 
     except Exception as e:
         print(f"\nAn error occurred during scenario execution: {e}")
         import traceback
         traceback.print_exc()
 
-    print("\n--- Server Breach → Cloud Takeover Scenario Complete ---")
-    print(f"  Spine (on-prem): web server {server_ip} — Apache attack → reverse shell → DNS exfil group by server IP.")
+    print("\n--- Server Breach -> Cloud Takeover Scenario Complete ---")
+    print(f"  Spine (on-prem): web server {server_ip} — Apache attack -> reverse shell -> DNS exfil group by server IP.")
     print(f"  Cloud stage (S3 exfil) links via the instance role; cross-tier merge awaits XSIAM identity unification.")
 
 
@@ -3405,24 +3432,11 @@ def run_cloud_ransomware_scenario(all_modules, config):
         ("STEP 7", "Impact: destroy KMS keys (DisableKey + ScheduleKeyDeletion)",  "KMS_KEY_DESTRUCTION"),
     ]
 
-    # Corroborating GuardDuty finding per CloudTrail stage (same principal/IP pivot).
-    _gd_for_stage = {
-        "CONSOLE_LOGIN_BRUTE_FORCE": "GD_MALICIOUS_IP",
-        "ATTACH_ADMIN_POLICY":       "GD_ADMIN_PRIVESC",
-        "STOP_CLOUDTRAIL":           "GD_CLOUDTRAIL_DISABLED",
-        "DISABLE_S3_LOGGING":        "GD_S3_LOGGING_DISABLED",
-        "S3_READ_EXFIL_CHAIN":       "GD_S3_EXFIL",
-        "S3_RANSOMWARE_ENCRYPT":     "GD_S3_IMPACT",
-    }
-
     try:
         for label, desc, ev in stages:
             print(f"[{label}] AWS: {desc}...")
             _emit(aws_module.generate_log(config, scenario_event=ev, context=aws_ctx),
                   aws_module, ev)
-            gd_ev = _gd_for_stage.get(ev)
-            if gd_ev:
-                _emit_guardduty(all_modules, config, aws_ctx, gd_ev)
             time.sleep(2)
     except Exception as e:
         print(f"\nAn error occurred during scenario execution: {e}")
@@ -3430,13 +3444,16 @@ def run_cloud_ransomware_scenario(all_modules, config):
         traceback.print_exc()
     finally:
         # Deliver the batched CloudTrail objects as one S3 upload per run.
+        # If this raises, every event of the run is stranded in the in-memory
+        # buffer and never reaches the tenant -- do not swallow the reason.
         try:
             flush_s3_batch()
-        except Exception:
-            pass
+        except Exception as exc:
+            _tprint(f"[flush] S3 batch flush FAILED — scenario events not "
+                    f"delivered: {type(exc).__name__}: {exc}")
 
     print("\n--- Cloud Ransomware Scenario Complete ---")
-    print(f"  Chain: brute force → admin policy → stop CloudTrail → disable S3 logging → exfil → encrypt+ransom.")
+    print(f"  Chain: brute force -> admin policy -> stop CloudTrail -> disable S3 logging -> exfil -> encrypt+ransom.")
     print(f"  Detects: AWS console brute force, defense-evasion (StopLogging), S3 exfil, 'Suspicious objects encryption in an AWS bucket'.")
 
 
@@ -3517,7 +3534,7 @@ def run_perimeter_intrusion_scenario(all_modules, config):
         traceback.print_exc()
 
     print("\n--- Perimeter Intrusion Scenario Complete ---")
-    print(f"  Chain: port scan → denied inbound flood → VPN brute force → web exploit, from attacker {attacker_ip}.")
+    print(f"  Chain: port scan -> denied inbound flood -> VPN brute force -> web exploit, from attacker {attacker_ip}.")
     print(f"  Detects: port scan, high-volume denied inbound, VPN brute force, Apache Log4Shell/injection.")
 
 
@@ -3529,7 +3546,7 @@ def run_identity_attack_cloud_scenario(all_modules, config):
     exfiltrates. Spine: the victim username, carried from Okta into the AWS SAML session —
     pre-staging the exact Okta↔AWS link the identity graph will resolve.
     """
-    print("\n--- Running 'Identity Attack → Cloud' Scenario ---")
+    print("\n--- Running 'Identity Attack -> Cloud' Scenario ---")
 
     okta_module = all_modules.get("Okta SSO")
     aws_module  = all_modules.get("aws")
@@ -3571,36 +3588,29 @@ def run_identity_attack_cloud_scenario(all_modules, config):
             process_and_send(content, module, config, name)
 
     try:
-        # STEP 1 — MFA fatigue: attacker spams push prompts at the victim.
         print("\n[STEP 1] Okta: MFA-fatigue push bombing against the victim...")
         _emit(okta_module.generate_log(config, scenario_event="mfa_bombing", context=okta_ctx),
               okta_module, "mfa_bombing")
         time.sleep(2)
 
-        # STEP 2 — Account takeover: successful login from a Tor exit node.
         print("[STEP 2] Okta: account takeover — login from a Tor exit node...")
         _emit(okta_module.generate_log(config, scenario_event="tor_login", context=okta_ctx),
               okta_module, "tor_login")
         time.sleep(2)
 
-        # STEP 3 — Federation: the compromised identity assumes an AWS role via SAML.
         print("[STEP 3] AWS: AssumeRoleWithSAML — Okta identity federates into AWS...")
         _emit(aws_module.generate_log(config, scenario_event="ASSUME_ROLE_WITH_SAML", context=aws_ctx),
               aws_module, "ASSUME_ROLE_WITH_SAML")
         time.sleep(2)
 
-        # STEP 4 — Cloud privilege escalation.
         print("[STEP 4] AWS: privilege escalation — attach AdministratorAccess...")
         _emit(aws_module.generate_log(config, scenario_event="ATTACH_ADMIN_POLICY", context=aws_ctx),
               aws_module, "ATTACH_ADMIN_POLICY")
-        _emit_guardduty(all_modules, config, aws_ctx, "GD_ADMIN_PRIVESC")
         time.sleep(2)
 
-        # STEP 5 — Cloud data exfiltration as the federated session.
         print("[STEP 5] AWS: bulk S3 read + exfil as the federated identity...")
         _emit(aws_module.generate_log(config, scenario_event="S3_READ_EXFIL_CHAIN", context=aws_ctx),
               aws_module, "S3_READ_EXFIL_CHAIN")
-        _emit_guardduty(all_modules, config, aws_ctx, "GD_S3_EXFIL")
 
     except Exception as e:
         print(f"\nAn error occurred during scenario execution: {e}")
@@ -3609,13 +3619,14 @@ def run_identity_attack_cloud_scenario(all_modules, config):
     finally:
         try:
             flush_s3_batch()
-        except Exception:
-            pass
+        except Exception as exc:
+            _tprint(f"[flush] S3 batch flush FAILED — scenario events not "
+                    f"delivered: {type(exc).__name__}: {exc}")
 
-    print("\n--- Identity Attack → Cloud Scenario Complete ---")
-    print(f"  Spine: Okta user '{victim_user}' → AWS SAML roleSessionName '{victim_user}'.")
+    print("\n--- Identity Attack -> Cloud Scenario Complete ---")
+    print(f"  Spine: Okta user '{victim_user}' -> AWS SAML roleSessionName '{victim_user}'.")
     print(f"  Detects: Okta MFA bombing / Tor login (ThreatInsight), AWS admin-policy grant, S3 exfil.")
-    print(f"  Cross-identity (Okta↔AWS) shares the username now; full merge lands with XSIAM identity unification.")
+    print(f"  Cross-identity (Okta<->AWS) shares the username now; full merge lands with XSIAM identity unification.")
 
 
 def get_scenarios():
@@ -3624,8 +3635,6 @@ def get_scenarios():
     Module-level so both the CLI menu (select_scenario_mode) and the Web-UI
     training engine (modules/training_engine.py) resolve scenarios by the same id.
     """
-    # NOTE: Scenario "Compromised Account & Data Exfiltration via Google Drive" is disabled
-    # until the Google Workspace module is restored. The function remains in the codebase.
     scenarios = {
         # ── High-value multi-module scenarios (no Infoblox required) ──────────
         "1": {
@@ -3722,8 +3731,41 @@ def get_scenarios():
             "name": "Identity Attack → Cloud (Okta MFA-fatigue + Tor login → AWS SAML federation → privesc → exfil) [identity-keyed]",
             "func": run_identity_attack_cloud_scenario
         },
+        # ── XDR attack orchestration (real Atomic on a Cortex-agent box + aligned synthetic net) ──
+        "24": {
+            "name": "XDR Orchestration — FULL kill-chain: recon sweep → C2 (DNS/tunnel/web) → persistence x2 [purple-team, requires target box]",
+            "func": _run_xdr_reference_story
+        },
+        "25": {
+            "name": "XDR Orchestration — QUICK: recon + aligned C2 beacon (fast, small run) [purple-team, requires target box]",
+            "func": _run_xdr_quick_story
+        },
+        "26": {
+            "name": "XDR Orchestration — CREDENTIAL THEFT: LOLBin ingress → LSASS dump → creds-in-files → evasion → staging → HTTP exfil [purple-team, requires target box]",
+            "func": _run_xdr_intrusion_story
+        },
     }
     return scenarios
+
+
+def _run_xdr_reference_story(all_modules, config):
+    """Thin adapter so get_scenarios stays import-light: the xdr_orchestration
+    package (and pywinrm) is imported only when this scenario is actually run."""
+    from modules.xdr_orchestration import run_reference_story
+    return run_reference_story(all_modules, config)
+
+
+def _run_xdr_quick_story(all_modules, config):
+    """QUICK XDR story — short, small-footprint purple-team run."""
+    from modules.xdr_orchestration import run_quick_story
+    return run_quick_story(all_modules, config)
+
+
+def _run_xdr_intrusion_story(all_modules, config):
+    """CREDENTIAL-THEFT XDR story — a different endpoint tactic spread (credential
+    access / defense evasion / staging / exfil) so XDR sees more than discovery."""
+    from modules.xdr_orchestration import run_intrusion_story
+    return run_intrusion_story(all_modules, config)
 
 
 def select_scenario_mode(all_modules, config):
@@ -3798,6 +3840,23 @@ def main():
     live_tor_nodes = fetch_tor_exit_nodes()
     if live_tor_nodes:
         config['tor_exit_nodes'] = live_tor_nodes
+
+    # --- Cloud identifier pools: grow them before any module reads one ---
+    # aws_config shipped ~20 pools of 26 ids, so the same 26 instances were started,
+    # stopped and snapshotted all month and a "new resource" detection had 26 things
+    # to learn. Expanded here rather than at ~100 call sites; must run AFTER the
+    # PLACEHOLDER_* substitution above so generated ARNs carry the real account id.
+    from modules import cloud_ids
+    cloud_ids.expand_pools(config)
+
+    # --- Long-tail domain corpus for rare benign DNS / web destinations ---
+    from modules import domain_corpus
+    domain_corpus.load(config)
+
+    # --- Shared name->address resolution (Infoblox answers == firewall targets) ---
+    # Must load BEFORE the modules so every generator resolves from one table.
+    from modules import resolver
+    resolver.load(config)
 
     all_modules = load_modules()
 

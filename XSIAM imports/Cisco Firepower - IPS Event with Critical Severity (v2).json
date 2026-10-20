@@ -1,0 +1,57 @@
+[
+ {
+  "rule_id": 1677,
+  "name": "Cisco Firepower — IPS Event with Critical Severity (v2)",
+  "alert_name": "Cisco Firepower — IPS Event with Critical Severity (v2)",
+  "description": "Snort/FTD intrusion event at CEF severity >= 9. Replaces rule 72, which filtered cefName = \"Intrusion Detected\" - a value neither Cisco nor this tenant produces. FTD CEF carries the eStreamer eNcore name \"INTRUSION EVENT\". Direction corrected: src is the external attacker, dst the internal victim.",
+  "xql_query": "dataset = cisco_firepower_raw\n| filter cefName = \"INTRUSION EVENT\" and to_integer(cefSeverity) >= 9\n| alter attacker_ip = src, attacker_port = spt, victim_ip = dst, victim_port = dpt\n| alter signature = cs2, ips_policy = cs5, ips_rule_id = cs6, threat_category = cat\n",
+  "severity": "SEV_050_CRITICAL",
+  "alert_category": "DISCOVERY",
+  "mitre_defs": {
+   "TA0007 - Discovery": [
+    "T1046 - Network Service Discovery"
+   ]
+  },
+  "alert_fields": {
+   "action_remote_ip": "attacker_ip",
+   "action_remote_port": "attacker_port",
+   "action_local_ip": "victim_ip",
+   "action_local_port": "victim_port",
+   "xdm_application_protocol": "app",
+   "agent_hostname": "dvchost",
+   "eventid": "cefDeviceEventClassId",
+   "severity": "cefSeverity",
+   "eventaction": "act",
+   "statusreason": "reason",
+   "policyactions": "reason",
+   "policydetails": "signature",
+   "alert_category": "threat_category",
+   "fw_interface_from": "cs3",
+   "fw_interface_to": "cs4",
+   "user_agent": "requestClientApplication"
+  },
+  "execution_mode": "SCHEDULED",
+  "search_window": "10 minutes",
+  "simple_schedule": "10 minutes",
+  "crontab": "*/10 * * * *",
+  "timezone": "America/New_York",
+  "suppression_enabled": true,
+  "suppression_duration": "1 hours",
+  "suppression_fields": [
+   "attacker_ip",
+   "victim_ip"
+  ],
+  "is_enabled": true,
+  "alert_type": null,
+  "alert_description": null,
+  "alert_domain": "DOMAIN_SECURITY",
+  "dataset": "alerts",
+  "user_defined_severity": null,
+  "user_defined_category": null,
+  "investigation_query_link": "",
+  "drilldown_query_timeframe": "ALERT",
+  "mapping_strategy": "CUSTOM",
+  "action": "ALERTS",
+  "lookup_mapping": []
+ }
+]

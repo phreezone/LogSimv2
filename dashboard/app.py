@@ -109,14 +109,20 @@ def _run_scenario_and_flush(func, modules, cfg, run_id=None):
             _update_run(run_id, status="error", error=str(e))
         raise
     finally:
+        # A failed final flush strands the whole batch in the in-memory buffer --
+        # the events are simply never delivered, and swallowing the reason here
+        # is what makes that look like "the tenant didn't ingest" rather than
+        # "the flush raised".  Runs once per scenario, so log it unconditionally.
         try:
             flush_s3_batch()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[flush] S3 batch flush FAILED — events not delivered: "
+                  f"{type(exc).__name__}: {exc}")
         try:
             _flush_wec_batch(cfg)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[flush] WEC batch flush FAILED — events not delivered: "
+                  f"{type(exc).__name__}: {exc}")
         if run_id and _RUNS.get(run_id, {}).get("status") != "error":
             _update_run(run_id, status="done", emitted=collector.manifest() if collector else None)
         elif run_id:
@@ -248,23 +254,36 @@ def _require_api_key():
 # external IPs while still labelling the event vpn_tor_login/tor_connection.  XSIAM
 # then has nothing to match and the Tor detections go quiet with no error anywhere.
 # That exact silent failure is why this is reported as a hard health ERROR.
-TOR_FETCH_STATE: dict = {"ok": False, "count": 0, "error": "not attempted"}
+TOR_FETCH_STATE: dict = {"ok": False, "count": 0, "error": "not attempted", "geo": {}}
 
 
 def _fetch_tor_exit_nodes() -> list[dict]:
     """Fetch the current Tor exit node list from the Tor Project bulk-exit URL.
-    Returns a list of {ip, country} dicts on success, or empty list on failure."""
+
+    Returns a list of {ip, country, asn, isp, is_proxy, proxy_type} dicts on
+    success, or empty list on failure.  The bulk list is IPs only; country/ASN
+    come from Onionoo (see modules.tor_enrichment) so Tor-sourced events carry
+    the real country and hosting AS a GeoIP-backed vendor would report.
+    """
     _TOR_BULK_URL = "https://check.torproject.org/torbulkexitlist"
     try:
         import urllib.request
         with urllib.request.urlopen(_TOR_BULK_URL, timeout=10) as resp:
             ips = resp.read().decode("utf-8").strip().splitlines()
-        nodes = [{"ip": ip.strip(), "country": "Unknown"} for ip in ips if ip.strip()]
+        nodes = [{"ip": ip.strip()} for ip in ips if ip.strip()]
+        from modules.tor_enrichment import enrich_tor_nodes
+        nodes, geo_stats = enrich_tor_nodes(nodes)
         print(f"[dashboard] Fetched {len(nodes)} live Tor exit nodes from torproject.org")
-        TOR_FETCH_STATE.update(ok=True, count=len(nodes), error=None)
+        if geo_stats["onionoo"]:
+            print(f"[dashboard] Onionoo enriched {geo_stats['resolved']}/{geo_stats['total']} "
+                  f"({geo_stats['join_rate']}%) with country + AS")
+        else:
+            print("[dashboard] WARNING: Onionoo enrichment unavailable — Tor events will "
+                  "carry a null country and no ASN (geolocation will be null, not 0,0).")
+        TOR_FETCH_STATE.update(ok=True, count=len(nodes), error=None, geo=geo_stats)
         return nodes
     except Exception as exc:
-        TOR_FETCH_STATE.update(ok=False, count=0, error=str(exc))
+        TOR_FETCH_STATE.update(ok=False, count=0, error=str(exc), geo={})
         print("=" * 78)
         print(f"[dashboard] ERROR: Could not fetch live Tor exit nodes ({exc}).")
         print("            config.json ships NO static fallback, so the Tor list is EMPTY.")
@@ -291,6 +310,21 @@ if _live_tor:
 # the old static list did not.
 if not CONFIG.get("_static_tor_exit_nodes"):
     CONFIG["_static_tor_exit_nodes"] = copy.deepcopy(CONFIG.get("tor_exit_nodes", []))
+
+# ── Long-tail domain corpus ───────────────────────────────────────────────────
+# Real registrable domains (Tranco) for the rare tail of benign DNS and web
+# traffic, so "rare" comes from cardinality rather than a weight on a 26-entry
+# pool that UEBA eventually learns as normal. Loaded once per process, so
+# Training runs in this process all draw from the same tail. Soft-fails to the
+# config pool; /api/health reports it.
+from modules import domain_corpus
+from modules import threat_catalog
+domain_corpus.load(CONFIG)
+
+# One name->address table shared by Infoblox and the firewall modules, so a DNS
+# answer and the connection that follows it carry the same destination.
+from modules import resolver
+resolver.load(CONFIG)
 
 THREAT_LEVELS = list(CONFIG.get("threat_generation_levels", {
     "Benign Traffic Only": 86400,
@@ -324,6 +358,18 @@ def _load_modules():
     return modules
 
 MODULES = _load_modules()
+
+# ── Expand low-cardinality cloud pools (same as log_simulator CLI main) ──────
+# Without this the dashboard generates from the static ~26-value config pools, so
+# AWS/GCP identifiers (foreign accounts, buckets, snapshots, KMS keys, ...) repeat and
+# get learned as "known" by the tenant -- which silences every "unknown account / not
+# seen in 30 days / first-time" analytic. The CLI main expanded these; the dashboard
+# (the path the simulator is actually run from) did not, so novelty detectors saturated.
+try:
+    from modules import cloud_ids as _cloud_ids
+    _cloud_ids.expand_pools(CONFIG, verbose=False)
+except Exception as _e:
+    print(f"[dashboard] Could not expand cloud pools: {_e}")
 
 # ── Build session context (stable user→IP map, same as parallel mode) ────────
 try:
@@ -381,6 +427,11 @@ class ModuleState:
                 self.threat_names = set(fn())  # type: ignore[arg-type]
             except Exception:
                 pass
+        # The subset offered for on-demand firing: threats tied to an XSIAM analytic.
+        try:
+            self.on_demand: list = threat_catalog.analytic_threats(module)
+        except Exception:
+            self.on_demand = []
 
     # ── Metric helpers ────────────────────────────────────────────────────────
 
@@ -433,6 +484,7 @@ class ModuleState:
             "last_threat": self.last_threat,
             "event_interval": self.event_interval,
             "threat_breakdown": dict(self._threat_counts),
+            "on_demand_threats": len(self.on_demand),
         }
 
 
@@ -537,10 +589,8 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
                             m["threats"] += 1
                         _baduser_state["metrics"][metrics_key] = m
                     for msg in valid:
-                        try:
-                            _SEND_QUEUE.put_nowait((msg, module, config, event_name))
-                        except _queue.Full:
-                            pass
+                        if not _enqueue_send((msg, module, config, event_name), stop_event):
+                            break
 
         except Exception as exc:
             print(f"[bad-user][{module.NAME}] worker error: {exc}")
@@ -670,12 +720,91 @@ def _stop_baduser():
 # sent synchronously via HTTP.  The send queue lets the worker record metrics
 # instantly while a pool of sender threads handles the slow network I/O.
 
-_SEND_QUEUE: _queue.Queue = _queue.Queue(maxsize=5000)
+# A buffer between module workers and the sender pool, not a throughput cap: when it
+# is full the producing module WAITS (_enqueue_send) instead of dropping. Before
+# 2026-10-06 a full queue dropped events after they had already been counted, so the
+# dashboard over-reported delivery. SEND_QUEUE_SIZE resizes it.
+_SEND_QUEUE: _queue.Queue = _queue.Queue(maxsize=max(1, int(os.getenv("SEND_QUEUE_SIZE", "5000"))))
+
+
+_ENQUEUE_MAX_WAIT_S = float(os.getenv("SEND_ENQUEUE_MAX_WAIT_S", "30"))
+
+
+def _enqueue_send(item, stop_event=None):
+    """Hand one event to the sender pool. Apply backpressure (wait for room) up to
+    _ENQUEUE_MAX_WAIT_S, then DROP (counted) and move on.
+
+    The wait must be bounded. An earlier version blocked forever on a full queue, so a
+    single stalled transport -- the shared sender pool drains S3, HTTP and syslog, and a
+    slow/unreachable collector or a retry storm can keep it full -- froze EVERY module on
+    this pool at once (observed 2026-10-08: AWS, Okta and all syslog ingestion stopped
+    together while Windows, which has its own WEC path, kept running). Degrading to lossy
+    (drop + count) keeps generation alive; a permanent freeze does not.
+    Returns False only if the producer is being stopped."""
+    waited = 0.0
+    while True:
+        try:
+            _SEND_QUEUE.put(item, timeout=1.0)
+            return True
+        except _queue.Full:
+            if stop_event is not None and stop_event.is_set():
+                return False
+            waited += 1.0
+            if waited >= _ENQUEUE_MAX_WAIT_S:
+                _note_queue_drop()
+                return True
 _SEND_WORKERS_STARTED = False
 _SEND_WORKERS_LOCK = threading.Lock()
 # Continuous module streaming + Bad User forward through this pool. More workers = higher
 # sustained events/sec (each now reuses pooled keep-alive HTTP connections). Tunable via env.
 _SEND_WORKER_COUNT = max(1, int(os.getenv("SEND_WORKERS", "8")))
+
+# Delivery failures used to be swallowed whole: a send that raised, or an event
+# dropped because the queue was full, produced no counter, no log and no health
+# signal.  Metrics are recorded by the module worker BEFORE the event reaches
+# this queue, so a silent drop also made the dashboard over-report what was
+# actually delivered.  These counters are surfaced by _run_health_checks().
+_DELIVERY_STATS = {
+    "send_failures": 0, "last_send_error": None, "last_send_error_ts": None,
+    "queue_drops": 0, "last_drop_ts": None,
+}
+_DELIVERY_LOCK = threading.Lock()
+_LAST_DELIVERY_WARN = {"send": 0.0, "drop": 0.0}
+
+
+def _note_queue_drop():
+    """Count an event dropped after the bounded backpressure wait in _enqueue_send.
+    A non-zero count means a transport is stalled and generation is shedding load to
+    stay alive -- investigate the slow collector, do not treat it as normal."""
+    now = time.time()
+    with _DELIVERY_LOCK:
+        _DELIVERY_STATS["queue_drops"] += 1
+        _DELIVERY_STATS["last_drop_ts"] = now
+        total = _DELIVERY_STATS["queue_drops"]
+        due = now - _LAST_DELIVERY_WARN["drop"] >= _DELIVERY_WARN_EVERY_S
+        if due:
+            _LAST_DELIVERY_WARN["drop"] = now
+    if due:
+        print(f"[send] queue full > {_ENQUEUE_MAX_WAIT_S:.0f}s — dropped {total} event(s) "
+              f"to keep generation alive; a transport/collector is stalled")
+_DELIVERY_WARN_EVERY_S = 30.0
+
+
+def _note_send_failure(exc):
+    """Count a failed send and warn at most once per _DELIVERY_WARN_EVERY_S."""
+    now = time.time()
+    with _DELIVERY_LOCK:
+        _DELIVERY_STATS["send_failures"] += 1
+        _DELIVERY_STATS["last_send_error"] = f"{type(exc).__name__}: {exc}"[:200]
+        _DELIVERY_STATS["last_send_error_ts"] = now
+        total = _DELIVERY_STATS["send_failures"]
+        due = now - _LAST_DELIVERY_WARN["send"] >= _DELIVERY_WARN_EVERY_S
+        if due:
+            _LAST_DELIVERY_WARN["send"] = now
+    if due:
+        print(f"[send] FAILED ({total} total): {type(exc).__name__}: {exc}")
+
+
 
 
 def _send_worker():
@@ -687,10 +816,13 @@ def _send_worker():
             msg, module, config, event_name = _SEND_QUEUE.get()
             try:
                 process_and_send(msg, module, config, event_name)
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as exc:
+                _note_send_failure(exc)
+        except Exception as exc:
+            # The queue get itself failed -- keep the worker alive, but do not
+            # let the reason vanish.
+            _note_send_failure(exc)
+            time.sleep(0.5)
 
 
 def _ensure_send_workers(count=None):
@@ -727,7 +859,10 @@ def _module_worker(state: ModuleState, config: dict):
     # makes the very first generate_log call always fire a threat (since
     # time.time() - 0 >> any interval).  Reset it to now so the module waits
     # the correct interval before the first threat, matching the selected level.
-    if hasattr(state.module, "last_threat_event_time"):
+    # Only when the module has no timer yet (0 at import, or after a training reset):
+    # resetting it on every start meant a stop/start pushed the next threat a full
+    # interval out (30 min at High) no matter when the last one fired.
+    if hasattr(state.module, "last_threat_event_time") and not state.module.last_threat_event_time:
         state.module.last_threat_event_time = time.time()
 
     while not state._stop_event.is_set():
@@ -736,6 +871,10 @@ def _module_worker(state: ModuleState, config: dict):
         benign_only   = (current_level == "Benign Traffic Only")
         cycle_start   = time.time()
         try:
+            # Hold generation while this module's transport is backed up (WEC today),
+            # so a slow broker slows Windows only -- never the shared senders.
+            from log_simulator import wait_for_transport
+            wait_for_transport(state.module, config, state._stop_event)
             result = state.module.generate_log(
                 config=config,
                 threat_level=current_level,
@@ -754,10 +893,9 @@ def _module_worker(state: ModuleState, config: dict):
                 if valid:
                     state.record_log(event_name, log_count=len(valid))
                     for msg in valid:
-                        try:
-                            _SEND_QUEUE.put_nowait((msg, state.module, config, event_name))
-                        except _queue.Full:
-                            pass  # drop if send queue is backed up
+                        if not _enqueue_send((msg, state.module, config, event_name),
+                                             state._stop_event):
+                            break
 
         except Exception as exc:
             state.status = "error"
@@ -946,9 +1084,12 @@ def api_get_threats(name: str):
     state = MODULE_STATES.get(name)
     if not state:
         return jsonify({"error": f"Module '{name}' not found"}), 404
-    fn = getattr(state.module, "get_threat_names", None)
-    threats = sorted(fn()) if callable(fn) else []  # type: ignore[arg-type]
-    return jsonify({"module": name, "threats": threats})
+    # Only threats tied to an XSIAM analytic are offered on demand; every threat still
+    # runs in long-running sessions. `threats` stays a list of event names (the MCP
+    # contract); `options` adds the analytic each one targets, for the dropdown label.
+    options = sorted(state.on_demand, key=lambda t: (t["alert"].lower(), t["event"].lower()))
+    return jsonify({"module": name, "threats": [t["event"] for t in options],
+                    "options": options})
 
 
 @app.post("/api/modules/<name>/fire")
@@ -960,6 +1101,13 @@ def api_fire_threat(name: str):
     event_name = body.get("event")
     if not event_name:
         return jsonify({"error": "event name required"}), 400
+    resolved = threat_catalog.resolve_on_demand(state.module, event_name)
+    if not resolved:
+        return jsonify({"error": f"'{event_name}' is not tied to an XSIAM analytics alert, "
+                                 "so it is not offered on demand; it still runs in "
+                                 "long-running sessions. See /threats for the valid events.",
+                        "on_demand": False}), 400
+    event_name, target_alert = resolved
     process_and_send = _get_process_and_send()
     cfg = copy.deepcopy(CONFIG)
     context = {"session_context": SESSION_CONTEXT}
@@ -988,9 +1136,11 @@ def api_fire_threat(name: str):
         try:
             from log_simulator import _flush_wec_batch
             _flush_wec_batch(cfg)
-        except Exception:
-            pass
-        return jsonify({"fired": True, "event": event_name, "log_count": len(valid)})
+        except Exception as exc:
+            print(f"[fire-threat] WEC flush FAILED — events not delivered: "
+                  f"{type(exc).__name__}: {exc}")
+        return jsonify({"fired": True, "event": event_name, "alert": target_alert,
+                        "log_count": len(valid)})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
@@ -1054,6 +1204,134 @@ def api_get_run(run_id: str):
     if not view:
         return jsonify({"error": f"Run '{run_id}' not found"}), 404
     return jsonify(view)
+
+
+# ── XDR attack orchestration (dedicated console tab) ──────────────────────────
+# Real Atomic techniques on a live Cortex-agent box + identity-aligned synthetic
+# network logs, stitched into one XSIAM incident. Isolated from the module/scenario
+# surfaces so small purple-team runs are easy to identify and trigger.
+_ATTACK_SUMMARIES = {}          # run_id -> orchestrator run summary (technique results)
+_ATTACK_READINESS = {}          # hostname -> last kickstarter phone-home payload
+
+
+def _console_lan_ip():
+    """Best-effort primary LAN IP of the console (the WinRM client the box scopes
+    its firewall to). Uses a UDP socket to find the outbound interface; no packet
+    is actually sent."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return "127.0.0.1"
+
+
+@app.get("/api/attack/health")
+def api_attack_health():
+    """Run the orchestrator preflight and return the per-check report + the
+    discovered identity the run will carry (fail-closed gate for the tab)."""
+    try:
+        from modules.xdr_orchestration import WorkstationConnection, ConnectionError as _CE
+        conn = WorkstationConnection.from_config(CONFIG)
+        report = conn.preflight(force=True)
+        return jsonify(report.to_dict())
+    except Exception as e:
+        # A config error (no block / no host) is a clear RED, not a 500.
+        return jsonify({"ok": False, "checks": [
+            {"name": "connection", "status": "FAIL", "detail": str(e)}], "identity": None}), 200
+
+
+@app.get("/api/attack/stories")
+def api_attack_stories():
+    from modules.xdr_orchestration import list_stories
+    return jsonify(list_stories())
+
+
+@app.post("/api/attack/run")
+def api_attack_run():
+    """Start a story run (small purple-team run).
+    Body: {story_id, dry_run?, cleanup_prior_incidents?}.
+    Returns a run_id; poll /api/scenarios/runs/<id> (emitted manifest) and
+    /api/attack/runs/<id> (technique results).
+
+    cleanup_prior_incidents (default False): resolve prior OPEN box-cases before
+    firing so this run's network + endpoint alerts stitch into ONE fresh incident.
+    Opt-in because it closes incidents on the XSIAM tenant."""
+    body = request.get_json(silent=True) or {}
+    story_id = body.get("story_id") or "xdr_quick"
+    dry_run = bool(body.get("dry_run", False))
+    cleanup = bool(body.get("cleanup_prior_incidents", False))
+    from modules.xdr_orchestration import get_story
+    story = get_story(story_id)
+    if not story:
+        return jsonify({"error": f"Unknown story '{story_id}'"}), 404
+
+    cfg = copy.deepcopy(CONFIG)
+    modules = {name: state.module for name, state in MODULE_STATES.items()}
+    run_id = _new_run(f"attack:{story_id}", story.name)
+
+    def _func(mods, c):
+        from modules.xdr_orchestration import run_story_id
+        _ATTACK_SUMMARIES[run_id] = run_story_id(mods, c, story_id, dry_run=dry_run,
+                                                 cleanup_prior_incidents=cleanup)
+
+    t = threading.Thread(target=_run_scenario_and_flush, args=(_func, modules, cfg, run_id),
+                         daemon=True, name=f"attack-{story_id}-{run_id[:8]}")
+    t.start()
+    return jsonify({"started": True, "story": story.name, "story_id": story_id,
+                    "dry_run": dry_run, "cleanup_prior_incidents": cleanup,
+                    "run_id": run_id}), 202
+
+
+@app.get("/api/attack/runs/<run_id>")
+def api_attack_run_result(run_id: str):
+    """Run view (status/emitted manifest) + the orchestrator summary (technique
+    results, discovered identity) once available."""
+    with _RUNS_LOCK:
+        rec = _RUNS.get(run_id)
+        view = _run_view(rec) if rec else None
+    if not view:
+        return jsonify({"error": f"Run '{run_id}' not found"}), 404
+    view["attack"] = _ATTACK_SUMMARIES.get(run_id)
+    return jsonify(view)
+
+
+@app.get("/api/attack/kickstarter")
+def api_attack_kickstarter():
+    """Return the console-generated PowerShell one-shot that turns a bare box into
+    a preflight-green target (WinRM scoped to this console + unattended Atomic +
+    agent check + phone-home). Downloadable .ps1."""
+    from modules.xdr_orchestration import render_kickstarter, all_technique_ids
+    console_ip = request.args.get("console_ip") or _console_lan_ip()
+    # Prefer an explicit override, else the URL the browser reached us on.
+    console_url = request.args.get("console_url") or request.host_url.rstrip("/")
+    ps = render_kickstarter(console_url=console_url, console_ip=console_ip,
+                            token=_API_KEY or "", technique_ids=all_technique_ids())
+    resp = make_response(ps)
+    resp.headers["Content-Type"] = "text/plain; charset=utf-8"
+    resp.headers["Content-Disposition"] = "attachment; filename=logsim-kickstarter.ps1"
+    return resp
+
+
+@app.post("/api/attack/register")
+def api_attack_register():
+    """Phone-home endpoint the Kickstarter POSTs readiness to. Records the box's
+    self-check so the console can reflect it. Authenticated by the shared token
+    like every other /api route."""
+    body = request.get_json(silent=True) or {}
+    host = str(body.get("hostname") or "unknown")
+    _ATTACK_READINESS[host] = {**body, "received_at": time.time()}
+    return jsonify({"ok": True, "recorded": host})
+
+
+@app.get("/api/attack/register")
+def api_attack_registrations():
+    """List boxes that have phoned home readiness (for the console health tile)."""
+    return jsonify(list(_ATTACK_READINESS.values()))
 
 
 # ── Training Mode (deterministic Bulk stage / Live stream) ────────────────────
@@ -1396,10 +1674,158 @@ def api_schedule_clear():
 
 
 # ── Health / preflight checks ─────────────────────────────────────────────────
-_SKIP_COLLECTORS = {
-    "google_login_collector", "google_drive_collector", "google_admin_collector",
-    "google_user_accounts_collector", "google_token_collector",
-}
+
+# Windows parallel-mode telemetry.  windows_events collects per-worker counters
+# and a threat-fired notification queue but nothing consumed them, so during a
+# parallel run there was no visibility into the DC / workstation / threat workers
+# at all.  This is that consumer.
+#
+# Threat history comes from get_recent_threats(), which is non-destructive.
+# NOT get_status_events(): that drains the queue generate_log() uses to label its
+# returned batch with the threat that fired, so reading it here would steal the
+# label and under-count threats in the module metrics.
+_WEC_STALE_AFTER_S = 300.0
+# Workers tick on an interval and there is one per workstation (hundreds), so for
+# the first minutes of a run plenty legitimately have not fired yet.  Flagging
+# those as "silent" would warn on every startup, so the check is suppressed until
+# the orchestrator has been up this long.  Tracked here because windows_events
+# records only a started flag, not a start time.
+_WEC_SILENT_GRACE_S = 180.0
+_WEC_ACTIVE_SINCE = {"ts": None}
+
+
+def _wec_module():
+    """The loaded windows_events module, found by capability not by name."""
+    return next((m for m in MODULES.values() if hasattr(m, "get_worker_stats")), None)
+
+
+def _wec_worker_checks():
+    """Health rows for Windows parallel-mode workers. Empty list if N/A."""
+    mod = _wec_module()
+    if mod is None:
+        return []
+    try:
+        stats = mod.get_worker_stats()
+    except Exception as exc:
+        return [{"group": "Windows WEC Workers", "check": "worker stats",
+                 "status": "error", "detail": f"{type(exc).__name__}: {exc}"}]
+
+    active = bool(stats.get("parallel_active"))
+    depth = stats.get("queue_depth", 0)
+    workers = {k: v for k, v in stats.items()
+               if k not in ("queue_depth", "parallel_active") and isinstance(v, dict)}
+
+    if not active:
+        _WEC_ACTIVE_SINCE["ts"] = None
+        return [{"group": "Windows WEC Workers", "check": "parallel mode",
+                 "status": "skip",
+                 "detail": "not running (Windows module not started)"}]
+
+    if _WEC_ACTIVE_SINCE["ts"] is None:
+        _WEC_ACTIVE_SINCE["ts"] = time.time()
+    uptime = time.time() - _WEC_ACTIVE_SINCE["ts"]
+
+    out = [{"group": "Windows WEC Workers", "check": "parallel mode",
+            "status": "ok",
+            "detail": f"active {int(uptime)}s — {len(workers)} worker(s)"}]
+
+    now = time.time()
+    total = sum(w.get("events_generated", 0) for w in workers.values())
+    # A worker that has never produced is different from one that has gone quiet:
+    # the first usually means its generator raises, the second a stalled thread.
+    # The threats worker waits a full threat interval before its first fire (30 min at
+    # High, 2 h at Realistic), so "produced nothing yet" is its normal state, not silence.
+    never = sorted(k for k, w in workers.items()
+                   if k != "threats" and not w.get("events_generated"))
+    # The threats worker is paced by the threat level (Realistic = one fire per 2 h),
+    # so long idle stretches are its normal state, not a stall.
+    stale = sorted(k for k, w in workers.items()
+                   if k != "threats" and w.get("events_generated")
+                   and now - w.get("last_event_time", 0) > _WEC_STALE_AFTER_S)
+    out.append({
+        "group": "Windows WEC Workers", "check": "events generated",
+        "status": "warn" if not total else "ok",
+        "detail": f"{total} event(s) across {len(workers)} worker(s)"
+                  if total else "no worker has produced an event yet",
+    })
+    if never and uptime >= _WEC_SILENT_GRACE_S:
+        out.append({"group": "Windows WEC Workers", "check": "silent workers",
+                    "status": "warn",
+                    "detail": f"{len(never)} produced nothing in {int(uptime)}s: "
+                              f"{', '.join(never[:4])}" + (" …" if len(never) > 4 else "")})
+    elif never:
+        out.append({"group": "Windows WEC Workers", "check": "silent workers",
+                    "status": "ok",
+                    "detail": f"{len(never)} not yet fired — within "
+                              f"{int(_WEC_SILENT_GRACE_S)}s startup grace"})
+    if stale:
+        out.append({"group": "Windows WEC Workers", "check": "stalled workers",
+                    "status": "warn",
+                    "detail": f"{len(stale)} idle >{int(_WEC_STALE_AFTER_S)}s: "
+                              f"{', '.join(stale[:4])}" + (" …" if len(stale) > 4 else "")})
+
+    # Output queue backs up when generation outpaces the drain in generate_log().
+    # Workers now wait for room instead of dropping (_put_backpressured), so a full
+    # queue is the throttle working -- generation held to the drain rate -- not loss.
+    cap = getattr(getattr(mod, "_output_queue", None), "maxsize", 0) or 1000
+    pct = int(100 * depth / cap) if cap else 0
+    tq = getattr(mod, "_threat_queue", None)
+    tdepth = tq.qsize() if tq is not None else 0
+    out.append({
+        "group": "Windows WEC Workers", "check": "output queue",
+        "status": "ok",
+        "detail": f"{depth}/{cap} ({pct}%)"
+                  + ("; backpressure active, no drops" if pct >= 70 else "")
+                  + f"; threats waiting: {tdepth}",
+    })
+
+    # Generator failures and dropped events, counted by _note_worker_error().
+    errs = getattr(mod, "_worker_errors", {}) or {}
+    n_err = sum(v.get("count", 0) for v in errs.values())
+    n_drop = sum(v.get("drops", 0) for v in errs.values())
+    if n_err or n_drop:
+        worst = max(errs.items(), key=lambda kv: kv[1].get("count", 0))
+        out.append({"group": "Windows WEC Workers", "check": "worker errors",
+                    "status": "error" if n_err else "warn",
+                    "detail": f"{n_err} generator error(s), {n_drop} dropped; "
+                              f"worst {worst[0]}: {worst[1].get('last')}"})
+    else:
+        out.append({"group": "Windows WEC Workers", "check": "worker errors",
+                    "status": "ok", "detail": "none"})
+
+    # WEC delivery outcomes (log_simulator.WEC_STATS): sends are pooled and retried, and
+    # anything that still fails -- or arrives while the breaker is open -- is counted.
+    try:
+        from log_simulator import WEC_STATS, wec_backlog
+        ws = dict(WEC_STATS)
+        lost = ws.get("failed_events", 0) + ws.get("breaker_dropped", 0)
+        out.append({
+            "group": "Windows WEC Workers", "check": "WEC delivery",
+            "status": "error" if lost else "ok",
+            "detail": (f"{ws.get('sent_events', 0)} sent in {ws.get('posts', 0)} POSTs; "
+                       f"{ws.get('retries', 0)} retries; backlog {wec_backlog()}"
+                       + (f"; LOST {ws.get('failed_events', 0)} failed + "
+                          f"{ws.get('breaker_dropped', 0)} while breaker open "
+                          f"({ws.get('last_error')})" if lost else "")),
+        })
+    except Exception:
+        pass
+
+    threats = stats.get("threats", {})
+    last_fired = threats.get("last_fired")
+    try:
+        recent = [e.get("name") for e in mod.get_recent_threats(3) if e.get("name")]
+    except Exception:
+        recent = []
+    out.append({
+        "group": "Windows WEC Workers", "check": "threats fired",
+        "status": "ok",
+        "detail": (f"{threats.get('events_generated', 0)} event(s); last: {last_fired}"
+                   + (f" | recent: {', '.join(reversed(recent))}" if recent else ""))
+        if last_fired else "none yet",
+    })
+    return out
+
 
 # Health cache — populated by background monitor thread every 60 s
 _health_cache: dict = {}
@@ -1463,10 +1889,79 @@ def _run_health_checks() -> dict:
             ),
         })
 
-    # Per-collector env vars (skip Google Workspace)
+    # ── Long-tail domain corpus ───────────────────────────────────────────────
+    # A warning, not an error: without it events are still correct, but the rare
+    # tail shrinks to the config pool and UEBA eventually learns those as normal.
+    _dc = domain_corpus.CORPUS_STATE
+    if _dc.get("ok"):
+        _stale = _dc.get("source") == "stale-cache"
+        results.append({
+            "group": "Threat Intel",
+            "check": "Long-tail domain corpus loaded",
+            "status": "warn" if _stale else "ok",
+            "detail": (
+                f"Tranco {_dc.get('list_id')}"
+                f"{' (pinned)' if _dc.get('pinned') else ''}: "
+                f"{_dc.get('dns', 0):,} DNS / {_dc.get('web', 0):,} web tail domains, "
+                f"{_dc.get('tail_share', 0):.0%} of benign lookups, "
+                f"{(CONFIG.get('domain_corpus') or {}).get('exfil_tail_share', 0.30):.0%}"
+                " of exfil destinations"
+                + (" — STALE cache, live fetch failed" if _stale else "")
+            ),
+        })
+    else:
+        results.append({
+            "group": "Threat Intel",
+            "check": "Long-tail domain corpus loaded",
+            "status": "warn",
+            "detail": (
+                f"unavailable ({_dc.get('error')}) — rare domains fall back to the "
+                "config pool, which UEBA will learn as normal over a long run, and "
+                "every exfil upload lands on a curated file-sharing site instead of "
+                "a never-seen host. Restart once tranco-list.eu is reachable."
+            ),
+        })
+
+    # ── Shared name resolution ────────────────────────────────────────────────
+    # Without it Infoblox answers and firewall destinations are chosen
+    # independently, and the DNS-to-connection network story cannot be built.
+    _rs = resolver.RESOLVER_STATE
+    if _rs.get("ok"):
+        _synthetic_only = _rs.get("live", 0) == 0
+        results.append({
+            "group": "Threat Intel",
+            "check": "Shared name resolution loaded",
+            "status": "warn" if _synthetic_only else "ok",
+            "detail": (
+                f"{_rs.get('internal', 0)} internal ({_rs.get('ad_domain')}) + "
+                f"{_rs.get('curated', 0)}/{_rs.get('curated_total', 0)} curated names "
+                f"[{_rs.get('source')}]: {_rs.get('live', 0)} resolved live, "
+                f"{_rs.get('synthetic', 0)} synthetic"
+                + (" — no live DNS, addresses are synthetic (the DNS/firewall join "
+                   "still holds, the addresses just are not real)" if _synthetic_only else "")
+            ),
+        })
+    else:
+        results.append({
+            "group": "Threat Intel",
+            "check": "Shared name resolution loaded",
+            "status": "error",
+            "detail": (
+                f"unavailable ({_rs.get('error')}) — Infoblox answers and firewall "
+                "destinations fall back to independent choice, so DNS-to-connection "
+                "correlation will not work."
+            ),
+        })
+
+    # Per-collector env vars
     global_http_url = os.getenv("HTTP_COLLECTOR_URL", "")
+    # Only collectors a module sends to over HTTP. Windows names windows_events_collector
+    # as a fallback but its transport is WEC, so checking that key was a false alarm.
+    http_in_use = {v.get("collector_id") for v in CONFIG.values()
+                   if isinstance(v, dict) and v.get("transport") == "http"
+                   and v.get("collector_id")}
     for cid, ccfg in CONFIG.get("http_collectors", {}).items():
-        if cid in _SKIP_COLLECTORS:
+        if cid not in http_in_use:
             continue
         uvar = ccfg.get("url_env_var", "")
         kvar = ccfg.get("api_key_env_var", "")
@@ -1547,8 +2042,6 @@ def _run_health_checks() -> dict:
         _check_http_url(global_url, "HTTP_COLLECTOR_URL", "HTTP (global fallback)")
 
     for cid, ccfg in CONFIG.get("http_collectors", {}).items():
-        if cid in _SKIP_COLLECTORS:
-            continue
         uvar = ccfg.get("url_env_var", "")
         url = os.getenv(uvar, "") if uvar else ""
         label = cid.replace("_collector", "").replace("_", " ").title()
@@ -1685,6 +2178,39 @@ def _run_health_checks() -> dict:
             "status": "skip", "detail": f"not set: {', '.join(missing)}" if missing else "skipped",
         })
 
+    # ── Windows parallel-mode workers ─────────────────────────────────────────
+    results.extend(_wec_worker_checks())
+
+    # ── Delivery integrity ────────────────────────────────────────────────────
+    # Send failures and queue drops are counted rather than swallowed; surface
+    # them here so a silent delivery problem shows up as a health alert instead
+    # of as "the tenant isn't ingesting".
+    with _DELIVERY_LOCK:
+        fails = _DELIVERY_STATS["send_failures"]
+        last_err = _DELIVERY_STATS["last_send_error"]
+    results.append({
+        "group": "Delivery", "check": "send failures",
+        "status": "error" if fails else "ok",
+        "detail": f"{fails} failed send(s); last: {last_err}" if fails else "none",
+    })
+    # Events a module has generated and COUNTED but the sender pool has not sent yet.
+    # Producers wait when this is full (they never drop), so a full queue means the
+    # senders are the bottleneck and are holding generation back -- not data loss.
+    # Shown because module counters include these: on 2026-10-07 ~10,300 events sat
+    # here and a dashboard total read as an over-count until they drained.
+    depth, cap = _SEND_QUEUE.qsize(), _SEND_QUEUE.maxsize
+    results.append({
+        "group": "Delivery", "check": "send queue",
+        "status": "error" if _DELIVERY_STATS.get("queue_drops") else
+                  ("warn" if cap and depth >= 0.9 * cap else "ok"),
+        "detail": (f"{depth}/{cap} counted but not yet sent"
+                   + (f"; DROPPED {_DELIVERY_STATS['queue_drops']} after >"
+                      f"{_ENQUEUE_MAX_WAIT_S:.0f}s full -- a transport is stalled"
+                      if _DELIVERY_STATS.get("queue_drops") else
+                      "; senders are holding generation back (SEND_WORKERS)"
+                      if cap and depth >= 0.9 * cap else "")),
+    })
+
     overall = ("error" if any(r["status"] == "error" for r in results)
                else "warn" if any(r["status"] == "warn" for r in results)
                else "ok")
@@ -1719,8 +2245,11 @@ def _health_monitor_tick():
                 _health_alerts.extend(alerts)
                 _health_cache = result
                 _health_ts = time.time()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Swallowing this means the health monitor can die quietly and every
+            # downstream check just looks "green" forever -- the same shape as the
+            # probe stall that went unnoticed for a day.
+            print(f"[health] monitor tick FAILED: {type(exc).__name__}: {exc}")
 
 
 # Start the background health monitor
@@ -1924,6 +2453,13 @@ def _register_v1_aliases():
         ("/api/v1/metrics",                   "api_metrics",         ["GET"]),
         ("/api/v1/threat_levels",             "api_threat_levels",   ["GET"]),
         ("/api/v1/timeline",                  "api_timeline",        ["GET"]),
+        # XDR attack orchestration (purple-team console tab)
+        ("/api/v1/attack/health",             "api_attack_health",       ["GET"]),
+        ("/api/v1/attack/stories",            "api_attack_stories",      ["GET"]),
+        ("/api/v1/attack/run",                "api_attack_run",          ["POST"]),
+        ("/api/v1/attack/runs/<run_id>",      "api_attack_run_result",   ["GET"]),
+        ("/api/v1/attack/kickstarter",        "api_attack_kickstarter",  ["GET"]),
+        ("/api/v1/attack/register",           "api_attack_register",     ["POST"]),
     ]
     view_funcs = app.view_functions
     for rule, endpoint_name, methods in aliases:

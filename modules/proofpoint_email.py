@@ -39,8 +39,10 @@ from datetime import datetime, timezone, timedelta
 
 try:
     from modules.session_utils import get_random_user, get_all_emails
+    from modules import threat_files
 except ImportError:
     from session_utils import get_random_user, get_all_emails
+    import threat_files
 
 NAME = "Proofpoint Email Gateway"
 DESCRIPTION = "Simulates Proofpoint TAP email security events (message and click events)."
@@ -48,9 +50,7 @@ XSIAM_VENDOR = "Proofpoint"
 XSIAM_PRODUCT = "Tap"
 CONFIG_KEY = "proofpoint_config"
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 
 _FIRST_OCTETS = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 194, 212, 213]
 
@@ -106,25 +106,33 @@ _DEFAULT_MALICIOUS_URL_DOMAINS = [
     "paypal-secure-verify.net", "microsoft-login-portal.info",
 ]
 
+# Every template now carries at least one slot. Nine of these were fully static, so
+# the same nine strings repeated for the life of a run.
 _BENIGN_SUBJECTS = [
-    "Q4 Financial Report - Action Required",
+    "{quarter} Financial Report - Action Required",
     "Team Meeting Agenda - {date}",
     "Your invoice #{num} is ready",
     "Welcome to {service}",
-    "Reminder: Annual Performance Review",
+    "Reminder: Annual Performance Review - {person}",
     "Project Update: {project} - Week {week}",
     "Please review and sign: {doc}",
-    "Your order has shipped",
-    "Upcoming webinar: Cybersecurity Best Practices",
+    "Your order #{num} has shipped",
+    "Upcoming webinar: Cybersecurity Best Practices - {date}",
     "Board Meeting Minutes - {date}",
-    "IT Maintenance Window Notification",
-    "HR Update: Open Enrollment for Benefits",
-    "Re: Contract Renewal Discussion",
+    "IT Maintenance Window Notification - {ticket}",
+    "HR Update: Open Enrollment for Benefits ({year})",
+    "Re: Contract Renewal Discussion - {vendor}",
     "New Shared Document: {doc}",
-    "Quarterly Business Review - Save the Date",
-    "Payroll Update: Please Review",
-    "Security Awareness Training Reminder",
-    "NDA Required: New Vendor Onboarding",
+    "{quarter} Business Review - {city} - Save the Date",
+    "Payroll Update: Please Review before {date}",
+    "Security Awareness Training Reminder - {dept}",
+    "NDA Required: New Vendor Onboarding - {vendor}",
+    "{ticket} resolved: {service} access request",
+    "Approval needed: purchase order #{num} ({amount} USD)",
+    "{person} shared \"{doc}\" with you",
+    "{dept} all-hands - {date}",
+    "Invoice {num} from {vendor} - due {date}",
+    "Interview schedule: {person} - {dept}",
 ]
 
 _PHISHING_SUBJECTS = [
@@ -172,7 +180,27 @@ _SPAM_SUBJECTS = [
     "Your prescription is ready for pickup",
 ]
 
-# Malicious attachment templates (classification and threat_type inform threatsInfoMap)
+def _malicious_attachment_template():
+    """A generated malware attachment in the template shape _fill_attachment wants.
+
+    Replaces random.choice(_MALICIOUS_ATTACHMENT_TEMPLATES). The eight fixed
+    templates varied only by a {num}, so a month of runs delivered the same eight
+    file names, and they never produced .lnk, .iso, .docm or .js -- four of the
+    seven branches of the "Proofpoint - Malware Attachment Delivered" rule. The
+    generator covers all seven and ties the malware family to the delivery format.
+    """
+    filename, _ext, ctype, family = threat_files.malicious_attachment()
+    return {"filename": filename, "contentType": ctype,
+            "classification": "MALWARE", "malware_family": family}
+
+
+def _benign_attachment_template():
+    """A generated ordinary business attachment, same shape."""
+    filename, _ext, ctype = threat_files.benign_attachment()
+    return {"filename": filename, "contentType": ctype}
+
+
+# Retained for reference: the fixed pools these replaced.
 _MALICIOUS_ATTACHMENT_TEMPLATES = [
     {"filename": "Invoice_{num}.doc",   "contentType": "application/msword",                                                                   "classification": "MALWARE", "malware_family": "Emotet"},
     {"filename": "Shipment_{num}.xlsm", "contentType": "application/vnd.ms-excel.sheet.macroEnabled.12",                                       "classification": "MALWARE", "malware_family": "QakBot"},
@@ -214,9 +242,7 @@ _THREAT_WEIGHTS = {
 last_threat_event_time = 0
 
 
-# ---------------------------------------------------------------------------
 # Internal helpers
-# ---------------------------------------------------------------------------
 
 def _get_threat_interval(threat_level, config):
     if threat_level == "Benign Traffic Only":
@@ -245,7 +271,20 @@ def _make_guid():
             f"{random.randint(0x100000000000, 0xFFFFFFFFFFFF):012X}}}")
 
 
-def _make_message_id(local_part="user", domain="mail.examplecorp.com"):
+def _make_message_id(local_part="user", domain=None, sender=None):
+    """Build a Message-ID.
+
+    The Message-ID is issued by the SENDING MTA, so for inbound external mail it
+    carries the sender's domain -- not the receiving organisation's.  Pass either
+    an explicit `domain` or the full `sender` address to derive it from.  A
+    sender-domain mismatch here is exactly what a header-anomaly rule looks for,
+    so getting it wrong on every message trains the wrong intuition.
+    """
+    if domain is None:
+        if sender and "@" in sender:
+            domain = f"mail.{sender.split('@', 1)[1]}"
+        else:
+            domain = "mail.examplecorp.com"
     rand = random.randint(100000000, 999999999)
     return f"<{rand}.JavaMail.{local_part}@{domain}>"
 
@@ -261,16 +300,55 @@ def _offset_iso(seconds_ago):
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
+# Slot vocabularies. These were 4-5 entries each, and half the subject templates had
+# no slot at all, so 176 distinct subjects covered 1,264 messages. Real subjects are
+# close to unique -- they carry names, ticket numbers, dates and amounts -- and
+# "first time this subject has been seen" is not a detection, but subject entropy is
+# what makes a mail corpus look like mail rather than a template.
+_SUBJ_PROJECT = ("Alpha", "Phoenix", "Titan", "Aurora", "Helios", "Nimbus", "Atlas",
+                 "Orion", "Vega", "Meridian", "Catalyst", "Northstar", "Beacon",
+                 "Cascade", "Summit", "Keystone", "Lattice", "Quarry")
+_SUBJ_DOC = ("NDA_Agreement", "Contract_2024", "Proposal_Final", "MSA_Draft",
+             "SOW_v3", "DPA_Addendum", "Renewal_Quote", "Security_Questionnaire",
+             "Pricing_Schedule", "SLA_Exhibit", "Change_Order", "Work_Order",
+             "Vendor_Onboarding_Pack", "Statement_of_Work")
+_SUBJ_SERVICE = ("Microsoft 365", "Salesforce", "Workday", "ServiceNow", "Zoom",
+                 "Slack", "Atlassian Cloud", "DocuSign", "Concur", "Okta",
+                 "Box", "Smartsheet", "Tableau", "Coupa")
+_SUBJ_FIRST = ("John", "Sarah", "Alex", "Mike", "Priya", "Daniel", "Aisha", "Tom",
+               "Elena", "Marcus", "Grace", "Omar", "Lena", "Chris", "Nadia",
+               "Victor", "Ruth", "Ibrahim", "Clara", "Sven")
+_SUBJ_LAST = ("Smith", "Connor", "Johnson", "Davis", "Patel", "Nguyen", "Okafor",
+              "Muller", "Rossi", "Kowalski", "Haddad", "Silva", "Andersson",
+              "Fitzgerald", "Yamamoto", "Novak", "Ferreira", "Larsen")
+_SUBJ_DEPT = ("Finance", "HR", "Legal", "IT", "Procurement", "Sales", "Marketing",
+              "Operations", "Security", "Facilities", "Payroll")
+_SUBJ_VENDOR = ("Acme Supply", "Northwind Trading", "Contoso Ltd", "Fabrikam",
+                "Litware", "Tailspin Toys", "Proseware", "Adventure Works",
+                "Wide World Importers", "Blue Yonder")
+_SUBJ_CITY = ("London", "Dublin", "Austin", "Denver", "Toronto", "Singapore",
+              "Berlin", "Amsterdam", "Sydney", "Boston", "Lisbon")
+
+
 def _format_subject(template):
+    first, last = random.choice(_SUBJ_FIRST), random.choice(_SUBJ_LAST)
     return (template
             .replace("{date}", datetime.now(timezone.utc).strftime("%B %d, %Y"))
             .replace("{num}", str(random.randint(10000, 99999)))
             .replace("{week}", str(random.randint(1, 52)))
             .replace("{year}", str(datetime.now(timezone.utc).year))
-            .replace("{project}", random.choice(["Alpha", "Phoenix", "Titan", "Aurora", "Helios"]))
-            .replace("{doc}", random.choice(["NDA_Agreement", "Contract_2024", "Proposal_Final", "MSA_Draft"]))
-            .replace("{service}", random.choice(["Microsoft 365", "Salesforce", "Workday", "ServiceNow"]))
-            .replace("{name}", random.choice(["John Smith", "Sarah Connor", "Alex Johnson", "Mike Davis"])))
+            .replace("{quarter}", f"Q{random.randint(1, 4)}")
+            .replace("{ticket}", f"{random.choice(('INC', 'REQ', 'CHG', 'TASK'))}"
+                                 f"{random.randint(1000000, 9999999)}")
+            .replace("{amount}", f"{random.randint(1, 240):,},{random.randint(100, 999)}")
+            .replace("{project}", random.choice(_SUBJ_PROJECT))
+            .replace("{doc}", random.choice(_SUBJ_DOC))
+            .replace("{service}", random.choice(_SUBJ_SERVICE))
+            .replace("{dept}", random.choice(_SUBJ_DEPT))
+            .replace("{vendor}", random.choice(_SUBJ_VENDOR))
+            .replace("{city}", random.choice(_SUBJ_CITY))
+            .replace("{person}", f"{first} {last}")
+            .replace("{name}", f"{first} {last}"))
 
 
 def _get_all_emails(config, session_context):
@@ -302,7 +380,9 @@ def _internal_domain(config):
 
 
 def _cluster_id(config):
-    return _cf(config).get("cluster_id", "pharmtech_hosted")
+    # Default is a tenant-shaped name; "pharmtech_hosted" is the sample value from
+    # Proofpoint's own API documentation and should not ship as our cluster.
+    return _cf(config).get("cluster_id", "examplecorp_hosted")
 
 
 def _campaign_id(config):
@@ -311,17 +391,206 @@ def _campaign_id(config):
 
 
 
+# Local parts of inbound business mail. Bulk senders use a role address; a human
+# correspondent at a partner or customer uses their name, which is where most of the
+# real variety in an inbound corpus comes from.
+_SENDER_ROLES = ("noreply", "no-reply", "info", "support", "notifications", "updates",
+                 "news", "billing", "invoices", "accounts", "sales", "hello",
+                 "team", "donotreply", "service", "care", "help", "orders")
+
+
 def _benign_sender(config):
-    senders = _cf(config).get("benign_senders", [])
-    if senders:
-        return random.choice(senders)
-    domain = random.choice(_DEFAULT_BENIGN_SENDER_DOMAINS)
-    local  = random.choice(["noreply", "info", "support", "notifications", "updates", "news", "billing"])
+    """An inbound benign sender address.
+
+    Was `random.choice(config['benign_senders'])` -- 15 addresses -- which measured
+    at 57 distinct senders over 1,247 messages. A real mailbox receives from
+    thousands of addresses across thousands of domains, and "first time this sender
+    has emailed the organisation" is a genuine detection that a 15-entry pool makes
+    meaningless.
+    
+    Three sources, in the proportions a business mailbox actually sees:
+      * the curated SaaS senders, kept as a recognisable head for manual hunting
+      * real long-tail domains from modules/domain_corpus.py -- partners, customers,
+        suppliers, which is what most inbound mail actually is
+      * a person-shaped local part rather than a role address, most of the time
+    """
+    curated = _cf(config).get("benign_senders", [])
+    roll = random.random()
+    if curated and roll < 0.25:
+        return random.choice(curated)
+
+    # tail_domain() directly, NOT session_utils.long_tail_domain(): that helper
+    # applies domain_corpus.TAIL_SHARE, which is 5% because it is calibrated for
+    # benign BROWSING, where a dominant curated head has to stay dominant to feed
+    # affinity baselines. Inbound mail is the opposite shape -- the long tail IS the
+    # bulk of it, since most senders are partners, customers and suppliers rather
+    # than the same sixteen SaaS vendors. Same reasoning as _EXFIL_TAIL_SHARE in
+    # session_utils, which overrides the browsing share for the same reason.
+    domain = None
+    if roll > 0.45:
+        try:
+            from modules import domain_corpus as _dc
+            if _dc.available():
+                # business_domain(), not tail_domain(): a benign business sender must
+                # not be an adult or gambling domain.
+                domain = _dc.business_domain()
+        except Exception:
+            domain = None
+    if not domain:
+        domain = random.choice(_DEFAULT_BENIGN_SENDER_DOMAINS)
+
+    if random.random() < 0.55:
+        first = random.choice(_SUBJ_FIRST).lower()
+        last = random.choice(_SUBJ_LAST).lower()
+        local = random.choice((f"{first}.{last}", f"{first[0]}{last}",
+                               f"{first}{random.randint(1, 99)}", f"{first}_{last}"))
+    else:
+        local = random.choice(_SENDER_ROLES)
     return f"{local}@{domain}"
 
 
-def _threat_sender(config):
+# Brand-impersonation lures: the sender and the subject have to name the SAME
+# brand.  Real campaigns build one pretext end to end; sampling a sender pool and
+# a subject pool independently produced Geek Squad billing scams from
+# hr@hr-notification.co.
+_THEMED_LURES = {
+    "microsoft": (
+        ["security@micros0ft-support.com", "alert@microsoft365-security.info",
+         "no-reply@office-update-required.com"],
+        ["Your Microsoft 365 account requires verification",
+         "Microsoft Support: Your computer is at risk",
+         "Microsoft 365: Unusual sign-in activity detected",
+         "Action Required: Your Microsoft password expires today"],
+    ),
+    "docusign": (
+        ["no-reply@docusign-notify.net", "files@shared-document.link"],
+        ["Your DocuSign document is waiting",
+         "DocuSign: Completed - Please review and sign",
+         "Secure File Share: Invoice-{num}.pdf"],
+    ),
+    "sharepoint": (
+        ["info@sharepoint-online.net", "alert@onedrive-share.xyz"],
+        ["SharePoint: {name} shared a document with you",
+         "Your shared file is ready to view",
+         "OneDrive: {name} shared 'Q4-Budget.xlsx' with you"],
+    ),
+    "hr_payroll": (
+        ["hr@hr-notification.co", "payroll@payroll-update.net"],
+        ["HR: Important payroll update required",
+         "Payroll: Action needed before your next deposit",
+         "HR: Updated employee handbook - acknowledgement required"],
+    ),
+    "helpdesk": (
+        ["helpdesk@secure-login-portal.xyz", "support@it-helpdesk-support.net",
+         "noreply@verify-identity.click"],
+        ["IT Support: Password Expiration Notice",
+         "Action Required: Confirm your email address",
+         "URGENT: Your account will be suspended in 24 hours",
+         "Important security notice for your account"],
+    ),
+    "billing": (
+        ["billing@invoice-delivery.info", "support@account-security-alert.com"],
+        ["Secure File Share: Invoice-{num}.pdf",
+         "Payment Confirmation - Document Attached",
+         "Re: Wire Transfer Approval Needed - Urgent"],
+    ),
+    "zoom": (
+        ["meeting@zoom-meeting-invite.com"],
+        ["Zoom: Meeting Recording Available",
+         "You have (1) pending message in your mailbox",
+         "Voicemail from unknown caller (+1-{num})"],
+    ),
+}
+
+# Consumer-brand callback/TOAD scams: throwaway support domains, never the
+# corporate-impersonation domains above.
+_CALLBACK_LURES = {
+    "Norton":     "norton-billing-support.com",
+    "McAfee":     "mcafee-subscription-desk.com",
+    "Amazon":     "amzn-order-support.info",
+    "Microsoft":  "windows-defender-alert.net",
+    "IRS":        "irs-payment-notice.org",
+    "Geek Squad": "geeksquad-renewal-desk.com",
+    "PayPal":     "paypal-billing-notice.net",
+}
+
+
+def _themed_lure(config):
+    """Return (sender, subject) drawn from the SAME brand theme."""
+    theme = random.choice(list(_THEMED_LURES))
+    senders, subjects = _THEMED_LURES[theme]
+    configured = _cf(config).get("threat_senders", [])
+    pool = [x for x in senders if not configured or x in configured] or senders
+    sender = (random.choice(pool) if random.random() < 0.25
+              else (_lookalike_sender(theme) or random.choice(pool)))
+    return sender, _format_subject(random.choice(subjects))
+
+
+# Lookalike sender infrastructure, PER THEME. The seven themes shipped 1-3 sender
+# addresses each -- 15 in total, measured at 57 distinct senders over 1,247 messages
+# with `meeting@zoom-meeting-invite.com` alone appearing 84 times. A campaign that
+# reuses one sender address is a campaign that gets blocked after the first report;
+# real operators rotate domains constantly, which is why "first time this sender has
+# emailed us" is worth detecting at all.
+#
+# Generated per theme rather than globally, because _THEMED_LURES exists precisely to
+# stop a Geek Squad subject arriving from hr@hr-notification.co. The brand tokens below
+# keep the sender naming the SAME brand the subject names.
+_THEME_BRANDS = {
+    "microsoft":  ("microsoft", "micros0ft", "microsoft365", "office365", "ms-office",
+                   "msonline", "office-update"),
+    "docusign":   ("docusign", "docu-sign", "docusign-notify", "esign-docs",
+                   "shared-document", "securedocs"),
+    "sharepoint": ("sharepoint", "sharepoint-online", "onedrive", "onedrive-share",
+                   "sp-online", "teams-share"),
+    "hr_payroll": ("hr-notification", "payroll-update", "hr-portal", "mypayroll",
+                   "employee-hub", "benefits-notice"),
+    "helpdesk":   ("it-helpdesk", "helpdesk-support", "secure-login", "verify-identity",
+                   "it-servicedesk", "account-security"),
+    "billing":    ("invoice-delivery", "billing-notice", "accounts-payable",
+                   "invoice-portal", "payment-update", "remittance"),
+    "zoom":       ("zoom-meeting", "zoom-invite", "zoomvideo", "zoom-notify",
+                   "meeting-invite", "zoom-account"),
+}
+_THEME_SUFFIX = ("", "-support", "-security", "-verify", "-alert", "-login", "-portal",
+                 "-update", "-notify", "-account", "-service", "-team", "-center")
+_THEME_TLD = ("com", "net", "info", "co", "xyz", "click", "link", "online", "site",
+              "top", "live", "org", "pw", "icu")
+_THEME_LOCAL = ("no-reply", "noreply", "security", "support", "billing", "helpdesk",
+                "notification", "service", "alert", "admin", "account", "docs",
+                "team", "info", "verify")
+
+
+def _lookalike_sender(theme):
+    """A fresh sender address for `theme`, still naming that theme's brand."""
+    brands = _THEME_BRANDS.get(theme)
+    if not brands:
+        return None
+    domain = f"{random.choice(brands)}{random.choice(_THEME_SUFFIX)}.{random.choice(_THEME_TLD)}"
+    return f"{random.choice(_THEME_LOCAL)}@{domain}"
+
+
+def _threat_sender(config, theme=None):
+    """Pick a threat sender.
+
+    `theme` selects a brand-consistent sender when the caller has already chosen a
+    themed subject; without it the historical random pick is kept for generators
+    whose subjects are brand-neutral.
+    """
+    if theme and theme in _THEMED_LURES:
+        # A quarter of the time reuse a curated address so the recognisable ones stay
+        # in circulation for manual hunting; otherwise rotate to a fresh lookalike.
+        if random.random() < 0.25:
+            return random.choice(_THEMED_LURES[theme][0])
+        return _lookalike_sender(theme) or random.choice(_THEMED_LURES[theme][0])
+    # No theme: the caller's subject is brand-neutral, so any lure sender fits. Still
+    # rotate rather than returning one of the fifteen configured addresses every time
+    # -- a lookalike for an arbitrary theme is internally consistent on its own.
     senders = _cf(config).get("threat_senders", [])
+    if random.random() >= 0.25:
+        generated = _lookalike_sender(random.choice(list(_THEME_BRANDS)))
+        if generated:
+            return generated
     if senders:
         return random.choice(senders)
     domain = random.choice(_DEFAULT_THREAT_SENDER_DOMAINS)
@@ -381,7 +650,11 @@ def _fill_attachment(template, malicious=False):
         att["sandboxStatus"] = _SANDBOX_MALICIOUS
     elif ct.startswith("image/"):
         att["sandboxStatus"] = None   # Images not submitted to sandbox
-    elif "pdf" in ct or "word" in ct or "excel" in ct or "powerpoint" in ct or "msword" in ct or "octet" in ct or "zip" in ct:
+    elif ("pdf" in ct or "word" in ct or "excel" in ct or "powerpoint" in ct
+          or "msword" in ct or "octet" in ct or "zip" in ct
+          # Archives beyond .zip now reach here (7z/rar/gzip), and Proofpoint does
+          # sandbox them; without these they silently came back sandboxStatus None.
+          or "7z-compressed" in ct or "vnd.rar" in ct or "gzip" in ct):
         att["sandboxStatus"] = _SANDBOX_CLEAN
     else:
         att["sandboxStatus"] = None
@@ -425,7 +698,7 @@ def _base_message(config, recipients, guid, sender, sender_ip, subject):
         "_log_type":          "message-delivered",  # caller overrides
         "GUID":               guid,
         "QID":                f"r{random.choice('abcdefghijklmnopqrstuvwxyz')}{random.randint(1,9)}{random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ')}{random.randint(10000,99999)}",
-        "messageID":          _make_message_id(local),
+        "messageID":          _make_message_id(local, sender=sender),
         "messageTime":        _now_iso(),
         "recipient":          recipients,
         "toAddresses":        recipients,
@@ -462,9 +735,7 @@ def _base_message(config, recipients, guid, sender, sender_ip, subject):
     }
 
 
-# ---------------------------------------------------------------------------
 # Benign generators
-# ---------------------------------------------------------------------------
 
 def _generate_benign_delivered(config, session_context=None):
     """Standard business email delivered to mailbox."""
@@ -483,7 +754,7 @@ def _generate_benign_delivered(config, session_context=None):
 
     # 50% chance of a benign attachment
     if random.random() > 0.5:
-        tmpl = random.choice(_BENIGN_ATTACHMENT_TEMPLATES)
+        tmpl = _benign_attachment_template()
         att  = _fill_attachment(tmpl)
         if "pdf" in att["contentType"]:
             msg["modulesRun"].append("pdr")
@@ -502,9 +773,7 @@ def _generate_benign_delivered(config, session_context=None):
     return json.dumps(msg, default=str)
 
 
-# ---------------------------------------------------------------------------
 # Threat generators
-# ---------------------------------------------------------------------------
 
 def _strip_none_threat_fields(msg):
     """Remove hunt fields that are None — keeps raw data clean for non-threat events."""
@@ -518,9 +787,8 @@ def _generate_phishing_url(config, session_context=None):
     all_emails  = _get_all_emails(config, session_context)
     recipients  = _pick_recipients(all_emails, count=random.randint(1, 2))
     guid        = _make_guid()
-    sender      = _threat_sender(config)
+    sender, subject = _themed_lure(config)
     sender_ip   = _random_external_ip()
-    subject     = _format_subject(random.choice(_PHISHING_SUBJECTS))
     camp_id     = _campaign_id(config)
 
     url          = _malicious_url(config)
@@ -559,12 +827,11 @@ def _generate_malware_attachment(config, session_context=None):
     all_emails  = _get_all_emails(config, session_context)
     recipients  = _pick_recipients(all_emails, count=random.randint(1, 3))
     guid        = _make_guid()
-    sender      = _threat_sender(config)
+    sender, subject = _themed_lure(config)
     sender_ip   = _random_external_ip()
-    subject     = _format_subject(random.choice(_PHISHING_SUBJECTS))
     camp_id     = _campaign_id(config)
 
-    tmpl = random.choice(_MALICIOUS_ATTACHMENT_TEMPLATES)
+    tmpl = _malicious_attachment_template()
     att  = _fill_attachment(tmpl, malicious=True)
 
     msg = _base_message(config, recipients, guid, sender, sender_ip, subject)
@@ -673,7 +940,19 @@ def _generate_bec_impostor(config, session_context=None):
 
     msg["classification"] = "IMPOSTOR"
     msg["threatStatus"]   = "active"
-    _strip_none_threat_fields(msg)  # BEC has no URL/threatID
+    # TAP raises impostor detections as a threat, so the message carries a
+    # threatsInfoMap entry.  threatType is "messageText" -- BEC has no URL or
+    # attachment payload, the message body itself is the threat.
+    _bec_threat_id = hashlib.sha256(f"{guid}{sender}".encode()).hexdigest()
+    msg["threatsInfoMap"] = _make_threats_info_map(
+        classification="IMPOSTOR",
+        threat_id=_bec_threat_id,
+        threat_type="messageText",
+        guid=guid,
+        campaign_id=_campaign_id(config),
+    )
+    msg["threatID"] = _bec_threat_id
+    _strip_none_threat_fields(msg)  # BEC has no URL
     return json.dumps(msg, default=str)
 
 
@@ -746,7 +1025,8 @@ def _generate_qr_code_phishing(config, session_context=None, target_email=None):
     ]))
     camp_id = _campaign_id(config)
 
-    qr_att  = _fill_attachment({"filename": "AuthCode.png", "contentType": "image/png"})
+    _qr_name, _qr_ext, _qr_ctype = threat_files.qr_phishing_attachment()
+    qr_att  = _fill_attachment({"filename": _qr_name, "contentType": _qr_ctype})
     url         = _malicious_url(config)
     threat_sha, _ = _generate_hashes()
 
@@ -778,16 +1058,20 @@ def _generate_callback_phishing(config, session_context=None):
     all_emails = _get_all_emails(config, session_context)
     recipients  = _pick_recipients(all_emails, count=random.randint(1, 3))
     guid        = _make_guid()
-    sender      = _threat_sender(config)
+    # Brand first: the sender domain and the subject must name the same brand.
+    brand       = random.choice(list(_CALLBACK_LURES))
+    sender      = f"{random.choice(['billing', 'support', 'no-reply', 'renewal'])}@{_CALLBACK_LURES[brand]}"
     sender_ip   = _random_external_ip()
-    subject     = random.choice([
-        "Your Norton subscription has been renewed - Call to cancel",
-        "McAfee Security Alert: Unauthorized access detected",
-        f"Amazon: Suspicious purchase $499 - Call +1-888-{random.randint(100,999)}-{random.randint(1000,9999)}",
-        "Microsoft Support: Your computer is at risk",
-        "IRS Notice: Overdue tax payment - Call immediately",
-        f"Geek Squad: Auto-renewal of $399 - Call +1-855-{random.randint(100,999)}-{random.randint(1000,9999)}",
-    ])
+    _callback_no = f"+1-{random.choice(['888', '855', '866', '877'])}-{random.randint(100,999)}-{random.randint(1000,9999)}"
+    subject     = {
+        "Norton":     f"Your Norton subscription has been renewed - Call {_callback_no} to cancel",
+        "McAfee":     "McAfee Security Alert: Unauthorized access detected",
+        "Amazon":     f"Amazon: Suspicious purchase $499 - Call {_callback_no}",
+        "Microsoft":  "Microsoft Support: Your computer is at risk",
+        "IRS":        f"IRS Notice: Overdue tax payment - Call {_callback_no} immediately",
+        "Geek Squad": f"Geek Squad: Auto-renewal of $399 - Call {_callback_no}",
+        "PayPal":     f"PayPal: Payment of $749.99 authorised - Call {_callback_no} to dispute",
+    }[brand]
 
     msg = _base_message(config, recipients, guid, sender, sender_ip, subject)
     msg["_log_type"]          = "message-blocked"
@@ -841,7 +1125,7 @@ def _generate_click_blocked(config, session_context=None, guid_override=None,
     event = {
         "_log_type":      "click-blocked",
         "GUID":           guid,
-        "messageID":      _make_message_id(recipient_email.split("@")[0]),
+        "messageID":      _make_message_id(_sender.split("@")[0], sender=_sender),
         "clickTime":      _now_iso(),
         "clickIP":        click_ip,
         "userAgent":      random.choice(_BROWSER_UA),
@@ -910,7 +1194,7 @@ def _generate_click_permitted(config, session_context=None, guid_override=None,
     event = {
         "_log_type":      "click-permitted",
         "GUID":           guid,
-        "messageID":      _make_message_id(recipient_email.split("@")[0]),
+        "messageID":      _make_message_id(_sender.split("@")[0], sender=_sender),
         "clickTime":      _click_t,
         "clickIP":        click_ip,
         "userAgent":      random.choice(_BROWSER_UA),
@@ -981,7 +1265,10 @@ def _generate_phishing_campaign(config, session_context=None):
     sender_ip  = _random_external_ip()
     camp_id    = _campaign_id(config)
     subject    = _format_subject(random.choice(_PHISHING_SUBJECTS))
-    count      = random.randint(4, 10)
+    # Lower bound is 5, not 4: the "High Volume of Blocked Emails from a Single IP"
+    # rule needs >= 5 blocked messages sharing a senderIP, so a 4-message campaign
+    # emitted a burst that could never reach the threshold — 1 campaign in 7 wasted.
+    count      = random.randint(5, 12)
 
     url         = _malicious_url(config)
     threat_sha, _ = _generate_hashes()
@@ -1009,9 +1296,7 @@ def _generate_phishing_campaign(config, session_context=None):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # Scenario event handlers (storytelling / kill-chain mode)
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_event(scenario_event, config, context):
     """Handle explicit scenario_event calls from log_simulator.py.
@@ -1102,9 +1387,7 @@ def _generate_scenario_event(scenario_event, config, context):
     return None, None
 
 
-# ---------------------------------------------------------------------------
 # Threat dispatcher
-# ---------------------------------------------------------------------------
 
 _THREAT_GENERATORS = {
     "phishing_url":        _generate_phishing_url,
@@ -1120,6 +1403,12 @@ _THREAT_GENERATORS = {
     "phishing_campaign":   _generate_phishing_campaign,
 }
 
+
+# No threat here is offered for on-demand firing (modules/threat_catalog.py): Cortex
+# publishes no analytics for Proofpoint TAP data, and none has fired from it in the tenant --
+# its alerts come from correlation rules and threat intel. Every threat still runs
+# in long-running sessions.
+ANALYTIC_ALERTS = {}
 
 def get_threat_names():
     """Return available threat names dynamically from _THREAT_GENERATORS.
@@ -1140,9 +1429,7 @@ def _select_threat(config, session_context):
     return (fn(config, session_context), threat_type)
 
 
-# ---------------------------------------------------------------------------
 # Main entry point
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, scenario_event=None, threat_level="Realistic",
                  benign_only=False, context=None):

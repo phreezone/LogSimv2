@@ -1,6 +1,6 @@
 """External API contract checks — /api/v1 vs openapi.yaml vs the MCP server.
 
-Run:  python tests/api_contract.py
+Run:  python _local_validation/api_contract.py
 No XSIAM tenant and no network are required, and NO log traffic is emitted: every call goes
 through Flask's test_client, and the routes that would generate events (module start,
 scenario run, fire) are deliberately never called. The Tor-exit-node fetch that app.py does
@@ -75,7 +75,7 @@ def _load_app():
     real_urlopen = urllib.request.urlopen
 
     def _offline(*_a, **_kw):
-        raise OSError("offline (stubbed by tests/api_contract.py)")
+        raise OSError("offline (stubbed by _local_validation/api_contract.py)")
 
     urllib.request.urlopen = _offline
     spec = importlib.util.spec_from_file_location("dashboard_app_undertest", APP_PATH)

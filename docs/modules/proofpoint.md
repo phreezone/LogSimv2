@@ -2,7 +2,7 @@
 
 **Dataset:** `proofpoint_tap_raw`
 **Transport:** HTTP Collector (5 per-app collectors defined in `config.json`)
-**Format:** Proofpoint TAP SIEM API JSON (Admin SDK Reports API Activity resource)
+**Format:** Proofpoint TAP SIEM API JSON
 
 Simulates Proofpoint Targeted Attack Protection (TAP) email security events. The module generates JSON matching the official Proofpoint TAP SIEM API schema exactly, including the four `_log_type` values that match XSIAM alert rules. The `ProofpointTAPModelingRules_1_3.xif` XIF rule maps JSON fields to XDM.
 
@@ -104,3 +104,32 @@ The Proofpoint module supports coordinated kill-chain scenario injection via the
 |---|---|---|
 | `CLICK_BLOCKED` | `_generate_click_blocked` | Kill chain step: victim clicks a phishing link in a delivered email. Generates a `click-blocked` event for the specified user, using that user's session IP as `clickIP`. |
 | `CLICK_PERMITTED` | `_generate_click_permitted` | Kill chain step: victim successfully reaches a phishing page before TAP flags the URL. Generates a `click-permitted` event with a back-dated `clickTime`. |
+
+## Generated Values
+
+Senders, subjects and attachments are composed per message rather than drawn from fixed
+lists. Reasoning in [value-cardinality.md](../value-cardinality.md).
+
+- **Senders** — ~540 distinct per 1,300 messages, up from 57. About half draw a real
+  registrable domain from the long-tail corpus (`modules/domain_corpus.py`), because most
+  inbound business mail comes from partners, customers and suppliers rather than the same
+  sixteen SaaS vendors. The local part is person-shaped (`daniel.smith@`, `mpatel@`) more
+  often than a role address. `domain_corpus.business_domain()` keeps adult and gambling
+  domains out of the benign sender population.
+- **Threat senders rotate, but stay on-brand.** `_THEMED_LURES` exists so that a sender and
+  a subject name the *same* brand — sampling them independently produced Geek Squad
+  billing scams from `hr@hr-notification.co`. Lookalike domains are therefore generated
+  **per theme**: a Microsoft lure can arrive from `micros0ft-verify.click` or
+  `office365-alert.info`, never from a DocuSign domain.
+- **Subjects** carry slots for ticket numbers, amounts, names, departments, vendors and
+  quarters, so they read like mail rather than a template. Every template now has at least
+  one slot; nine were previously fully static.
+- **Attachments** — the malicious extension mix spans the whole OR-chain the "Malware
+  Attachment Delivered" rule matches (`.docm .exe .iso .js .lnk .xlsm .zip`). `.lnk` and
+  `.iso`/`.img` container delivery now dominate, which is what email-borne malware actually
+  looks like since Office began blocking macros by default; the old templates only ever
+  produced macro documents and `.exe`.
+- **Content types always match the extension.** The QR-phishing rule matches `image/png` /
+  `image/jpeg` literally, so the MIME string has to be the real one for the file.
+- Malware families are tied to the delivery format — IcedID with `.iso`/`.lnk`, QakBot
+  with `.xlsm` — so an alert never reads "Emotet delivered via .lnk".

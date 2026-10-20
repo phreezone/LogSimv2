@@ -36,8 +36,8 @@ External integrations should use `/api/v1/*` (the UI-shaped legacy `/api/*` rout
 | `GET  /api/v1/modules` | List modules and their state |
 | `POST /api/v1/modules/{name}/start` | Start a module. Body: `{threat_level?, event_interval?}` |
 | `POST /api/v1/modules/{name}/stop` | Stop a module |
-| `GET  /api/v1/modules/{name}/threats` | Event names this module can fire (the valid `fire` values) |
-| `POST /api/v1/modules/{name}/fire` | Fire one event. Body: `{event}` |
+| `GET  /api/v1/modules/{name}/threats` | Event names this module can fire on demand (the valid `fire` values): only threats tied to an XSIAM analytics alert. `options` gives `[{event, alert}]` |
+| `POST /api/v1/modules/{name}/fire` | Fire one event. Body: `{event}`. Returns `alert` (the analytic to look for); HTTP 400 for a threat with no analytic |
 | `PATCH /api/v1/modules/{name}/interval` | Change event interval. Body: `{event_interval}`. Applies live |
 | `PATCH /api/v1/modules/{name}/threat_level` | Change threat level. Body: `{threat_level}`. Applies live |
 | `POST /api/v1/modules/{name}/reset` | Reset one module's counters |
@@ -152,8 +152,8 @@ Two suites, neither of which needs an XSIAM tenant and neither of which emits lo
 (`run_scenario`, `fire_event`, module start and `start_bad_user` are never called):
 
 ```bash
-python tests/api_contract.py        # in-process, offline, ~seconds
-python tests/mcp_server_smoke.py    # spawns a dashboard + the MCP server over real stdio
+python _local_validation/api_contract.py        # in-process, offline, ~seconds
+python _local_validation/mcp_server_smoke.py    # spawns a dashboard + the MCP server over real stdio
 ```
 
 `api_contract.py` is the drift guard. `_register_v1_aliases()` resolves view functions **by

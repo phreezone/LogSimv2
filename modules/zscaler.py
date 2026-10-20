@@ -8,15 +8,23 @@ from datetime import datetime, timezone
 from ipaddress import ip_network
 import hashlib
 try:
+    from modules import resolver
+    from modules import threat_files
     from modules.session_utils import (get_random_user, get_user_by_name,
         get_zscaler_device_info, rand_ip_from_network,
+        get_user_agent, get_byte_volume_band,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, long_tail_domain,
+        exfil_destination, exfil_url, rare_external_ip, rare_domain, to_nonstandard_https, correlated_or_random_user)
 except ImportError:
+    import resolver
+    import threat_files
     from session_utils import (get_random_user, get_user_by_name,
         get_zscaler_device_info, rand_ip_from_network,
+        get_user_agent, get_byte_volume_band,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip, long_tail_domain,
+        exfil_destination, exfil_url, rare_external_ip, rare_domain, to_nonstandard_https, correlated_or_random_user)
 
 def _cef_escape(value):
     """Encode an NSS extension value the way a real Zscaler feed does.
@@ -129,8 +137,17 @@ _UPLOAD_FILES = {
 
 
 def _pick_upload_file(kind="document"):
-    """Return (filename, filetype) for an upload event of the given content kind."""
-    return random.choice(_UPLOAD_FILES.get(kind, _UPLOAD_FILES["document"]))
+    """Return (filename, filetype) for an upload event of the given content kind.
+
+    Generated rather than drawn from _UPLOAD_FILES: that pool is 20 names with no
+    placeholders, so every upload in a long run is one of twenty and a DLP or
+    file-name-cardinality detector cannot tell one exfil from the next.
+    _UPLOAD_FILES is kept as the offline fallback.
+    """
+    try:
+        return threat_files.document_name(kind)
+    except Exception:
+        return random.choice(_UPLOAD_FILES.get(kind, _UPLOAD_FILES["document"]))
 
 
 def _get_threat_interval(threat_level, config):
@@ -169,8 +186,8 @@ def _get_user_and_device_info(config, user_override=None, session_context=None):
     if session_context:
         if user_override:
             user_info = get_user_by_name(session_context, user_override)
-        else:
-            user_info = get_random_user(session_context, preferred_device_type='workstation')
+        else:   # follow-on proxy traffic: prefer a currently-active (recently-logged-on) user
+            user_info = correlated_or_random_user(session_context, preferred_device_type='workstation')
         if user_info:
             device_info = get_zscaler_device_info(user_info)
             return user_info['username'], user_info.get('department', 'Unknown'), user_info['ip'], device_info
@@ -189,7 +206,8 @@ def _get_user_and_device_info(config, user_override=None, session_context=None):
     if not user_ip_map:
         return ("unknown_user", "Unknown", _get_random_internal_ip(config),
                 {"hostname": "unknown-host", "owner": "unknown_owner",
-                 "os_type": "Windows", "os_version": "11"})
+                 "os_type": "Windows", "os_version": "11",
+                 "user_agent": get_user_agent(None, "unknown_user")})
     user = (user_override if user_override and user_override in user_ip_map
             else random.choice(list(user_ip_map.keys())))
     ip = user_ip_map.get(user) or _get_random_internal_ip(config)
@@ -200,12 +218,36 @@ def _get_user_and_device_info(config, user_override=None, session_context=None):
         "owner":      d.get('owner',      user),
         "os_type":    d.get('os_type',    'Windows'),
         "os_version": d.get('os_version', '11'),
+        "user_agent": get_user_agent(None, user),
     }
     return user, dept, ip, device_info
 
 
+def _identity_from_context(config, ctx):
+    """Build (user, dept, ip, device_info) directly from an orchestrator-pinned
+    identity in context — the REAL box user/hostname/IP — bypassing the random
+    identity maps (which don't contain a bring-your-own box user).
+
+    Used ONLY when context carries 'user' (an XDR-orchestrated event). Ambient
+    generation never takes this path, so its identities/format are unchanged. The
+    emitted fields (suser, devicehostname, deviceowner, cip) keep their normal
+    format — only the values are the real ones, so the synthetic web logs align
+    with the endpoint the Cortex agent reports."""
+    user     = ctx.get("user") or "unknown_user"
+    ip       = ctx.get("src_ip") or _get_random_internal_ip(config)
+    hostname = ctx.get("hostname") or f"{user}-desktop"
+    device_info = {
+        "hostname":   hostname,
+        "owner":      user,
+        "os_type":    ctx.get("os_type", "Windows"),
+        "os_version": ctx.get("os_version", "11"),
+        "user_agent": get_user_agent(None, user),
+    }
+    return user, ctx.get("department", "Unknown"), ip, device_info
+
+
 def _dns_precursor_event(config, user, dept, device_info, src_ip, domain=None,
-                         event_time_ms=None):
+                         event_time_ms=None, exact_user=False):
     """Generate a DNS resolution NSSFWlog event that precedes a connection.
 
     Returns a single CEF string representing the UDP/53 query that must
@@ -228,12 +270,10 @@ def _dns_precursor_event(config, user, dept, device_info, src_ip, domain=None,
                      "United States", "1",
                      random.randint(64, 512), random.randint(32, 128),
                      dst_fqdn=domain, event_time_ms=event_time_ms,
-                     duration_ms=random.randint(1, 500))
+                     duration_ms=random.randint(1, 500), exact_user=exact_user)
 
 
-# ---------------------------------------------------------------------------
 # BENIGN WEB GENERATORS
-# ---------------------------------------------------------------------------
 
 def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_info):
     """Allowed outbound web browsing (nssweblog)."""
@@ -241,16 +281,19 @@ def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_in
     _default_dest = [{"ip_range": "8.8.8.0/24", "name": "google.com",
                       "ports": [443], "service_types": ["HTTPS"], "country": "US"}]
     destination = weighted_destination(user, zscaler_conf.get('benign_egress_destinations', _default_dest))
-    dest_ip_range = destination.get("ip_range", "8.8.8.0/24")
-    if dest_ip_range.endswith("/32"):
-        dest_ip = dest_ip_range[:-3]
-    else:
-        try:
-            dest_ip = rand_ip_from_network(ip_network(dest_ip_range, strict=False))
-        except Exception:
-            dest_ip = "8.8.8.1"
-    domain = destination.get("name", "example.com").replace(" ", "").lower()
+    # Real FQDN (config `domain`), and the address that NAME resolves to -- the
+    # same answer the Infoblox grid gives -- rather than an unrelated host in the
+    # entry's CIDR. See modules/resolver.py.
+    domain, dest_ip = resolver.benign_target(config, destination)
     app_details = random.choice(zscaler_conf.get('app_details', [{"name": "General Browsing", "class": "Web"}]))
+    # A slice of browsing goes to a real long-tail site (modules/domain_corpus.py),
+    # so rare destinations stay rare over a long run. Such a site is no named SaaS
+    # app, so it must not inherit "Slack" / "Microsoft Office 365" from the pool.
+    tail = long_tail_domain("web")
+    if tail:
+        # Stable per name, so this site answers the same in Infoblox and here.
+        domain, dest_ip = tail, resolver.answer_for(tail, config)
+        app_details = {"name": "General Browsing", "class": "Web"}
     fields = {
         "action": "Allowed",
         "urlcat":     random.choice(zscaler_conf.get('benign_url_categories', ["Technology"])),
@@ -258,14 +301,21 @@ def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_in
         "urlclass":   "Business and Productivity",
         "riskscore":  str(random.randint(1, 20)),
         "responsecode": "200", "reason": "Allowed", "reqmethod": "GET",
-        "useragent":  random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent":  (device_info.get('user_agent') or get_user_agent(None, user)),
         "appname":    app_details.get('name'), "appclass": app_details.get('class'),
         "contenttype": "text/html",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
-        "eurl": f"https://www.{domain}/", "ehost": domain,
+        # The host header IS ehost. This was https://www.{domain}/, so one event
+        # claimed two hosts (www.teams.microsoft.com vs teams.microsoft.com) and
+        # the URL named a host nothing ever resolved.
+        "eurl": f"https://{domain}/", "ehost": domain,
         "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
-        "bytesin": random.randint(5000, 50000), "bytesout": random.randint(500, 5000),
+        # Per-user volume band: light/medium/heavy users keep a consistent daily
+        # profile across the run, so a spike stands out against that user's own
+        # baseline rather than against one flat range shared by everyone.
+        "bytesin": random.randint(*get_byte_volume_band(user)),
+        "bytesout": random.randint(500, 5000),
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "2",
@@ -273,9 +323,7 @@ def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_in
     return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
 
 
-# ---------------------------------------------------------------------------
 # BENIGN FIREWALL GENERATORS
-# ---------------------------------------------------------------------------
 
 def _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, device_info):
     """Allowed outbound TCP connection — normal workstation traffic (nssfwlog)."""
@@ -283,15 +331,12 @@ def _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, devi
     _default_dest = [{"ip_range": "8.8.8.0/24", "name": "google.com",
                       "ports": [443], "service_types": ["HTTPS"], "country": "United States"}]
     destination = weighted_destination(user, zscaler_conf.get('benign_egress_destinations', _default_dest))
-    dest_ip_range = destination.get("ip_range", "8.8.8.0/24")
-    if dest_ip_range.endswith("/32"):
-        dest_ip = dest_ip_range[:-3]
-    else:
-        try:
-            dest_ip = rand_ip_from_network(ip_network(dest_ip_range, strict=False))
-        except Exception:
-            dest_ip = "8.8.8.1"
-    dest_port = random.choice(destination.get("ports", [443]))
+    _domain, dest_ip = resolver.benign_target(config, destination)
+    # Plain DNS from a workstation never reaches Zscaler (it goes to the Infoblox
+    # grid on the LAN). A browser talking to dns.google / 1.1.1.1 does so over
+    # DNS-over-HTTPS, so a DNS-provider destination is reached on 443.
+    _ports = [p for p in destination.get("ports", [443]) if p != 53] or [443]
+    dest_port = random.choice(_ports)
     # nwsvc is the network SERVICE, so derive it from the destination port. The
     # config's service_types are application categories ("Web Browsing",
     # "PackageManagement", "ZoomMeeting", "Email"), and feeding them through here put
@@ -307,7 +352,11 @@ def _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, devi
         "threatcat": None, "threatname": None,
         "destCountry": destination.get("country", "United States"),
         "srcCountry": "United States",
-        "bytesin": random.randint(5000, 50000), "bytesout": random.randint(500, 5000),
+        # Per-user volume band: light/medium/heavy users keep a consistent daily
+        # profile across the run, so a spike stands out against that user's own
+        # baseline rather than against one flat range shared by everyone.
+        "bytesin": random.randint(*get_byte_volume_band(user)),
+        "bytesout": random.randint(500, 5000),
         "nwsvc": _port_service(dest_port) or (_cfg_svc if _cfg_svc in _PORT_SERVICE.values() else None),
         # The config's service_types ("Web Browsing", "PackageManagement",
         # "ZoomMeeting", "Email") are APPLICATIONS, not services — the vendor sample
@@ -326,31 +375,40 @@ def _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, devi
 
 
 def _generate_benign_dns_query(config, user, dept, internal_host_ip, device_info):
-    """Benign outbound DNS query (UDP/53) to a public resolver (nssfwlog).
+    """Benign outbound DNS (UDP/53) as a Zscaler location sees it (nssfwlog).
 
-    Matches the dns_query benign event type present in Checkpoint, Firepower,
-    FortiGate, and Cisco ASA modules for baseline DNS traffic fidelity.
+    Workstations resolve through the Infoblox grid on the LAN, which never
+    reaches Zscaler. What does leave the location is the GRID's recursion to
+    its forwarders, so that is what this logs: src = grid member, dst =
+    forwarder, identity = the location (no ZCC device, no signed-in user). It
+    used to show every workstation querying 8.8.8.8/9.9.9.9 directly -- a
+    resolver bypass in an Infoblox estate.
     """
     zscaler_conf = config.get('zscaler_config', {})
-    dns_resolvers = ["8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9", "208.67.222.222"]
-    resolver = random.choice(dns_resolvers)
+    member, grid_ip = resolver.dns_server_for(config, None)
+    fwd = random.choice(resolver.dns_forwarders(config))
+    location = random.choice(zscaler_conf.get('locations', ["HQ"]))
+    device_info = {"hostname": member, "owner": "infrastructure",
+                   "os_type": "Infoblox NIOS", "os_version": "9.0"}
     fields = {
-        "srcip": internal_host_ip, "sport": random.randint(49152, 65535),
-        "destip": resolver, "destport": 53,
+        "_location_traffic": True,
+        "suser": location,
+        "srcip": grid_ip, "sport": random.randint(1024, 65535),
+        "destip": fwd, "destport": 53,
         "proto": "17",  # UDP
         "action": "Allow", "rulelabel": "Allow_DNS_Outbound", "reason": "Allowed",
         "threatcat": None, "threatname": None, "destCountry": "United States",
         "srcCountry": "United States",
         "bytesin": random.randint(64, 512), "bytesout": random.randint(32, 128),
-        "nwsvc": "DNS", "spriv": "domain users",
+        "nwsvc": "DNS",
         "duration_ms": random.randint(1, 500), "cefSeverity": "1",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
-        "destinationTranslatedAddress": resolver,
-        "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
+        "destinationTranslatedAddress": fwd,
+        "flexString1": location,
     }
-    return _format_nss_log_as_cef(fields, user, dept, 'nssfwlog')
+    return _format_nss_log_as_cef(fields, location, None, 'nssfwlog')
 
 
 def _generate_benign_inbound_block(config, user, dept, internal_host_ip, device_info):
@@ -405,10 +463,9 @@ def _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_in
         ("sharepoint.com",       "40.96.0.0/13",  "Office 365"),
     ]
     dest_name, dest_cidr, url_cat = random.choice(saas_destinations)
-    try:
-        dest_ip = rand_ip_from_network(ip_network(dest_cidr, strict=False))
-    except Exception:
-        dest_ip = "40.99.1.1"
+    # Pinned in the shared resolver (inside the provider's range), so Infoblox
+    # answers this host with the address the upload goes to.
+    dest_ip = resolver.pin(dest_name, dest_cidr) or "40.99.1.1"
     method = random.choice(["PUT", "POST"])
     # bytesout = client→server (large: uploading files); bytesin = server→client (small: ACK)
     upload_bytes = random.randint(500_000, 50_000_000)
@@ -423,7 +480,7 @@ def _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_in
         "responsecode": random.choice(["200", "201", "204"]),
         "reason":      "Allowed",
         "reqmethod":   method,
-        "useragent":   random.choice(config.get('user_agents', ["Microsoft OneDrive/22.0"])),
+        "useragent":   (device_info.get('user_agent') or get_user_agent(None, user)),
         "appname":     "Cloud Storage",
         "appclass":    "Web",
         "contenttype": "application/octet-stream",
@@ -463,10 +520,9 @@ def _generate_benign_software_update(config, user, dept, internal_host_ip, devic
         ("update.nai.com",           "161.69.0.0/16",   "Computer and Internet Info"),
     ]
     dest_name, dest_cidr, url_cat = random.choice(update_sources)
-    try:
-        dest_ip = rand_ip_from_network(ip_network(dest_cidr, strict=False))
-    except Exception:
-        dest_ip = "13.107.4.1"
+    # Pinned in the shared resolver inside the vendor's real range, so the
+    # Infoblox answer for the update host and this download agree.
+    dest_ip = resolver.pin(dest_name, dest_cidr) or "13.107.4.1"
     fields = {
         "action": "Allowed",
         "urlcat":      url_cat,
@@ -514,10 +570,9 @@ def _generate_benign_video_streaming(config, user, dept, internal_host_ip, devic
         ("nflxvideo.net",        "45.57.0.0/17",    "Streaming Media",     "video/mp4"),
     ]
     dest_name, dest_cidr, url_cat, content_type = random.choice(streaming_destinations)
-    try:
-        dest_ip = rand_ip_from_network(ip_network(dest_cidr, strict=False))
-    except Exception:
-        dest_ip = "216.58.1.1"
+    # Shared resolver: a curated name (zoom.us, teams.microsoft.com) keeps its
+    # real answer; the rest are pinned inside the provider's range.
+    dest_ip = resolver.pin(dest_name, dest_cidr) or "216.58.1.1"
     fields = {
         "action": "Allowed",
         "urlcat":      url_cat,
@@ -527,13 +582,13 @@ def _generate_benign_video_streaming(config, user, dept, internal_host_ip, devic
         "responsecode": "200",
         "reason":      "Allowed",
         "reqmethod":   "GET",
-        "useragent":   random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent":   (device_info.get('user_agent') or get_user_agent(None, user)),
         "appname":     url_cat,
         "appclass":    "Web",
         "contenttype": content_type,
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
-        "eurl":  f"https://www.{dest_name}/",
+        "eurl":  f"https://{dest_name}/",
         "ehost": dest_name,
         "cip":   internal_host_ip,
         "sip":   dest_ip,
@@ -548,9 +603,7 @@ def _generate_benign_video_streaming(config, user, dept, internal_host_ip, devic
     return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
 
 
-# ---------------------------------------------------------------------------
 # BENIGN PROTOCOL BASELINE GENERATORS (UEBA)
-# ---------------------------------------------------------------------------
 
 def _generate_benign_smb_event(config, user, dept, internal_host_ip, device_info):
     """Internal SMB file-share access — baseline for SMB lateral movement alerts (nssfwlog)."""
@@ -698,11 +751,10 @@ def _generate_benign_ftp_event(config, user, dept, internal_host_ip, device_info
                      random.randint(200, 5_000))
 
 
-# ---------------------------------------------------------------------------
 # THREAT WEB GENERATORS
-# ---------------------------------------------------------------------------
 
-def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_info):
+def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_info,
+                                 domain=None, dst_ip=None):
     """Blocked malicious web traffic — malware download or C2 callback.
 
     Returns [DNS precursor, NSSFWlog TCP/80 blocked, NSSWeblog blocked].
@@ -717,10 +769,13 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
     malware_details = random.choice(zscaler_conf.get('malware_details', [{"class": "Trojan", "type": "Generic"}]))
     filename = details.get('filename', f"payload_{random.randint(100, 999)}.exe")
     filetype  = details.get('filetype', "Windows Executable")
-    dest_ip = _random_external_ip()
+    # A scenario pins the name it had Infoblox resolve and the address that answer
+    # carried, so the proxy blocks the host the victim actually looked up.
+    dest_ip = dst_ip or _random_external_ip()
     logs = []
-    # Log 1: DNS precursor
-    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip))
+    # Log 1: DNS precursor — carries the resolved name when a scenario pinned one
+    logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip,
+                                     domain=domain))
     # Log 2: NSSFWlog — TCP/80 blocked connection
     logs.append(_fw_event(config, user, dept, device_info,
                           internal_host_ip, dest_ip, 80, "6",
@@ -739,12 +794,14 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
         "threatscore": str(random.randint(75, 100)),
         "malwareclass": malware_details.get('class'), "malwaretype": malware_details.get('type'),
         "reqmethod": "GET",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "contenttype": "application/octet-stream",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
-        "eurl":  f"http://{details.get('domain', 'malware.example.com')}/{filename}",
-        "ehost": details.get('domain', 'malware.example.com'),
+        # A scenario pins the host the victim resolved; otherwise the threat
+        # table's own domain. The URL host and ehost are always the same host.
+        "eurl":  f"http://{domain or details.get('domain', 'malware.example.com')}/{filename}",
+        "ehost": domain or details.get('domain', 'malware.example.com'),
         "cip": internal_host_ip, "sip": dest_ip,
         "proto": "HTTP",
         "bytesin":  random.randint(200, 2_000),
@@ -760,9 +817,10 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
 
 
 def _exfil_destination(config, kind="upload"):
-    """Pick a cloud-storage destination from the SHARED 25-entry pool.
+    """Pick an exfil destination from the SHARED 25-entry pool or the long tail.
 
-    Returns (domain, ip, url).
+    Returns (domain, ip, url, is_tail) — see session_utils.exfil_destination() for
+    the two archetypes and why `is_tail` must drive the URL-category labelling.
 
     Every upload/DLP/download generator here used to hardcode
     `dest_ip = f"104.18.30.{random.randint(1, 254)}"` and draw its domain from
@@ -776,41 +834,65 @@ def _exfil_destination(config, kind="upload"):
     205.196.121.147, 162.125.40.246, 154.53.224.128). A detector keying on "rare
     destination" cannot treat 166 addresses in a single /24 as rare, and cannot tell
     upload traffic from download traffic when both resolve into the same block.
-
-    Uploads and downloads draw from disjoint halves of the pool so the two directions
-    are distinguishable as destinations.
     """
-    dests = config.get('exfiltration_destinations') or []
-    if not dests:
+    if not config.get('exfiltration_destinations'):
         zc = config.get('zscaler_config', {})
         entry = random.choice(zc.get('exfil_destinations')
                              or [{"domain": "drive.google.com"}])
         domain = entry.get('domain', 'drive.google.com')
-        return domain, _random_external_ip(), entry.get('url') or f"https://{domain}/upload"
-    ordered = sorted(dests, key=lambda d: d.get('domain') or '')
-    half    = max(1, len(ordered) // 2)
-    pool    = ordered[:half] if kind == "download" else ordered[half:]
-    entry   = random.choice(pool or ordered)
-    domain  = entry.get('domain') or 'drive.google.com'
-    # Some pool entries are wildcard patterns (e.g. "*.digitaloceanspaces.com"). A real log
-    # carries a concrete FQDN, never a wildcard, so substitute a plausible label.
-    if domain.startswith('*.'):
-        domain = random.choice(["files", "cdn", "assets", "static", "data"]) + domain[1:]
-    try:
-        dest_ip = rand_ip_from_network(ip_network(entry.get('ip_range'), strict=False))
-    except Exception:
-        dest_ip = _random_external_ip()
-    path = "/download" if kind == "download" else "/upload"
-    return domain, dest_ip, f"https://{domain}{path}"
+        return (domain, _random_external_ip(),
+                entry.get('url') or f"https://{domain}/upload", False)
+    return exfil_destination(config, kind)
 
 
-def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, device_info):
+def _exfil_url_category(is_tail):
+    """NSSFWlog url_category for an exfil destination.
+
+    A long-tail host is a registrable domain the proxy has no classification for,
+    so it must NOT inherit "Online Storage and Backup" from the curated pool: a
+    detection that keys on the cloud-storage category would then fire on it for
+    the wrong reason, and one that keys on an uncategorised destination would
+    never see it at all. "Miscellaneous or Unknown" is Zscaler's real label for
+    exactly this.
+    """
+    return "Miscellaneous or Unknown" if is_tail else "Online Storage and Backup"
+
+
+def _exfil_web_categories(is_tail):
+    """NSSWeblog category/app labels for an exfil destination — see
+    _exfil_url_category(). A tail host is no named SaaS app, so it is General
+    Browsing rather than "File Transfer"; the anomaly is the byte volume against
+    an uncategorised, never-before-resolved destination, not the app name."""
+    if is_tail:
+        return {"urlcat": "Miscellaneous or Unknown", "urlsupercat": "Miscellaneous",
+                "urlclass": "General Surfing",
+                "appname": "General Browsing", "appclass": "Web"}
+    return {"urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
+            "urlclass": "Business and Productivity",
+            "appname": "File Transfer", "appclass": "General"}
+
+
+def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, device_info,
+                                     exact_user=False, domain_override=None):
     """Large file upload to cloud storage — data exfiltration (ALLOWED).
 
     Returns [DNS precursor, NSSFWlog TCP/443 allowed, NSSWeblog allowed].
+
+    `domain_override` / `exact_user`: orchestrated (XDR) events pin the exfil
+    destination domain and the exact box user so the web log, the paired firewall
+    C2_EGRESS, and the endpoint technique all agree on one destination/identity.
+    Ambient/standalone callers pass neither and behave exactly as before.
     """
     zscaler_conf = config.get('zscaler_config', {})
-    _exfil_domain, dest_ip, _exfil_url = _exfil_destination(config, "upload")
+    _exfil_domain, dest_ip, _exfil_url, _is_tail = _exfil_destination(config, "upload")
+    # Pin the exfil domain when orchestrated; overriding it here also flows into the
+    # DNS precursor and NSSFWlog sub-events below, which reuse `_exfil_domain`.
+    # An orchestrated domain is chosen by the story, so it is labelled as a curated
+    # destination rather than as an uncategorised long-tail host.
+    if domain_override:
+        _exfil_domain = domain_override
+        _exfil_url = exfil_url(domain_override, "upload")
+        _is_tail = False
     exfil_dest = {"url": _exfil_url, "domain": _exfil_domain}
     # 300 MB - 700 MB. "Large Upload (HTTPS)" has fired 85 times for Check Point and never
     # for Zscaler; max xdm.source.sent_bytes on port 443 was 105 MB for
@@ -824,7 +906,7 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
     # Log 1: DNS precursor — carries the resolved domain so the host/domain association
     # exists for rare-domain detectors (it previously resolved nothing).
     logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip,
-                                    domain=_exfil_domain))
+                                    domain=_exfil_domain, exact_user=exact_user))
     # Log 2: NSSFWlog — TCP/443 allowed connection (large upload)
     logs.append(_fw_event(config, user, dept, device_info,
                           internal_host_ip, dest_ip, 443, "6",
@@ -842,16 +924,19 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
                           ack_bytes, file_size_bytes,
                           dst_fqdn=_exfil_domain,
                           duration_ms=random.randint(300_000, 1_200_000),
-                          url_category="Online Storage and Backup"))
+                          url_category=_exfil_url_category(_is_tail),
+                          exact_user=exact_user))
     # Log 3: NSSWeblog — web proxy event
+    _cat = _exfil_web_categories(_is_tail)
     fields = {
         "action": "Allowed",
-        "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
-        "urlclass": "Business and Productivity",
+        "urlcat": _cat["urlcat"], "urlsupercat": _cat["urlsupercat"],
+        "urlclass": _cat["urlclass"],
         "riskscore": str(random.randint(40, 70)),
         "responsecode": "201", "reason": "Allowed", "reqmethod": "POST",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
-        "appname": "File Transfer", "appclass": "General", "contenttype": "application/zip",
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
+        "appname": _cat["appname"], "appclass": _cat["appclass"],
+        "contenttype": "application/zip",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": exfil_dest.get('url'), "ehost": exfil_dest.get('domain'),
@@ -863,12 +948,16 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "7",
+        # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the web
+        # log's user matches the endpoint identity; ambient events synthesize a UPN.
+        "suser": user if exact_user else None,
     }
     logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
     return logs
 
 
-def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info):
+def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info,
+                              domain=None, dst_ip=None):
     """DLP engine triggers block on sensitive data upload.
 
     Returns [DNS precursor, NSSFWlog TCP/443 blocked, NSSWeblog DLP block] or None.
@@ -884,7 +973,11 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
         return None
     dictionary = random.choice(dicts)
     rule       = random.choice(dlp_conf.get('rules', ["DLP-Default-Rule"]))
-    _exfil_domain, dest_ip, _exfil_url = _exfil_destination(config, "upload")
+    _exfil_domain, dest_ip, _exfil_url, _is_tail = _exfil_destination(config, "upload")
+    if domain:
+        # Pinned by the scenario to the destination Infoblox just resolved.
+        _exfil_domain, _exfil_url = domain, f"https://{domain}/upload"
+        dest_ip = dst_ip or resolver.answer_for(domain, config)
     exfil_dest = {"url": _exfil_url, "domain": _exfil_domain}
     upload_bytes = random.randint(1000, 50000)
     ack_bytes = random.randint(100, 500)
@@ -903,15 +996,16 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
                           "Unknown", "6",
                           ack_bytes, upload_bytes,
                           dst_fqdn=_exfil_domain,
-                          url_category="Online Storage and Backup"))
+                          url_category=_exfil_url_category(_is_tail)))
     # Log 3: NSSWeblog — DLP block with engine details
+    _cat = _exfil_web_categories(_is_tail)
     fields = {
         "action": "Blocked",
-        "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
-        "urlclass": "Business and Productivity",
+        "urlcat": _cat["urlcat"], "urlsupercat": _cat["urlsupercat"],
+        "urlclass": _cat["urlclass"],
         "riskscore": str(random.randint(45, 75)),
         "responsecode": "403", "reason": "DLP Block", "reqmethod": "POST",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "contenttype": "application/zip",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
@@ -963,7 +1057,7 @@ def _generate_cloud_app_control_event(config, user, dept, internal_host_ip, devi
         "reason": f"Cloud App Control: {app.get('name', 'Unknown App')}",
         "reqmethod": "GET", "appname": app.get('name'), "appclass": app.get('class'),
         "contenttype": "text/html",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"https://{app.get('name', 'app').lower()}.com",
@@ -1014,7 +1108,7 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
         "filesize": threat.get('filesize', random.randint(20_000, 8_000_000)),
         "reqmethod": "GET",
         "contenttype": "application/octet-stream",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl":  f"http://download.unsafe-storage.com/{filename}",
@@ -1031,9 +1125,7 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # FIREWALL EVENT HELPER — shared by all nssfwlog generators
-# ---------------------------------------------------------------------------
 
 def _is_internal_ip(ip):
     """Return True if the IP string looks like a private/internal address."""
@@ -1075,7 +1167,8 @@ def _port_service(port):
 def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
               action, rule, nwsvc, threat_cat, threat_name, dest_country, sev,
               bytes_in=0, bytes_out=60, event_time_ms=None, src_country=None,
-              dst_fqdn=None, duration_ms=None, url_category=None, nwapp=None):
+              dst_fqdn=None, duration_ms=None, url_category=None, nwapp=None,
+              exact_user=False):
     """Build a single nssfwlog CEF event — used by all firewall scenario generators.
 
     event_time_ms: optional ms-epoch to back-date the event (sets CEF rt -> XSIAM _time);
@@ -1135,15 +1228,17 @@ def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
         "destinationTranslatedAddress": dst_ip,
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cdfqdn": dst_fqdn,
+        # Orchestrated (XDR) events pin the EXACT box user (no @examplecorp.com) so the
+        # firewall log's user matches the endpoint identity; ambient events leave this
+        # unset and get the usual synthesized UPN.
+        "suser": user if exact_user else None,
     }
     if event_time_ms is not None:
         fields["rt"] = event_time_ms
     return _format_nss_log_as_cef(fields, user, dept, 'nssfwlog')
 
 
-# ---------------------------------------------------------------------------
 # THREAT FIREWALL GENERATORS — single-event
-# ---------------------------------------------------------------------------
 
 def _generate_threat_firewall_traffic(config, user, dept, internal_host_ip, device_info):
     """Outbound connection to a suspicious or TOR destination, blocked.
@@ -1205,10 +1300,15 @@ def _generate_server_outbound_http(config, user, dept, internal_host_ip, device_
     """
     print("    - Zscaler Module simulating: Server Outbound HTTP (anomalous)")
     internal_servers = config.get('internal_servers', [])
-    server_ip = random.choice(internal_servers) if internal_servers else _get_random_internal_ip(config)
+    try:
+        from modules.session_utils import stable_subset
+    except ImportError:
+        from session_utils import stable_subset
+    server_ip = (random.choice(stable_subset(internal_servers, "zscaler:server_outbound_http"))
+                 if internal_servers else _get_random_internal_ip(config))
     logs = [_dns_precursor_event(config, user, dept, device_info, server_ip)]
     logs.append(_fw_event(config, user, dept, device_info,
-                     server_ip, _random_external_ip(), 80, "6",
+                     server_ip, (_beacon_target_map.get(f"srvhttp::{server_ip}") or rare_external_ip()), 80, "6",
                      "Allow", "Allow_Web_Outbound", "HTTP",
                      "Suspicious Outbound", "ServerOutboundHTTP",
                      "Unknown", "5",
@@ -1272,28 +1372,79 @@ def _generate_rdp_lateral(config, user, dept, internal_host_ip, device_info):
 
 
 def _generate_ssh_over_https(config, user, dept, internal_host_ip, device_info):
-    """Suspicious outbound SSH or tunneled connection.
+    """An application on a port it does not belong on, to a RARE destination — XSIAM
+    "Rare AppID usage to a rare destination" ("Rare AppID with port usage to rare
+    destination"; dedup 14 days).
 
-    Returns [DNS precursor, NSSFWlog SSH-over-443 or SSH/22 blocked].
+    REBUILT 2026-09-17. The previous version emitted a BLOCKED event — no session ever
+    happened, so there was no app usage to observe — to a destination from the AMBIENT
+    pool, and 30% of the time it was plain SSH on 22 (not an app/port mismatch at all).
+    Now: an ALLOWED SSH session identified on TCP/443, 1-3 interactive sessions to one
+    session_utils.rare_external_ip(). nwsvc is emitted as cs3, which the nssfwlog
+    modeling rule maps to xdm.network.application_protocol (measured 2026-09-17).
     """
-    print("    - Zscaler Module simulating: SSH over HTTPS / suspicious SSH tunnel")
-    if random.random() < 0.70:
-        dest_port, nwsvc, threat_name = 443, "HTTPS", "SSHoverHTTPS"
-    else:
-        dest_port, nwsvc, threat_name = 22,  "SSH",   "SuspiciousSSH"
-    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
-    logs.append(_fw_event(config, user, dept, device_info,
-                     internal_host_ip, _random_external_ip(), dest_port, "6",
-                     "Blocked", "Block_SuspiciousSSH", nwsvc,
-                     "Tunneling", threat_name,
-                     "Unknown", "7",
-                     random.randint(40, 200), random.randint(100, 500)))
+    print("    - Zscaler Module simulating: SSH on 443 to a rare destination")
+    dst  = rare_external_ip()
+    fqdn = f"cdn-{dst.replace('.', '-')}.edge-static.net"
+    now  = int(time.time() * 1000)
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip, domain=fqdn,
+                                 event_time_ms=now - 2_000)]
+    for _ in range(random.randint(1, 3)):
+        logs.append(_fw_event(config, user, dept, device_info,
+                              internal_host_ip, dst, 443, "6",
+                              "Allow", "Allow_Web_Outbound", "SSH",
+                              "None", "None",
+                              "Unknown", "3",
+                              random.randint(20_000, 2_000_000), random.randint(20_000, 2_000_000),
+                              event_time_ms=now - random.randint(0, 600_000),
+                              dst_fqdn=fqdn, duration_ms=random.randint(60_000, 1_800_000),
+                              nwapp="SSH"))
     return logs
 
 
-# ---------------------------------------------------------------------------
+def _generate_rare_domain_communication(config, user, dept, internal_host_ip, device_info):
+    """ALLOWED browse to a domain nobody in the org has ever resolved — XSIAM
+    "Abnormal Communication to a Rare Domain" (single event, NDR C2 Detection).
+
+    NEW 2026-09-17 — the analytic successor to web_threat, which stays as vendor noise.
+    web_threat could not fire: it draws its "threats" from a small fixed config map that
+    recurs every run, so none of its domains were rare. Zscaler Web is one of only two
+    firewall datasets whose domain reaches XDM (ehost -> xdm.network.http.domain).
+
+    Standing risk, specific to Zscaler: nssweblog records attribute the SOURCE to the
+    egress/translated address (3 distinct xdm.source.ipv4 values tenant-wide, the
+    internal client is only in xdm.source.host.ipv4_addresses), so an endpoint-profiled
+    detector sees three "endpoints" for the whole org. Re-evaluate after 2026-10-16.
+    """
+    print("    - Zscaler Module simulating: communication to a rare domain")
+    zscaler_conf = config.get('zscaler_config', {})
+    domain = rare_domain()
+    dst    = rare_external_ip()
+    now    = int(time.time() * 1000)
+    logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip,
+                                 domain=domain, event_time_ms=now - 1_500)]
+    fields = {
+        "action": "Allowed",
+        "urlcat": "Newly Registered Domains", "urlsupercat": "Miscellaneous",
+        "urlclass": "Unknown", "riskscore": str(random.randint(40, 70)),
+        "responsecode": "200", "reason": "Allowed", "reqmethod": "GET",
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
+        "appname": "General Browsing", "appclass": "Web",
+        "contenttype": "text/html",
+        "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
+        "deviceostype": device_info['os_type'], "deviceosversion": device_info['os_version'],
+        "eurl": f"https://{domain}/", "ehost": domain,
+        "cip": internal_host_ip, "sip": dst, "proto": "HTTPS",
+        "bytesin": random.randint(2_000, 60_000), "bytesout": random.randint(600, 6_000),
+        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
+        "cefSeverity": "3",
+    }
+    logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
+    return logs
+
+
 # THREAT FIREWALL GENERATORS — multi-event (return list)
-# ---------------------------------------------------------------------------
 
 def _generate_port_scan(config, user, dept, internal_host_ip, device_info):
     """Internal host probing many ports on an internal server (nssfwlog).
@@ -1397,7 +1548,13 @@ def _generate_brute_force(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-_beacon_target_map: dict = {}   # internal_host_ip -> stable C2 resolver for recurring-rare-IP detection
+try:
+    from modules.session_utils import beacon_targets as _beacon_targets
+except ImportError:
+    from session_utils import beacon_targets as _beacon_targets
+# Persists across restarts (state/beacon_targets.json): a source keeps its C2, as a
+# real implant does, so recurring-access detectors can see the pair on many days.
+_beacon_target_map = _beacon_targets("zscaler")
 
 
 def _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info):
@@ -1414,7 +1571,7 @@ def _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info):
     resolver_ip = _beacon_target_map.get(internal_host_ip)
     if not resolver_ip:
         suspicious_resolvers = (
-            [_random_external_ip() for _ in range(3)] +
+            [rare_external_ip() for _ in range(3)] +
             ["91.108.4.1", "176.10.104.240", "185.220.101.1"]
         )
         resolver_ip = random.choice(suspicious_resolvers)
@@ -1443,9 +1600,7 @@ def _generate_dns_c2_beacon(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # SMB THREAT GENERATORS — internal east-west SMB scenarios
-# ---------------------------------------------------------------------------
 
 def _generate_smb_new_host_lateral(config, user, dept, internal_host_ip, device_info):
     """SMB connections from one internal workstation to multiple unfamiliar internal hosts.
@@ -1692,9 +1847,7 @@ def _generate_smb_share_enumeration(config, user, dept, internal_host_ip, device
     return logs
 
 
-# ---------------------------------------------------------------------------
 # RARE-RDP peer bookkeeping — same idiom as the rare-SMB block above
-# ---------------------------------------------------------------------------
 # "rdprare::<src_ip>" -> peers this host has already reached on 3389. In memory only,
 # by design (single-session operation), and deliberately NOT seeded from hash(): CPython
 # salts str hashing per process, so a hash-derived "sticky" value re-rolls on restart.
@@ -1840,9 +1993,7 @@ def _generate_rdp_rare_session(config, user, dept, internal_host_ip, device_info
     return logs
 
 
-# ---------------------------------------------------------------------------
 # ADMINISTRATIVE-BEHAVIOUR ANALYTICS SUPPORT
-# ---------------------------------------------------------------------------
 # Destination ports the detector actually COUNTS as an administrative action. Measured
 # against the tenant: 22 and 69 count reliably, 512 was never counted on any feed and 992
 # counts on some feeds and not others. So 22/69 carry the budget and the other two are
@@ -2010,9 +2161,7 @@ def _generate_new_admin_behavior(config, user, dept, internal_host_ip, device_in
     return logs
 
 
-# ---------------------------------------------------------------------------
 # VPN / REMOTE ACCESS GENERATORS — Zscaler ZPA / RA-VPN via cloud firewall
-# ---------------------------------------------------------------------------
 
 def _generate_vpn_brute_force(config, user, dept, internal_host_ip, device_info):
     """External IP repeatedly failing VPN/ZPA authentication — brute force (nssfwlog).
@@ -2153,9 +2302,7 @@ def _generate_vpn_tor_login(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # RARE OUTBOUND SERVICE GENERATORS
-# ---------------------------------------------------------------------------
 
 def _generate_rare_external_rdp(config, user, dept, internal_host_ip, device_info):
     """Outbound RDP from internal workstation to a rare external IP.
@@ -2165,7 +2312,7 @@ def _generate_rare_external_rdp(config, user, dept, internal_host_ip, device_inf
     print(f"    - Zscaler Module simulating: Rare External RDP from {internal_host_ip}")
     logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
     logs.append(_fw_event(config, user, dept, device_info,
-                     internal_host_ip, _random_external_ip(), 3389, "6",
+                     internal_host_ip, rare_external_ip(), 3389, "6",
                      "Allow", "Allow_Web_Outbound", "RDP",
                      "Suspicious Outbound", "RareExternalRDP",
                      "Unknown", "5",
@@ -2182,7 +2329,7 @@ def _generate_rare_ssh(config, user, dept, internal_host_ip, device_info):
     print(f"    - Zscaler Module simulating: Rare External SSH from {internal_host_ip}")
     logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip)]
     logs.append(_fw_event(config, user, dept, device_info,
-                     internal_host_ip, _random_external_ip(), 22, "6",
+                     internal_host_ip, rare_external_ip(), 22, "6",
                      "Allow", "Allow_Web_Outbound", "SSH",
                      "Suspicious Outbound", "RareExternalSSH",
                      "Unknown", "5",
@@ -2191,9 +2338,7 @@ def _generate_rare_ssh(config, user, dept, internal_host_ip, device_info):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # SMTP / FTP EXFILTRATION GENERATORS
-# ---------------------------------------------------------------------------
 
 def _generate_smtp_spray(config, user, dept, internal_host_ip, device_info):
     """Compromised workstation acting as spam bot — direct SMTP to many external MX (nssfwlog).
@@ -2268,9 +2413,7 @@ def _generate_ftp_large_exfil(config, user, dept, internal_host_ip, device_info)
     return logs
 
 
-# ---------------------------------------------------------------------------
 # DDNS C2 GENERATOR
-# ---------------------------------------------------------------------------
 
 def _generate_ddns_connection(config, user, dept, internal_host_ip, device_info):
     """Internal workstation connecting to a known dynamic DNS domain (nssfwlog).
@@ -2349,7 +2492,7 @@ def _generate_ddns_connection(config, user, dept, internal_host_ip, device_info)
             "urlclass":    "Business and Productivity",
             "riskscore":   str(random.randint(45, 80)),
             "responsecode": "200", "reason": "Allowed", "reqmethod": "POST",
-            "useragent":   random.choice(config.get('user_agents', ["Mozilla/5.0"])),
+            "useragent":   (device_info.get('user_agent') or get_user_agent(None, user)),
             "appname":     "General Browsing", "appclass": "Web",
             "contenttype": "application/octet-stream",
             "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
@@ -2379,6 +2522,10 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": None},
     {"event": "data_exfil",           "weight": 8,  "analytic": True,
      "xsiam_alert": "Large Upload (HTTPS)"},
+    # Same exfil to an HTTPS service on a non-standard port -> the Low-severity
+    # "Large Upload (HTTPS) to non-standard port" variation.
+    {"event": "large_upload_nonstd_port", "weight": 2, "analytic": True,
+     "xsiam_alert": "Large Upload (HTTPS)"},
     {"event": "dlp_threat",           "weight": 6,  "analytic": False,
      "xsiam_alert": None},
     {"event": "cloud_app_threat",     "weight": 5,  "analytic": False,
@@ -2394,17 +2541,18 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "tor_connection",       "weight": 6,  "analytic": True,
      "xsiam_alert": "Recurring access to rare IP"},
     {"event": "dns_c2_beacon",        "weight": 5,  "analytic": True,
-     "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
+     "xsiam_alert": "Recurring access to rare IP"},
     {"event": "server_outbound_http", "weight": 4,  "analytic": True,
-     "xsiam_alert": "New Administrative Behavior"},
+     "xsiam_alert": "Recurring access to rare IP"},
     {"event": "rdp_lateral",          "weight": 3,  "analytic": True,
      "xsiam_alert": "Failed Connections"},
     {"event": "rdp_rare_session",     "weight": 4,  "analytic": True,
      "xsiam_alert": "Abnormal RDP session to a remote host from a rarely seen host"},
     {"event": "new_admin_behavior",   "weight": 4,  "analytic": True,
      "xsiam_alert": "New Administrative Behavior"},
-    {"event": "ssh_over_https",       "weight": 3,  "analytic": False,
-     "xsiam_alert": None},
+    # ssh_over_https REBUILT 2026-09-17 (allowed, SSH on 443, rare destination).
+    {"event": "ssh_over_https",       "weight": 3,  "analytic": True,
+     "xsiam_alert": "Rare AppID usage to a rare destination"},
     {"event": "smb_new_host_lateral", "weight": 4,  "analytic": True,
      "xsiam_alert": "Rare SMB session to a remote host"},
     {"event": "smb_rare_file_transfer","weight": 3, "analytic": True,
@@ -2427,17 +2575,17 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Spam Bot Traffic"},
     {"event": "smtp_large_exfil",     "weight": 2,  "analytic": True,
      "xsiam_alert": "Large Upload (SMTP)"},
-    {"event": "ftp_large_exfil",      "weight": 2,  "analytic": True,
-     "xsiam_alert": "New FTP Server"},
+    {"event": "ftp_large_exfil",      "weight": 2,  "analytic": False,
+     "xsiam_alert": None},
     {"event": "ddns_connection",      "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
-    {"event": "large_download",       "weight": 3,  "analytic": True,
-     "xsiam_alert": "Large Download"},
+    {"event": "large_download",       "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
     # Was annotated "Uncommon reverse SSH tunnel to external domain/ip" — that alert name
     # does not exist in the tenant (searched the whole alerts dataset
     # for every name containing SSH or tunnel). The real detector this drives is
     {"event": "reverse_ssh_tunnel",   "weight": 2,  "analytic": True,
-     "xsiam_alert": "Unusual, long SSH activity with tunnel characteristics"},
+     "xsiam_alert": "Uncommon SSH session was established"},
     # web_c2_beacon was ORPHANED: present in _NAMED_THREATS but absent from this list and
     # from generate_log's threat map, so it never fired ambiently, never appeared in
     # get_threat_names(), and was reachable only via the single hardcoded
@@ -2445,6 +2593,20 @@ _DEFAULT_THREAT_EVENTS = [
     # the generator actually reachable.
     {"event": "web_c2_beacon",        "weight": 4,  "analytic": True,
      "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
+    # Analytic successor to web_threat, NEW 2026-09-17.
+    {"event": "rare_domain_communication", "weight": 4, "analytic": True,
+     "xsiam_alert": "Abnormal Communication to a Rare Domain"},
+    # Tier 1/3 detectors added 2026-09-18.
+    {"event": "port_sweep",           "weight": 5,  "analytic": True,
+     "xsiam_alert": "Port Sweep"},
+    {"event": "dc_smb_outbound",      "weight": 3,  "analytic": True,
+     "xsiam_alert": "Suspicious SMB connection from domain controller"},
+    {"event": "new_ftp_server",       "weight": 2,  "analytic": True,
+     "xsiam_alert": "New FTP Server"},
+    {"event": "rare_smtp_session",    "weight": 2,  "analytic": True,
+     "xsiam_alert": "Rare SMTP/S Session"},
+    {"event": "torrent_client",       "weight": 3,  "analytic": True,
+     "xsiam_alert": "A Torrent client was detected on a host"},
 ]
 
 # --- Display-name mapping (same pattern as checkpoint_firewall.py) ---
@@ -2452,25 +2614,40 @@ _EVENT_DISPLAY_NAMES = {}   # event_key -> display_name
 _DISPLAY_TO_EVENT    = {}   # display_name -> event_key  (reverse lookup)
 for _e in _DEFAULT_THREAT_EVENTS:
     _key  = _e["event"]
-    _name = _key if _e.get("analytic", True) else _NON_ANALYTIC_PREFIX + _key
+    # The "[Non-Analytic] " display prefix is retired: non-analytic threats are simply
+    # not offered on demand (modules/threat_catalog.py). Old prefixed names still resolve.
+    _name = _key
+    _DISPLAY_TO_EVENT[_NON_ANALYTIC_PREFIX + _key] = _key
     _EVENT_DISPLAY_NAMES[_key]  = _name
     _DISPLAY_TO_EVENT[_name]    = _key
     _DISPLAY_TO_EVENT[_key]     = _key      # also accept raw key for back-compat
 
-def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info):
+def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
+                            c2_domain_override=None, exact_user=False, c2_ip_override=None):
     """Web-layer C2 beacon (nssweblog) — repeated small HTTP callbacks to a C2 host at a
     regular cadence. The web-proxy counterpart to the DNS C2 beacon: same host, same
     tempo, uncategorized destination, non-browser user-agent, tiny symmetric byte counts.
+
+    `c2_domain_override`: when supplied (orchestrated event pinning the same C2
+    domain the endpoint + DNS beacon use), callbacks target that host instead of a
+    random one. Log format is identical — only the destination host/URL change.
     """
     zscaler_conf = config.get('zscaler_config', {})
-    c2_domain = random.choice(zscaler_conf.get('c2_domains',
-                ["cdn-analytics-sync.com", "telemetry-edge-api.net", "update-check-svc.org", "cloud-metric-relay.io"]))
+    # Rare domain, stable per host, so the (host, domain) pair recurs across days —
+    # the config c2_domains recur every run and each host used a random one.
+    c2_domain = (c2_domain_override or _beacon_target_map.get(f"webc2dom::{internal_host_ip}")
+                 or rare_domain())
+    _beacon_target_map[f"webc2dom::{internal_host_ip}"] = c2_domain
     # Use the shared helper, NOT a hand-rolled random /8. Picking a random host inside a
     # random octet range is the exact construction the "DO NOT FIX THIS BACK" note near
     # the top of this module warns about: it scattered sources across 210 distinct
     # countries and destroyed geo-based detection. _random_external_ip() draws from the
     # curated external ranges instead.
-    c2_ip     = _random_external_ip()
+    # c2_ip_override: an orchestrated scenario pins the address its DNS beacon
+    # just resolved the C2 name to, so DNS, web and firewall all name one host.
+    c2_ip     = (c2_ip_override or _beacon_target_map.get(f"webc2ip::{internal_host_ip}")
+                 or rare_external_ip())
+    _beacon_target_map[f"webc2ip::{internal_host_ip}"] = c2_ip
     beacon_ua = random.choice(["python-requests/2.31.0", "Go-http-client/1.1", "curl/8.4.0",
                                "Mozilla/5.0 (Windows NT 10.0) WinHTTP/1.0"])
     # A beacon is defined by its CADENCE, so the callbacks must carry distinct timestamps.
@@ -2501,6 +2678,10 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info):
             "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
             "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
             "cefSeverity": "5",
+            # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the
+            # web log's user matches the endpoint identity. Ambient events leave this
+            # unset and get the usual synthesized UPN.
+            "suser": user if exact_user else None,
             # walk backwards from now so the beacon train sits in the recent past at a
             # steady cadence rather than all arriving in the same millisecond
             "rt": base_ms - (n_beacons - 1 - _i) * interval
@@ -2512,23 +2693,34 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info):
 
 # Module-level dispatch map for named-threat mode.
 # Functions accept (config, user, dept, internal_host_ip, device_info).
-def _generate_large_download(config, user, dept, internal_host_ip, device_info):
+def _generate_large_download(config, user, dept, internal_host_ip, device_info,
+                             exact_user=False, domain_override=None):
     """Large INBOUND web transfer — 'Large Download' volume anomaly. The proxy
     counterpart to data_exfil: huge bytesin (download) / small bytesout (request).
-    Returns [DNS precursor, NSSFWlog TCP/443 allow, NSSWeblog allow]."""
+    Returns [DNS precursor, NSSFWlog TCP/443 allow, NSSWeblog allow].
+
+    `domain_override` / `exact_user`: orchestrated (XDR) events pin the download
+    source domain and the exact box user; ambient/standalone callers pass neither
+    and behave exactly as before."""
     print("    - Zscaler Module simulating: Large Download (inbound volume anomaly)")
     zscaler_conf = config.get('zscaler_config', {})
     # `download_destinations` is not present in config, so this silently fell back to the
     # 2-entry upload list and downloads resolved to the SAME hosts as uploads. Draw from
     # the download half of the shared pool instead — see _exfil_destination().
-    _dl_domain, dest_ip, _dl_url = _exfil_destination(config, "download")
+    _dl_domain, dest_ip, _dl_url, _is_tail = _exfil_destination(config, "download")
+    # Pin the source domain when orchestrated; flows into the DNS precursor and NSSFWlog
+    # sub-events below, which reuse `_dl_domain`.
+    if domain_override:
+        _dl_domain = domain_override
+        _dl_url = exfil_url(domain_override, "download")
+        _is_tail = False
     dl_dest        = {"url": _dl_url, "domain": _dl_domain}
     download_bytes = random.randint(524_288_000, 4_294_967_296)  # 500 MB - 4 GB
     req_bytes      = random.randint(200, 2000)
     filename, filetype = _pick_upload_file(random.choice(["archive", "document"]))
 
     logs = [_dns_precursor_event(config, user, dept, device_info, internal_host_ip,
-                                domain=_dl_domain)]
+                                domain=_dl_domain, exact_user=exact_user)]
     # NSSFWlog — bytes_in = download (large), bytes_out = request (small)
     logs.append(_fw_event(config, user, dept, device_info,
                           internal_host_ip, dest_ip, 443, "6",
@@ -2538,15 +2730,18 @@ def _generate_large_download(config, user, dept, internal_host_ip, device_info):
                           download_bytes, req_bytes,
                           dst_fqdn=_dl_domain,
                           duration_ms=random.randint(300_000, 1_200_000),
-                          url_category="Online Storage and Backup"))
+                          url_category=_exfil_url_category(_is_tail),
+                          exact_user=exact_user))
+    _cat = _exfil_web_categories(_is_tail)
     fields = {
         "action": "Allowed",
-        "urlcat": "Online Storage", "urlsupercat": "Productivity and Collaboration",
-        "urlclass": "Business and Productivity",
+        "urlcat": _cat["urlcat"], "urlsupercat": _cat["urlsupercat"],
+        "urlclass": _cat["urlclass"],
         "riskscore": str(random.randint(30, 60)),
         "responsecode": "200", "reason": "Allowed", "reqmethod": "GET",
-        "useragent": random.choice(config.get('user_agents', ["Mozilla/5.0"])),
-        "appname": "File Transfer", "appclass": "General", "contenttype": "application/octet-stream",
+        "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
+        "appname": _cat["appname"], "appclass": _cat["appclass"],
+        "contenttype": "application/octet-stream",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
         "eurl": dl_dest.get('url'), "ehost": dl_dest.get('domain'),
@@ -2557,6 +2752,9 @@ def _generate_large_download(config, user, dept, internal_host_ip, device_info):
         "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "5",
+        # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the web
+        # log's user matches the endpoint identity; ambient events synthesize a UPN.
+        "suser": user if exact_user else None,
     }
     logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
     return logs
@@ -2586,7 +2784,7 @@ def _generate_reverse_ssh_tunnel(config, user, dept, internal_host_ip, device_in
         # address is effectively novel, which is what a rare-destination detector keys on
         # — the same helper already sustains "An Uncommon SSH session was established to a
         # rare IP" for Zscaler (n=155).
-        dest_ip = _random_external_ip()
+        dest_ip = rare_external_ip()   # rare pool
         _beacon_target_map[peer_key] = dest_ip
 
     # --- SHAPE ------------------------------------------------------------------
@@ -2636,12 +2834,137 @@ def _generate_reverse_ssh_tunnel(config, user, dept, internal_host_ip, device_in
     return logs
 
 
+# ── Analytic detectors added 2026-09-18 (Tier 1/3; see docs/firewall-analytics.md) ──
+
+def _zs_domain_controllers(config):
+    """DC IPs; falls back to the shared synthesized DC addresses used by the other modules."""
+    dcs = config.get('zscaler_config', {}).get('domain_controllers') or config.get('domain_controllers')
+    return dcs or ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+
+
+# Privileged ports only (< 1024), as Port Sweep requires; 1433/3389 belong to the
+# SQL/RDP analytics. Missed when the other four modules were fixed on 2026-09-29.
+_ZS_SWEEP_PORTS = [21, 22, 23, 88, 135, 139, 389, 445, 636]
+_ZS_SWEEP_SVC = {21: "FTP", 22: "SSH", 23: "TELNET", 88: "KERBEROS", 135: "RPC",
+                 139: "NetBIOS", 389: "LDAP", 445: "SMB", 636: "LDAPS"}
+
+
+def _generate_port_sweep(config, user, dept, internal_host_ip, device_info):
+    """One internal host probing the SAME privileged port across MANY internal hosts in
+    several subnets — XSIAM "Port Sweep". nwsvc carries the service (-> AppID). Returns list."""
+    print("    - Zscaler Module simulating: Port Sweep (one port, many internal hosts)")
+    src = internal_host_ip or _get_random_internal_ip(config)
+    port = random.choice(_ZS_SWEEP_PORTS)
+    svc = _ZS_SWEEP_SVC.get(port, "TCP")
+    try:
+        from modules.session_utils import sweep_targets
+    except ImportError:
+        from session_utils import sweep_targets
+    # Known live hosts over several /24s (session_utils.sweep_targets): random
+    # addresses in the /16s are hosts the analytics engine has never seen.
+    targets = set(sweep_targets(config, exclude={src}))
+    responders = set(random.sample(sorted(targets), max(1, int(len(targets) * random.uniform(0.10, 0.30)))))
+    base = int(time.time() * 1000); window = random.randint(120_000, 600_000)
+    logs = []
+    for dst in targets:
+        ok = dst in responders
+        logs.append(_fw_event(config, user, dept, device_info, src, dst, port, "6",
+                             "Allow" if ok else "Block",
+                             "Allow_Internal_Any" if ok else "Block_Internal_Scan",
+                             svc, "None" if ok else "PortSweep", "None" if ok else "PortSweep",
+                             "Reserved", "3" if ok else "5",
+                             random.randint(400, 20000) if ok else 0,
+                             random.randint(200, 4000) if ok else 40,
+                             event_time_ms=base - random.randint(0, window),
+                             src_country="Reserved",
+                             duration_ms=random.randint(2000, 45000) if ok else 0))
+    return logs
+
+
+def _generate_dc_smb_outbound(config, user, dept, internal_host_ip, device_info):
+    """SMB from a DOMAIN CONTROLLER to a workstation — XSIAM "Suspicious SMB connection
+    from domain controller". Source from _zs_domain_controllers(). Returns list."""
+    dcs = _zs_domain_controllers(config)
+    dc_ip = random.choice(dcs)
+    print(f"    - Zscaler Module simulating: DC->workstation SMB from {dc_ip}")
+    nets = config.get("internal_networks", ["192.168.1.0/24"])
+    try:
+        target = rand_ip_from_network(ip_network(random.choice(nets), strict=False))
+    except Exception:
+        target = "192.168.1.101"
+    logs = []
+    for _ in range(random.randint(2, 4)):
+        logs.append(_fw_event(config, "SYSTEM", dept, device_info, dc_ip, target, 445, "6",
+                             "Allow", "Allow_Internal_SMB", "SMB", "None", "None", "Reserved", "3",
+                             random.randint(5_000, 200_000), random.randint(5_000, 50_000),
+                             src_country="Reserved", duration_ms=random.randint(5_000, 60_000)))
+    return logs
+
+
+def _generate_new_ftp_server(config, user, dept, internal_host_ip, device_info):
+    """Internal host begins SERVING inbound FTP — XSIAM "New FTP Server". 3-6 distinct
+    external clients connect inbound to an internal host on TCP/21. Returns list."""
+    print("    - Zscaler Module simulating: New FTP Server (inbound TCP/21)")
+    servers = config.get("internal_servers", [])
+    try:
+        from modules.session_utils import new_ftp_server_host
+    except ImportError:
+        from session_utils import new_ftp_server_host
+    ftp_ip = new_ftp_server_host(config)   # never a hot internal_servers host: see helper
+    base = int(time.time() * 1000)
+    logs = []
+    for _ in range(random.randint(3, 6)):
+        logs.append(_fw_event(config, user, dept, device_info, _random_external_ip(), ftp_ip, 21, "6",
+                             "Allow", "Allow_Inbound_FTP", "FTP", "None", "None", "Reserved", "3",
+                             random.randint(50_000, 5_000_000), random.randint(2_000, 20_000),
+                             event_time_ms=base - random.randint(0, 600_000),
+                             duration_ms=random.randint(10_000, 300_000)))
+    return logs
+
+
+def _generate_rare_smtp_session(config, user, dept, internal_host_ip, device_info):
+    """A workstation opening an SMTP/S session to a mail server it has never used — XSIAM
+    "Rare SMTP/S Session". Returns list."""
+    print("    - Zscaler Module simulating: Rare SMTP/S session")
+    smtps = random.random() < 0.5
+    dpt, svc = (465, "SMTPS") if smtps else (25, "SMTP")
+    return [_fw_event(config, user, dept, device_info, internal_host_ip, rare_external_ip(), dpt, "6",
+                     "Allow", "Allow_Outbound_Mail", svc, "None", "None", "Unknown", "3",
+                     random.randint(500, 5_000), random.randint(2_000, 200_000),
+                     duration_ms=random.randint(1_000, 30_000))]
+
+
+_ZS_BT_PORTS = [6881, 6882, 6883, 6884, 6885, 6886, 6887, 6888, 6889, 51413]
+
+
+def _generate_torrent_client(config, user, dept, internal_host_ip, device_info):
+    """A workstation running a BitTorrent client — XSIAM "A Torrent client was detected
+    on a host". 12-30 allowed peer sessions on BitTorrent ports, ~40% UDP; nwsvc/nwapp
+    = BitTorrent (-> application_protocol). Returns list."""
+    print(f"    - Zscaler Module simulating: BitTorrent client on {internal_host_ip}")
+    base = int(time.time() * 1000)
+    logs = []
+    for _ in range(random.randint(12, 30)):
+        udp = random.random() < 0.4
+        peer = _random_external_ip() if random.random() < 0.5 else rare_external_ip()
+        dpt = random.choice(_ZS_BT_PORTS)
+        logs.append(_fw_event(config, user, dept, device_info, internal_host_ip, peer, dpt,
+                             "17" if udp else "6",
+                             "Allow", "Allow_Outbound_Any", "BitTorrent", "P2P", "BitTorrent",
+                             "Unknown", "3",
+                             random.randint(50_000, 12_000_000), random.randint(20_000, 4_000_000),
+                             event_time_ms=base - random.randint(0, 1_200_000),
+                             nwapp="BitTorrent", duration_ms=random.randint(5_000, 900_000)))
+    return logs
+
+
 _NAMED_THREATS = {
     "web_c2_beacon":        _generate_web_c2_beacon,
     "large_download":       _generate_large_download,
     "reverse_ssh_tunnel":   _generate_reverse_ssh_tunnel,
     "web_threat":           _generate_threat_web_traffic,
     "data_exfil":           _generate_data_exfil_web_traffic,
+    "large_upload_nonstd_port": lambda *a, **k: to_nonstandard_https(_generate_data_exfil_web_traffic(*a, **k)),
     "dlp_threat":           _generate_dlp_web_traffic,
     "cloud_app_threat":     _generate_cloud_app_control_event,
     "sandbox_threat":       _generate_sandbox_event,
@@ -2655,6 +2978,12 @@ _NAMED_THREATS = {
     "rdp_rare_session":     _generate_rdp_rare_session,
     "new_admin_behavior":   _generate_new_admin_behavior,
     "ssh_over_https":       _generate_ssh_over_https,
+    "rare_domain_communication": _generate_rare_domain_communication,
+    "port_sweep":           _generate_port_sweep,
+    "dc_smb_outbound":      _generate_dc_smb_outbound,
+    "new_ftp_server":       _generate_new_ftp_server,
+    "rare_smtp_session":    _generate_rare_smtp_session,
+    "torrent_client":       _generate_torrent_client,
     "smb_new_host_lateral": _generate_smb_new_host_lateral,
     "smb_rare_file_transfer": _generate_smb_rare_file_transfer,
     "smb_share_enumeration":  _generate_smb_share_enumeration,
@@ -2672,12 +3001,10 @@ _NAMED_THREATS = {
 
 
 def get_threat_names():
-    """Return available threat names dynamically from _DEFAULT_THREAT_EVENTS.
+    """Return every threat name in _DEFAULT_THREAT_EVENTS (analytic or not).
 
-    Non-analytic events (those that won't trigger an XSIAM Third-Party Firewall
-    analytics detection) are prefixed with '[Non-Analytic] ' so operators can
-    focus on events that will produce alerts.
-    """
+    get_threat_info() carries the analytic flag and target alert; only analytic threats
+    are offered for on-demand firing (modules/threat_catalog.py)."""
     return [_EVENT_DISPLAY_NAMES[e["event"]] for e in _DEFAULT_THREAT_EVENTS]
 
 
@@ -2698,9 +3025,7 @@ def get_threat_info():
     return result
 
 
-# ---------------------------------------------------------------------------
 # CEF FORMATTER (unchanged from original)
-# ---------------------------------------------------------------------------
 
 def _format_nss_log_as_cef(fields, user, dept, log_product):
     """Builds the final CEF log string for Zscaler NSS feeds.
@@ -2721,7 +3046,11 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
 
     common_map = {
         "rt": rt,
-        "suser": user if '@' in user else f"{user}@examplecorp.com",
+        # Ambient events synthesize a UPN (user@examplecorp.com). Orchestrated
+        # (XDR-triggered) events set fields['suser'] to the EXACT box username so it
+        # matches the endpoint identity XSIAM stores (which does no user
+        # normalization) — no fake email domain appended.
+        "suser": fields.get("suser") or (user if '@' in user else f"{user}@examplecorp.com"),
         "externalId": str(random.randint(1000000, 9999999999)),
         # Lowercase `devicehostname` is the key the Zscaler modeling rule reads, not
         # CEF-standard deviceHostName. The nssweblog block maps it to
@@ -2769,6 +3098,15 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
         "nsssvcip":         "10.10.102.30",
         "productversion":   "5.0.902.95524_04",
     }
+    if fields.get("_location_traffic"):
+        # Forwarded by the site's tunnel (e.g. the Infoblox grid's recursion), not
+        # by an enrolled endpoint: there is no Client Connector, so none of its
+        # device fields, and no department -- the identity is the location.
+        for _k in ("devicetype", "devicemodel", "deviceappversion", "ztunnelversion",
+                   "deviceOwner", "deviceOperatingSystem", "deviceOperatingSystemVersion",
+                   "dept"):
+            common_map.pop(_k, None)
+        common_map["contentclass"] = "Network Service"
 
     if log_product == 'nssweblog':
         # totalsize = full transaction bytes. Fall back to bytesin+bytesout when a
@@ -2957,9 +3295,7 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
             f"{syslog_host} {cef_header}{extension_string}")
 
 
-# ---------------------------------------------------------------------------
 # SCENARIO SUPPORT
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_log(config, scenario):
     """Generates a scenario-driven threat log from an explicit scenario dict."""
@@ -2992,9 +3328,7 @@ def _generate_scenario_log(config, scenario):
     return _format_nss_log_as_cef(fields, user, dept, 'nssweblog')
 
 
-# ---------------------------------------------------------------------------
 # MAIN ENTRY POINT
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, threat_level="Realistic", benign_only=False, context=None, scenario_event=None):
     """Generates a Zscaler NSS CEF log with variable threat rates.
@@ -3035,7 +3369,9 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
             config, user_override=victim_user, session_context=session_context)
         if src_ip:
             internal_host_ip = src_ip
-        return _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_info)
+        return _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_info,
+                                            domain=(context or {}).get("domain"),
+                                            dst_ip=(context or {}).get("dst_ip"))
 
     if scenario_event == "DATA_EXFIL":
         # Insider threat step 5: large data upload to external cloud storage triggers DLP alert
@@ -3045,20 +3381,46 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
             config, user_override=insider_user, session_context=session_context)
         if src_ip:
             internal_host_ip = src_ip
-        result = _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)
+        result = _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info,
+                                           domain=(context or {}).get("domain"),
+                                           dst_ip=(context or {}).get("dst_ip"))
         if result is None:
             result = _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, device_info)
         return result
 
     if scenario_event and scenario_event in _NAMED_THREATS:
-        user, dept, internal_host_ip, device_info = _get_user_and_device_info(
-            config, session_context=session_context)
-        # Pin the source host from context so a scenario keys the web stage to one host.
-        _ctx_src = (context or {}).get("src_ip")
-        if _ctx_src:
-            internal_host_ip = _ctx_src
+        _ctx = context or {}
+        if _ctx.get("user"):
+            # Orchestrated (XDR-triggered) event: pin the REAL box identity so the
+            # web log carries the same user/host the Cortex agent reports.
+            user, dept, internal_host_ip, device_info = _identity_from_context(config, _ctx)
+        else:
+            user, dept, internal_host_ip, device_info = _get_user_and_device_info(
+                config, session_context=session_context)
+            # Pin the source host from context so a scenario keys the web stage to one host.
+            _ctx_src = _ctx.get("src_ip")
+            if _ctx_src:
+                internal_host_ip = _ctx_src
         if not internal_host_ip:
             internal_host_ip = _get_random_internal_ip(config)
+        # Orchestrated events may pin the destination domain so it matches the endpoint
+        # technique + the paired DNS/firewall events, and pin the exact box user (no UPN
+        # suffix) so the web log's identity matches the endpoint. web_c2_beacon, data_exfil
+        # and large_download all honor these; other named threats keep their defaults.
+        _domain = _ctx.get("domain")
+        _exact_user = bool(_ctx.get("user"))
+        if _domain or _exact_user:
+            if scenario_event == "web_c2_beacon":
+                return _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
+                                               c2_domain_override=_domain, exact_user=_exact_user,
+                                               c2_ip_override=(context or {}).get("dst_ip"))
+            if scenario_event == "data_exfil":
+                return _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip,
+                                                        device_info, exact_user=_exact_user,
+                                                        domain_override=_domain)
+            if scenario_event == "large_download":
+                return _generate_large_download(config, user, dept, internal_host_ip, device_info,
+                                                exact_user=_exact_user, domain_override=_domain)
         return _NAMED_THREATS[scenario_event](config, user, dept, internal_host_ip, device_info)
 
     user, dept, internal_host_ip, device_info = _get_user_and_device_info(
@@ -3100,6 +3462,7 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         # label,                  weight, callable
         ("web_threat",            12, lambda: _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_info)),
         ("data_exfil",             8, lambda: _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, device_info)),
+        ("large_upload_nonstd_port", 2, lambda: to_nonstandard_https(_generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, device_info))),
         ("dlp_threat",             6, lambda: _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info)),
         ("cloud_app_threat",       5, lambda: _generate_cloud_app_control_event(config, user, dept, internal_host_ip, device_info)),
         ("sandbox_threat",         4, lambda: _generate_sandbox_event(config, user, dept, internal_host_ip, device_info)),
@@ -3113,6 +3476,12 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         ("rdp_rare_session",       4, lambda: _generate_rdp_rare_session(config, user, dept, internal_host_ip, device_info)),
         ("new_admin_behavior",     4, lambda: _generate_new_admin_behavior(config, user, dept, internal_host_ip, device_info)),
         ("ssh_over_https",         3, lambda: _generate_ssh_over_https(config, user, dept, internal_host_ip, device_info)),
+        ("rare_domain_communication", 4, lambda: _generate_rare_domain_communication(config, user, dept, internal_host_ip, device_info)),
+        ("port_sweep",             5, lambda: _generate_port_sweep(config, user, dept, internal_host_ip, device_info)),
+        ("dc_smb_outbound",        3, lambda: _generate_dc_smb_outbound(config, user, dept, internal_host_ip, device_info)),
+        ("new_ftp_server",         2, lambda: _generate_new_ftp_server(config, user, dept, internal_host_ip, device_info)),
+        ("rare_smtp_session",      2, lambda: _generate_rare_smtp_session(config, user, dept, internal_host_ip, device_info)),
+        ("torrent_client",         3, lambda: _generate_torrent_client(config, user, dept, internal_host_ip, device_info)),
         ("smb_new_host_lateral",   4, lambda: _generate_smb_new_host_lateral(config, user, dept, internal_host_ip, device_info)),
         ("smb_rare_file_transfer", 3, lambda: _generate_smb_rare_file_transfer(config, user, dept, internal_host_ip, device_info)),
         ("smb_share_enumeration",  5, lambda: _generate_smb_share_enumeration(config, user, dept, internal_host_ip, device_info)),

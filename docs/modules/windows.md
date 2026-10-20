@@ -49,15 +49,30 @@ Named threat generators (via `scenario_event` = the key below, or fired individu
 | `DEFAULT_ACCOUNT_ENABLED` | A user enabled the Windows DefaultAccount | Analytics BIOC | ✅ |
 | `SUSPICIOUS_ACCOUNT_CREATION` | Suspicious hidden user created | Analytics BIOC | ✅ |
 | `MASS_ACCOUNT_DELETION` | A user deleted multiple users for the first time | XDR Analytics | ✅ |
-| `MULTIPLE_SERVICE_TICKETS` | *(re-test pending)* | — | ⏳ |
-| `SUSPICIOUS_ACCOUNT_LOCKOUT` | *(re-test pending)* | — | ⏳ |
-| `PRIV_GROUP_ADD_REMOVE` | **no alert** — events ingest, detector silent | — | ❌ |
-| `SMS_ADMINS_ADDITION` | **no alert** — events ingest, detector silent | — | ❌ |
+| `MULTIPLE_SERVICE_TICKETS` | Abnormal issuance of weakly encrypted service tickets to a user | XDR Analytics | ✅ |
+| `SUSPICIOUS_ACCOUNT_LOCKOUT` | Excessive account lockouts on suspicious users | XDR Analytics | ✅ |
+| `PRIV_GROUP_ADD_REMOVE` | Rare privileged group addition and removal | XDR Analytics | ✅ |
+| `SMS_ADMINS_ADDITION` | User added to the SMS Admins local group | XDR Analytics | ✅ |
+| `SMS_ADMINS_ADD_REMOVE` | User added to the SMS Admins group and removed | XDR Analytics | ✅ |
+| `IRREGULAR_TGT_BURST` | A user sent an excessive number of TGT requests to irregular services | XDR Analytics | ✅ |
+| `MACHINE_ACCOUNT_TO_DOMAIN_ADMINS` | Machine account was added to a domain admins group | Analytics BIOC | ✅ |
+| `AS_REP_ROASTING` | An excessive number of TGT requests were sent for users that do not require Kerberos pre-authentication | XDR Analytics | ✅ |
+| `DMSA_PRIVESC` | Possible Privilege Escalation using Delegated MSA account attempt | XDR Analytics | ✅ |
+| `SENSITIVE_PASSWORD_RESET` | Sensitive account password reset attempt for the first time | Analytics BIOC | ✅ |
 
-The last two were previously listed as confirmed detections. They are not: their events
-ingest correctly and no alert is produced within a 10-minute window. Treat them as WIP.
+Rows from `MULTIPLE_SERVICE_TICKETS` down were re-checked against 90 days of tenant alerts
+on 2026-09-29; each has fired at least once. `PRIV_GROUP_ADD_REMOVE` and
+`SMS_ADMINS_ADDITION`, earlier marked "no alert", have since fired. `AS_REP_ROASTING`,
+`DMSA_PRIVESC` and `SENSITIVE_PASSWORD_RESET` dropped their `WIP_` prefix for the same
+reason; the old `WIP_` names still dispatch.
 
-**WIP** (events ingest correctly; detection pending baseline/investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_DMSA_PRIVESC`, `WIP_SENSITIVE_PASSWORD_RESET`, `WIP_PASSWORD_NEVER_EXPIRES`, `WIP_AS_REP_ROASTING`, `WIP_IRREGULAR_SERVICE_TGS`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`.
+**WIP** (events ingest correctly; detection not yet seen firing): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_PASSWORD_NEVER_EXPIRES`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
+
+**On-demand firing** offers the threats in the module's `ANALYTIC_ALERTS` table: everything
+above plus the four remaining `WIP_` detections, which target published analytics. Not
+offered, background-only: `WIP_IRREGULAR_SERVICE_TGS`, `LSASS_HANDLE_ACCESS` (an XDR-agent
+detection, not a Windows Event Collector analytic) and `ACCOUNT_ACCESS_REMOVAL` (no
+matching published analytic).
 
 ---
 
@@ -98,3 +113,61 @@ Multi-event generators (process trees, some threats) return a Python **list** of
 ## Transport Setup
 
 WEC broker configuration (certificate export, subscription URL, subscription filter) is documented in **WEC Transport Setup** in the [README](../../README.md#wec-transport-setup). In brief: the Broker VM's Windows Event Collector must be activated, and LogSim's `.env` must supply `WEC_BROKER_URL`, `WEC_PFX_PATH`, and `WEC_PFX_PASSWORD`.
+
+## Delivery and Volume
+
+One worker per workstation plus a DC worker and a threats worker generate events into
+buffers that `generate_log()` drains. This is the only ambient mode: the old
+single-threaded mode (`parallel_hosts: false`) was removed on 2026-10-20, and the key is
+no longer read.
+
+- **Events are released at their own timestamps.** Workers schedule each generated
+  sequence into a time-ordered queue and a release thread hands every event out when its
+  time arrives, assigning its `EventRecordID` at that moment. Per host and channel, ids
+  therefore rise with time exactly as on a real machine (before, ~16% of consecutive ids
+  ran backwards), and nothing is ever stamped in the future. A sequence that spans time
+  arrives over that time: a process's 4689 exit is delivered when the process exits,
+  minutes after its 4688. Scenario fires and other direct generator calls are not
+  deferred; they return their events immediately.
+
+- **Volume is set by pacing, not by a cap.** `wks_interval_multiplier` (default 10.0) sets
+  how often each workstation emits; see [Delivery: buffers, not limits](../configuration.md).
+- **Threats are delivered whole.** Each threat is queued as one unit on its own queue and
+  drained before benign traffic, so a multi-event sequence is never cut short and its
+  label is exact. They used to share the benign queue, where a full queue cut a threat off
+  part-way and it was never retried.
+- **No drops.** Workers wait when a buffer is full. A slow WEC broker pauses only the
+  Windows module (`wec_max_pending`); WEC POSTs are pooled and retried, and anything still
+  undeliverable is counted under "WEC delivery" in the health check.
+- **Insane** fires a threat on every threats-worker tick (base interval x
+  `threat_interval_multiplier`, 2 s by default). It previously fired none in parallel mode.
+
+## Record Numbers
+
+Each host's `EventRecordID` only ever increases, across restarts and across processes,
+as on a real Windows host. Numbers are taken in reserved blocks of 10,000 from
+`state/windows_record_numbers.json` (gitignored) under a lock shared between processes,
+so the simulator and a sweep script running at once never hand out the same id. A host
+seen for the first time starts at 1,000,000,000 or above.
+
+They used to be reseeded at random (50,000-500,000) on every restart, so a restart could
+put a host back into a range it had already used. Deleting the state file is safe: hosts
+are reseeded above 1e9 again.
+
+Deterministic Training Mode is unaffected: inside a training run numbering is seeded and
+in-memory, so the same seed reproduces the same ids, and the live counters are untouched.
+
+## Per-Host LSASS PID
+
+The Security channel is written by LSASS, so its PID appears in `<Execution ProcessID>` on
+every record. That PID was pinned globally at `584`, which is correct for **one host**
+— LSASS does keep one PID for the life of a boot — but the simulator spans 500+
+hostnames, and all of them reported 584 on every Security event.
+
+It is now derived from the computer name: stable for that host across restarts, a multiple
+of four as Windows allocates PIDs, within the realistic 500–1496 range. ~160 distinct
+values across the estate.
+
+The invariant the global pin existed for is preserved: when the logon-requesting process in
+EventData *is* LSASS, its `ProcessId` matches the PID the record reports, and one PID never
+names two executables.

@@ -1,0 +1,63 @@
+[
+ {
+  "rule_id": 1678,
+  "name": "Cisco Firepower — Malicious File Transferred (v2)",
+  "alert_name": "Cisco Firepower — Malicious File Transferred (v2)",
+  "description": "AMP for Networks blocked a malicious file download. Replaces rule 75, which filtered cefName = \"Malicious File Detected\"; FTD emits \"FireAMP Event\". fileHash is a 64-char SHA256, so it is mapped to the sha256 fields only. cs3/cs4 are disposition fields on FireAMP rows, not interfaces, so they are no longer mapped as interfaces.",
+  "xql_query": "dataset = cisco_firepower_raw\n| filter cefName = \"FireAMP Event\"\n| alter u_tail = arrayindex(regextract(suser, \"([A-Za-z0-9._-]+)$\"), 0)\n| alter bare_user = arrayindex(regextract(u_tail, \"^([^@]+)\"), 0)\n| alter disposition = cs3, virus_name = cs2, event_desc = cs5\n",
+  "severity": "SEV_040_HIGH",
+  "alert_category": "DROPPER",
+  "mitre_defs": {
+   "TA0008 - Lateral Movement": [
+    "T1570 - Lateral Tool Transfer"
+   ]
+  },
+  "alert_fields": {
+   "action_local_ip": "src",
+   "action_local_port": "spt",
+   "action_remote_ip": "dst",
+   "action_remote_port": "dpt",
+   "xdm_application_protocol": "app",
+   "actor_effective_username": "bare_user",
+   "agent_hostname": "shost",
+   "xdm_url": "request",
+   "fw_url_domain": "dhost",
+   "action_file_name": "fname",
+   "action_file_sha256": "fileHash",
+   "xdm_file_sha256": "fileHash",
+   "eventid": "cefDeviceEventClassId",
+   "severity": "cefSeverity",
+   "eventaction": "act",
+   "statusreason": "reason",
+   "policyactions": "reason",
+   "policydetails": "virus_name",
+   "alert_category": "disposition",
+   "applicationpath": "sproc",
+   "user_agent": "requestClientApplication",
+   "threatvaultbypaloaltonetworksfiletype": "fileType"
+  },
+  "execution_mode": "SCHEDULED",
+  "search_window": "10 minutes",
+  "simple_schedule": "10 minutes",
+  "crontab": "*/10 * * * *",
+  "timezone": "America/New_York",
+  "suppression_enabled": true,
+  "suppression_duration": "1 hours",
+  "suppression_fields": [
+   "src",
+   "fname"
+  ],
+  "is_enabled": true,
+  "alert_type": null,
+  "alert_description": null,
+  "alert_domain": "DOMAIN_SECURITY",
+  "dataset": "alerts",
+  "user_defined_severity": null,
+  "user_defined_category": null,
+  "investigation_query_link": "",
+  "drilldown_query_timeframe": "ALERT",
+  "mapping_strategy": "CUSTOM",
+  "action": "ALERTS",
+  "lookup_mapping": []
+ }
+]

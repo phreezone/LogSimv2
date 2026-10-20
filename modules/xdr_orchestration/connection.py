@@ -21,14 +21,18 @@
 # DryRun/no-box dev path works even when pywinrm isn't installed. A `stub`
 # transport returns a caller-supplied identity for offline development.
 #
-# Secrets convention (mirrors http_collectors, log_simulator.py:243): config.json
-# stores only the *names* of the .env vars; the actual credentials live in .env
-# and are resolved here via os.getenv(<name-from-config>).
+# Config convention: ALL deployment-specific values (target host, WinRM creds,
+# optional egress IP / tuning) live in .env under fixed variable names (see the
+# ENV_* constants on WorkstationConnection). config.json holds only structural
+# defaults and the dev-only stub identity, so an end user edits .env only and
+# never has to touch config.json.
 
+import base64
 import os
 import re
 import socket
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -136,51 +140,76 @@ class WorkstationConnection:
 
     # ---- construction --------------------------------------------------------
 
+    # Fixed .env variable names — the ONLY place a user configures the target.
+    # config.json never carries deployment-specific values (host/creds/IPs), so
+    # end users edit .env only and never touch config.json.
+    ENV_HOST      = "XDR_TARGET_HOST"          # box IP or hostname (required, live)
+    ENV_USER      = "XDR_TARGET_WINRM_USER"    # local admin username (required, live)
+    ENV_PASSWORD  = "XDR_TARGET_WINRM_PASSWORD"  # local admin password (required, live)
+    ENV_PORT      = "XDR_TARGET_WINRM_PORT"     # optional, default 5985
+    ENV_SCHEME    = "XDR_TARGET_WINRM_SCHEME"   # optional, default http
+    ENV_AUTH      = "XDR_TARGET_WINRM_AUTH"     # optional, default ntlm
+    ENV_TRANSPORT = "XDR_TARGET_TRANSPORT"      # optional, "winrm" (default) or "stub"
+    ENV_EGRESS_IP = "XDR_TARGET_EGRESS_IP"      # optional override (org NAT/public IP)
+    ENV_EMAIL_DOM = "XDR_EMAIL_DOMAIN"          # optional override (email domain)
+
     @classmethod
     def from_config(cls, config):
-        """Read the `xdr_orchestration.connection` block.
+        """Build the connection. All deployment-specific values come from .env via
+        the fixed ENV_* names above; config.json only supplies structural defaults
+        and the dev-only stub identity, so a user never has to edit config.json.
 
-        Expected shape (secrets are env-var *names*, not values):
-            "xdr_orchestration": {
-              "connection": {
-                "host": "10.0.0.50",
-                "transport": "winrm",              # or "stub" for no-box dev
-                "winrm": {
-                  "port": 5985, "scheme": "http", "auth": "ntlm",
-                  "user_env_var": "XDR_TARGET_WINRM_USER",
-                  "pass_env_var": "XDR_TARGET_WINRM_PASS"
-                },
-                "overrides": { "egress_ip": "203.0.113.10", "email_domain": "corp.example" },
-                "stub_identity": { ... }           # used only when transport=="stub"
-              }
-            }
+        .env (the only file users touch):
+            XDR_TARGET_HOST=192.168.0.60
+            XDR_TARGET_WINRM_USER=labadmin
+            XDR_TARGET_WINRM_PASSWORD=•••••
+            # optional: XDR_TARGET_WINRM_{PORT,SCHEME,AUTH}, XDR_TARGET_TRANSPORT=stub,
+            #           XDR_TARGET_EGRESS_IP, XDR_EMAIL_DOMAIN
+
+        config.json (optional `xdr_orchestration.connection` block, structural only):
+            { "transport": "winrm",              # env XDR_TARGET_TRANSPORT overrides
+              "stub_identity": { ... } }         # used only when transport=="stub"
         """
-        block = (config or {}).get("xdr_orchestration", {}).get("connection", {})
-        if not block:
-            raise ConnectionError(
-                "config.json has no xdr_orchestration.connection block — nothing to connect to.")
+        def _env(name):
+            v = os.getenv(name)
+            return v.strip() if v and v.strip() else None
 
-        transport = block.get("transport", "winrm")
-        host = block.get("host")
+        block = (config or {}).get("xdr_orchestration", {}).get("connection", {}) or {}
+
+        # Transport: env wins, then config default, then "winrm".
+        transport = (_env(cls.ENV_TRANSPORT) or block.get("transport") or "winrm").lower()
+
+        host = _env(cls.ENV_HOST)
         if transport != "stub" and not host:
             raise ConnectionError(
-                "xdr_orchestration.connection.host is required for a live (non-stub) transport.")
+                f"{cls.ENV_HOST} is not set in .env — set the target box's IP/hostname there "
+                "(config.json intentionally holds no target address).")
 
-        winrm = block.get("winrm", {})
-        user_env = winrm.get("user_env_var")
-        pass_env = winrm.get("pass_env_var")
-        username = os.getenv(user_env) if user_env else None
-        password = os.getenv(pass_env) if pass_env else None
+        # Structural WinRM settings: env first, then optional config defaults, then built-ins.
+        winrm_cfg = block.get("winrm", {})
+        port   = int(_env(cls.ENV_PORT)   or winrm_cfg.get("port")   or 5985)
+        scheme = _env(cls.ENV_SCHEME)     or winrm_cfg.get("scheme") or "http"
+        auth   = _env(cls.ENV_AUTH)       or winrm_cfg.get("auth")   or "ntlm"
+
+        username = _env(cls.ENV_USER)
+        password = _env(cls.ENV_PASSWORD)
+
+        # Optional identity overrides — env wins over any config block overrides.
+        overrides = dict(block.get("overrides", {}) or {})
+        if _env(cls.ENV_EGRESS_IP):
+            overrides["egress_ip"] = _env(cls.ENV_EGRESS_IP)
+        if _env(cls.ENV_EMAIL_DOM):
+            overrides["email_domain"] = _env(cls.ENV_EMAIL_DOM)
 
         return cls(
             host=host,
             transport=transport,
-            winrm_port=int(winrm.get("port", 5985)),
-            winrm_scheme=winrm.get("scheme", "http"),
+            winrm_port=port,
+            winrm_scheme=scheme,
             username=username,
             password=password,
-            transport_auth=winrm.get("auth", "ntlm"),
-            overrides=block.get("overrides", {}),
+            transport_auth=auth,
+            overrides=overrides,
             stub_identity=block.get("stub_identity"),
         )
 
@@ -203,8 +232,8 @@ class WorkstationConnection:
             ) from e
         if not self.username or not self.password:
             raise ConnectionError(
-                "WinRM credentials are empty — set the env vars named in "
-                "xdr_orchestration.connection.winrm.{user_env_var,pass_env_var} in your .env.")
+                "WinRM credentials are empty — set XDR_TARGET_WINRM_USER and "
+                "XDR_TARGET_WINRM_PASSWORD in your .env.")
         endpoint = f"{self.winrm_scheme}://{self.host}:{self.winrm_port}/wsman"
         self._session = winrm.Session(
             endpoint,
@@ -217,13 +246,97 @@ class WorkstationConnection:
         """Run a PowerShell snippet on the target. Returns (rc, stdout, stderr)
         with text decoded. Raises ConnectionError only if the channel itself
         can't be established; a nonzero rc is returned, not raised, so callers
-        decide whether it's a check failure or fatal."""
+        decide whether it's a check failure or fatal.
+
+        NOTE: PowerShell over WinRM (wsmprovhost.exe) is heavily scrutinized by
+        the Cortex XDR agent's Behavioral Threat Protection — recon-shaped or
+        module-loading scripts get the hosting process TERMINATED (observed rc
+        ~3225419877, output truncated). So the benign health/identity PROBES use
+        run_cmd (native cmd.exe) instead; run_ps is reserved for the executor,
+        where triggering the agent is the whole point."""
         session = self._winrm_session()
         result = session.run_ps(script)
         rc = result.status_code
         out = (result.std_out or b"").decode("utf-8", "replace").strip()
         err = (result.std_err or b"").decode("utf-8", "replace").strip()
         return rc, out, err
+
+    def run_cmd(self, command, args=()):
+        """Run a native cmd.exe command on the target. Returns (rc, stdout,
+        stderr) decoded. Preferred for benign probes: plain cmd builtins
+        (whoami, hostname, query user, ipconfig, sc query) run cleanly where the
+        equivalent PowerShell is killed by the EDR. A nonzero rc is returned, not
+        raised — several probe commands (e.g. `query user`) exit nonzero yet emit
+        valid output, so callers judge on the output."""
+        session = self._winrm_session()
+        result = session.run_cmd(command, list(args))
+        rc = result.status_code
+        out = (result.std_out or b"").decode("utf-8", "replace").strip()
+        err = (result.std_err or b"").decode("utf-8", "replace").strip()
+        return rc, out, err
+
+    # Where run_ps_file stages its transient .ps1 (world-writable, no env
+    # expansion needed so every step routes through a plain `cmd /c`).
+    STAGE_DIR = r"C:\Users\Public"
+
+    def run_ps_file(self, script, timeout=None):
+        """Run a PowerShell snippet by DROPPING IT AS A .ps1 ON THE BOX and
+        invoking it with `powershell -File`, instead of pywinrm's default
+        `powershell -EncodedCommand` (what run_ps does).
+
+        Why: the encoded-command transport itself trips Cortex "Script Engine
+        Activity" / "suspicious base64-encoded commands" on EVERY delivery — a
+        delivery-mechanism artifact unrelated to the technique. That high-volume
+        alert burst fragments the endpoint incident (observed: scenario 26 split
+        into two cases, one a pure delivery-noise satellite). A file invocation
+        removes the encoded-command signature so the run coalesces into one case
+        and the case reflects technique behaviour, not the harness.
+
+        Mechanism (no PowerShell in the drop path — all steps go through cmd.exe
+        so nothing here re-introduces an encoded-command delivery):
+          1. base64 the script in Python (base64 is cmd-echo-safe: no & | < > ^ % ").
+          2. echo it to a .b64 on the box in <=6000-char chunks (cmd line limit).
+          3. `certutil -decode` the .b64 -> .ps1 (certutil tolerates the embedded
+             CRLFs the chunked echoes leave in the base64 stream).
+          4. `powershell -File script.ps1` — the actual, non-encoded execution.
+          5. delete both files.
+
+        Returns (rc, stdout, stderr) from step 4, same contract as run_ps. Raises
+        ConnectionError only on a channel-level failure. A staging failure (echo
+        or certutil) raises Executor_-visible ConnectionError so the caller can
+        fall back to run_ps."""
+        token = uuid.uuid4().hex[:12]
+        b64path = rf"{self.STAGE_DIR}\xdr_{token}.b64"
+        ps1path = rf"{self.STAGE_DIR}\xdr_{token}.ps1"
+        b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
+
+        try:
+            CHUNK = 6000
+            for idx in range(0, len(b64), CHUNK):
+                chunk = b64[idx:idx + CHUNK]
+                redir = ">" if idx == 0 else ">>"
+                rc, out, err = self.run_cmd("cmd", ["/c", f"echo {chunk}{redir}{b64path}"])
+                if rc != 0:
+                    raise ConnectionError(
+                        f"run_ps_file: staging chunk write failed (rc={rc}): {err or out}")
+
+            rc, out, err = self.run_cmd(
+                "cmd", ["/c", f'certutil -f -decode "{b64path}" "{ps1path}"'])
+            if rc != 0:
+                raise ConnectionError(
+                    f"run_ps_file: certutil decode failed (rc={rc}): {err or out}")
+
+            rc, out, err = self.run_cmd(
+                "cmd", ["/c",
+                        f'powershell.exe -NonInteractive -NoProfile '
+                        f'-ExecutionPolicy Bypass -File "{ps1path}"'])
+            return rc, out, err
+        finally:
+            # Best-effort cleanup; never mask the execution result.
+            try:
+                self.run_cmd("cmd", ["/c", f'del /f /q "{b64path}" "{ps1path}"'])
+            except Exception:
+                pass
 
     # ---- identity discovery --------------------------------------------------
 
@@ -271,64 +384,68 @@ class WorkstationConnection:
         )
 
     def _identity_from_box(self):
-        # One round-trip returns all three facts as KEY=VALUE lines. `query user`
-        # needs an interactive/RDP session present; if none, ActiveUser is blank
-        # and _validate_identity fails preflight with a clear message.
-        script = r"""
-$ErrorActionPreference = 'SilentlyContinue'
-$comp = $env:COMPUTERNAME
-try { $fqdn = ([System.Net.Dns]::GetHostByName($env:COMPUTERNAME)).HostName } catch { $fqdn = $comp }
-$upn = (whoami /upn) 2>$null
-$active = $null
-$qu = (query user) 2>$null
-if ($qu) {
-  foreach ($line in ($qu | Select-Object -Skip 1)) {
-    $cols = ($line.Trim() -replace '\s{2,}', "`t").Split("`t")
-    if ($cols.Length -ge 3 -and $cols[2] -eq 'Active') { $active = $cols[0].TrimStart('>'); break }
-    if ($cols.Length -ge 4 -and $cols[3] -eq 'Active') { $active = $cols[0].TrimStart('>'); break }
-  }
-}
-if (-not $active) { $active = ($env:USERNAME) }
-$ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-       Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' -and
-                      $_.PrefixOrigin -ne 'WellKnown' } |
-       Sort-Object -Property SkipAsSource, InterfaceMetric |
-       Select-Object -First 1 -ExpandProperty IPAddress)
-Write-Output ("COMPUTERNAME=" + $comp)
-Write-Output ("FQDN=" + $fqdn)
-Write-Output ("ACTIVEUSER=" + $active)
-Write-Output ("UPN=" + ($upn | Select-Object -First 1))
-Write-Output ("IPV4=" + $ip)
-"""
-        try:
-            rc, out, err = self.run_ps(script)
-        except ConnectionError:
-            raise
-        except Exception as e:
-            raise ConnectionError(f"identity discovery failed to run on {self.host}: {e}") from e
-        if rc != 0 and not out:
-            raise ConnectionError(
-                f"identity discovery returned rc={rc} on {self.host}: {err or 'no output'}")
+        # Discovery uses several MINIMAL native cmd.exe probes, one round-trip
+        # each, instead of a single PowerShell script. PowerShell recon over WinRM
+        # is terminated by the Cortex agent (see run_ps note); plain cmd builtins
+        # run clean. `query user` needs an interactive/RDP session; if none is
+        # present the active user is blank and _validate_identity fails preflight.
+        def _probe(command):
+            try:
+                rc, out, err = self.run_cmd(command)
+            except ConnectionError:
+                raise
+            except Exception as e:
+                raise ConnectionError(
+                    f"identity discovery probe '{command}' failed on {self.host}: {e}") from e
+            return out  # native probes may exit nonzero yet emit valid output
 
-        facts = {}
-        for line in out.splitlines():
-            if "=" in line:
-                k, _, v = line.partition("=")
-                facts[k.strip()] = v.strip()
+        # Host: `hostname` returns the real computer name (not the 15-char NetBIOS
+        # truncation %COMPUTERNAME%), which better matches Cortex agent telemetry.
+        hostname = (_probe("hostname") or "").strip().lower() or None
 
-        raw_user = facts.get("ACTIVEUSER", "")
-        upn = facts.get("UPN", "") or None
-        # Normalize DOMAIN\user or host\user; keep sam account for username.
-        username = raw_user.split("\\")[-1] if raw_user else ""
-        hostname = (facts.get("FQDN") or facts.get("COMPUTERNAME") or "").lower() or None
-        ip = facts.get("IPV4") or None
+        # Active interactive user: prefer the RDP/console 'Active' session from
+        # `query user`; fall back to the WinRM-authenticated `whoami` account.
+        active = self._parse_active_user(_probe("query user"))
+        if not active:
+            active = (_probe("whoami") or "").strip()
+        # Normalize DOMAIN\user or host\user; keep the sam account as username.
+        username = active.split("\\")[-1] if active else ""
+
+        ip = self._parse_ipv4(_probe("ipconfig"))
 
         return self._identity_shell(
             username=username or None,
             hostname=hostname,
             ip=ip,
-            upn=upn,
         )
+
+    @staticmethod
+    def _parse_active_user(query_user_out):
+        """Pull the 'Active' session's username from `query user` output. Returns
+        '' when no interactive session is present."""
+        if not query_user_out:
+            return ""
+        lines = query_user_out.splitlines()
+        for line in lines[1:]:                      # skip the header row
+            cols = re.split(r"\s{2,}", line.strip())
+            # Layout: USERNAME  [SESSIONNAME]  ID  STATE  ...  — STATE == 'Active'.
+            if "Active" in cols:
+                user = cols[0].lstrip(">").strip()
+                if user:
+                    return user
+        return ""
+
+    @staticmethod
+    def _parse_ipv4(ipconfig_out):
+        """First non-loopback, non-APIPA IPv4 from `ipconfig` output."""
+        if not ipconfig_out:
+            return None
+        for m in re.finditer(r"IPv4 Address[.\s]*:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})",
+                             ipconfig_out):
+            ip = m.group(1)
+            if ip != "127.0.0.1" and not ip.startswith("169.254."):
+                return ip
+        return None
 
     def _identity_shell(self, *, username=None, hostname=None, ip=None, os_version=None,
                         department=None, email=None, display_name=None, upn=None):
@@ -445,9 +562,9 @@ Write-Output ("IPV4=" + $ip)
                 f"TCP {self.host}:{self.winrm_port} not open ({e}) — is WinRM enabled and the "
                 "firewall rule scoped to this console? Run the Kickstarter on the box."))
             return False
-        # Port open — now authenticate with a trivial round-trip.
+        # Port open — authenticate with a trivial native round-trip (`whoami`).
         try:
-            rc, out, err = self.run_ps("Write-Output ('WHOAMI=' + (whoami))")
+            rc, out, err = self.run_cmd("whoami")
         except ConnectionError as e:
             checks.append(PreflightCheck("WinRM reachable + auth", False, str(e)))
             return False
@@ -456,57 +573,64 @@ Write-Output ("IPV4=" + $ip)
                 "WinRM reachable + auth", False,
                 f"port open but WinRM auth/round-trip failed: {e} — check credentials/auth type."))
             return False
-        if rc != 0 or "WHOAMI=" not in out:
+        who = out.strip().splitlines()[0].strip() if out else ""
+        if not who or "\\" not in who:
             checks.append(PreflightCheck(
                 "WinRM reachable + auth", False,
                 f"round-trip returned rc={rc}: {err or out or 'no output'}"))
             return False
-        who = out.split("WHOAMI=", 1)[1].strip()
         checks.append(PreflightCheck("WinRM reachable + auth", True, f"authenticated as {who}"))
         return True
 
+    # Default install location from Install-AtomicRedTeam (-getAtomics). Not on
+    # $PSModulePath, so `Get-Module -ListAvailable` can't see it — a file check is
+    # the reliable, EDR-safe presence probe (and it runs under cmd, not PS).
+    ATOMIC_PSD1 = r"C:\AtomicRedTeam\invoke-atomicredteam\Invoke-AtomicRedTeam.psd1"
+
     def _check_atomic(self, checks):
         try:
-            rc, out, err = self.run_ps(
-                "if (Get-Command Invoke-AtomicTest -ErrorAction SilentlyContinue) "
-                "{ Write-Output 'ATOMIC=ok' } else { Write-Output 'ATOMIC=missing' }")
+            rc, out, err = self.run_cmd(
+                f'if exist "{self.ATOMIC_PSD1}" (echo ATOMIC=ok) else (echo ATOMIC=missing)')
         except Exception as e:
             checks.append(PreflightCheck("Atomic present", False, f"probe failed: {e}"))
             return
         if "ATOMIC=ok" in out:
-            checks.append(PreflightCheck("Atomic present", True, "Invoke-AtomicTest importable"))
+            checks.append(PreflightCheck(
+                "Atomic present", True,
+                f"Invoke-AtomicRedTeam module found at {self.ATOMIC_PSD1}"))
         else:
             checks.append(PreflightCheck(
                 "Atomic present", False,
-                "Invoke-AtomicTest not importable — install Invoke-AtomicRedTeam "
-                "(the Kickstarter does this)."))
+                "Invoke-AtomicRedTeam not installed — run docs/install-atomic-on-box.ps1 "
+                "on the box (the Kickstarter will do this)."))
 
     def _check_cortex_agent(self, checks):
         # cyserver is the Cortex XDR agent service; cyverak/cydump vary by version,
-        # so we key off the primary service being present AND running.
+        # so we key off the primary service being present AND running. `sc query`
+        # (native) instead of Get-Service so the EDR doesn't kill the probe.
         try:
-            rc, out, err = self.run_ps(
-                "$s = Get-Service -Name 'cyserver' -ErrorAction SilentlyContinue; "
-                "if ($null -eq $s) { Write-Output 'AGENT=absent' } "
-                "else { Write-Output ('AGENT=' + $s.Status) }")
+            rc, out, err = self.run_cmd("sc query cyserver")
         except Exception as e:
             checks.append(PreflightCheck("Cortex agent healthy", False, f"probe failed: {e}"))
             return
-        val = ""
-        for line in out.splitlines():
-            if line.startswith("AGENT="):
-                val = line.split("=", 1)[1].strip()
-        if val == "Running":
-            checks.append(PreflightCheck("Cortex agent healthy", True, "cyserver service Running"))
-        elif val == "absent":
+        text = out or err or ""
+        if "RUNNING" in text.upper():
+            checks.append(PreflightCheck("Cortex agent healthy", True, "cyserver service RUNNING"))
+        elif "does not exist" in text.lower() or "1060" in text:
             checks.append(PreflightCheck(
                 "Cortex agent healthy", False,
                 "Cortex XDR agent (cyserver) not installed — no endpoint telemetry will be "
                 "collected, so nothing to correlate. Install the agent before firing."))
         else:
+            # Pull the STATE line if present for a precise reason.
+            state = ""
+            for line in text.splitlines():
+                if "STATE" in line.upper():
+                    state = line.strip()
+                    break
             checks.append(PreflightCheck(
                 "Cortex agent healthy", False,
-                f"cyserver service is '{val or 'unknown'}', not Running."))
+                f"cyserver service not RUNNING ({state or text.strip()[:120] or 'unknown'})."))
 
     def _check_xsiam(self, checks, xsiam_client):
         if xsiam_client is None:

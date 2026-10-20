@@ -157,13 +157,13 @@ move values near the anchor (a bare 10–19 digit ID is left alone).
 
 ### Verifying
 
-`python tests/training_multistudent.py` proves isolation/leak-freedom, **cross-day
+`python _local_validation/training_multistudent.py` proves isolation/leak-freedom, **cross-day
 reproducibility** (Mon == Thu), backfill-window correctness, and per-student AM/PM alignment —
-no XSIAM tenant needed. `python tests/training_determinism.py` covers the single-tenant checks.
+no XSIAM tenant needed. `python _local_validation/training_determinism.py` covers the single-tenant checks.
 
 ### Verifying determinism
 
-`python tests/training_determinism.py` proves, with no XSIAM tenant or network:
+`python _local_validation/training_determinism.py` proves, with no XSIAM tenant or network:
 
 - **Determinism** — two runs of a pack produce byte-identical content (timestamps stripped).
 - **Bulk↔Stream parity** — Bulk and Stream produce the same content, order, and transport.

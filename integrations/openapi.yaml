@@ -89,6 +89,28 @@ components:
           additionalProperties:
             type: object
             properties: { logs: { type: integer }, threats: { type: integer } }
+    PreflightReport:
+      type: object
+      description: >
+        XDR orchestration preflight against the configured target workstation. The
+        orchestrator refuses to fire unless ok is true.
+      properties:
+        ok:             { type: boolean }
+        checked_at:     { type: number }
+        checked_at_iso: { type: string }
+        identity:
+          type: object
+          nullable: true
+          description: Identity discovered on the box that the synthetic logs will carry.
+          additionalProperties: true
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name:   { type: string }
+              status: { type: string, enum: [PASS, FAIL, SKIP] }
+              detail: { type: string, nullable: true }
     Error:
       type: object
       properties: { error: { type: string } }
@@ -327,6 +349,127 @@ paths:
         "200":
           description: OK
           content: { application/json: { schema: { $ref: "#/components/schemas/BadUserStatus" } } }
+  /attack/health:
+    get:
+      summary: XDR orchestration preflight
+      description: >
+        Runs the preflight against the target workstation (forced, not cached). A
+        configuration error is reported as a failed "connection" check with a 200,
+        not as a 500.
+      responses:
+        "200":
+          description: Preflight report
+          content: { application/json: { schema: { $ref: "#/components/schemas/PreflightReport" } } }
+  /attack/stories:
+    get:
+      summary: List XDR attack stories
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:         { type: string, example: "xdr_quick" }
+                    name:       { type: string }
+                    steps:      { type: integer }
+                    techniques: { type: array, items: { type: string, example: "T1059.001" } }
+  /attack/run:
+    post:
+      summary: Start an XDR attack story run (async)
+      description: >
+        Executes real techniques on the target workstation alongside aligned synthetic
+        network logs. Poll GET /scenarios/runs/{run_id} for the emission manifest and
+        GET /attack/runs/{run_id} for technique results.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                story_id: { type: string, default: xdr_quick }
+                dry_run:  { type: boolean, default: false }
+                cleanup_prior_incidents:
+                  type: boolean
+                  default: false
+                  description: >
+                    Resolve prior OPEN incidents for the box before firing, so this run's
+                    alerts stitch into one fresh incident. Closes incidents on the tenant.
+            example: { story_id: "xdr_quick", dry_run: true }
+      responses:
+        "202":
+          description: Run started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  started:                 { type: boolean }
+                  story:                   { type: string }
+                  story_id:                { type: string }
+                  dry_run:                 { type: boolean }
+                  cleanup_prior_incidents: { type: boolean }
+                  run_id:                  { type: string }
+        "404":
+          description: Unknown story
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /attack/runs/{run_id}:
+    get:
+      summary: Get an attack run's status, manifest and technique results
+      parameters: [ { name: run_id, in: path, required: true, schema: { type: string } } ]
+      responses:
+        "200":
+          description: >
+            The Run view plus `attack`, the orchestrator summary (technique results and
+            discovered identity) — null until the orchestrator finishes.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Run"
+                  - type: object
+                    properties:
+                      attack: { type: object, nullable: true, additionalProperties: true }
+        "404":
+          description: Unknown run
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /attack/kickstarter:
+    get:
+      summary: Download the target-workstation Kickstarter script
+      description: >
+        PowerShell one-shot that prepares a bare box for orchestration (WinRM scoped to
+        this console, unattended Atomic, agent check, phone-home to POST /attack/register).
+      parameters:
+        - { name: console_ip, in: query, required: false, schema: { type: string }, description: "Defaults to this console's LAN IP" }
+        - { name: console_url, in: query, required: false, schema: { type: string }, description: "Defaults to the URL the request reached" }
+      responses:
+        "200":
+          description: logsim-kickstarter.ps1
+          content: { text/plain: { schema: { type: string } } }
+  /attack/register:
+    post:
+      summary: Kickstarter phone-home
+      description: Records a workstation's readiness self-check, keyed by hostname.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { hostname: { type: string } }
+              additionalProperties: true
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean }, recorded: { type: string } }
   /health:
     get: { summary: Health snapshot, responses: { "200": { description: OK } } }
   /health/alerts:
