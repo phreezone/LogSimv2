@@ -51,15 +51,22 @@
 # This module only generates synthetic events for log-ingestion and
 # detection-rule testing. It never touches a real Windows machine.
 
+import os
 import random
 import re
 import time
 import json
 import uuid
+import base64
 import hashlib
 import threading
+import collections
+import functools
+import heapq
+import itertools
 import queue as _queue_mod
 from datetime import datetime, timezone, timedelta
+from xml.sax.saxutils import escape as _xml_escape
 
 try:
     from lxml import etree as _etree
@@ -68,14 +75,35 @@ except ImportError:
     _HAS_LXML = False
 
 try:
-    from modules.session_utils import get_random_user, get_user_by_name, get_random_anon_ip_ctx
+    from modules.session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
+                                        publish_activity, pick_active_session, CORRELATE_PROB)
 except ImportError:
-    from session_utils import get_random_user, get_user_by_name, get_random_anon_ip_ctx
+    from session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
+                               publish_activity, pick_active_session, CORRELATE_PROB)
 
 
-# ---------------------------------------------------------------------------
+def _publish_logon(u):
+    """Publish a Windows logon as an active session (session start) for cross-plane correlation."""
+    if u:
+        publish_activity(u.get("username"), private_ip=u.get("ip"), hostname=u.get("hostname"),
+                         department=u.get("department"), email=u.get("email"),
+                         display_name=u.get("display_name"))
+
+
+def _pick_windows_user_corr(session_context):
+    """Follow-on Windows picker: prefer a currently-active Windows user (correlates to a recent
+    logon), else a random Windows user."""
+    if session_context and pick_active_session and random.random() < CORRELATE_PROB:
+        s = pick_active_session()
+        if s:
+            wins = _get_windows_users(session_context)
+            for w in wins:
+                if w.get("username") == s["username"]:
+                    return w
+    return _pick_windows_user(session_context)
+
+
 # Required module-level attributes (the auto-loader uses these)
-# ---------------------------------------------------------------------------
 
 NAME        = "Windows Event Log"
 DESCRIPTION = "Simulates Windows Security channel events (4624/4625/4634/4647/4648/4740/4768/4769/4771/4776) in NXLog-style JSON."
@@ -90,9 +118,7 @@ last_threat_event_time = 0
 _BUILD_EVENT_OS_SUBTYPE = "Windows 10"
 
 
-# ---------------------------------------------------------------------------
 # Static Windows reference data
-# ---------------------------------------------------------------------------
 
 _PROVIDER_NAME = "Microsoft-Windows-Security-Auditing"
 _PROVIDER_GUID = "{54849625-5478-4994-a5ba-3e3b0328c30d}"
@@ -130,7 +156,7 @@ _EVENT_META = {
     4648: {"task": 12544, "category": "Logon",                 "version": 0, "outcome": "success"},
     4740: {"task": 13824, "category": "User Account Management","version": 0, "outcome": "success"},
     4768: {"task": 14339, "category": "Kerberos Authentication Service", "version": 2, "outcome": "success"},
-    4769: {"task": 14337, "category": "Kerberos Service Ticket Operations", "version": 0, "outcome": "success"},
+    4769: {"task": 14337, "category": "Kerberos Service Ticket Operations", "version": 2, "outcome": "success"},
     4771: {"task": 14339, "category": "Kerberos Authentication Service", "version": 0, "outcome": "failure"},
     4776: {"task": 14336, "category": "Credential Validation", "version": 0, "outcome": "success"},
     4672: {"task": 12548, "category": "Special Logon",          "version": 0, "outcome": "success"},
@@ -162,6 +188,22 @@ _EVENT_META = {
     4738: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4697: {"task": 12805, "category": "Security System Extension",  "version": 0, "outcome": "success"},
     1102: {"task": 104,   "category": "Log clear",                  "version": 0, "outcome": "success"},
+    # Forest/domain trust + SID-history (Phase 2 rogue-forest-trust chain)
+    4706: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4707: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4716: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4865: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4866: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4867: {"task": 13568, "category": "Authentication Policy Change", "version": 0, "outcome": "success"},
+    4765: {"task": 13824, "category": "User Account Management",     "version": 0, "outcome": "success"},
+    4766: {"task": 13824, "category": "User Account Management",     "version": 0, "outcome": "failure"},
+    # DCShadow — detailed directory-service replication (rogue DC pushing changes)
+    4928: {"task": 14083, "category": "Detailed Directory Service Replication", "version": 0, "outcome": "success"},
+    4929: {"task": 14083, "category": "Detailed Directory Service Replication", "version": 0, "outcome": "success"},
+    4698: {"task": 12804, "category": "Other Object Access Events", "version": 1, "outcome": "success"},
+    4699: {"task": 12804, "category": "Other Object Access Events", "version": 1, "outcome": "success"},
+    5140: {"task": 12808, "category": "File Share",                 "version": 1, "outcome": "success"},
+    5145: {"task": 12811, "category": "Detailed File Share",        "version": 0, "outcome": "success"},
 }
 
 def _format_message(event_id: int, ed: dict) -> str:
@@ -958,6 +1000,95 @@ def _msg_4697(d):
     )
 
 
+def _msg_4698(d):
+    return (
+        "A scheduled task was created.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Task Information:\r\n"
+        f"\tTask Name: \t\t{d.get('TaskName','')}\r\n"
+        f"\tTask Content: \t\t{d.get('TaskContent','')}\r\n\r\n"
+        "Other Information:\r\n"
+        f"\tProcessCreationTime: \t\t{d.get('ClientProcessStartKey','')}\r\n"
+        f"\tClientProcessId: \t\t\t{d.get('ClientProcessId','')}\r\n"
+        f"\tParentProcessId: \t\t\t{d.get('ParentProcessId','')}\r\n"
+        f"\tFQDN: \t\t{d.get('FQDN','')}"
+    )
+
+
+def _msg_4699(d):
+    return (
+        "A scheduled task was deleted.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Task Information:\r\n"
+        f"\tTask Name: \t\t{d.get('TaskName','')}\r\n"
+        f"\tTask Content: \t\t{d.get('TaskContent','')}"
+    )
+
+
+def _msg_5140(d):
+    return (
+        "A network share object was accessed.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Network Information:\t\r\n"
+        f"\tObject Type:\t\t{d.get('ObjectType','')}\r\n"
+        f"\tSource Address:\t\t{d.get('IpAddress','')}\r\n"
+        f"\tSource Port:\t\t{d.get('IpPort','')}\r\n\r\n"
+        "Share Information:\r\n"
+        f"\tShare Name:\t\t{d.get('ShareName','')}\r\n"
+        f"\tShare Path:\t\t{d.get('ShareLocalPath','')}\r\n\r\n"
+        "Access Request Information:\r\n"
+        f"\tAccess Mask:\t\t{d.get('AccessMask','')}\r\n"
+        f"\tAccesses:\t\t{d.get('AccessList','')}"
+    )
+
+
+def _msg_5145(d):
+    return (
+        "A network share object was checked to see whether client can be granted "
+        "desired access.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Network Information:\t\r\n"
+        f"\tObject Type:\t\t{d.get('ObjectType','')}\r\n"
+        f"\tSource Address:\t\t{d.get('IpAddress','')}\r\n"
+        f"\tSource Port:\t\t{d.get('IpPort','')}\r\n\r\n"
+        "Share Information:\r\n"
+        f"\tShare Name:\t\t{d.get('ShareName','')}\r\n"
+        f"\tShare Path:\t\t{d.get('ShareLocalPath','')}\r\n"
+        f"\tRelative Target Name:\t{d.get('RelativeTargetName','')}\r\n\r\n"
+        "Access Request Information:\r\n"
+        f"\tAccess Mask:\t\t{d.get('AccessMask','')}\r\n"
+        f"\tAccesses:\t\t{d.get('AccessList','')}\r\n"
+        f"\tAccess Check Results:\r\n\t\t\t\t{d.get('AccessReason','')}"
+    )
+
+
+def _msg_7045(d):
+    return (
+        "A service was installed in the system.\r\n\r\n"
+        f"Service Name:  {d.get('ServiceName','')}\r\n"
+        f"Service File Name:  {d.get('ImagePath','')}\r\n"
+        f"Service Type:  {d.get('ServiceType','')}\r\n"
+        f"Service Start Type:  {d.get('StartType','')}\r\n"
+        f"Service Account:  {d.get('AccountName','')}"
+    )
+
+
 def _msg_4720(d):
     return (
         "A user account was created.\r\n\r\n"
@@ -1089,6 +1220,102 @@ def _msg_4738(d):
     )
 
 
+def _msg_4706(d):
+    return (
+        "A new trust was created to a domain.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        f"\tDomain Name:\t\t{d.get('DomainName','')}\r\n"
+        f"\tDomain ID:\t\t{d.get('DomainSid','')}\r\n"
+        f"\tTrust Type:\t\t{d.get('TdoType','')}\r\n"
+        f"\tTrust Direction:\t{d.get('TdoDirection','')}\r\n"
+        f"\tTrust Attributes:\t{d.get('TdoAttributes','')}\r\n"
+        f"\tSID Filtering:\t\t{d.get('SidFilteringEnabled','')}"
+    )
+
+
+def _msg_4716(d):
+    return (
+        "Trusted domain information was modified.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        f"\tDomain Name:\t\t{d.get('DomainName','')}\r\n"
+        f"\tDomain ID:\t\t{d.get('DomainSid','')}\r\n"
+        f"\tTrust Attributes:\t{d.get('TdoAttributes','')}\r\n"
+        f"\tSID Filtering:\t\t{d.get('SidFilteringEnabled','')}"
+    )
+
+
+def _msg_4865(d):
+    return (
+        "A trusted forest information entry was added.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        f"\tForest Root:\t\t{d.get('ForestRootSid','')}\r\n"
+        f"\tForest Root Domain:\t{d.get('ForestRoot','')}\r\n"
+        f"\tOperation ID:\t\t{d.get('OperationId','')}\r\n"
+        f"\tEntry Type:\t\t{d.get('EntryType','')}\r\n"
+        f"\tFlags:\t\t\t{d.get('Flags','')}\r\n"
+        f"\tTop Level Name:\t\t{d.get('TopLevelName','')}\r\n"
+        f"\tDNS Name:\t\t{d.get('DnsName','')}\r\n"
+        f"\tNetBIOS Name:\t\t{d.get('NetbiosName','')}"
+    )
+
+
+def _msg_4867(d):
+    return _msg_4865(d).replace("was added", "was modified")
+
+
+def _msg_4765(d):
+    return (
+        "SID History was added to an account.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Target Account:\r\n"
+        f"\tSecurity ID:\t\t{d.get('TargetSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('TargetUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n\r\n"
+        "Source Account:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SourceSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SourceUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SourceDomainName','')}"
+    )
+
+
+def _msg_4766(d):
+    return _msg_4765(d).replace(
+        "SID History was added to an account.",
+        "An attempt to add SID History to an account failed.")
+
+
+def _msg_4928(d):
+    return (
+        "An Active Directory replica source naming context was established.\r\n\r\n"
+        f"\tDestination DRA:\t{d.get('DestinationDRA','')}\r\n"
+        f"\tSource DRA:\t\t{d.get('SourceDRA','')}\r\n"
+        f"\tSource Address:\t\t{d.get('SourceAddr','')}\r\n"
+        f"\tNaming Context:\t\t{d.get('NamingContext','')}\r\n"
+        f"\tOptions:\t\t{d.get('Options','')}\r\n"
+        f"\tSession ID:\t\t{d.get('SessionID','')}"
+    )
+
+
+def _msg_4929(d):
+    return _msg_4928(d).replace("was established", "was removed")
+
+
 _MSG_BUILDERS = {
     4624: _msg_4624,
     4625: _msg_4625,
@@ -1124,6 +1351,18 @@ _MSG_BUILDERS = {
     4720: _msg_4720,
     4697: _msg_4697,
     1102: _msg_1102,
+    4706: _msg_4706,
+    4716: _msg_4716,
+    4865: _msg_4865,
+    4867: _msg_4867,
+    4765: _msg_4765,
+    4766: _msg_4766,
+    4928: _msg_4928,
+    4929: _msg_4929,
+    4698: _msg_4698,
+    4699: _msg_4699,
+    5140: _msg_5140,
+    5145: _msg_5145,
     4722: _msg_4722,
     4724: _msg_4724,
     4725: _msg_4725,
@@ -1187,17 +1426,45 @@ _SYNTH_DOMAIN_SID = "S-1-5-21-3457937927-2839227994-823803824"
 
 # Process names/paths keyed by logon type category.
 # Windows uses specific processes for each logon scenario.
+# The Security channel is written by LSASS, so its PID is what appears in
+# <Execution ProcessID> on every record, and in EventData ProcessId whenever the
+# logon-requesting process is LSASS itself. Pinned here so the two never
+# disagree, and so one PID never names two different executables (0x248
+# previously meant lsass.exe on the DC path and svchost.exe in this table).
+_LSASS_PID_HEX = "0x248"
+_LSASS_PID_DEC = str(int(_LSASS_PID_HEX, 16))     # 584
+
+
+def _lsass_pid(computer):
+    """LSASS's PID on this host, as (hex, decimal).
+
+    One PID per host for the life of its boot -- that part of the original pinning
+    was right -- but it was pinned GLOBALLY, so all 500+ hosts in the estate reported
+    lsass at 584 across every one of ~25,000 Security events. A real fleet has a
+    different PID per machine, assigned at boot, and anything reasoning about process
+    identity saw a single value.
+
+    Derived from the computer name so it is stable for that host across restarts, the
+    same guarantee the global constant gave. Windows hands out PIDs in multiples of
+    four, and lsass starts early, so the realistic range is a few hundred to ~1500.
+    """
+    if not computer:
+        return _LSASS_PID_HEX, _LSASS_PID_DEC
+    digest = hashlib.sha256(f"lsass:{str(computer).lower()}".encode()).digest()
+    pid = 500 + (int.from_bytes(digest[:4], "big") % 250) * 4     # 500..1496, x4
+    return hex(pid), str(pid)
+
 _LOGON_PROCESSES_BY_TYPE = {
     "interactive": [("0x1d4", "C:\\Windows\\System32\\winlogon.exe"),
                     ("0xb44", "C:\\Windows\\System32\\svchost.exe")],
-    "service":     [("0x248", "C:\\Windows\\System32\\svchost.exe"),
+    "service":     [("0x2f8", "C:\\Windows\\System32\\svchost.exe"),
                     ("0x5f4", "C:\\Windows\\System32\\services.exe")],
-    "network":     [("0x34c", "C:\\Windows\\System32\\lsass.exe")],
+    "network":     [(_LSASS_PID_HEX, "C:\\Windows\\System32\\lsass.exe")],
     "unlock":      [("0x1d4", "C:\\Windows\\System32\\winlogon.exe")],
     "remote":      [("0x1d4", "C:\\Windows\\System32\\winlogon.exe")],
     "cached":      [("0x1d4", "C:\\Windows\\System32\\winlogon.exe")],
 }
-_LOGON_PROCESSES_DEFAULT = [("0x34c", "C:\\Windows\\System32\\lsass.exe")]
+_LOGON_PROCESSES_DEFAULT = [(_LSASS_PID_HEX, "C:\\Windows\\System32\\lsass.exe")]
 
 # LogonProcessName values Windows emits for various scenarios
 _LOGON_PROCESS_NAMES = {
@@ -1339,9 +1606,7 @@ _SPN_TO_SERVICE_ACCOUNT.update(
     {spn: acct for acct, spn in _KERBEROAST_SERVICE_ACCOUNTS})
 
 
-# ---------------------------------------------------------------------------
 # Per-process mutable state
-# ---------------------------------------------------------------------------
 
 # _OPEN_SESSIONS:  hostname → list of open session dicts
 #   { "logon_id":"0x...", "target_user_sid":"...", "target_user_name":"...",
@@ -1367,10 +1632,161 @@ _STATE_LOCK = threading.Lock()
 # --- Parallel host mode infrastructure ---
 _output_queue: _queue_mod.Queue = _queue_mod.Queue(maxsize=1000)
 _status_queue: _queue_mod.Queue = _queue_mod.Queue(maxsize=200)
+# Threats travel apart from benign traffic. They used to share _output_queue with ~266
+# benign workers that kept it permanently full, so a threat's put() timed out part-way:
+# the rest of that threat was lost and -- its fire time already advanced -- never
+# retried. Measured 2026-10-06 over 3.5 days: 8.16M Windows events dropped, and Windows
+# fired 20 threats while every other module fired 42. Each entry here is ONE whole
+# threat, (name, items), and generate_log() drains this queue before benign traffic.
+_threat_queue: _queue_mod.Queue = _queue_mod.Queue(maxsize=100)
+
+
+def _put_backpressured(q, item, stop_event):
+    """Wait for room instead of dropping. The drain in generate_log() is the real rate
+    limit (50 events per call, one call per second), so a full queue means "generate
+    slower", not "throw events away": workers block here and generation settles at
+    what can actually be delivered. Returns False only when the simulator is stopping."""
+    while not stop_event.is_set():
+        try:
+            q.put(item, timeout=1.0)
+            return True
+        except _queue_mod.Full:
+            continue
+    return False
 _worker_stats: dict = {}
 _orchestrator_started = False
 _orchestrator_lock = threading.Lock()
 _workers_stop = threading.Event()
+
+
+# ── Time-ordered release: record ids follow time ─────────────────────────────────────
+# A real host assigns EventRecordID when it writes the event, so per channel the ids
+# rise with time. The workers used to build a whole sequence at once (ids taken then)
+# and ship it immediately, with timestamps spread over seconds to minutes -- so ~16%
+# of a host's consecutive ids ran backwards in time. Workers now build events with a
+# placeholder id and SCHEDULE them; one release thread hands each event out when its
+# timestamp arrives and assigns the real id at that moment. A sequence that would
+# start in the past is shifted to start now (gaps kept), so nothing is released out
+# of time order and nothing is ever stamped in the future.
+#
+# Only the worker threads defer. Scenario events, the harness and other direct callers
+# of the generator tables run on other threads and stay immediate (ids at build).
+_DEFER_IDS = threading.local()          # .on is True only inside worker threads
+_RID_PENDING = "@rid:"                  # placeholder record_id, "@rid:<counter key>"
+_release_heap: list = []                # (ts, seq, threat_group|None, threat_name, record)
+_release_cond = threading.Condition()
+_release_seq = itertools.count()
+_RELEASE_MAX_PENDING = 200_000          # schedulers wait above this (memory bound)
+
+
+def _deferring() -> bool:
+    return getattr(_DEFER_IDS, "on", False)
+
+
+def _schedule(items, stop_event, threat_name=None) -> bool:
+    """Queue one generator result for release at its own timestamps. A threat's
+    events share a group, so only its first released chunk carries its name (the
+    dashboard counts one threat per labelled chunk). False only when stopping."""
+    recs = [json.loads(i) if isinstance(i, str) else i for i in items if i]
+    if not recs:
+        return True
+    times = [_parse_iso_ts(r["time_created"]) for r in recs]
+    shift = max(0.0, time.time() - min(times))       # never start in the past
+    group = next(_release_seq) if threat_name else None
+    with _release_cond:
+        while len(_release_heap) >= _RELEASE_MAX_PENDING and not stop_event.is_set():
+            _release_cond.wait(timeout=1.0)
+        if stop_event.is_set():
+            return False
+        for r, t in zip(recs, times):
+            if shift:
+                r["time_created"] = _iso_ts(t + shift)
+            heapq.heappush(_release_heap, (t + shift, next(_release_seq), group, threat_name, r))
+        _release_cond.notify_all()
+    return True
+
+
+def _releaser(stop_event):
+    """Single release thread: pops events whose time has come, in time order, assigns
+    their record ids, and feeds the queues generate_log() drains."""
+    labelled = set()
+    while not stop_event.is_set():
+        with _release_cond:
+            now = time.time()
+            due = []
+            while _release_heap and _release_heap[0][0] <= now:
+                due.append(heapq.heappop(_release_heap))
+            if not due:
+                wait = (_release_heap[0][0] - now) if _release_heap else 1.0
+                _release_cond.wait(timeout=min(1.0, max(0.01, wait)))
+                continue
+            _release_cond.notify_all()                   # room for waiting schedulers
+        benign, threats = [], {}
+        for _ts, _seq, group, name, r in due:            # release order == time order
+            rid = str(r.get("record_id", ""))
+            if rid.startswith(_RID_PENDING):
+                r["record_id"] = str(_next_record_number(rid[len(_RID_PENDING):]))
+            line = json.dumps(r)
+            if group is not None and group not in labelled:
+                threats.setdefault(group, (name, []))[1].append(line)
+            else:
+                benign.append(line)
+        for group, (name, lines) in threats.items():
+            labelled.add(group)
+            if not _put_backpressured(_threat_queue, (name, lines), stop_event):
+                return
+        for line in benign:
+            if not _put_backpressured(_output_queue, line, stop_event):
+                return
+
+# Worker threads used to swallow every exception, so a generator that raised on
+# every call simply produced nothing -- no log line, no counter, no clue.  These
+# run in a loop, so failures are counted and reported at most once per interval
+# per worker rather than on every tick.
+_worker_errors: dict = {}
+_WORKER_WARN_EVERY_S = 60.0
+
+# Threat labels now travel with the threat itself on _threat_queue; _status_queue is
+# advisory only (get_status_events), bounded, and drops when nobody reads it.
+# Observers should use this non-destructive ring (get_recent_threats).
+_recent_threats: collections.deque = collections.deque(maxlen=25)
+
+
+# Rate limiting is GLOBAL per kind, not per worker.  There is one worker per
+# workstation -- hundreds of them -- so a per-worker window meant a saturated
+# output queue printed once per worker and buried the console.  Counts stay
+# per-worker (the health check reports the worst offender); only the printing
+# is aggregated.
+_worker_warn_last = {"error": 0.0, "drop": 0.0}
+
+
+def _note_worker_error(where, exc, dropped=False):
+    now = time.time()
+    kind = "drop" if dropped else "error"
+    with _STATE_LOCK:
+        rec = _worker_errors.setdefault(
+            where, {"count": 0, "drops": 0, "last": None})
+        if dropped:
+            rec["drops"] += 1
+        else:
+            rec["count"] += 1
+            rec["last"] = f"{type(exc).__name__}: {exc}"[:200]
+        due = now - _worker_warn_last[kind] >= _WORKER_WARN_EVERY_S
+        if due:
+            _worker_warn_last[kind] = now
+        tot_err = sum(v["count"] for v in _worker_errors.values())
+        tot_drop = sum(v["drops"] for v in _worker_errors.values())
+        n_workers = sum(1 for v in _worker_errors.values()
+                        if (v["drops"] if dropped else v["count"]))
+        last = rec["last"]
+    if due:
+        if dropped:
+            print(f"[windows] output queue saturated — {tot_drop} event(s) dropped "
+                  f"across {n_workers} worker(s); generation is outpacing the drain "
+                  f"in generate_log()")
+        else:
+            print(f"[windows] generator errors — {tot_err} across {n_workers} "
+                  f"worker(s); latest {where}: {last}")
 
 
 def reset_state():
@@ -1384,7 +1800,11 @@ def reset_state():
     global last_threat_event_time, _BUILD_EVENT_OS_SUBTYPE, _orchestrator_started
     with _STATE_LOCK:
         _RECORD_NUMBERS.clear()
+        _RECORD_RESERVED.clear()
+        _RECORD_NUMBERS_HERMETIC.clear()
         _USER_SIDS.clear()
+    with _release_cond:
+        _release_heap.clear()           # scheduled-but-unreleased events of the last run
     last_threat_event_time = 0
     _BUILD_EVENT_OS_SUBTYPE = "Windows 10"
     _orchestrator_started = False
@@ -1403,12 +1823,119 @@ def _stable_user_sid(username: str) -> str:
         return sid
 
 
+# --- Record numbers that never go backwards --------------------------------------------
+# A real host's Security log RecordNumber only ever increases. These used to be reseeded
+# with random.randint(50_000, 500_000) on every restart, so a restart could drop a host
+# back into a range it had already used -- and the tenant stores ~13.5% fewer Windows
+# events than the broker accepts (measured 2026-10-06), uniformly across event types, while
+# brand-new test hosts and a real Windows host on the same broker lose nothing. Reuse of
+# (host, record id) is the leading explanation; persisting the counter tests it.
+#
+# IDs are taken in RESERVED BLOCKS from state/windows_record_numbers.json under a lock
+# shared between processes (the simulator and a sweep script can run at once): a process
+# claims the next block before using any of it, so concurrent processes get disjoint
+# ranges and a crash leaves a harmless gap, never a reuse. A host seen for the first time
+# starts at >= 1e9, above anything the old random seeding plus days of use could reach.
+_RECORD_STATE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                  "state", "windows_record_numbers.json")
+_RECORD_BLOCK = 10_000
+_RECORD_FIRST_SEED = 1_000_000_000
+_RECORD_RESERVED: dict[str, int] = {}      # host -> end of the block THIS process holds
+
+
+class _StateFileLock:
+    """Cross-process lock: an O_EXCL lock file, broken if it outlives a crash."""
+
+    def __init__(self, path, stale_after=15.0):
+        self.path, self.stale_after = path + ".lock", stale_after
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        deadline = time.time() + 30
+        while True:
+            try:
+                os.close(os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.path) > self.stale_after:
+                        os.remove(self.path)       # holder died mid-reservation
+                        continue
+                except OSError:
+                    continue
+                if time.time() > deadline:
+                    raise TimeoutError(f"record-number lock held too long: {self.path}")
+                time.sleep(0.01)
+
+    def __exit__(self, *exc):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+
+def _reserve_record_block(host, cur):
+    """Claim the next block of record numbers for `host`; returns the id before it."""
+    with _StateFileLock(_RECORD_STATE_PATH):
+        try:
+            with open(_RECORD_STATE_PATH, encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, ValueError):
+            state = {}
+        saved = state.get(host)
+        start = int(saved) if saved is not None else _RECORD_FIRST_SEED + random.randint(0, 50_000_000)
+        if cur is not None:
+            start = max(start, cur)
+        state[host] = start + _RECORD_BLOCK
+        tmp = _RECORD_STATE_PATH + f".{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        # On Windows, replacing a file another process holds open (Defender or the
+        # search indexer scanning the copy just written) fails with WinError 5 for a
+        # few milliseconds. Seen once in ~23k events; retry rather than fail the event.
+        for attempt in range(40):
+            try:
+                os.replace(tmp, _RECORD_STATE_PATH)
+                break
+            except PermissionError:
+                if attempt == 39:
+                    raise
+                time.sleep(0.025)
+    _RECORD_RESERVED[host] = start + _RECORD_BLOCK
+    return start
+
+
+_RECORD_NUMBERS_HERMETIC: dict[str, int] = {}
+
+
+def _in_hermetic_run():
+    try:
+        from modules.session_utils import hermetic
+    except ImportError:
+        from session_utils import hermetic
+    return hermetic()
+
+
 def _next_record_number(host: str) -> int:
-    """Monotonic RecordNumber per host.  Seeded to a realistic multi-thousand value."""
+    """Monotonic RecordNumber per host, across restarts and concurrent processes.
+
+    Inside a deterministic Training Mode run (session_utils.hermetic()) numbering is the
+    original seeded, in-memory scheme instead, so the same seed reproduces the same ids
+    -- and the live, persistent counters are never touched by a training run."""
+    if _deferring():                    # worker thread: the releaser assigns it later
+        return _RID_PENDING + host
+    if _in_hermetic_run():
+        with _STATE_LOCK:
+            cur = _RECORD_NUMBERS_HERMETIC.get(host)
+            if cur is None:
+                cur = random.randint(50_000, 500_000)
+            cur += 1
+            _RECORD_NUMBERS_HERMETIC[host] = cur
+            return cur
     with _STATE_LOCK:
         cur = _RECORD_NUMBERS.get(host)
-        if cur is None:
-            cur = random.randint(50_000, 500_000)
+        if cur is None or cur >= _RECORD_RESERVED.get(host, -1):
+            cur = _reserve_record_block(host, cur)
         cur += 1
         _RECORD_NUMBERS[host] = cur
         return cur
@@ -1422,6 +1949,11 @@ def _new_logon_id() -> str:
 def _new_logon_guid() -> str:
     """UUID in the braced form Windows uses."""
     return "{" + str(uuid.uuid4()) + "}"
+
+
+def _ticket_hash() -> str:
+    """Base64(SHA-256) ticket hash, as the Jan-2025-CU 4768/4769 events log Request/ResponseTicketHash."""
+    return base64.b64encode(hashlib.sha256(uuid.uuid4().bytes).digest()).decode()
 
 
 def _format_logon_ip(ip, logon_type):
@@ -1445,9 +1977,50 @@ def _iso_ts(t: float = None) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond:06d}000Z"
 
 
-# ---------------------------------------------------------------------------
+def _parse_iso_ts(s: str) -> float:
+    """Inverse of _iso_ts (sub-microsecond digits dropped)."""
+    dt = datetime.strptime(s[:26], "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _end_by_now(events, now=None):
+    """Rebase a built sequence so its LAST event lands at or just before now.
+
+    Multi-step generators start at time.time() and add random gaps (dwell, process
+    lifetime, per-account pacing), so their tail used to carry a time_created minutes
+    ahead of wall clock -- something no real WEC source ships, and which skews any
+    time-windowed correlation. Every event shifts back by the same amount, so the gaps
+    between them are unchanged. Sequences already ending in the past are left alone.
+    """
+    if not events:
+        return events
+    if not isinstance(events, list):                       # one record
+        return _end_by_now([events], now)[0]
+    now = now or time.time()
+    recs = [json.loads(e) if isinstance(e, str) else e for e in events]
+    times = [_parse_iso_ts(r["time_created"]) for r in recs if r.get("time_created")]
+    if not times or max(times) <= now:
+        return events
+    delta = max(times) - now + random.uniform(0.2, 3.0)
+    out = []
+    for e, r in zip(events, recs):
+        if r.get("time_created"):
+            r["time_created"] = _iso_ts(_parse_iso_ts(r["time_created"]) - delta)
+        out.append(json.dumps(r) if isinstance(e, str) else r)
+    return out
+
+
+def _ending_by_now(fn):
+    """Wrap a (config, session_context) generator so its output passes _end_by_now.
+    Applied to every entry of _BENIGN_GENERATORS / _THREAT_GENERATORS and to the
+    scenario dispatch, so no current or future generator can ship future events."""
+    @functools.wraps(fn)
+    def run(config, session_context):
+        return _end_by_now(fn(config, session_context))
+    return run
+
+
 # Configuration helpers
-# ---------------------------------------------------------------------------
 
 def _cf(config):
     """Shorthand — read this module's block from config.json with safe defaults."""
@@ -1512,9 +2085,7 @@ def _get_threat_interval(threat_level, config):
     return levels.get(threat_level, 7200)
 
 
-# ---------------------------------------------------------------------------
 # Core event-record builder
-# ---------------------------------------------------------------------------
 
 def _build_event(event_id: int, computer: str, event_data: dict,
                  success: bool = True,
@@ -1540,8 +2111,19 @@ def _build_event(event_id: int, computer: str, event_data: dict,
 
     ed_clean = {k: v for k, v in event_data.items() if v is not None}
 
-    proc_pid = str(random.randint(400, 9000))
-    proc_tid = str(random.randint(500, 15000))
+    # LSASS has one PID for the life of the boot; only the thread varies. Per HOST,
+    # though -- see _lsass_pid.
+    _pid_hex, proc_pid = _lsass_pid(computer)      # stable: LSASS wrote this record
+    proc_tid = str(random.randint(500, 15000))     # varies: LSASS is multithreaded
+
+    # Keep the invariant the original global pin existed to guarantee: when the
+    # logon-requesting process in EventData IS lsass, its ProcessId must be the same
+    # PID this record reports in <Execution ProcessID>, and one PID must never name
+    # two executables. Enforced here, the single place that knows both the host and
+    # the event data, rather than at each of the three tables that emit an lsass PID.
+    _pname = str(ed_clean.get("ProcessName", ""))
+    if _pname.lower().endswith("lsass.exe") and ed_clean.get("ProcessId"):
+        ed_clean["ProcessId"] = _pid_hex
 
     # The process that generates Security Auditing events is lsass.exe
     lsass_path = "C:\\Windows\\System32\\lsass.exe"
@@ -1601,9 +2183,7 @@ def _user_type(sid: str, username: str = "") -> str:
     return "User"
 
 
-# ---------------------------------------------------------------------------
 # Windows Event XML renderer (for WEC transport)
-# ---------------------------------------------------------------------------
 
 _EVENT_NS = "http://schemas.microsoft.com/win/2004/08/events/event"
 
@@ -1632,11 +2212,17 @@ def _render_event_xml(event: dict) -> str:
     provider.set("Name", event.get("provider_name", ""))
     provider.set("Guid", event.get("provider_guid", ""))
 
-    SE(system, "EventID").text = str(event.get("event_id", "0"))
+    eid_el = SE(system, "EventID")
+    eid_el.text = str(event.get("event_id", "0"))
+    # Classic (pre-Crimson) providers such as the Service Control Manager carry the
+    # high word of the message ID as Qualifiers (7045: Qualifiers='16384').
+    if event.get("event_qualifiers"):
+        eid_el.set("Qualifiers", str(event["event_qualifiers"]))
     SE(system, "Version").text = str(event.get("version", "0"))
 
-    # Level: 0 for audit events (both success and failure)
-    SE(system, "Level").text = "0"
+    # Level: 0 for audit events (both success and failure). Non-Security channels
+    # (e.g. PowerShell/Operational 4104 = Verbose, 5) pass their own "level_num".
+    SE(system, "Level").text = str(event.get("level_num", "0"))
 
     SE(system, "Task").text = str(event.get("task", "0"))
     SE(system, "Opcode").text = str(event.get("op_code", "0"))
@@ -1660,7 +2246,13 @@ def _render_event_xml(event: dict) -> str:
 
     SE(system, "Channel").text = event.get("channel", "Security")
     SE(system, "Computer").text = event.get("computer_name", "")
-    SE(system, "Security")
+    # Security-channel audit events carry no UserID here on real Windows (the user is in
+    # EventData), so the element stays empty by default. Operational channels such as
+    # PowerShell/Operational 4104 do record the running user's SID; a record supplies it
+    # as "security_user_id".
+    sec = SE(system, "Security")
+    if event.get("security_user_id"):
+        sec.set("UserID", str(event["security_user_id"]))
 
     # -- <EventData> --
     ed = event.get("event_data", {})
@@ -1677,30 +2269,40 @@ def _render_event_xml(event: dict) -> str:
         ri = SE(root, "RenderingInfo")
         ri.set("Culture", "en-US")
         SE(ri, "Message").text = msg
-        SE(ri, "Level").text = "Information"
+        SE(ri, "Level").text = event.get("log_level", "Information")
         SE(ri, "Task").text = event.get("event_action", "")
         SE(ri, "Opcode").text = event.get("opcode", "Info")
         SE(ri, "Channel").text = event.get("channel", "Security")
-        SE(ri, "Provider").text = "Microsoft Windows security auditing."
+        SE(ri, "Provider").text = event.get("rendering_provider",
+                                            "Microsoft Windows security auditing.")
         kw_el = SE(ri, "Keywords")
-        kw_text = "Audit Success" if event.get("event_result") == "success" else "Audit Failure"
-        SE(kw_el, "Keyword").text = kw_text
+        # Security events are audit success/failure; other channels (PowerShell) carry
+        # no audit keyword, signalled by "rendering_keyword": None.
+        kw_text = event.get("rendering_keyword",
+                            "Audit Success" if event.get("event_result") == "success"
+                            else "Audit Failure")
+        if kw_text:
+            SE(kw_el, "Keyword").text = kw_text
 
     xml_str = _etree.tostring(root, encoding="unicode", xml_declaration=False)
     xml_str = re.sub(r'="([^"]*)"', lambda m: "='" + m.group(1) + "'", xml_str)
     return xml_str
 
 
-# ---------------------------------------------------------------------------
 # Per-EventID constructors
-# ---------------------------------------------------------------------------
 
 def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
                 workstation_override=None, ip_override=None,
                 target_logon_id=None, logon_guid=None, ts=None,
-                elevated=False) -> dict:
-    """4624 – An account was successfully logged on (emitted by the endpoint)."""
-    domain = _get_domain(config)
+                elevated=False, domain_override=None) -> dict:
+    """4624 – An account was successfully logged on (emitted by the endpoint).
+
+    `domain_override`: TargetDomainName to use instead of the config AD domain.
+    For a LOCAL (non-domain) box account, the logon "domain" is the computer's own
+    name — pass it so the synthetic identity matches how XSIAM resolves that local
+    account (netbios = the host), which the IP<->user binding needs to line up with
+    the endpoint case."""
+    domain = domain_override or _get_domain(config)
     computer = _fqdn(workstation_override or user_info["hostname"], config)
     ip = ip_override if ip_override is not None else user_info.get("ip") or "-"
     port = str(random.randint(49152, 65535))
@@ -1856,6 +2458,164 @@ def _build_4697(config, *, computer, actor_user=None, actor_sid=None,
         "ServiceAccount":    service_account or "LocalSystem",
     }
     return _build_event(4697, comp, event_data, success=True, ts=ts)
+
+
+# 7045 is written by the Service Control Manager to the SYSTEM channel, not by LSASS to
+# Security, so it is built here as its own record (like the PowerShell 4104) rather than
+# through _build_event. It pairs with the Security-channel 4697 for the same install; a
+# WEC subscription that collects only Security sees the 4697 alone.
+_SCM_PROVIDER = "Service Control Manager"
+_SCM_GUID     = "{555908d1-a6d7-4695-8e1e-26931d2012f4}"
+_SCM_START_TYPES = {2: "auto start", 3: "demand start", 4: "disabled"}
+
+
+def _services_pid(computer):
+    """services.exe PID for a host -- stable for the boot, like _lsass_pid."""
+    h = int(hashlib.md5(("services:" + computer.lower()).encode()).hexdigest()[:6], 16)
+    return str(600 + (h % 300) * 4)
+
+
+def _build_7045(config, *, computer, service_name, image_path, start_type=3,
+                account="LocalSystem", installer_sid=None, ts=None) -> dict:
+    """7045 – A service was installed in the system (System channel, SCM)."""
+    ts = ts if ts is not None else time.time()
+    comp = _fqdn(computer, config)
+    return {
+        "event_id": "7045", "event_qualifiers": "16384",
+        "provider_name": _SCM_PROVIDER, "provider_guid": _SCM_GUID,
+        "channel": "System", "computer_name": comp, "host_name": comp,
+        "time_created": _iso_ts(ts),
+        "message": _msg_7045({"ServiceName": service_name, "ImagePath": image_path,
+                              "ServiceType": "user mode service",
+                              "StartType": _SCM_START_TYPES.get(start_type, "demand start"),
+                              "AccountName": account}),
+        "keywords": "0x8080000000000000", "level_num": "4", "log_level": "Information",
+        "rendering_provider": _SCM_PROVIDER, "rendering_keyword": "Classic",
+        "event_result": "success", "event_action": "None",
+        "task": "0", "opcode": "Info", "op_code": "0", "version": "0",
+        "os_subtype": _BUILD_EVENT_OS_SUBTYPE,
+        "record_id": str(_next_record_number(comp + "|System")),
+        "activity_id": "",
+        "process_pid": _services_pid(comp),
+        "process_thread_id": str(random.randint(500, 15000)),
+        "process_name": "services.exe",
+        "process_path": r"C:\Windows\System32\services.exe",
+        "security_user_id": installer_sid or _SID_SYSTEM,
+        "event_data": {"ServiceName": service_name, "ImagePath": image_path,
+                       "ServiceType": "user mode service",
+                       "StartType": _SCM_START_TYPES.get(start_type, "demand start"),
+                       "AccountName": account},
+    }
+
+
+def _build_4698(user_info, config, *, computer=None, task_name, command, arguments="",
+                author=None, run_as="S-1-5-18", hidden=False, trigger="boot",
+                logon_id=None, ts=None) -> dict:
+    """4698 – A scheduled task was created (Security channel).
+
+    TaskContent is the task's registration XML, which is what detections read the
+    action (Command/Arguments), principal (RunAs), Hidden flag and author from."""
+    domain = _get_domain(config)
+    comp = _fqdn(computer or user_info["hostname"], config)
+    author = author or f"{domain}\\{user_info['username']}"
+    ts_val = ts if ts is not None else time.time()
+    when = datetime.fromtimestamp(ts_val, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    trig = {
+        "boot":  "<BootTrigger><Enabled>true</Enabled></BootTrigger>",
+        "logon": "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>",
+        "daily": (f"<CalendarTrigger><StartBoundary>{when}</StartBoundary><Enabled>true</Enabled>"
+                  "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>"),
+        "once":  f"<TimeTrigger><StartBoundary>{when}</StartBoundary><Enabled>true</Enabled></TimeTrigger>",
+    }[trigger]
+    # TaskContent is the task's XML, so its text values are XML-escaped (a redirect '>'
+    # in the arguments is logged as '&gt;').
+    author, command, arguments = (_xml_escape(author), _xml_escape(command),
+                                  _xml_escape(arguments))
+    args_el = f"<Arguments>{arguments}</Arguments>" if arguments else ""
+    content = (
+        '<?xml version="1.0" encoding="UTF-16"?>\r\n'
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\r\n'
+        f"  <RegistrationInfo>\r\n    <Date>{when}</Date>\r\n    <Author>{author}</Author>\r\n"
+        f"    <URI>{task_name}</URI>\r\n  </RegistrationInfo>\r\n"
+        f"  <Triggers>\r\n    {trig}\r\n  </Triggers>\r\n"
+        f'  <Principals>\r\n    <Principal id="Author">\r\n      <UserId>{run_as}</UserId>\r\n'
+        "      <RunLevel>HighestAvailable</RunLevel>\r\n    </Principal>\r\n  </Principals>\r\n"
+        f"  <Settings>\r\n    <Enabled>true</Enabled>\r\n    <Hidden>{'true' if hidden else 'false'}</Hidden>\r\n"
+        "  </Settings>\r\n"
+        f'  <Actions Context="Author">\r\n    <Exec>\r\n      <Command>{command}</Command>\r\n'
+        f"      {args_el}\r\n    </Exec>\r\n  </Actions>\r\n</Task>"
+    )
+    # A machine-account subject (HOST$) is the SYSTEM context of an elevated installer.
+    is_machine = user_info["username"].endswith("$")
+    event_data = {
+        "SubjectUserSid":        _SID_SYSTEM if is_machine else _stable_user_sid(user_info["username"]),
+        "SubjectUserName":       user_info["username"],
+        "SubjectDomainName":     domain,
+        "SubjectLogonId":        logon_id or _new_logon_id(),
+        "TaskName":              task_name,
+        "TaskContent":           content,
+        "ClientProcessStartKey": str(random.randint(10**15, 10**16 - 1)),
+        "ClientProcessId":       str(random.randint(1000, 30000)),
+        "ParentProcessId":       str(random.randint(600, 1200)),
+        "RpcCallClientLocality": "0",
+        "FQDN":                  comp,
+    }
+    return _build_event(4698, comp, event_data, success=True, ts=ts)
+
+
+def _build_5140(user_info, config, *, computer, share_name, share_path,
+                ip=None, logon_id=None, access_mask="0x1", ts=None) -> dict:
+    """5140 – A network share object was accessed (logged on the SERVER, once per
+    session per share). ShareName is the UNC form '\\\\*\\NAME'."""
+    domain = _get_domain(config)
+    comp = _fqdn(computer, config)
+    event_data = {
+        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserName":   user_info["username"],
+        "SubjectDomainName": domain,
+        "SubjectLogonId":    logon_id or _new_logon_id(),
+        "ObjectType":        "File",
+        "IpAddress":         ip or user_info.get("ip") or "-",
+        "IpPort":            str(random.randint(49152, 65535)),
+        "ShareName":         share_name,
+        "ShareLocalPath":    share_path,
+        "AccessMask":        access_mask,
+        "AccessList":        "%%4416\r\n\t\t\t\t",
+    }
+    return _build_event(5140, comp, event_data, success=True, ts=ts)
+
+
+# 5145 access masks / access lists for the operations detections distinguish.
+_5145_READ  = ("0x120089", "%%1538\r\n\t\t\t\t%%1541\r\n\t\t\t\t%%4416\r\n\t\t\t\t%%4419\r\n\t\t\t\t%%4423\r\n\t\t\t\t")
+_5145_WRITE = ("0x2",      "%%4417\r\n\t\t\t\t")
+_5145_PIPE  = ("0x12019f", "%%1538\r\n\t\t\t\t%%1541\r\n\t\t\t\t%%4416\r\n\t\t\t\t%%4417\r\n\t\t\t\t"
+                           "%%4418\r\n\t\t\t\t%%4419\r\n\t\t\t\t%%4420\r\n\t\t\t\t%%4423\r\n\t\t\t\t%%4424\r\n\t\t\t\t")
+
+
+def _build_5145(user_info, config, *, computer, share_name, share_path,
+                relative_target, access=_5145_READ, ip=None, logon_id=None,
+                ts=None) -> dict:
+    """5145 – A network share object was checked to see whether client can be
+    granted desired access (Detailed File Share; one per file/pipe touched)."""
+    domain = _get_domain(config)
+    comp = _fqdn(computer, config)
+    mask, alist = access
+    event_data = {
+        "SubjectUserSid":     _stable_user_sid(user_info["username"]),
+        "SubjectUserName":    user_info["username"],
+        "SubjectDomainName":  domain,
+        "SubjectLogonId":     logon_id or _new_logon_id(),
+        "ObjectType":         "File",
+        "IpAddress":          ip or user_info.get("ip") or "-",
+        "IpPort":             str(random.randint(49152, 65535)),
+        "ShareName":          share_name,
+        "ShareLocalPath":     share_path,
+        "RelativeTargetName": relative_target,
+        "AccessMask":         mask,
+        "AccessList":         alist,
+        "AccessReason":       "-",
+    }
+    return _build_event(5145, comp, event_data, success=True, ts=ts)
 
 
 def _build_1102(user_info, config, *, ts=None) -> dict:
@@ -2833,7 +3593,7 @@ def _dc_logon_event(user_info, config, *, logon_type=3, auth_pkg=_KRB_PACKAGE,
         "TransmittedServices":       "-",
         "LmPackageName":             "-",
         "KeyLength":                 "0",
-        "ProcessId":                 "0x248",
+        "ProcessId":                 _LSASS_PID_HEX,
         "ProcessName":               "C:\\Windows\\System32\\lsass.exe",
         "IpAddress":                 ip if ip and ip != "-" else "-",
         "IpPort":                    str(random.randint(49152, 65535)),
@@ -2912,6 +3672,13 @@ def _build_4769(user_info, config, *, service_spn=None, encryption=None,
         svc_name = spn.split("/")[1].split(":")[0].split(".")[0].upper() + "$"
     else:
         svc_name = spn
+    # Post-Jan-2025 CU (event Version 2) adds ticket-hash and per-principal encryption-capability
+    # fields. We model the SERVICE as AES-capable (msds-SET includes AES), so an RC4 (0x17) service
+    # ticket against it is a DOWNGRADE — the modern Kerberoasting signal the newer detectors use
+    # (weak ticket enc vs. AES-capable account), independent of the legacy "0x17 only" heuristic.
+    svc_supported = "0x1F (DES, RC4, AES128-SHA96, AES256-SHA96)"
+    client_adv = ("\n\t\tAES256-CTS-HMAC-SHA1-96\n\t\tAES128-CTS-HMAC-SHA1-96"
+                  "\n\t\tRC4-HMAC-NT\n\t\tRC4-HMAC-NT-EXP\n\t\tRC4-HMAC-OLD-EXP")
     event_data = {
         "TargetUserName":        f"{user_info['username']}@{_get_dns_domain(config).upper()}",
         "TargetDomainName":      _get_dns_domain(config).upper(),
@@ -2924,9 +3691,19 @@ def _build_4769(user_info, config, *, service_spn=None, encryption=None,
         "Status":                status,
         "LogonGuid":             _new_logon_guid(),
         "TransmittedServices":   "-",
+        # --- Version 2 (Jan 2025 CU) fields ---
+        "RequestTicketHash":     _ticket_hash() if success else "N/A",
+        "ResponseTicketHash":    _ticket_hash() if success else "N/A",
+        "AccountSupportedEncryptionTypes": "N/A",
+        "AccountAvailableKeys":  "N/A",
+        "ServiceSupportedEncryptionTypes": svc_supported if success else "N/A",
+        "ServiceAvailableKeys":  "AES-SHA1, RC4" if success else "N/A",
+        "DCSupportedEncryptionTypes": "0x1F (DES, RC4, AES128-SHA96, AES256-SHA96)",
+        "DCAvailableKeys":       "AES-SHA1, RC4",
+        "ClientAdvertizedEncryptionTypes": client_adv,
+        # modern DCs issue an AES session key even when the service ticket itself is RC4
+        "SessionKeyEncryptionType": "0x12" if success else "0xFFFFFFFF",
     }
-    # 4769 on newer DCs may also include encryption detail fields
-    # but they are less consistently present than in 4768
     return _build_event(4769, dc_host, event_data, success=success, ts=ts,
 )
 
@@ -3131,9 +3908,7 @@ def _build_4738(user_info, config, *, target_username, target_sid,
     return _build_event(4738, dc_host, event_data, success=True, ts=ts)
 
 
-# ---------------------------------------------------------------------------
 # Benign event generators
-# ---------------------------------------------------------------------------
 
 def _benign_interactive_logon(config, session_context):
     """User logs on interactively at their workstation (LogonType 2).
@@ -3142,6 +3917,7 @@ def _benign_interactive_logon(config, session_context):
     u = _pick_windows_user(session_context)
     if not u:
         return None
+    _publish_logon(u)   # session start -> cloud sign-in + network traffic for this user correlate
 
     t0 = time.time()
     logon_id = _new_logon_id()
@@ -3179,7 +3955,120 @@ def _benign_network_share_logon(config, session_context):
     result.append(json.dumps(_build_4624(u, config, logon_type=3, auth_pkg=_KRB_PACKAGE,
                                          workstation_override=server_fqdn,
                                          target_logon_id=logon_id, ts=t0)))
+    # Server-side share audit for the same logon session: 5140 once per share
+    # connection, and a 5145 for the file opened when Detailed File Share is audited.
+    share, path, files = random.choice(_server_shares(server_fqdn))
+    t1 = t0 + random.uniform(0.02, 0.2)
+    result.append(json.dumps(_build_5140(u, config, computer=server_fqdn, share_name=share,
+                                         share_path=path, logon_id=logon_id, ts=t1)))
+    if random.random() < 0.35:
+        result.append(json.dumps(_build_5145(
+            u, config, computer=server_fqdn, share_name=share, share_path=path,
+            relative_target=random.choice(files), logon_id=logon_id,
+            ts=t1 + random.uniform(0.05, 2.0))))
     return result
+
+
+# Shares per file server (UNC share name, local path, typical relative targets).
+_FILE_SERVER_SHARES = {
+    "fs": [
+        (r"\\*\Shared",      r"\??\D:\Shares\Shared",
+         [r"Finance\Q3 Forecast.xlsx", r"HR\Benefits 2026.pdf", r"Projects\Roadmap.pptx",
+          r"Templates\Letterhead.dotx", r"IT\Install\README.txt"]),
+        (r"\\*\Departments", r"\??\D:\Shares\Departments",
+         [r"Sales\Pipeline.xlsx", r"Marketing\Brand Guide.pdf", r"Legal\NDA Template.docx"]),
+        (r"\\*\Home$",       r"\??\D:\Home",
+         [r"Documents\notes.txt", r"Desktop\todo.docx", "desktop.ini"]),
+    ],
+    "backup": [
+        (r"\\*\Backups",     r"\??\E:\Backups",
+         [r"Daily\catalog.xml", r"Weekly\manifest.json"]),
+    ],
+}
+
+
+def _server_shares(server_fqdn):
+    short = server_fqdn.split(".")[0].lower()
+    return _FILE_SERVER_SHARES["backup" if short.startswith("backup") else "fs"]
+
+
+# Software that registers its own scheduled tasks / services as part of routine
+# install and self-update. (task name, command, arguments, trigger)
+_BENIGN_SCHED_TASKS = [
+    (r"\GoogleSystem\GoogleUpdater\GoogleUpdaterTaskSystem{ver}",
+     r"C:\Program Files (x86)\Google\GoogleUpdater\{ver}\updater.exe", "--wake --system", "daily"),
+    (r"\MicrosoftEdgeUpdateTaskMachineCore{{{guid}}}",
+     r"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe", "/c", "logon"),
+    (r"\MicrosoftEdgeUpdateTaskMachineUA{{{guid}}}",
+     r"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe", "/ua /installsource scheduler", "daily"),
+    (r"\Adobe Acrobat Update Task",
+     r"C:\Program Files (x86)\Common Files\Adobe\ARM\1.0\AdobeARM.exe", "", "logon"),
+    (r"\Mozilla\Firefox Default Browser Agent {hex}",
+     r"C:\Program Files\Mozilla Firefox\default-browser-agent.exe", "do-task \"{hex}\"", "daily"),
+    (r"\Microsoft\Office\Office Automatic Updates 2.0",
+     r"C:\Program Files\Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe",
+     "/frequentupdate SCHEDULEDTASK displaylevel=False", "daily"),
+]
+
+_BENIGN_SERVICES = [
+    ("GoogleUpdaterService{ver}", r'"C:\Program Files (x86)\Google\GoogleUpdater\{ver}\updater.exe" --system --windows-service', 2),
+    ("edgeupdate",  r'"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe" /svc', 2),
+    ("edgeupdatem", r'"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe" /medsvc', 3),
+    ("MozillaMaintenance", r'"C:\Program Files (x86)\Mozilla Maintenance Service\maintenanceservice.exe"', 3),
+    ("ZoomCptService", r'"C:\Program Files\Common Files\Zoom\Support\CptService.exe" -user_path "C:\Users\Public"', 3),
+    ("AdobeARMservice", r'"C:\Program Files (x86)\Common Files\Adobe\ARM\1.0\armsvc.exe"', 2),
+]
+
+
+_UPDATER_VERSIONS = ["128.0.6537.0", "129.0.6668.0", "130.0.6723.0"]
+
+
+def _software_tokens(host):
+    """The token set of one host's installs, so a task/service name and its binary path
+    agree. The Edge task GUID and the Firefox install hash are fixed per machine in
+    reality -- drawn per call they made every re-registration a new, never-seen task
+    name. The updater version steps forward every two weeks, staggered per host."""
+    h = int(hashlib.sha256(f"sw:{host.lower()}".encode()).hexdigest(), 16)
+    fortnight = int(time.time() // (14 * 86400))
+    tok = {"{ver}": _UPDATER_VERSIONS[(h + fortnight) % len(_UPDATER_VERSIONS)],
+           "{guid}": str(uuid.UUID(int=h >> 128)).upper(),
+           "{hex}": f"{h & ((1 << 64) - 1):016X}"}
+
+    def fill(s):
+        for k, v in tok.items():
+            s = s.replace(k, v)
+        return s
+    return fill
+
+
+def _benign_scheduled_task_create(config, session_context):
+    """Software updater registers its scheduled task (4698, Subject = SYSTEM machine
+    account during an elevated installer run)."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    name, cmd, args, trig = random.choice(_BENIGN_SCHED_TASKS)
+    fill = _software_tokens(u["hostname"])
+    machine = {**u, "username": u["hostname"].split(".")[0].upper() + "$"}
+    return json.dumps(_build_4698(machine, config, task_name=fill(name), command=fill(cmd),
+                                  arguments=fill(args),
+                                  author=f"{_get_domain(config)}\\{u['username']}",
+                                  trigger=trig, logon_id="0x3e7"))
+
+
+def _benign_service_install(config, session_context):
+    """Software installer registers a Windows service (4697 Security + 7045 System)."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    name, image, start = random.choice(_BENIGN_SERVICES)
+    fill = _software_tokens(u["hostname"])
+    name, image = fill(name), fill(image)
+    t = time.time()
+    return [json.dumps(_build_4697(config, computer=u["hostname"], service_name=name,
+                                   service_file=image, start_type=start, ts=t)),
+            json.dumps(_build_7045(config, computer=u["hostname"], service_name=name,
+                                   image_path=image, start_type=start, ts=t + 0.01))]
 
 
 def _benign_workstation_unlock(config, session_context):
@@ -3187,6 +4076,7 @@ def _benign_workstation_unlock(config, session_context):
     u = _pick_windows_user(session_context)
     if not u:
         return None
+    _publish_logon(u)
     return json.dumps(_build_4624(u, config, logon_type=7, auth_pkg=_NEG_PACKAGE))
 
 
@@ -3302,6 +4192,7 @@ def _benign_cached_logon(config, session_context):
     u = _pick_windows_user(session_context)
     if not u:
         return None
+    _publish_logon(u)
     return json.dumps(_build_4624(u, config, logon_type=11, auth_pkg=_NEG_PACKAGE))
 
 
@@ -3312,6 +4203,7 @@ def _benign_rdp_logon(config, session_context):
     u = _pick_windows_user(session_context)
     if not u:
         return None
+    _publish_logon(u)
     src = _pick_windows_user(session_context)
     src_ip = src["ip"] if src and src["ip"] != u["ip"] else "10.10.10.200"
 
@@ -3332,7 +4224,7 @@ def _benign_rdp_logon(config, session_context):
 
 def _benign_sql_access(config, session_context):
     """User connects to SQL Server — 4769 TGS for MSSQLSvc SPN with AES."""
-    u = _pick_windows_user(session_context)
+    u = _pick_windows_user_corr(session_context)
     if not u:
         return None
     sql_spns = [s for s in _SERVICE_ACCOUNT_SPNS if s.startswith("MSSQLSvc/")]
@@ -3342,7 +4234,7 @@ def _benign_sql_access(config, session_context):
 
 def _benign_web_app_access(config, session_context):
     """User accesses intranet web app — 4769 TGS for HTTP SPN with AES."""
-    u = _pick_windows_user(session_context)
+    u = _pick_windows_user_corr(session_context)
     if not u:
         return None
     http_spns = [s for s in _SERVICE_ACCOUNT_SPNS if s.startswith("HTTP/")]
@@ -3352,7 +4244,7 @@ def _benign_web_app_access(config, session_context):
 
 def _benign_ldap_query(config, session_context):
     """Workstation queries AD — 4769 TGS for LDAP SPN with AES."""
-    u = _pick_windows_user(session_context)
+    u = _pick_windows_user_corr(session_context)
     if not u:
         return None
     ldap_spns = [s for s in _SERVICE_ACCOUNT_SPNS if s.startswith("LDAP/")]
@@ -3370,7 +4262,7 @@ def _benign_ntlm_validation(config, session_context):
 
 def _benign_explicit_cred_runas(config, session_context):
     """User uses runas to launch a process as another local account."""
-    u = _pick_windows_user(session_context)
+    u = _pick_windows_user_corr(session_context)
     if not u:
         return None
     target_user = u["username"] + "_admin"
@@ -3388,9 +4280,7 @@ def _benign_password_typo(config, session_context):
                                   sub_status="0xC000006A"))
 
 
-# ---------------------------------------------------------------------------
 # Benign process creation (4688) — realistic user workstation activity
-# ---------------------------------------------------------------------------
 # Each entry: (process_path, parent_process, command_line_template, weight)
 # command_line_template may contain {doc} placeholder filled at runtime.
 
@@ -3529,6 +4419,109 @@ _BENIGN_PROCESS_TABLE = [
 ]
 
 
+# Object access (4656/4663) and DC account administration (4725/4767)
+# 4656/4663 only appear on objects carrying a SACL, so the benign baseline is
+# drawn from paths an org would realistically audit: finance, HR and legal
+# shares, plus the GPO/NETLOGON trees on SYSVOL.  Without this baseline the
+# threat-side LSASS handle access (T1003.001) has nothing to stand out against,
+# which is the whole point of emitting the benign side at all.
+_AUDITED_FILE_OBJECTS = [
+    ("\\\\FS-01\\Finance\\Budgets\\FY26_Forecast.xlsx",      "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE"),
+    ("\\\\FS-01\\Finance\\Payroll\\Q3_Payroll_Export.csv",   "C:\\Windows\\explorer.exe"),
+    ("\\\\FS-01\\HR\\Personnel\\Headcount_Plan.xlsx",        "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE"),
+    ("\\\\FS-01\\Legal\\Contracts\\MSA_Renewals_2026.docx",  "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE"),
+    ("\\\\FS-02\\Engineering\\Designs\\platform_roadmap.pdf","C:\\Program Files\\Adobe\\Acrobat DC\\Acrobat\\Acrobat.exe"),
+    ("C:\\Windows\\SYSVOL\\sysvol\\Policies\\{31B2F340-016D-11D2-945F-00C04FB984F9}\\GPT.INI",
+     "C:\\Windows\\System32\\svchost.exe"),
+]
+
+# Access masks as Windows reports them for the common file operations.
+_ACCESS_MASK_READ    = "0x120089"   # ReadData | ReadAttributes | ReadEA | ReadControl | Sync
+_ACCESS_MASK_WRITE   = "0x120116"   # WriteData | AppendData | WriteEA | WriteAttributes
+
+# LSASS handle access: the access mask is what separates a credential dump from
+# ordinary process inspection.  0x1010 = PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
+# which is what a memory-dumping tool requests; 0x1fffff is full control.
+_LSASS_OBJECT_NAME = "\\Device\\HarddiskVolume2\\Windows\\System32\\lsass.exe"
+_CRED_DUMP_ACCESS  = ["0x1010", "0x1410", "0x1fffff"]
+_CRED_DUMP_TOOLS = [
+    ("C:\\Users\\Public\\procdump64.exe",       "procdump64.exe -accepteula -ma lsass.exe C:\\Users\\Public\\lsass.dmp"),
+    ("C:\\Windows\\Temp\\mimikatz.exe",         "mimikatz.exe \"privilege::debug\" \"sekurlsa::logonpasswords\" exit"),
+    ("C:\\Users\\Public\\rundll32.exe",         "rundll32.exe C:\\Windows\\System32\\comsvcs.dll, MiniDump 584 C:\\Windows\\Temp\\lsass.dmp full"),
+    ("C:\\Windows\\Temp\\nanodump.exe",         "nanodump.exe --write C:\\Windows\\Temp\\nano.dmp"),
+]
+
+# Accounts a helpdesk would routinely disable (offboarding) rather than delete.
+_OFFBOARD_ACCOUNT_SUFFIXES = ["_contractor", "_temp", "_intern", "_vendor", ""]
+
+
+def _benign_audited_file_access(config, session_context):
+    """Routine access to a SACL-audited file object: 4656 handle then 4663 access.
+
+    4663 always follows a 4656 on the same HandleId in real Windows -- the handle
+    must be opened before it can be read -- so both are emitted as a pair sharing
+    HandleId, ProcessId and SubjectLogonId.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    object_name, process_name = random.choice(_AUDITED_FILE_OBJECTS)
+    handle_id = "0x%x" % random.randint(0x100, 0xffff)
+    process_id = "0x%x" % random.randint(0x200, 0xffff)
+    logon_id = _new_logon_id()
+    # Reads dominate; writes happen but are the minority on a shared document.
+    write = random.random() < 0.25
+    t = time.time()
+
+    events = [json.dumps(_build_4656(
+        u, config, object_type="File", object_name=object_name,
+        process_name=process_name,
+        access_mask=_ACCESS_MASK_WRITE if write else _ACCESS_MASK_READ,
+        handle_id=handle_id, process_id=process_id, logon_id=logon_id, ts=t))]
+    events.append(json.dumps(_build_4663(
+        u, config, object_type="File", object_name=object_name,
+        process_name=process_name,
+        access_mask=_ACCESS_MASK_WRITE if write else _ACCESS_MASK_READ,
+        handle_id=handle_id, process_id=process_id, logon_id=logon_id,
+        ts=t + random.uniform(0.01, 0.20))))
+    return events
+
+
+def _benign_account_unlock(config, session_context):
+    """Helpdesk unlocks a locked-out account -- 4767, emitted by the DC.
+
+    This is the routine counterpart to the 4740 lockout the threat generators
+    produce: in a real domain most lockouts are a forgotten password and end
+    with an administrator unlocking the account minutes later.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    admin = {"username": random.choice(["svc_helpdesk", "helpdesk.admin", "Administrator"]),
+             "hostname": _get_dc_hostname(config)}
+    return json.dumps(_build_4767(admin, config, unlocked_by=admin["username"],
+                                  ts=time.time()))
+
+
+def _benign_account_disable(config, session_context):
+    """Offboarding: an administrator disables a departing user's account (4725).
+
+    Real offboarding disables an account and leaves it disabled for a retention
+    window rather than deleting it, so this is a standalone 4725 with no 4726.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    admin = {"username": random.choice(["svc_hr_sync", "helpdesk.admin", "Administrator"]),
+             "hostname": _get_dc_hostname(config)}
+    target = f"{u['username']}{random.choice(_OFFBOARD_ACCOUNT_SUFFIXES)}"
+    return json.dumps(_build_4725(admin, config,
+                                  target_username=target,
+                                  target_sid=_stable_user_sid(target),
+                                  ts=time.time()))
+
+
 def _benign_process_creation(config, session_context):
     """Emit 1-3 benign 4688 (process creation) + 4689 (exit) events for
     normal user workstation activity — Office, browsers, system utilities.
@@ -3537,7 +4530,7 @@ def _benign_process_creation(config, session_context):
     establishes the UEBA baseline that makes attack tool 4688 events
     (mimikatz, Rubeus, procdump) detectable as anomalous.
     """
-    u = _pick_windows_user(session_context)
+    u = _pick_windows_user_corr(session_context)
     if not u:
         return None
 
@@ -3574,9 +4567,7 @@ def _benign_process_creation(config, session_context):
     return events
 
 
-# ---------------------------------------------------------------------------
 # DC-specific benign generators (baseline for UEBA)
-# ---------------------------------------------------------------------------
 
 _DC_SERVICE_ACCOUNTS = [
     ("SYSTEM",          _SID_SYSTEM,       5),
@@ -3743,32 +4734,8 @@ def _benign_dc_service_activity(config, session_context):
     return events
 
 
-_BENIGN_WEIGHTS = {
-    # Higher weights → more realistic day-in-the-life (Windows auth volume
-    # is dominated by unlocks, network-share access, and routine interactive
-    # logons).  SQL/web/LDAP access generates steady 4769 AES baseline that
-    # UEBA uses to contrast against RC4 Kerberoasting bursts.
-    "interactive_logon":     18,
-    "network_share_logon":   22,
-    "workstation_unlock":    18,
-    "logoff":                10,
-    "service_logon":          6,
-    "scheduled_task_logon":   4,
-    "cached_logon":           2,
-    "rdp_logon":              3,
-    "sql_access":            10,
-    "web_app_access":         8,
-    "ldap_query":             6,
-    "ntlm_validation":        4,
-    "explicit_cred_runas":    1,
-    "password_typo":          2,
-    "dc_self_logon":          8,
-    "dc_kerberos_traffic":   15,
-    "dc_directory_service":   8,
-    "dc_service_activity":   10,
-    "process_creation":      30,
-}
-
+# Benign generators by name. Ambient scheduling -- which run, and how often -- lives in
+# the per-host worker tables _DC_BENIGN_GENS / _WKS_BENIGN_GENS (see generate_log).
 _BENIGN_GENERATORS = {
     "interactive_logon":    _benign_interactive_logon,
     "network_share_logon":  _benign_network_share_logon,
@@ -3789,26 +4756,15 @@ _BENIGN_GENERATORS = {
     "dc_directory_service": _benign_dc_directory_service,
     "dc_service_activity":  _benign_dc_service_activity,
     "process_creation":     _benign_process_creation,
+    "audited_file_access":  _benign_audited_file_access,
+    "account_unlock":       _benign_account_unlock,
+    "account_disable":      _benign_account_disable,
+    "scheduled_task_create": _benign_scheduled_task_create,
+    "service_install":      _benign_service_install,
 }
 
 
-def _select_benign(config, session_context):
-    """Pick a weighted benign generator and run it."""
-    cfg_mix = _cf(config).get("event_mix", {}).get("benign", {})
-    weights = {k: cfg_mix.get(k, v) for k, v in _BENIGN_WEIGHTS.items()}
-    choice = random.choices(list(weights.keys()), weights=list(weights.values()), k=1)[0]
-    fn = _BENIGN_GENERATORS[choice]
-    result = fn(config, session_context)
-    # Some generators (logoff) return None if no state allows them — retry once
-    if result is None:
-        fn2 = _BENIGN_GENERATORS["interactive_logon"]
-        result = fn2(config, session_context)
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Threat generators
-# ---------------------------------------------------------------------------
 #
 # Every threat generator returns a list of JSON strings so the transport
 # layer emits them all in one call.  Detection-completeness patterns follow
@@ -4032,8 +4988,8 @@ def _threat_suspicious_account_lockout(config, session_context):
 
 
 # DCSync replication GUIDs (DS-Replication-Get-Changes family)
-_GUID_REPL_GET_CHANGES     = "{1131f6ad-9c07-11d1-f79f-00c04fc2dcd2}"
-_GUID_REPL_GET_CHANGES_ALL = "{1131f6ae-9c07-11d1-f79f-00c04fc2dcd2}"
+_GUID_REPL_GET_CHANGES     = "{1131f6aa-9c07-11d1-f79f-00c04fc2dcd2}"
+_GUID_REPL_GET_CHANGES_ALL = "{1131f6ad-9c07-11d1-f79f-00c04fc2dcd2}"
 _GUID_REPL_IN_FILTERED_SET = "{89e95b76-444d-4c62-991a-0facbeda640c}"
 
 
@@ -4205,14 +5161,12 @@ def _threat_lateral_movement_chain(config, session_context):
 
     return events
 
-_BENIGN_WEIGHTS["lateral_movement"] = 3
 _BENIGN_GENERATORS["lateral_movement"] = _threat_lateral_movement_chain
+_BENIGN_GENERATORS = {k: _ending_by_now(v) for k, v in _BENIGN_GENERATORS.items()}
 
 
-# ---------------------------------------------------------------------------
 # dMSA privilege escalation targets — privileged accounts whose privileges
 # the attacker inherits via msDS-ManagedAccountPrecededByLink
-# ---------------------------------------------------------------------------
 # These must be *accounts*. msDS-ManagedAccountPrecededByLink is a DN link to the
 # superseded user/computer object, so a group DN ("Domain Admins") can never be
 # superseded and leaves the detector with no identity to resolve.
@@ -5975,7 +6929,7 @@ def _threat_new_machine_delegation(config, session_context):
     Which event carries the signal matters. delegation_change corroborates with 5136
     (msDS-AllowedToDelegateTo, userAccountControl) but the event XSIAM actually consumes is
     the 4738 that carries AllowedToDelegateTo. 5136 is not in XSIAM's Windows analytics
-    intake, so a 5136-only sequence is invisible — that is exactly why wip_dmsa_privesc sat
+    intake, so a 5136-only sequence is invisible — that is exactly why dmsa_privesc sat
     silent until a 4662 was added. For a machine the 4738 equivalent is 4742, which has its
     own AllowedToDelegateTo field, so the delegation is expressed there.
 
@@ -6667,9 +7621,7 @@ def _threat_priv_cert_request(config, session_context):
     return events
 
 
-# ---------------------------------------------------------------------------
 # Tier 1 threat generators: account lifecycle detections
-# ---------------------------------------------------------------------------
 
 _SUSPICIOUS_ACCOUNT_PREFIXES = [
     "svc_", "tmp_", "test_", "backup_", "admin_", "sys_", "sql_",
@@ -7015,6 +7967,108 @@ def _threat_password_never_expires(config, session_context):
     return events
 
 
+# Accounts an attacker disables to slow the response: the people and service
+# identities that would otherwise investigate or revoke their access.
+_SECURITY_STAFF_ACCOUNTS = [
+    "soc.analyst1", "soc.analyst2", "soc.oncall", "ir.lead",
+    "sec.engineer", "svc_edr_admin", "svc_backup", "svc_siem_forwarder",
+    "domain.audit", "helpdesk.admin",
+]
+
+
+def _threat_lsass_handle_access(config, session_context):
+    """Credential dumping via an LSASS handle (T1003.001).
+
+    Detection targets:
+      - "Handle to LSASS requested by a non-system process"
+      - "Credential dumping tool executed"
+
+    Sequence:
+      1. 4688 dumping tool launched
+      2. 4656 handle to lsass.exe requested with a memory-read access mask
+      3. 4663 the read actually performed on that handle
+      4. 4689 tool exit
+
+    This is what _build_4656's own docstring was written for.  The access mask
+    is the discriminator: ordinary tooling queries LSASS with 0x1000
+    (PROCESS_QUERY_LIMITED_INFORMATION), while a dumper needs PROCESS_VM_READ.
+    Object/process names are emitted exactly as the Security channel reports
+    them -- lsass.exe as a \\Device\\HarddiskVolume path, not a C:\\ path.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    tool_path, command_line = random.choice(_CRED_DUMP_TOOLS)
+    access_mask = random.choice(_CRED_DUMP_ACCESS)
+    handle_id = "0x%x" % random.randint(0x100, 0xffff)
+    process_id = "0x%x" % random.randint(0x200, 0xffff)
+    logon_id = _new_logon_id()
+    t = time.time()
+
+    events = [json.dumps(_build_4688(u, config, process_name=tool_path,
+                                     command_line=command_line,
+                                     logon_id=logon_id, ts=t))]
+    t += random.uniform(0.2, 1.2)
+    events.append(json.dumps(_build_4656(
+        u, config, object_type="Process", object_name=_LSASS_OBJECT_NAME,
+        process_name=tool_path, access_mask=access_mask,
+        handle_id=handle_id, process_id=process_id, logon_id=logon_id, ts=t)))
+    t += random.uniform(0.01, 0.15)
+    events.append(json.dumps(_build_4663(
+        u, config, object_type="Process", object_name=_LSASS_OBJECT_NAME,
+        process_name=tool_path, access_mask=access_mask,
+        handle_id=handle_id, process_id=process_id, logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 3.0)
+    events.append(json.dumps(_build_4689(u, config, process_name=tool_path,
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_account_access_removal(config, session_context):
+    """Attacker disables accounts to impede response (T1531).
+
+    Detection targets:
+      - "Multiple user accounts disabled in a short window"
+
+    Sequence:
+      1. 4688 process creation (net.exe / PowerShell)
+      2. 4725 account disabled -- several security/admin accounts in a burst
+      3. 4689 process exit
+
+    Disabling rather than deleting is the quieter variant: the accounts still
+    exist, so an operator glancing at AD sees nothing missing, but the responders
+    who own them cannot log in.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    tool = random.choice([
+        ("C:\\Windows\\System32\\net.exe", "net user {acct} /active:no /domain"),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         "powershell.exe -c \"Disable-ADAccount -Identity {acct}\""),
+    ])
+    targets = random.sample(_SECURITY_STAFF_ACCOUNTS,
+                            k=min(random.randint(4, 7), len(_SECURITY_STAFF_ACCOUNTS)))
+    logon_id = _new_logon_id()
+    t = time.time()
+
+    events = [json.dumps(_build_4688(u, config, process_name=tool[0],
+                                     command_line=tool[1].format(acct=targets[0]),
+                                     logon_id=logon_id, ts=t))]
+    for acct in targets:
+        t += random.uniform(0.4, 2.0)
+        events.append(json.dumps(_build_4725(u, config,
+                                             target_username=acct,
+                                             target_sid=_stable_user_sid(acct),
+                                             logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 3.0)
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
 def _threat_default_account_enabled(config, session_context):
     """Default local account (Administrator, Guest, DefaultAccount) is enabled.
 
@@ -7088,12 +8142,654 @@ def _threat_default_account_enabled(config, session_context):
     return events
 
 
+# Threats renamed once their detection was confirmed firing in the tenant: the wip_
+# ("work in progress") prefix marked a generator whose detection had not yet been
+# seen. The old names still dispatch, so saved scenarios and MCP callers keep working.
+_RENAMED_THREATS = {
+    "WIP_AS_REP_ROASTING":          "AS_REP_ROASTING",           # fired 2026-07-30
+    "WIP_DMSA_PRIVESC":             "DMSA_PRIVESC",              # fired 2026-09-19
+    "WIP_SENSITIVE_PASSWORD_RESET": "SENSITIVE_PASSWORD_RESET",  # fired 2026-09-28
+}
+
+# ── Exchange mailbox abuse via PowerShell (4104 ScriptBlock) ──────────────────
+# These emit a Microsoft-Windows-PowerShell/Operational 4104 ScriptBlock event -- the
+# same shape the WEC channel probe proved ingests end-to-end -- carrying an Exchange
+# Management Shell cmdlet. The analytics key on the cmdlet text in ScriptBlockText.
+_PS_PROVIDER = "Microsoft-Windows-PowerShell"
+_PS_GUID     = "{A0C1853B-5C40-4B15-8766-3CF1C58F985A}"
+_PS_CHANNEL  = "Microsoft-Windows-PowerShell/Operational"
+_EXCHANGE_HOSTS = ["EXCH-01", "EXCH-02", "EXCH-MBX-01"]
+
+
+def _build_ps_4104(user, config, script, action, ts=None):
+    """One PowerShell/Operational 4104 ScriptBlock-logging event (dict)."""
+    ts = ts if ts is not None else time.time()
+    sb_id = str(uuid.uuid4())
+    host = (user.get("hostname") or "WORKSTATION")
+    return {
+        "event_id": "4104", "provider_name": _PS_PROVIDER, "provider_guid": _PS_GUID,
+        "channel": _PS_CHANNEL, "computer_name": host, "host_name": host,
+        "time_created": _iso_ts(ts),
+        "message": (f"Creating Scriptblock text (1 of 1):\r\n{script}\r\n\r\n"
+                    f"ScriptBlock ID: {sb_id}\r\nPath: "),
+        "keywords": "0x0", "level_num": "5", "log_level": "Verbose",
+        "rendering_provider": _PS_PROVIDER, "rendering_keyword": None,
+        "event_result": "success", "event_action": action,
+        "task": "2", "opcode": "On create calls", "op_code": "15", "version": "1",
+        "record_id": str(_next_record_number(host)),
+        "activity_id": "{" + str(uuid.uuid4()).upper() + "}",
+        "process_pid": str(random.randint(2000, 30000)),
+        "process_thread_id": str(random.randint(2000, 30000)),
+        "process_name": "powershell.exe",
+        "process_path": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        # Running user's domain SID, matching that user's Security-channel events.
+        "security_user_id": _stable_user_sid(user["username"]),
+        "event_data": {"MessageNumber": "1", "MessageTotal": "1",
+                       "ScriptBlockText": script, "ScriptBlockId": sb_id, "Path": ""},
+    }
+
+
+def _mailbox_ps_threat(session_context, config, script, action):
+    """Operator logs on to an Exchange host and runs one Exchange cmdlet (4104)."""
+    op = _pick_windows_user(session_context)
+    if not op:
+        return None
+    tgt = _pick_windows_user(session_context) or op
+    exch = random.choice(_EXCHANGE_HOSTS) + ".examplecorp.local"
+    operator = {**op, "hostname": exch}          # the cmdlet runs ON the Exchange box
+    t = time.time()
+    logs = [json.dumps(_build_4624(operator, config, logon_type=10, ip_override=op.get("ip"),
+                                   elevated=True, ts=t))]      # RDP to the Exchange server
+    t += random.uniform(3, 20)
+    logs.append(json.dumps(_build_ps_4104(operator, config,
+                                          script(tgt), action, ts=t)))
+    return logs
+
+
+def _threat_mailbox_export(config, session_context):
+    """New-MailboxExportRequest -- stage a mailbox to a PST for exfiltration.
+    XSIAM: 'PowerShell used to export mailbox contents'."""
+    exch = random.choice(_EXCHANGE_HOSTS)
+    return _mailbox_ps_threat(
+        session_context, config,
+        lambda t: (f'New-MailboxExportRequest -Mailbox "{t["username"]}@examplecorp.com" '
+                   rf'-FilePath "\\{exch}\PSTExport$\{t["username"]}.pst"'),
+        "Execute a Remote Command")
+
+
+def _threat_mailbox_export_log_removal(config, session_context):
+    """Remove-MailboxExportRequest -- delete evidence of a mailbox export (anti-forensics).
+    XSIAM: 'PowerShell used to remove mailbox export request logs'."""
+    return _mailbox_ps_threat(
+        session_context, config,
+        lambda t: (rf'Remove-MailboxExportRequest -Identity "{t["username"]}\MailboxExport" '
+                   f'-Confirm:$false'),
+        "Execute a Remote Command")
+
+
+def _threat_mailbox_cas_change(config, session_context):
+    """Set-CASMailbox -- enable client-access protocols to ease mailbox data theft.
+    XSIAM: 'Mailbox Client Access Setting (CAS) changed'."""
+    return _mailbox_ps_threat(
+        session_context, config,
+        lambda t: (f'Set-CASMailbox -Identity "{t["username"]}@examplecorp.com" '
+                   f'-OWAEnabled $true -ImapEnabled $true -PopEnabled $true '
+                   f'-ActiveSyncEnabled $true'),
+        "Execute a Remote Command")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — rogue forest trust kill chain (on-prem AD)
+#   A rogue external forest is trusted by this domain with SID filtering
+#   disabled, then SID History is injected so a controlled account inherits
+#   privileged SIDs across the trust. Events are DC-originated Security logs
+#   (Authentication Policy Change + User Account Management).
+# ---------------------------------------------------------------------------
+
+_ROGUE_FOREST_DNS     = "rogue-forest.lab"
+_ROGUE_FOREST_NETBIOS = "ROGUEFOREST"
+# Stable fake SID for the rogue forest root domain.
+_ROGUE_FOREST_SID     = "S-1-5-21-" + "-".join(
+    str(int(hashlib.sha256(("rogueforest:" + str(i)).encode()).hexdigest(), 16) % 4000000000 + 1000000000)
+    for i in range(3))
+
+
+def _build_4706(user_info, config, *, logon_id=None, ts=None) -> dict:
+    """4706 – A new trust was created to a domain (DC event)."""
+    dc_host = _get_dc_hostname(config)
+    event_data = {
+        "DomainName":          _ROGUE_FOREST_NETBIOS,
+        "DomainSid":           _ROGUE_FOREST_SID,
+        "TdoType":             "Forest (uplevel)",      # TRUST_TYPE_UPLEVEL + forest
+        "TdoDirection":        "Bidirectional",         # TRUST_DIRECTION_BIDIRECTIONAL
+        # TrustAttributes 0x8 = FOREST_TRANSITIVE; filtering disabled below is the danger.
+        "TdoAttributes":       "0x8",
+        "SidFilteringEnabled": "False",                 # quarantine OFF -> SID history crosses the trust
+        "SubjectUserSid":      _stable_user_sid(user_info["username"]),
+        "SubjectUserName":     user_info["username"],
+        "SubjectDomainName":   _get_domain(config),
+        "SubjectLogonId":      logon_id or _new_logon_id(),
+    }
+    return _build_event(4706, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_4865(user_info, config, *, logon_id=None, ts=None) -> dict:
+    """4865 – A trusted forest information entry was added (DC event)."""
+    dc_host = _get_dc_hostname(config)
+    event_data = {
+        "ForestRoot":        _ROGUE_FOREST_DNS,
+        "ForestRootSid":     _ROGUE_FOREST_SID,
+        "OperationId":       f"0x{random.randint(0x10000, 0xfffff):x}",
+        "EntryType":         "Top Level Name (TLN)",
+        "Flags":             "0",                       # not excluded/disabled -> active TLN routing
+        "TopLevelName":      _ROGUE_FOREST_DNS,
+        "DnsName":           _ROGUE_FOREST_DNS,
+        "NetbiosName":       _ROGUE_FOREST_NETBIOS,
+        "DomainSid":         _ROGUE_FOREST_SID,
+        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserName":   user_info["username"],
+        "SubjectDomainName": _get_domain(config),
+        "SubjectLogonId":    logon_id or _new_logon_id(),
+    }
+    return _build_event(4865, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_4716(user_info, config, *, logon_id=None, ts=None,
+                domain_netbios=_ROGUE_FOREST_NETBIOS, domain_sid=_ROGUE_FOREST_SID) -> dict:
+    """4716 – Trusted domain information was modified (SID filtering disabled)."""
+    dc_host = _get_dc_hostname(config)
+    event_data = {
+        "DomainName":          domain_netbios,
+        "DomainSid":           domain_sid,
+        "TdoAttributes":       "0x8",
+        "SidFilteringEnabled": "False",
+        "SubjectUserSid":      _stable_user_sid(user_info["username"]),
+        "SubjectUserName":     user_info["username"],
+        "SubjectDomainName":   _get_domain(config),
+        "SubjectLogonId":      logon_id or _new_logon_id(),
+    }
+    return _build_event(4716, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_4765(user_info, config, *, target_name, target_sid,
+                source_sid, logon_id=None, ts=None) -> dict:
+    """4765 – SID History was added to an account (cross-forest privilege injection)."""
+    dc_host = _get_dc_hostname(config)
+    domain = _get_domain(config)
+    event_data = {
+        "TargetUserName":    target_name,
+        "TargetDomainName":  domain,
+        "TargetSid":         target_sid,
+        "SourceUserName":    "Domain Admins",
+        "SourceDomainName":  _ROGUE_FOREST_NETBIOS,
+        "SourceSid":         source_sid,
+        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserName":   user_info["username"],
+        "SubjectDomainName": domain,
+        "SubjectLogonId":    logon_id or _new_logon_id(),
+    }
+    return _build_event(4765, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_4928(user_info, config, *, source_addr, naming_context, logon_id=None, ts=None) -> dict:
+    """4928 – An Active Directory replica source naming context was established (DCShadow push)."""
+    dc_host = _get_dc_hostname(config)
+    event_data = {
+        "DestinationDRA":  dc_host,
+        "SourceDRA":       source_addr,
+        "SourceAddr":      source_addr,
+        "NamingContext":   naming_context,
+        "Options":         "0x40000000",   # DRS_WRIT_REP (writable replication)
+        "SessionID":       f"0x{random.randint(0x100, 0xffff):x}",
+        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserName":   user_info["username"],
+        "SubjectDomainName": _get_domain(config),
+        "SubjectLogonId":    logon_id or _new_logon_id(),
+    }
+    return _build_event(4928, dc_host, event_data, success=True, ts=ts)
+
+
+# A legitimate, long-standing partner forest (NOT the rogue one) — used by the existing-trust
+# SID-filter-downgrade threat.
+_PARTNER_NETBIOS = "CONTOSO"
+_PARTNER_DNS     = "contoso.com"
+_PARTNER_SID     = "S-1-5-21-" + "-".join(
+    str(int(hashlib.sha256(("partner:" + str(i)).encode()).hexdigest(), 16) % 4000000000 + 1000000000)
+    for i in range(3))
+
+
+def _threat_existing_trust_sid_filter_downgrade(config, session_context):
+    """SID-filter downgrade on an EXISTING legitimate trust (T1484.002 / T1134.005): rather than
+    standing up a new rogue forest, the attacker disables SID filtering (quarantine) on a real,
+    long-standing partner trust, then injects that forest's Domain-Admins SID into a controlled
+    account — quieter than a brand-new trust. DC-originated Security events."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"), logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2, auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id, elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id, is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+    events.append(json.dumps(_build_4688(u, config,
+                                         process_name="C:\\Windows\\System32\\netdom.exe",
+                                         command_line=f'netdom trust {_get_dns_domain(config)} '
+                                                      f'/Domain:{_PARTNER_DNS} /quarantine:No',
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    events.append(json.dumps(_build_4716(u, config, logon_id=logon_id, ts=t,
+                                         domain_netbios=_PARTNER_NETBIOS, domain_sid=_PARTNER_SID)))
+    t += random.uniform(1.0, 3.0)
+    victim = _pick_windows_user(session_context) or u
+    events.append(json.dumps(_build_4765(u, config, target_name=victim["username"],
+                                         target_sid=_stable_user_sid(victim["username"]),
+                                         source_sid=_PARTNER_SID + "-512", logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(u, config,
+                                         process_name="C:\\Windows\\System32\\netdom.exe",
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_dcshadow(config, session_context):
+    """DCShadow (T1207 Rogue Domain Controller): the attacker registers a fake DC in the directory
+    and pushes malicious changes via replication, bypassing change auditing on real DCs.
+
+    Sequence (DC-originated Security events):
+      1. admin authenticates                    -> 4624 + 4672
+      2. mimikatz lsadump::dcshadow              -> 4688
+      3. attacker host registers as a DC (DRS SPNs + SERVER_TRUST_ACCOUNT) -> 4742
+      4. nTDSDSA object created under Configuration (the rogue DC)         -> 5137
+      5. replica source naming context established (the malicious push)    -> 4928  (primary signal)
+      6. process exit                            -> 4689
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    dns_domain = _get_dns_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    rogue_host = "WS-" + "".join(random.choice("ABCDEFGHJKMNPQRSTUVWXYZ23456789") for _ in range(6))
+    rogue_fqdn = f"{rogue_host}.{dns_domain}"
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"), logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2, auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id, elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id, is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+    events.append(json.dumps(_build_4688(u, config,
+                                         process_name="C:\\Tools\\mimikatz.exe",
+                                         command_line='mimikatz.exe "lsadump::dcshadow /object:'
+                                                      'CN=Administrator,CN=Users,' + base_dn +
+                                                      ' /attribute:sidHistory /value:S-1-5-21-...-519" "exit"',
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    # the attacker workstation registers itself as a DC (DRS SPNs + SERVER_TRUST_ACCOUNT UAC)
+    drs_spns = (f"GC/{rogue_fqdn}/{dns_domain},"
+                f"E3514235-4B06-11D1-AB04-00C04FC2DCD2/{uuid.uuid4()}/{dns_domain},"
+                f"ldap/{rogue_fqdn}/{dns_domain}")
+    events.append(json.dumps(_build_4742(u, config, target_computer_name=rogue_host + "$",
+                                         target_sid=_stable_user_sid(rogue_host + "$"),
+                                         sam_account_name=rogue_host + "$", dns_host_name=rogue_fqdn,
+                                         spns=drs_spns, old_uac_value="0x1000", new_uac_value="0x2000",
+                                         uac_control="%%2087",  # SERVER_TRUST_ACCOUNT
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 1.0)
+    events.append(json.dumps(_build_5137(u, config,
+                                         object_dn=f"CN={rogue_host},CN=Servers,CN=Default-First-Site-Name,"
+                                                   f"CN=Sites,CN=Configuration,{base_dn}",
+                                         object_class="nTDSDSA",
+                                         object_guid=str(uuid.uuid4()), logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 1.0)
+    events.append(json.dumps(_build_4928(u, config, source_addr=rogue_fqdn,
+                                         naming_context=base_dn, logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(u, config, process_name="C:\\Tools\\mimikatz.exe",
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_golden_ticket(config, session_context):
+    """Golden/forged-TGT usage (T1558.001): a controlled account presents service tickets with NO
+    preceding TGT request (4768) and anomalous RC4 encryption — the hallmark of a forged ticket
+    minted offline from the krbtgt hash. Burst of 4769 service-ticket requests, no 4768."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    events = []
+    t = time.time()
+    sensitive = ["cifs/DC01.{d}", "host/DC01.{d}", "ldap/DC01.{d}", "HTTP/sql-prod.{d}",
+                 "MSSQLSvc/sql-prod.{d}:1433", "cifs/fileserver.{d}"]
+    dns_domain = _get_dns_domain(config)
+    for i, spn_t in enumerate(random.sample(sensitive, k=random.randint(4, 6))):
+        spn = spn_t.format(d=dns_domain)
+        # RC4 (0x17) where the realm normally issues AES — a forged-ticket indicator.
+        events.append(json.dumps(_build_4769(u, config, service_spn=spn, encryption="0x17",
+                                             status="0x0", ip_override=u.get("ip"),
+                                             ts=t + i * random.uniform(0.3, 1.2))))
+    return events
+
+
+def _threat_malicious_gpo(config, session_context):
+    """Malicious GPO modification (T1484.001 Group Policy Modification): an attacker edits a GPO to
+    push a startup script / restricted-group change domain-wide, then links it to a privileged OU.
+
+    Sequence: admin auth -> 4688 (GPO edit) -> 5136 gPCMachineExtensionNames/versionNumber ->
+    5136 gPLink on the OU -> 4689."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    dns_domain = _get_dns_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    gpo_guid = str(uuid.uuid4())
+    gpo_dn = f"CN={{{gpo_guid}}},CN=Policies,CN=System,{base_dn}"
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"), logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2, auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id, elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id, is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+    events.append(json.dumps(_build_4688(u, config,
+                                         process_name="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                                         command_line='powershell.exe -c "Set-GPPrefRegistryValue -Name '
+                                                      '\'Default Domain Policy\' -Context Computer -Action Update '
+                                                      '-Key HKLM\\...\\Run -ValueName Updater -Value C:\\pkg\\u.exe"',
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    events.append(json.dumps(_build_5136(u, config, object_dn=gpo_dn, object_class="groupPolicyContainer",
+                                         object_guid=gpo_guid, attribute_name="gPCMachineExtensionNames",
+                                         attribute_value="[{35378EAC-683F-11D2-A89A-00C04FBBCFA2}]",
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.6)
+    events.append(json.dumps(_build_5136(u, config,
+                                         object_dn=f"OU=Domain Controllers,{base_dn}", object_class="organizationalUnit",
+                                         object_guid=str(uuid.uuid4()), attribute_name="gPLink",
+                                         attribute_value=f"[LDAP://{gpo_dn};0]", logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(u, config,
+                                         process_name="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_rogue_forest_trust(config, session_context):
+    """Rogue forest trust + SID-history injection (ATT&CK T1484.002 Domain Trust Modification,
+    T1134.005 SID-History Injection). A compromised admin on a DC establishes a two-way forest
+    trust to an attacker-controlled forest with SID filtering disabled, then injects the rogue
+    forest's Domain-Admins SID into a controlled account so it is privileged across the trust.
+
+    Sequence (all DC-originated Security events):
+      1. admin authenticates to the DC          -> 4624 + 4672
+      2. netdom/PowerShell trust creation        -> 4688
+      3. new trust created to the rogue domain   -> 4706   (primary signal)
+      4. trusted forest information entry added   -> 4865   (TLN routing to the rogue forest)
+      5. trusted domain info modified, SID filtering disabled -> 4716 (the dangerous misconfig)
+      6. SID History injected into a controlled account       -> 4765 (cross-forest privesc)
+      7. process exit                             -> 4689
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2, auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id, elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id, is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+    tool = random.choice([
+        ("C:\\Windows\\System32\\netdom.exe",
+         f'netdom trust {_get_dns_domain(config)} /Domain:{_ROGUE_FOREST_DNS} '
+         f'/add /twoway /transitive:yes /quarantine:No'),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f'powershell.exe -c "$f=[System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest(); '
+         f'$f.CreateTrustRelationship(\'{_ROGUE_FOREST_DNS}\',\'Bidirectional\')"'),
+    ])
+    events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
+                                         command_line=tool[1], logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    events.append(json.dumps(_build_4706(u, config, logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.8)
+    events.append(json.dumps(_build_4865(u, config, logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.8)
+    events.append(json.dumps(_build_4716(u, config, logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 3.0)
+    # Inject the rogue forest's Domain-Admins SID into a controlled account (SID history).
+    victim = _pick_windows_user(session_context) or u
+    events.append(json.dumps(_build_4765(u, config,
+                                         target_name=victim["username"],
+                                         target_sid=_stable_user_sid(victim["username"]),
+                                         source_sid=_ROGUE_FOREST_SID + "-512",
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+# ── Remote execution / persistence over SMB (5140 / 5145 / 4698 / 4697 + 7045) ──
+# No Cortex "Windows Event Collector" analytic keys on these EventIDs (checked
+# 2026-10-19), so they are background-only here; surfacing them needs correlation
+# rules (not yet written). Each chain is the server-side record of a real tool run.
+
+def _remote_logon(attacker, config, target_host, src_ip, t, auth_pkg=_NTLM_PACKAGE_SHORT):
+    """Network logon of the operator onto target_host (4624 type 3 + 4672).
+    Returns (events, logon_id)."""
+    lid = _new_logon_id()
+    on_target = {**attacker, "hostname": target_host}
+    ev = _build_4624(attacker, config, logon_type=3, auth_pkg=auth_pkg,
+                     workstation_override=target_host, ip_override=src_ip,
+                     target_logon_id=lid, elevated=True, ts=t)
+    return [json.dumps(ev),
+            json.dumps(_build_4672(on_target, config, logon_id=lid, is_admin=True,
+                                   ts=t + 0.02))], lid
+
+
+def _lateral_pair(session_context):
+    """(operator, target_host) -- the operator's own box is the source."""
+    users = _get_windows_users(session_context)
+    if len(users) < 2:
+        return None, None
+    op = random.choice(users)
+    targets = [u["hostname"] for u in users if u["hostname"] != op["hostname"]]
+    targets += ["FS01", "FS02", "SQL01", "APP01"]
+    return op, random.choice(targets)
+
+
+def _threat_psexec_lateral(config, session_context):
+    """PsExec / Impacket smbexec remote service execution on a peer host.
+
+    Server-side trail: type-3 admin logon, ADMIN$ / IPC$ share connects (5140), the
+    service binary write and svcctl pipe (5145), the service install (4697 + 7045),
+    then the named-pipe I/O (PsExec) or the C$ output file (smbexec)."""
+    op, target = _lateral_pair(session_context)
+    if not op:
+        return None
+    src_ip = op.get("ip") or "10.10.20.50"
+    src_short = op["hostname"].split(".")[0].upper()
+    t = time.time()
+    events, lid = _remote_logon(op, config, target, src_ip, t)
+    t += random.uniform(0.2, 0.6)
+    kw = dict(ip=src_ip, logon_id=lid)
+    events.append(json.dumps(_build_5140(op, config, computer=target, share_name=r"\\*\IPC$",
+                                         share_path="", ts=t, **kw)))
+    if random.random() < 0.6:
+        # Sysinternals PsExec
+        svc, image = "PSEXESVC", r"%SystemRoot%\PSEXESVC.exe"
+        t += 0.1
+        events.append(json.dumps(_build_5140(op, config, computer=target, share_name=r"\\*\ADMIN$",
+                                             share_path=r"\??\C:\Windows", ts=t, **kw)))
+        events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\ADMIN$",
+                                             share_path=r"\??\C:\Windows", relative_target="PSEXESVC.exe",
+                                             access=_5145_WRITE, ts=t + 0.05, **kw)))
+        cli_pid = random.randint(1000, 30000)     # the PsExec client's PID names all three
+        pipes = ["svcctl"] + [f"PSEXESVC-{src_short}-{cli_pid}-{s}"
+                              for s in ("stdin", "stdout", "stderr")]
+        child = (r"C:\Windows\System32\cmd.exe", "cmd.exe", r"C:\Windows\PSEXESVC.exe")
+    else:
+        # Impacket smbexec: the service IS the command, output lands on C$.
+        svc = "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ", k=random.choice([6, 8])))
+        image = (r"%COMSPEC% /Q /c echo cd ^> \\127.0.0.1\C$\__output 2^>^&1 > "
+                 r"%SYSTEMROOT%\execute.bat & %COMSPEC% /Q /c %SYSTEMROOT%\execute.bat & "
+                 r"del %SYSTEMROOT%\execute.bat")
+        pipes = ["svcctl"]
+        child = (r"C:\Windows\System32\cmd.exe", image.replace("%COMSPEC%", "cmd.exe"),
+                 r"C:\Windows\System32\services.exe")
+    t += 0.3
+    events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\IPC$",
+                                         share_path="", relative_target=pipes[0],
+                                         access=_5145_PIPE, ts=t, **kw)))
+    t += 0.2
+    events.append(json.dumps(_build_4697(config, computer=target, service_name=svc,
+                                         service_file=image, start_type=3, ts=t)))
+    events.append(json.dumps(_build_7045(config, computer=target, service_name=svc,
+                                         image_path=image, start_type=3,
+                                         installer_sid=_stable_user_sid(op["username"]),
+                                         ts=t + 0.01)))
+    t += 0.4
+    events.append(json.dumps(_build_4688({**op, "hostname": target}, config,
+                                         process_name=child[0], command_line=child[1],
+                                         parent_process=child[2], ts=t)))
+    for p in pipes[1:]:
+        t += 0.05
+        events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\IPC$",
+                                             share_path="", relative_target=p,
+                                             access=_5145_PIPE, ts=t, **kw)))
+    if svc != "PSEXESVC":
+        t += random.uniform(0.5, 2.0)
+        # Windows logs the C$ root as \??\C:\ -- one trailing backslash. Not a raw
+        # string: r"...\" cannot end in a single backslash, and r"...\\" keeps two.
+        c_root = "\\??\\C:\\"
+        events.append(json.dumps(_build_5140(op, config, computer=target, share_name=r"\\*\C$",
+                                             share_path=c_root, ts=t, **kw)))
+        events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\C$",
+                                             share_path=c_root, relative_target="__output",
+                                             ts=t + 0.05, **kw)))
+    return events
+
+
+_ATEXEC_COMMANDS = [
+    "whoami /all", "net group \"Domain Admins\" /domain", "ipconfig /all",
+    "tasklist /v", "quser", "net localgroup administrators",
+]
+
+
+def _threat_remote_scheduled_task(config, session_context):
+    """Impacket atexec / schtasks /S: a hidden SYSTEM task registered over the atsvc
+    pipe, run once, its output read back over ADMIN$, then the task deleted."""
+    op, target = _lateral_pair(session_context)
+    if not op:
+        return None
+    src_ip = op.get("ip") or "10.10.20.50"
+    t = time.time()
+    events, lid = _remote_logon(op, config, target, src_ip, t)
+    kw = dict(ip=src_ip, logon_id=lid)
+    t += 0.3
+    events.append(json.dumps(_build_5140(op, config, computer=target, share_name=r"\\*\IPC$",
+                                         share_path="", ts=t, **kw)))
+    events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\IPC$",
+                                         share_path="", relative_target="atsvc",
+                                         access=_5145_PIPE, ts=t + 0.05, **kw)))
+    tname = "".join(random.choices("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", k=8))
+    tmp = "".join(random.choices("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", k=8)) + ".tmp"
+    args = f"/C {random.choice(_ATEXEC_COMMANDS)} > %windir%\\Temp\\{tmp} 2>&1"
+    t += 0.3
+    task = _build_4698(op, config, computer=target, task_name="\\" + tname,
+                       command="cmd.exe", arguments=args, run_as="S-1-5-18",
+                       hidden=True, trigger="once", logon_id=lid, ts=t)
+    events.append(json.dumps(task))
+    t += random.uniform(1.5, 4.0)
+    events.append(json.dumps(_build_4688({**op, "hostname": target}, config,
+                                         process_name=r"C:\Windows\System32\cmd.exe",
+                                         command_line=f"cmd.exe {args}",
+                                         parent_process=r"C:\Windows\System32\svchost.exe",
+                                         ts=t)))
+    t += random.uniform(0.5, 1.5)
+    deleted = _build_event(4699, _fqdn(target, config),
+                           {k: task["event_data"][k] for k in
+                            ("SubjectUserSid", "SubjectUserName", "SubjectDomainName",
+                             "SubjectLogonId", "TaskName", "TaskContent",
+                             "ClientProcessStartKey", "ClientProcessId", "ParentProcessId",
+                             "RpcCallClientLocality", "FQDN")}, ts=t)
+    events.append(json.dumps(deleted))
+    t += 0.4
+    events.append(json.dumps(_build_5140(op, config, computer=target, share_name=r"\\*\ADMIN$",
+                                         share_path=r"\??\C:\Windows", ts=t, **kw)))
+    events.append(json.dumps(_build_5145(op, config, computer=target, share_name=r"\\*\ADMIN$",
+                                         share_path=r"\??\C:\Windows",
+                                         relative_target=f"Temp\\{tmp}", ts=t + 0.05, **kw)))
+    return events
+
+
+def _threat_share_enumeration(config, session_context):
+    """SMB share discovery sweep (SharpShares / PowerView Find-DomainShare /
+    CrackMapExec --shares): one source connects IPC$ and calls srvsvc
+    NetShareEnum on many hosts within a minute or two."""
+    users = _get_windows_users(session_context)
+    if len(users) < 2:
+        return None
+    op = random.choice(users)
+    src_ip = op.get("ip") or "10.10.20.50"
+    hosts = list({u["hostname"] for u in users if u["hostname"] != op["hostname"]})
+    hosts += ["FS01", "FS02", "SQL01", "APP01", "BACKUP01"]
+    random.shuffle(hosts)
+    t = time.time()
+    events = []
+    for host in hosts[:random.randint(8, 15)]:
+        evs, lid = _remote_logon(op, config, host, src_ip, t, auth_pkg=_KRB_PACKAGE)
+        events.append(evs[0])           # plain user: 4624 only, no 4672
+        kw = dict(ip=src_ip, logon_id=lid)
+        events.append(json.dumps(_build_5140(op, config, computer=host, share_name=r"\\*\IPC$",
+                                             share_path="", ts=t + 0.05, **kw)))
+        events.append(json.dumps(_build_5145(op, config, computer=host, share_name=r"\\*\IPC$",
+                                             share_path="", relative_target="srvsvc",
+                                             access=_5145_PIPE, ts=t + 0.1, **kw)))
+        t += random.uniform(1.0, 8.0)
+    return events
+
+
+def _threat_malicious_service_install(config, session_context):
+    """Local service persistence: an implant registered as an auto-start service
+    from a user-writable path (4697 + 7045)."""
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    name = random.choice(_IMPLANT_SERVICE_NAMES)
+    image = random.choice(_IMPLANT_SERVICE_FILES).replace("{n}", name)
+    t = time.time()
+    return [json.dumps(_build_4697(config, computer=u["hostname"], service_name=name,
+                                   service_file=image, start_type=2, ts=t)),
+            json.dumps(_build_7045(config, computer=u["hostname"], service_name=name,
+                                   image_path=image, start_type=2, ts=t + 0.01))]
+
+
 _THREAT_WEIGHTS = {
-    "wip_as_rep_roasting":         8,
+    "rogue_forest_trust":                3,
+    "existing_trust_sid_filter_downgrade": 3,
+    "dcshadow":                          3,
+    "golden_ticket":                     4,
+    "malicious_gpo":                     3,
+    "as_rep_roasting":         8,
     "account_lockout":             5,
     "suspicious_account_lockout":  4,
     "dcsync":                      4,
-    "wip_dmsa_privesc":            3,
+    "dmsa_privesc":            3,
     "priv_group_addition":         5,
     "machine_account_to_domain_admins": 3,
     "wip_adminsdholder_acl_modification": 3,
@@ -7111,17 +8807,33 @@ _THREAT_WEIGHTS = {
     "wip_priv_cert_request":       3,
     "suspicious_account_creation": 5,
     "mass_account_deletion":       4,
-    "wip_sensitive_password_reset": 4,
+    "sensitive_password_reset": 4,
     "wip_password_never_expires":  3,
     "default_account_enabled":     3,
+    # LSASS handle access is a high-signal credential-dumping path, so it is
+    # weighted with the other privilege-abuse threats rather than rarely.
+    "lsass_handle_access":         5,
+    "account_access_removal":      3,
+    "mailbox_export":              3,
+    "mailbox_export_log_removal":  3,
+    "mailbox_cas_change":          3,
+    "psexec_lateral":              4,
+    "remote_scheduled_task":       3,
+    "share_enumeration":           3,
+    "malicious_service_install":   3,
 }
 
 _THREAT_GENERATORS = {
-    "wip_as_rep_roasting":             _threat_as_rep_roasting,
+    "rogue_forest_trust":               _threat_rogue_forest_trust,
+    "existing_trust_sid_filter_downgrade": _threat_existing_trust_sid_filter_downgrade,
+    "dcshadow":                         _threat_dcshadow,
+    "golden_ticket":                    _threat_golden_ticket,
+    "malicious_gpo":                    _threat_malicious_gpo,
+    "as_rep_roasting":             _threat_as_rep_roasting,
     "account_lockout":                  _threat_account_lockout,
     "suspicious_account_lockout":       _threat_suspicious_account_lockout,
     "dcsync":                           _threat_dcsync,
-    "wip_dmsa_privesc":                 _threat_dmsa_privesc,
+    "dmsa_privesc":                 _threat_dmsa_privesc,
     "priv_group_addition":              _threat_priv_group_addition,
     "machine_account_to_domain_admins": _threat_machine_account_to_domain_admins,
     "wip_adminsdholder_acl_modification": _threat_adminsdholder_acl_modification,
@@ -7139,11 +8851,73 @@ _THREAT_GENERATORS = {
     "wip_priv_cert_request":            _threat_priv_cert_request,
     "suspicious_account_creation":      _threat_suspicious_account_creation,
     "mass_account_deletion":            _threat_mass_account_deletion,
-    "wip_sensitive_password_reset":     _threat_sensitive_password_reset,
+    "sensitive_password_reset":     _threat_sensitive_password_reset,
     "wip_password_never_expires":       _threat_password_never_expires,
     "default_account_enabled":          _threat_default_account_enabled,
+    "lsass_handle_access":              _threat_lsass_handle_access,
+    "account_access_removal":           _threat_account_access_removal,
+    "mailbox_export":                   _threat_mailbox_export,
+    "mailbox_export_log_removal":       _threat_mailbox_export_log_removal,
+    "mailbox_cas_change":               _threat_mailbox_cas_change,
+    "psexec_lateral":                   _threat_psexec_lateral,
+    "remote_scheduled_task":            _threat_remote_scheduled_task,
+    "share_enumeration":                _threat_share_enumeration,
+    "malicious_service_install":        _threat_malicious_service_install,
+}
+_THREAT_GENERATORS = {k: _ending_by_now(v) for k, v in _THREAT_GENERATORS.items()}
+
+
+# Threat -> the XSIAM analytics alert it is built to trigger. Only these threats are
+# offered for on-demand firing (dashboard / MCP / CLI, via modules/threat_catalog.py);
+# every threat still runs in long-running sessions. Names are as the tenant raises them
+# where observed, else the published Cortex name. Mapped 2026-09-29 against the Cortex
+# "Windows Event Collector" analytics list and 90 days of tenant alerts.
+ANALYTIC_ALERTS = {
+    # Unmapped (background only): lsass_handle_access and account_access_removal (no
+    # Windows Event Collector analytic; LSASS access is an XDR-agent detection), and
+    # wip_irregular_service_tgs -- it only ever raises the weak-encryption alert that
+    # multiple_service_tickets owns; irregular_tgt_burst covers its intended target.
+    # Also unmapped: psexec_lateral, remote_scheduled_task, share_enumeration and
+    # malicious_service_install -- no WEC analytic reads 4698/7045/5140/5145.
+    "as_rep_roasting":             "An excessive number of TGT requests were sent for users that do not require Kerberos pre-authentication",
+    "account_lockout":             "Multiple user accounts failed login due to account lockouts",
+    "suspicious_account_lockout":  "Excessive account lockouts on suspicious users",
+    "dcsync":                      "Possible DCSync by an unusual user",
+    "dmsa_privesc":                "Possible Privilege Escalation using Delegated MSA account attempt",
+    "priv_group_addition":         "User added to a Windows privileged group",
+    "machine_account_to_domain_admins": "Machine account was added to a domain admins group",
+    "wip_adminsdholder_acl_modification": "Suspicious modification of the AdminSDHolder's ACL",
+    "irregular_tgt_burst":         "A user sent an excessive number of TGT requests to irregular services",
+    "sms_admins_addition":         "User added to the SMS Admins local group",
+    "sms_admins_add_remove":       "User added to the SMS Admins group and removed",
+    "wip_sccm_container_recon":    "Suspicious access of the System Management Container",
+    "dnshostname_spoofing":        "Suspicious dNSHostName attribute change to DC name",
+    "samaccountname_spoofing":     "Service ticket request with a spoofed sAMAccountName",
+    "delegation_change":           "User account delegation to KRBTGT",
+    "new_machine_delegation":      "A new machine attempted Kerberos delegation",
+    "multiple_service_tickets":    "Abnormal issuance of weakly encrypted service tickets to a user",
+    "priv_group_add_remove":       "Rare privileged group addition and removal",
+    "wip_priv_cert_request":       "Privileged certificate request via certificate template",
+    "suspicious_account_creation": "Suspicious hidden user created",
+    "mass_account_deletion":       "A user deleted multiple users for the first time",
+    "sensitive_password_reset":    "Sensitive account password reset attempt for the first time",
+    "wip_password_never_expires":  "A user account was modified to password never expires",
+    "default_account_enabled":     "A user enabled the Windows DefaultAccount",
+    "mailbox_export":              "PowerShell used to export mailbox contents",
+    "mailbox_export_log_removal":  "PowerShell used to remove mailbox export request logs",
+    "mailbox_cas_change":          "Mailbox Client Access Setting (CAS) changed",
 }
 
+# Further analytics a threat's events are built to satisfy, beyond its ANALYTIC_ALERTS
+# entry. Coverage reporting reads these (the on-demand label uses the primary only).
+ANALYTIC_ALERTS_SECONDARY = {
+    "suspicious_account_creation": [
+        "Short-lived user account",                         # 1-3 of the accounts deleted
+        "Multiple suspicious user accounts were created",
+        "Suspicious domain user account creation",
+        "Local user account creation",
+    ],
+}
 
 def get_threat_names():
     """Expose named threats to the dashboard / CLI 'fire threat' mode."""
@@ -7162,9 +8936,7 @@ def _select_threat(config, session_context):
     return (result, choice) if result is not None else (None, None)
 
 
-# ---------------------------------------------------------------------------
 # Scenario-event dispatch (used by log_simulator.py attack scenarios)
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_event(scenario_event, config, context):
     """Scenario events let the top-level orchestrator request a specific
@@ -7172,7 +8944,19 @@ def _generate_scenario_event(scenario_event, config, context):
     """
     session_context = (context or {}).get("session_context")
     user = None
-    if context and context.get("user_identity"):
+    # Direct pinned identity (XDR-orchestrated events): a bring-your-own box user
+    # that is NOT in session_context. Build the user dict straight from context so
+    # the event carries the EXACT box identity (e.g. a 4624 type-3 IP<->user
+    # binding), never a random session user. Only taken when 'user' is a string and
+    # no session-based 'user_identity' was given, so existing scenarios/ambient
+    # generation are unaffected.
+    if context and context.get("user") and not context.get("user_identity"):
+        user = {
+            "username": context["user"],
+            "hostname": context.get("hostname") or context.get("computer") or "WORKSTATION",
+            "ip": context.get("src_ip"),
+        }
+    if user is None and context and context.get("user_identity"):
         user = get_user_by_name(session_context, context["user_identity"])
     if user is None:
         user = _pick_windows_user(session_context)
@@ -7180,19 +8964,35 @@ def _generate_scenario_event(scenario_event, config, context):
         return None
 
     ev = scenario_event.upper()
+    ev = _RENAMED_THREATS.get(ev, ev)
     if ev in ("LOGIN", "LOGIN_SUCCESS"):
         return json.dumps(_build_4624(user, config, logon_type=2, auth_pkg=_NEG_PACKAGE)), "login_success"
     if ev in ("NETWORK_LOGON", "WORKSTATION_LOGON"):
         # Type-3 network logon carrying an explicit source IP — used as an IP↔user
         # binding so IP-keyed detections (DNS/SMB) can join to resolve the user.
         _bind_ip = (context or {}).get("src_ip") or user.get("ip")
-        return json.dumps(_build_4624(user, config, logon_type=3, ip_override=_bind_ip)), "network_logon"
+        # For an orchestrated pinned identity on a LOCAL (non-domain) box, set the
+        # logon domain to the box's own name so the identity matches the endpoint's
+        # local account (XSIAM applies no user normalization across domains).
+        _dom = None
+        if (context or {}).get("user") and not (context or {}).get("user_identity"):
+            _dom = ((user.get("hostname") or "").split(".")[0] or None)
+            if _dom:
+                _dom = _dom.upper()
+        return json.dumps(_build_4624(user, config, logon_type=3, ip_override=_bind_ip,
+                                      domain_override=_dom)), "network_logon"
     if ev in ("SERVICE_INSTALL", "IMPLANT_SERVICE"):
         # 4697 – a service was installed on the victim host (malware persistence).
+        # The SCM's System-channel 7045 accompanies it, with the same name and image.
         _host = (context or {}).get("hostname") or user.get("hostname")
-        return json.dumps(_build_4697(config, computer=_host,
-                                      service_name=(context or {}).get("service_name"),
-                                      service_file=(context or {}).get("service_file"))), "service_install"
+        _sec = _build_4697(config, computer=_host,
+                           service_name=(context or {}).get("service_name"),
+                           service_file=(context or {}).get("service_file"))
+        _ed = _sec["event_data"]
+        return [json.dumps(_sec),
+                json.dumps(_build_7045(config, computer=_host, service_name=_ed["ServiceName"],
+                                       image_path=_ed["ServiceFileName"],
+                                       start_type=int(_ed["ServiceStartType"])))], "service_install"
     if ev in ("PROCESS_TREE", "MALWARE_EXECUTION"):
         # A linked chain of 4688s: Office → hidden PowerShell → cmd → LOLBin.
         return _build_process_tree(user, config, c2_ip=(context or {}).get("c2_ip")), "process_tree"
@@ -7211,13 +9011,49 @@ def _generate_scenario_event(scenario_event, config, context):
         return json.dumps(_build_4740(user, config, source_workstation=user["hostname"])), "lockout"
     if ev == "KERBEROS_TGT":
         return json.dumps(_build_4768(user, config)), "kerberos_tgt"
+    if ev == "ACCOUNT_UNLOCK":
+        return json.dumps(_build_4767(user, config,
+                                      unlocked_by=user["username"])), "account_unlock"
+    if ev == "ACCOUNT_DISABLE":
+        target = (context or {}).get("target_user") or user["username"]
+        return json.dumps(_build_4725(user, config, target_username=target,
+                                      target_sid=_stable_user_sid(target))), "account_disable"
+    if ev in ("OBJECT_ACCESS", "AUDITED_FILE_ACCESS"):
+        # Scenario callers may pin the object; otherwise use the audited pool.
+        obj = (context or {}).get("object_name")
+        proc = (context or {}).get("process_name")
+        if not obj:
+            obj, default_proc = random.choice(_AUDITED_FILE_OBJECTS)
+            proc = proc or default_proc
+        proc = proc or "C:\\Windows\\explorer.exe"
+        handle_id = "0x%x" % random.randint(0x100, 0xffff)
+        process_id = "0x%x" % random.randint(0x200, 0xffff)
+        logon_id = _new_logon_id()
+        t = time.time()
+        return ([json.dumps(_build_4656(user, config, object_type="File",
+                                        object_name=obj, process_name=proc,
+                                        access_mask=_ACCESS_MASK_READ,
+                                        handle_id=handle_id, process_id=process_id,
+                                        logon_id=logon_id, ts=t)),
+                 json.dumps(_build_4663(user, config, object_type="File",
+                                        object_name=obj, process_name=proc,
+                                        access_mask=_ACCESS_MASK_READ,
+                                        handle_id=handle_id, process_id=process_id,
+                                        logon_id=logon_id,
+                                        ts=t + random.uniform(0.01, 0.2)))],
+                "object_access")
     # Dispatch to named threat generators
     _threat_dispatch = {
-        "WIP_AS_REP_ROASTING":             _threat_as_rep_roasting,
+        "ROGUE_FOREST_TRUST":               _threat_rogue_forest_trust,
+        "EXISTING_TRUST_SID_FILTER_DOWNGRADE": _threat_existing_trust_sid_filter_downgrade,
+        "DCSHADOW":                         _threat_dcshadow,
+        "GOLDEN_TICKET":                    _threat_golden_ticket,
+        "MALICIOUS_GPO":                    _threat_malicious_gpo,
+        "AS_REP_ROASTING":             _threat_as_rep_roasting,
         "ACCOUNT_LOCKOUT":                  _threat_account_lockout,
         "SUSPICIOUS_ACCOUNT_LOCKOUT":       _threat_suspicious_account_lockout,
         "DCSYNC":                           _threat_dcsync,
-        "WIP_DMSA_PRIVESC":                 _threat_dmsa_privesc,
+        "DMSA_PRIVESC":                 _threat_dmsa_privesc,
         "PRIV_GROUP_ADDITION":              _threat_priv_group_addition,
         "MACHINE_ACCOUNT_TO_DOMAIN_ADMINS": _threat_machine_account_to_domain_admins,
         "WIP_ADMINSDHOLDER_ACL_MODIFICATION": _threat_adminsdholder_acl_modification,
@@ -7235,19 +9071,26 @@ def _generate_scenario_event(scenario_event, config, context):
         "WIP_PRIV_CERT_REQUEST":            _threat_priv_cert_request,
         "SUSPICIOUS_ACCOUNT_CREATION":      _threat_suspicious_account_creation,
         "MASS_ACCOUNT_DELETION":            _threat_mass_account_deletion,
-        "WIP_SENSITIVE_PASSWORD_RESET":     _threat_sensitive_password_reset,
+        "SENSITIVE_PASSWORD_RESET":     _threat_sensitive_password_reset,
         "WIP_PASSWORD_NEVER_EXPIRES":       _threat_password_never_expires,
         "DEFAULT_ACCOUNT_ENABLED":          _threat_default_account_enabled,
+        "LSASS_HANDLE_ACCESS":              _threat_lsass_handle_access,
+        "ACCOUNT_ACCESS_REMOVAL":           _threat_account_access_removal,
+        "MAILBOX_EXPORT":                   _threat_mailbox_export,
+        "MAILBOX_EXPORT_LOG_REMOVAL":       _threat_mailbox_export_log_removal,
+        "MAILBOX_CAS_CHANGE":               _threat_mailbox_cas_change,
+        "PSEXEC_LATERAL":                   _threat_psexec_lateral,
+        "REMOTE_SCHEDULED_TASK":            _threat_remote_scheduled_task,
+        "SHARE_ENUMERATION":                _threat_share_enumeration,
+        "MALICIOUS_SERVICE_INSTALL":        _threat_malicious_service_install,
     }
     if ev in _threat_dispatch:
-        result = _threat_dispatch[ev](config, session_context)
+        result = _end_by_now(_threat_dispatch[ev](config, session_context))
         return (result, ev.lower()) if result else None
     return None
 
 
-# ---------------------------------------------------------------------------
 # Entry point (called by log_simulator.py on every tick)
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, scenario_event=None,
                  threat_level="Realistic", benign_only=False, context=None):
@@ -7256,10 +9099,11 @@ def generate_log(config, scenario=None, scenario_event=None,
     Returns:
       • str            — one JSON record
       • list[str]      — several JSON records (one per event)
-      • (obj, name)    — scenario dispatch returns (result, event_name)
-      • None           — no eligible Windows users in session_context
+      • (obj, name)    — scenario dispatch, or one whole worker threat: (result, name)
+      • None           — no eligible Windows users, or nothing buffered by the
+                         workers since the last call
     """
-    global last_threat_event_time, _BUILD_EVENT_OS_SUBTYPE
+    global _BUILD_EVENT_OS_SUBTYPE
     session_context = (context or {}).get("session_context")
 
     # --- Scenario / story mode (always synchronous) ---
@@ -7274,71 +9118,60 @@ def generate_log(config, scenario=None, scenario_event=None,
     if not _get_windows_users(session_context):
         return None
 
-    # --- Parallel host mode ---
-    if _cf(config).get("parallel_hosts", False):
-        _ensure_orchestrator(config, session_context, threat_level, benign_only)
-        batch = []
-        try:
-            while len(batch) < 50:
-                batch.append(_output_queue.get_nowait())
-        except _queue_mod.Empty:
-            pass
-        if not batch:
-            return None
-        # Check if a threat fired during this drain cycle
-        threat_name = None
-        try:
-            while True:
-                status_evt = _status_queue.get_nowait()
-                if status_evt.get("type") == "threat_fired":
-                    threat_name = status_evt["name"]
-        except _queue_mod.Empty:
-            pass
-        content = batch if len(batch) > 1 else batch[0]
-        if threat_name:
-            return (content, threat_name)
-        return content
-
-    # --- Original single-threaded behavior ---
-    _BUILD_EVENT_OS_SUBTYPE = _get_os_subtype(config)
-
-    if benign_only:
-        return _select_benign(config, session_context)
-
-    # --- Insane mode: 50% threat, 50% benign ---
-    if threat_level == "Insane":
-        if random.random() < 0.50:
-            result, threat_name = _select_threat(config, session_context)
-            if result is not None:
-                return (result, threat_name)
-        return _select_benign(config, session_context)
-
-    # --- Normal paced mode: threats released on the configured interval ---
-    interval     = _get_threat_interval(threat_level, config)
-    current_time = time.time()
-    with _STATE_LOCK:
-        if interval > 0 and (current_time - last_threat_event_time) > interval:
-            last_threat_event_time = current_time
-            should_fire = True
-        else:
-            should_fire = False
-    if should_fire:
-        result, threat_name = _select_threat(config, session_context)
-        if result is not None:
-            return (result, threat_name)
-
-    return _select_benign(config, session_context)
+    # --- Ambient generation: per-host worker threads ---
+    # One worker per workstation, one for the DC and one for threats, all feeding the
+    # queues drained below. (A single-threaded mode that drew from its own weight
+    # table was removed 2026-10-20: the shipped config never used it, and keeping a
+    # second table in step with the worker tables kept going wrong.)
+    _ensure_orchestrator(config, session_context, threat_level, benign_only)
+    # A whole threat first, returned on its own and labelled with its own name.
+    # Labelling used to come from _status_queue and attach to whichever 50-event
+    # batch happened to drain it, so a threat split across batches was labelled once
+    # and counted approximately.
+    try:
+        threat_name, items = _threat_queue.get_nowait()
+        return ((items if len(items) > 1 else items[0]), threat_name)
+    except _queue_mod.Empty:
+        pass
+    # Take everything buffered at this moment. This used to stop at 50 events per
+    # call -- with one call a second, a fixed 50 events/s ceiling on Windows that
+    # silently discarded whatever the workers produced beyond it. Volume is now set
+    # by the workers' own pacing (dc/wks_interval_multiplier in windows_events_
+    # config), like every other module. The snapshot keeps one call finite while
+    # backpressured workers refill the queue behind it.
+    batch = []
+    try:
+        for _ in range(_output_queue.qsize()):
+            batch.append(_output_queue.get_nowait())
+    except _queue_mod.Empty:
+        pass
+    if not batch:
+        return None
+    return batch if len(batch) > 1 else batch[0]
 
 
-# ---------------------------------------------------------------------------
-# Per-host parallel generation (multi-threaded mode)
-# ---------------------------------------------------------------------------
+# Per-host worker generation
 
+# NOTE: these two tables ARE the ambient benign schedule -- _BENIGN_GENERATORS is only
+# the name -> function map. A generator added there but to neither table never fires.
+#
+# The Windows event mix is deliberately code-only.  windows_events_config used to
+# carry an "event_mix" block, but these workers never consulted it, so its benign
+# weights were dead, and its threat keys named generators that no longer exist
+# (brute_force, password_spray, rdp_bruteforce, ...) so every lookup fell through
+# to the module default.  It was removed rather than repaired: the selectors below
+# already default cleanly when the key is absent (both test suites ship configs
+# with no event_mix and pass).  If you want config-tunable weights back, the
+# workers must read the override the way _select_threat does --
+# re-adding the config block alone will silently do nothing.
 _DC_BENIGN_GENS = {
     "dc_kerberos_traffic":  15,
     "dc_directory_service":  8,
     "dc_service_activity":  10,
     "dc_self_logon":         8,
+    # 4767 / 4725 are DC-emitted account-administration events.
+    "account_unlock":        3,
+    "account_disable":       1,
 }
 
 _WKS_BENIGN_GENS = {
@@ -7358,11 +9191,19 @@ _WKS_BENIGN_GENS = {
     "password_typo":         2,
     "process_creation":     30,
     "lateral_movement":      3,
+    # 4656/4663 on SACL'd file objects -- workstation-side, via the file share.
+    "audited_file_access":  12,
+    # Per workstation worker (one draw a second): ~0.07 task and ~0.03 service
+    # registrations per host per day -- a few a month. At weight 2/1 this was ~1,300
+    # and ~440 per host per day.
+    "scheduled_task_create": 0.00013,
+    "service_install":       0.00006,
 }
 
 
 def _dc_worker(config, session_context, interval, stop_event):
     """Background thread generating DC-specific benign events."""
+    _DEFER_IDS.on = True
     stats = _worker_stats["dc"]
     gens = list(_DC_BENIGN_GENS.keys())
     weights = list(_DC_BENIGN_GENS.values())
@@ -7373,19 +9214,18 @@ def _dc_worker(config, session_context, interval, stop_event):
             result = fn(config, session_context)
             if result:
                 items = result if isinstance(result, list) else [result]
-                for item in items:
-                    _output_queue.put(item, timeout=5)
-                    stats["events_generated"] += 1
+                if not _schedule(items, stop_event):
+                    return
+                stats["events_generated"] += len(items)
                 stats["last_event_time"] = time.time()
-        except _queue_mod.Full:
-            pass
-        except Exception:
-            pass
+        except Exception as exc:
+            _note_worker_error("dc", exc)
         stop_event.wait(timeout=interval)
 
 
 def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
     """Background thread generating workstation-specific benign events."""
+    _DEFER_IDS.on = True
     stats = _worker_stats[hostname]
     gens = list(_WKS_BENIGN_GENS.keys())
     weights = list(_WKS_BENIGN_GENS.values())
@@ -7398,20 +9238,19 @@ def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
                 stop_event.wait(timeout=interval)
                 continue
             items = result if isinstance(result, list) else [result]
-            for item in items:
-                _output_queue.put(item, timeout=5)
-                stats["events_generated"] += 1
+            if not _schedule(items, stop_event):
+                return
+            stats["events_generated"] += len(items)
             stats["last_event_time"] = time.time()
-        except _queue_mod.Full:
-            pass
-        except Exception:
-            pass
+        except Exception as exc:
+            _note_worker_error(f"wks:{hostname}", exc)
         stop_event.wait(timeout=interval)
 
 
 def _threat_worker(config, session_context, threat_level, interval, stop_event):
     """Background thread that fires threats on a cadence."""
     global last_threat_event_time
+    _DEFER_IDS.on = True
     stats = _worker_stats["threats"]
     threat_interval = _get_threat_interval(threat_level, config)
 
@@ -7420,7 +9259,11 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
             current_time = time.time()
             should_fire = False
             with _STATE_LOCK:
-                if threat_interval > 0 and (current_time - last_threat_event_time) > threat_interval:
+                # An interval of 0 ("Insane") means no spacing: fire on every tick. This
+                # used to require interval > 0, so Insane fired NO threats in parallel
+                # mode -- every other module special-cases Insane before that test, this
+                # worker did not. A tick is base interval x threat_interval_multiplier.
+                if threat_interval <= 0 or (current_time - last_threat_event_time) > threat_interval:
                     last_threat_event_time = current_time
                     should_fire = True
 
@@ -7428,11 +9271,16 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
                 result, threat_name = _select_threat(config, session_context)
                 if result:
                     items = result if isinstance(result, list) else [result]
-                    for item in items:
-                        _output_queue.put(item, timeout=5)
-                        stats["events_generated"] += 1
+                    # Released at its own timestamps; the first chunk carries the name.
+                    if not _schedule(items, stop_event, threat_name=threat_name):
+                        return
+                    stats["events_generated"] += len(items)
                     stats["last_event_time"] = time.time()
                     stats["last_fired"] = threat_name
+                    with _STATE_LOCK:
+                        _recent_threats.append({"name": threat_name,
+                                                "event_count": len(items),
+                                                "timestamp": current_time})
                     try:
                         _status_queue.put_nowait({
                             "type": "threat_fired",
@@ -7441,15 +9289,17 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
                             "timestamp": current_time,
                         })
                     except _queue_mod.Full:
+                        # Status queue is advisory (dashboard "threat fired"
+                        # badge); the events themselves already went out.
                         pass
-        except Exception:
-            pass
+        except Exception as exc:
+            _note_worker_error("threats", exc)
         stop_event.wait(timeout=interval)
 
 
 def _ensure_orchestrator(config, session_context, threat_level, benign_only):
     """Start worker threads on first call. Subsequent calls are no-ops."""
-    global _orchestrator_started, _BUILD_EVENT_OS_SUBTYPE
+    global _orchestrator_started, _BUILD_EVENT_OS_SUBTYPE, _output_queue, _threat_queue
     with _orchestrator_lock:
         if _orchestrator_started:
             return
@@ -7459,6 +9309,12 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
 
     base_interval = config.get("base_event_interval_seconds", 1.0)
     wcfg = _cf(config)
+
+    # Buffer sizes come from config. They are not throughput caps -- workers wait when a
+    # buffer is full (_put_backpressured) and the drain takes everything buffered -- they
+    # only bound how much is held in memory between generation and delivery.
+    _output_queue = _queue_mod.Queue(maxsize=max(1, int(wcfg.get("output_queue_size", 1000))))
+    _threat_queue = _queue_mod.Queue(maxsize=max(1, int(wcfg.get("threat_queue_size", 100))))
 
     # Group users by hostname
     hosts: dict[str, list[str]] = {}
@@ -7493,6 +9349,12 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
             name=f"logsim-win-{hostname.split('.')[0]}",
         ).start()
 
+    # Release thread: hands scheduled events out at their timestamps (ids assigned then)
+    threading.Thread(
+        target=_releaser, args=(_workers_stop,),
+        daemon=True, name="logsim-win-release",
+    ).start()
+
     # Threat worker (skipped in benign-only mode)
     if not benign_only:
         threat_interval = base_interval * wcfg.get("threat_interval_multiplier", 2.0)
@@ -7503,9 +9365,7 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
         ).start()
 
 
-# ---------------------------------------------------------------------------
 # Public API for Flask UI status
-# ---------------------------------------------------------------------------
 
 def get_worker_stats() -> dict:
     """Returns current parallel-mode worker stats for the Flask dashboard."""
@@ -7516,8 +9376,24 @@ def get_worker_stats() -> dict:
     }
 
 
+def get_recent_threats(max_items: int = 10) -> list:
+    """Most-recent threats fired, newest last.  Non-destructive.
+
+    Use this for dashboards/telemetry.  get_status_events() below drains the
+    queue generate_log() depends on and must not be used for observation.
+    """
+    with _STATE_LOCK:
+        return list(_recent_threats)[-max_items:]
+
+
 def get_status_events(max_items: int = 20) -> list:
-    """Drain status queue for Flask UI (threat-fired notifications, etc.)."""
+    """Drain status queue for Flask UI (threat-fired notifications, etc.).
+
+    WARNING: destructive, and generate_log() already drains this queue to label
+    its returned batch with the threat that fired.  Calling this concurrently
+    steals that label and the threat is under-counted.  Prefer
+    get_recent_threats().
+    """
     events = []
     try:
         while len(events) < max_items:

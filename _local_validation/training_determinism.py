@@ -1,6 +1,6 @@
 """Training Mode trust checks — determinism, bulk/stream parity, and backfill bounds.
 
-Run:  python tests/training_determinism.py
+Run:  python _local_validation/training_determinism.py
 No XSIAM tenant or network is required — everything runs in capture / dry-run mode.
 
 What it proves:

@@ -149,16 +149,22 @@ def deterministic_env(seed, config):
     if static_tor is not None:
         config["tor_exit_nodes"] = copy.deepcopy(static_tor)
 
-    # 4) hermetic per-user caches
+    # 4) hermetic per-user caches, and hermetic persistent state (beacon maps and
+    #    Windows record numbers use per-run scratch state in THIS context only, so a
+    #    live simulator in the same process keeps its persistence)
+    hermetic_token = None
     try:
         from modules import session_utils
         session_utils.reset_caches()
+        hermetic_token = session_utils.enter_hermetic()
     except Exception:
         session_utils = None
 
     try:
         yield
     finally:
+        if session_utils is not None and hermetic_token is not None:
+            session_utils.exit_hermetic(hermetic_token)
         random.setstate(rng_state)
         uuid.uuid4 = orig_uuid4
         if saved_tor is not None:
@@ -301,14 +307,18 @@ def _build_actions(pack, all_modules, config, session_context, duration):
 # ── Batch flush ───────────────────────────────────────────────────────────────
 
 def _flush(config, ls):
+    # A failed flush strands the staged batch: the training corpus silently comes
+    # out short, which is indistinguishable from "the generator produced less".
     try:
         ls.flush_s3_batch()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[training][flush] S3 batch flush FAILED — staged events not "
+              f"delivered: {type(exc).__name__}: {exc}")
     try:
         ls._flush_wec_batch(config)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[training][flush] WEC batch flush FAILED — staged events not "
+              f"delivered: {type(exc).__name__}: {exc}")
 
 
 # ── BULK: backfill now-4h .. now, virtual clock, finishes in seconds ──────────
@@ -962,6 +972,8 @@ def run_multi_student(pack, all_modules, config, mode="bulk", num_students=1,
         try:
             sender.close()
         except Exception:
+            # Belt-and-braces second close: the happy path already closed the
+            # sender above, so a raise here just means "already closed".
             pass
 
     return {"mode": mode, "pack": pack.get("id"), "num_students": num_students,

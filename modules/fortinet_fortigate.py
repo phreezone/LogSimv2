@@ -69,17 +69,24 @@ import hashlib
 from ipaddress import ip_network, AddressValueError
 
 try:
-    from modules.session_utils import (get_random_user, find_user_by_ip, rand_ip_from_network,
+    from modules.session_utils import (get_random_user, find_user_by_ip, rand_ip_from_network, host_mac,
                                        stable_vpn_ip, stable_mail_servers, weighted_destination,
-                                       novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+                                       novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
+                                       rare_external_ip, rare_internal_host, rare_domain, ip_country,
+                                       vpn_username, impossible_travel_ips, correlated_or_random_user)
+    from modules import resolver
+    from modules import threat_domains
+    from modules import mgmt_plane
 except ImportError:
-    from session_utils import (get_random_user, find_user_by_ip, rand_ip_from_network,
+    from session_utils import (get_random_user, find_user_by_ip, rand_ip_from_network, host_mac,
                                stable_vpn_ip, stable_mail_servers, weighted_destination,
-                                       novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
-
-# ---------------------------------------------------------------------------
+                                       novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
+                                       rare_external_ip, rare_internal_host, rare_domain, ip_country,
+                                       vpn_username, impossible_travel_ips, correlated_or_random_user)
+    import resolver
+    import mgmt_plane
+    import threat_domains
 # Module identity
-# ---------------------------------------------------------------------------
 NAME        = "Fortinet FortiGate"
 DESCRIPTION = "Simulates Fortinet FortiGate traffic, UTM, and event logs in CEF syslog format."
 XSIAM_PARSER = "fortinet_fortigate_raw"
@@ -102,6 +109,10 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": None},
     {"event": "large_upload",          "weight": 8,  "analytic": True,
      "xsiam_alert": "Large Upload (HTTPS)"},
+    # Same exfil to an HTTPS service on a non-standard port -> the Low-severity
+    # "Large Upload (HTTPS) to non-standard port" variation.
+    {"event": "large_upload_nonstd_port", "weight": 2, "analytic": True,
+     "xsiam_alert": "Large Upload (HTTPS)"},
     {"event": "port_scan",             "weight": 8,  "analytic": True,
      "xsiam_alert": "Port Scan"},
     {"event": "waf_attack",            "weight": 6,  "analytic": False,
@@ -112,10 +123,15 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": None},
     {"event": "auth_brute_force",      "weight": 7,  "analytic": False,
      "xsiam_alert": None},
-    {"event": "vpn_brute_force",       "weight": 6,  "analytic": False,
-     "xsiam_alert": None},
-    {"event": "vpn_impossible_travel", "weight": 3,  "analytic": False,
-     "xsiam_alert": None},
+    # vpn_brute_force / vpn_impossible_travel REBUILT 2026-09-17 (see generators).
+    # Every FortiGate VPN event also now reaches XSIAM with a BARE username and a
+    # country label that matches its IP — both were silencing all VPN analytics.
+    {"event": "vpn_brute_force",       "weight": 6,  "analytic": True,
+     "xsiam_alert": "VPN login Brute-Force attempt"},
+    {"event": "vpn_impossible_travel", "weight": 3,  "analytic": True,
+     "xsiam_alert": "Impossible traveler - VPN"},
+    {"event": "vpn_password_spray",    "weight": 3,  "analytic": True,
+     "xsiam_alert": "VPN Login Password Spray"},
     {"event": "lateral_movement",      "weight": 5,  "analytic": True,
      "xsiam_alert": "Failed Connections"},
     {"event": "tor_connection",        "weight": 3,  "analytic": True,
@@ -123,11 +139,18 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "dns_c2_beacon",         "weight": 3,  "analytic": True,
      "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
     {"event": "server_outbound_http",  "weight": 2,  "analytic": True,
-     "xsiam_alert": "New Administrative Behavior"},
+     "xsiam_alert": "Recurring access to rare IP"},
     {"event": "rdp_lateral",           "weight": 2,  "analytic": True,
      "xsiam_alert": "Rare RDP session to a remote host"},
     {"event": "app_control_block",     "weight": 2,  "analytic": False,
      "xsiam_alert": None},
+    # Analytic successors to webfilter_block / app_control_block, NEW 2026-09-17.
+    # The originals stay as genuine vendor noise: a BLOCK means no communication
+    # happened, which is the opposite of what these detectors look for.
+    {"event": "rare_domain_communication", "weight": 4, "analytic": True,
+     "xsiam_alert": "Abnormal Communication to a Rare Domain"},
+    {"event": "torrent_client",        "weight": 3,  "analytic": True,
+     "xsiam_alert": "A Torrent client was detected on a host"},
     {"event": "vpn_tor_login",         "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring access to rare IP"},
     {"event": "smb_new_host_lateral",  "weight": 4,  "analytic": True,
@@ -142,26 +165,54 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Spam Bot Traffic"},
     {"event": "smtp_large_exfil",      "weight": 2,  "analytic": True,
      "xsiam_alert": "Large Upload (SMTP)"},
+    # "Large Upload (FTP)" is a third-party-firewall analytic: it fired from Firepower
+    # data on 2026-09-25 while this entry still said non-analytic.
     {"event": "ftp_large_exfil",       "weight": 2,  "analytic": True,
-     "xsiam_alert": "New FTP Server"},
+     "xsiam_alert": "Large Upload (FTP)"},
     {"event": "ddns_connection",       "weight": 2,  "analytic": True,
      "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
-    {"event": "large_download",        "weight": 3,  "analytic": True,
-     "xsiam_alert": "Large Download"},
-    {"event": "dns_tunneling",         "weight": 3,  "analytic": True,
-     "xsiam_alert": "DNS Tunneling"},
+    {"event": "large_download",        "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "dns_tunneling",         "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
     {"event": "reverse_ssh_tunnel",    "weight": 2,  "analytic": True,
-     "xsiam_alert": "Uncommon reverse SSH tunnel to external domain/ip"},
-    {"event": "ldap_recon",            "weight": 3,  "analytic": True,
-     "xsiam_alert": "Suspicious reconnaissance using LDAP"},
+     "xsiam_alert": "Uncommon SSH session was established"},
+    {"event": "ldap_recon",            "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
     {"event": "vpn_abnormal_os",       "weight": 2,  "analytic": True,
      "xsiam_alert": "VPN access with an abnormal operating system"},
     {"event": "vpn_new_country_login", "weight": 3,  "analytic": True,
      "xsiam_alert": "First successful VPN access from a country in organization"},
-    {"event": "external_port_scan",    "weight": 3,  "analytic": True,
-     "xsiam_alert": "Port Scan"},
+    # external_port_scan is realistic perimeter traffic but NOT a "Port Scan" analytic:
+    # that detector profiles YOUR endpoints ("The endpoint connected, or attempted to
+    # connect, to multiple privileged ports"), and an internet scanner hitting the WAN is
+    # not one of them. It was claimed analytic with xsiam_alert "Port Scan" and could
+    # never fire that way. Relabelled [Non-Analytic]; the internal port_scan threat is
+    # the one that exercises the detector.
+    {"event": "external_port_scan",    "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
     {"event": "new_admin_behavior",    "weight": 3,  "analytic": True,
      "xsiam_alert": "New Administrative Behavior"},
+    # Tier 1-3 detectors added 2026-09-18.
+    {"event": "port_sweep",            "weight": 5,  "analytic": True,
+     "xsiam_alert": "Port Sweep"},
+    {"event": "dc_smb_outbound",       "weight": 3,  "analytic": True,
+     "xsiam_alert": "Suspicious SMB connection from domain controller"},
+    {"event": "new_ftp_server",        "weight": 2,  "analytic": True,
+     "xsiam_alert": "New FTP Server"},
+    {"event": "rare_appid",            "weight": 3,  "analytic": True,
+     "xsiam_alert": "Rare AppID usage to a rare destination"},
+    {"event": "abnormal_rdp_rare_host","weight": 2,  "analytic": True,
+     "xsiam_alert": "Abnormal RDP session to a remote host from a rarely seen host"},
+    {"event": "rare_smtp_session",     "weight": 2,  "analytic": True,
+     "xsiam_alert": "Rare SMTP/S Session"},
+    # Management plane (2026-10-19, gocortexio advisory corpus MANAGEMENT patterns).
+    # No shipped Cortex analytic covers device administration: hunting / correlation.
+    {"event": "mgmt_admin_unexpected_source", "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_config_route_change",     "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_logging_suppressed",      "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_config_harvest",          "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "snmp_unexpected_source",       "weight": 1, "analytic": False, "xsiam_alert": None},
 ]
 
 # --- Display-name mapping (same pattern as checkpoint_firewall.py) ---
@@ -169,15 +220,20 @@ _EVENT_DISPLAY_NAMES = {}   # event_key → display_name
 _DISPLAY_TO_EVENT    = {}   # display_name → event_key  (reverse lookup)
 for _e in _DEFAULT_THREAT_EVENTS:
     _key  = _e["event"]
-    _name = _key if _e.get("analytic", True) else _NON_ANALYTIC_PREFIX + _key
+    # The "[Non-Analytic] " display prefix is retired: non-analytic threats are simply
+    # not offered on demand (modules/threat_catalog.py). Old prefixed names still resolve.
+    _name = _key
+    _DISPLAY_TO_EVENT[_NON_ANALYTIC_PREFIX + _key] = _key
     _EVENT_DISPLAY_NAMES[_key]  = _name
     _DISPLAY_TO_EVENT[_name]    = _key
     _DISPLAY_TO_EVENT[_key]     = _key      # also accept raw key for back-compat
 
 
 def get_threat_names():
-    """Return available threat display names from _DEFAULT_THREAT_EVENTS.
-    Non-analytic events are prefixed with '[Non-Analytic] '."""
+    """Return every threat name in _DEFAULT_THREAT_EVENTS (analytic or not).
+
+    get_threat_info() carries the analytic flag and target alert; only analytic threats
+    are offered for on-demand firing (modules/threat_catalog.py)."""
     return [_EVENT_DISPLAY_NAMES[e["event"]] for e in _DEFAULT_THREAT_EVENTS]
 
 
@@ -200,9 +256,7 @@ def get_threat_info():
 
 last_threat_event_time = 0
 
-# ---------------------------------------------------------------------------
 # Static data constants
-# ---------------------------------------------------------------------------
 _FIRST_OCTETS = [45, 52, 54, 62, 80, 91, 104, 142, 176, 185, 193, 194, 212, 213]
 
 # Syslog PRI: facility local7 (23×8=184) + informational (6) = 190
@@ -381,9 +435,7 @@ def _admin_port_sequence(count):
     return seq[:count]
 
 
-# ---------------------------------------------------------------------------
 # Helper functions
-# ---------------------------------------------------------------------------
 
 def _cef_escape(v):
     """Escapes a CEF extension value per ArcSight CEF spec.
@@ -422,16 +474,25 @@ def _random_external_ip():
     return random_external_ip()
 
 
-def _dns_precursor(config, src_ip, user, shost, domain):
-    """Generate a DNS lookup precursor event for conversation-complete sequences."""
+def _dns_precursor(config, src_ip, user, shost, domain, answer_ip=None):
+    """Generate a DNS lookup precursor event for conversation-complete sequences.
+
+    The client asks ITS Infoblox grid member (resolver.dns_server_for) -- the
+    member the Infoblox module logs the same query on -- and FTNTFGTipaddr is
+    the address the connection that follows actually goes to (`answer_ip`), or
+    the shared answer for the name. It used to be 8.8.8.8 answering a random
+    address, so the precursor, the Infoblox answer and the session never agreed.
+    """
     forti_conf = _get_config(config)
-    resolved = _random_external_ip()
+    resolved = answer_ip or resolver.answer_for(domain, config)
+    grid_name, grid_ip = resolver.dns_server_for(config, src_ip)
     fields = {
         "src":              src_ip,
         "spt":              random.randint(49152, 65535),
         "shost":            shost,
         "suser":            user,
-        "dst":              forti_conf.get("dns_server", "8.8.8.8"),
+        "dst":              forti_conf.get("dns_server") or grid_ip,
+        "dhost":            f"{grid_name}.{resolver.internal_domain(config)}",
         "dpt":              53,
         "proto":            "17",
         "act":              "passthrough",
@@ -449,13 +510,13 @@ def _dns_precursor(config, src_ip, user, shost, domain):
         "FTNTFGTsentpkt":   1,
         "FTNTFGTrcvdpkt":   1,
         "FTNTFGTsrccountry":"Reserved",
-        "FTNTFGTdstcountry":"United States",
+        "FTNTFGTdstcountry":"Reserved",
         "FTNTFGTosname":    random.choice(_SRC_OS_WINDOWS),
-        "FTNTFGTsrcmac":    _random_mac(),
+        "FTNTFGTsrcmac":    _random_mac(shost),
         "FTNTFGTservice":   "DNS",
         "FTNTFGTlogdesc":   "DNS response",
         "FTNTFGTsrcintfrole": "lan",
-        "FTNTFGTdstintfrole": "wan",
+        "FTNTFGTdstintfrole": "dmz",
         "externalId":       _session_id(),
         "outcome":          "success",
         "msg":              f"DNS query for {domain}",
@@ -463,10 +524,15 @@ def _dns_precursor(config, src_ip, user, shost, domain):
     return _format_fortinet_cef(config, "1501054802", "dns", "dns-query", "information", fields)
 
 
-def _random_mac():
-    """Returns a realistic MAC address string."""
-    ouis = ["00:50:56", "00:0C:29", "AC:DE:48", "F8:FF:C2", "3C:22:FB", "DC:A6:32"]
-    return f"{random.choice(ouis)}:{random.randint(0,255):02X}:{random.randint(0,255):02X}:{random.randint(0,255):02X}"
+def _random_mac(host=None):
+    """The source host's MAC -- stable per host, and the same NIC the Infoblox
+    DHCP log leases to (session_utils.host_mac). It used to be a random OUI and
+    random octets on EVERY event, so FTNTFGTsrcmac never identified a device and
+    never matched a DHCP lease. Hostless flows still get a random address."""
+    if host:
+        return host_mac(host)
+    ouis = ["00:50:56", "00:0c:29", "f4:8e:38", "3c:d9:2b", "28:d2:44", "f0:18:98"]
+    return f"{random.choice(ouis)}:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
 
 
 def _session_id():
@@ -485,6 +551,31 @@ def _conn_timing(duration_s=None):
 def _ext_geo():
     """Random external location for geo-enriched fields on external traffic."""
     return random.choice(_EXT_LOCATIONS)
+
+
+# Countries hosting the bulk of real Tor exit capacity, weighted roughly by share.
+_TOR_EXIT_COUNTRIES = [
+    ("Germany", 34), ("Netherlands", 16), ("United States", 14), ("France", 10),
+    ("Romania", 7), ("Finland", 6), ("Sweden", 5), ("Switzerland", 4),
+    ("Austria", 2), ("Luxembourg", 2),
+]
+
+
+def _tor_exit_country(tor_entry):
+    """Country to report for a Tor exit node.
+
+    Uses the country carried on the config entry when it is a real one; the live
+    torproject.org bulk list has no geo data and stamps "Unknown", so fall back to
+    a weighted pick from the countries that actually host exit capacity.  Never
+    returns "Reserved" -- a Tor exit is a public routable address, and FortiGate
+    reports "Reserved" only for RFC1918 and other reserved ranges.
+    """
+    if isinstance(tor_entry, dict):
+        c = (tor_entry.get("country") or "").strip()
+        if c and c.lower() not in ("unknown", "reserved", "na", "n/a"):
+            return c
+    names, weights = zip(*_TOR_EXIT_COUNTRIES)
+    return random.choices(names, weights=weights)[0]
 
 
 # Port → FortiGate service name mapping (real FortiGate service names)
@@ -522,13 +613,38 @@ def _get_user_and_host_info(config, ip_address=None, session_context=None):
     return username or "unknown", hostname
 
 
+# FortiOS binds a severity level to each log ID.  Only IDs we are confident about
+# are pinned here; UTM log IDs legitimately vary and are left to the caller.
+#   0000000013 = LOG_ID_TRAFFIC_END_FORWARD  -> always "notice" (accept AND deny)
+#   1501054802 = DNS query                   -> always "information"
+_LOGID_CANONICAL_LEVEL = {
+    "0000000013": "notice",
+    "1501054802": "information",
+    # SSL VPN, per the FortiOS 7.6.4 log message reference. Until 2026-09-30 successful
+    # tunnels were sent as 39426 (which is the LOGIN FAILURE id) and failures as the
+    # undocumented 39428 / the tunnel-up id 39424 -- inverted.
+    "0101039424": "information",   # LOG_ID_EVENT_SSL_VPN_USER_TUNNEL_UP
+    "0101039425": "information",   # LOG_ID_EVENT_SSL_VPN_USER_TUNNEL_DOWN
+    "0101039426": "alert",         # LOG_ID_EVENT_SSL_VPN_USER_SSL_LOGIN_FAIL
+}
+
+
 def _format_fortinet_cef(config, logid, log_type, subtype, log_level, extensions_dict):
     """
     Formats a Fortinet FortiGate CEF syslog message.
 
-    CEF header:  CEF:0|Fortinet|Fortigate|v{version}|{logid}|{type}:{subtype} {action}|{severity}|
+    CEF header:  CEF:0|Fortinet|Fortigate|v{version}|{logid[-5:]}|{type}:{subtype} {action}|{severity}|
     Syslog wrap: <PRI>timestamp hostname  CEF:...
     """
+    # In FortiOS the severity level is bound to the log ID by the log definition,
+    # not chosen per event.  Pin the ones we emit so a threat generator cannot
+    # silently raise a traffic log to "warning" -- a real FortiGate marks bad
+    # traffic via the UTM / app-control log and crlevel/crscore, and leaves the
+    # forward-traffic log at its canonical level.
+    _canonical = _LOGID_CANONICAL_LEVEL.get(logid)
+    if _canonical:
+        log_level = _canonical
+
     forti_conf  = _get_config(config)
     serial      = forti_conf.get("serial_number", "FGVM08TM21000001")
     vdom        = forti_conf.get("vdom", "root")
@@ -541,8 +657,11 @@ def _format_fortinet_cef(config, logid, log_type, subtype, log_level, extensions
     et_val  = extensions_dict.get("FTNTFGTeventtype", "")
     cef_name = " ".join(p for p in (f"{log_type}:{subtype}", et_val, act_val) if p)
 
+    # Signature ID is the last five digits of the log ID (Fortinet's CEF mapping:
+    # 0000000013 -> 00013, 1501054802 -> 54802); the full ID travels in FTNTFGTlogid.
+    # The tenant parser models both forms identically (A/B, 2026-09-29).
     cef_header = (
-        f"CEF:0|Fortinet|Fortigate|v7.6.4|{logid}"
+        f"CEF:0|Fortinet|Fortigate|v7.6.4|{logid[-5:]}"
         f"|{cef_name}|{cef_sev}|"
     )
 
@@ -562,17 +681,39 @@ def _format_fortinet_cef(config, logid, log_type, subtype, log_level, extensions
     merged = {**base, **extensions_dict}
 
     # AD domain-qualify bare usernames so XSIAM Identity can stitch
-    # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com)
-    for _ufield in ("suser", "duser", "FTNTFGTxauthuser"):
-        _uval = merged.get(_ufield)
-        if _uval and "\\" not in _uval and "@" not in _uval:
-            merged[_ufield] = f"EXAMPLECORP\\{_uval}"
+    # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com).
+    # Orchestrated events set _no_user_qualify to keep the EXACT box user (bare).
+    #
+    # EXCEPT VPN authentication (event:vpn). Identity Analytics reduces
+    # EXAMPLECORP\jdoe to the DOMAIN, collapsing every VPN user into one identity
+    # called "examplecorp" (proven by A/B on ASA 2026-07-28). Measured 2026-09-17: 100%
+    # of FortiGate's 6,561 weekly VPN events carried the prefix and no FortiGate VPN
+    # analytic had ever fired; ASA — bare usernames — is the only vendor whose VPN
+    # analytics fire. VPN events are therefore forced bare, prefix stripped.
+    if subtype == "vpn":
+        merged.pop('_no_user_qualify', None)
+        for _ufield in ("suser", "duser", "FTNTFGTxauthuser"):
+            if merged.get(_ufield):
+                merged[_ufield] = vpn_username(merged[_ufield])
+    elif not merged.pop('_no_user_qualify', False):
+        for _ufield in ("suser", "duser", "FTNTFGTxauthuser"):
+            _uval = merged.get(_ufield)
+            if _uval and "\\" not in _uval and "@" not in _uval:
+                merged[_ufield] = f"EXAMPLECORP\\{_uval}"
 
     ext_string = " ".join(
         f"{k}={_cef_escape(v)}" for k, v in merged.items() if v is not None
     )
 
-    syslog_ts = time.strftime("%b %d %H:%M:%S")
+    # UTC, to agree with the hardcoded FTNTFGTtz=+0000 and the UTC-epoch
+    # FTNTFGTeventtime below.  time.strftime() without a time tuple uses machine
+    # LOCAL time, which put the header hours away from the eventtime it claims.
+    _evt_ns = merged.get("FTNTFGTeventtime")
+    try:
+        _evt_epoch = int(_evt_ns) / 1_000_000_000 if _evt_ns else time.time()
+    except (TypeError, ValueError):
+        _evt_epoch = time.time()
+    syslog_ts = time.strftime("%b %d %H:%M:%S", time.gmtime(_evt_epoch))
     return f"<{_SYSLOG_PRI}>{syslog_ts} {fw_hostname} {cef_header}{ext_string}"
 
 
@@ -594,7 +735,7 @@ def _base_traffic_fields(config, src_ip, shost, user, dst_ip, dhost, proto, dpt,
     duration_s, _ = _conn_timing(duration_s)
     sent_bytes    = random.randint(500, 20000)
     rcvd_bytes    = random.randint(10000, 300000)
-    src_mac       = _random_mac()
+    src_mac       = _random_mac(shost)
     os_name       = src_os or random.choice(_SRC_OS_WINDOWS)
     app_entry     = random.choice(_BENIGN_APPS)
 
@@ -649,16 +790,39 @@ def _base_traffic_fields(config, src_ip, shost, user, dst_ip, dhost, proto, dpt,
     }
 
 
-# ---------------------------------------------------------------------------
 # Benign event generators
-# ---------------------------------------------------------------------------
+
+def _benign_destination(config, user, weighted=True):
+    """(domain, ip) for a benign destination, where the ip is what that NAME resolves to.
+
+    Before 2026-09-18 the name and the address were chosen from two unrelated
+    pools -- `dst_ip` from the destination's CIDR, `domain` from config
+    `benign_domains` -- so the pairing was meaningless. Measured in-tenant, every
+    one of github.com / zoom.us / salesforce.com was logged against 13.107.4.50
+    (the Windows Update /32), and no DNS answer from Infoblox ever matched a
+    FortiGate destination: the join was EMPTY.
+
+    Both now come from modules/resolver.py, the same table Infoblox answers from,
+    so a DNS response and the connection that follows carry the same address.
+    """
+    destinations = config.get("benign_egress_destinations") or [{}]
+    dest = (weighted_destination(user, destinations) if weighted
+            else random.choice(destinations))
+    domain = dest.get("domain") or dest.get("name", "example.com").lower().replace(" ", "")
+    ip = resolver.resolve_one(domain)
+    if not ip:
+        # Resolver unavailable (soft-fail) -- keep the old behaviour so events
+        # are still well-formed; only the DNS/firewall join is lost.
+        try:
+            ip = rand_ip_from_network(ip_network(dest.get("ip_range", "40.96.0.0/13"), strict=False))
+        except Exception:
+            ip = "40.96.0.1"
+    return dest, domain, ip
+
 
 def _generate_traffic_forward(config, src_ip, user, shost):
     """Normal outbound web browsing — traffic:forward allow."""
-    destinations = config.get("benign_egress_destinations") or [{}]
-    dest         = weighted_destination(user, destinations)
-    dst_ip       = rand_ip_from_network(ip_network(dest.get("ip_range", "40.96.0.0/13"), strict=False))
-    domain       = random.choice(config.get("benign_domains", ["microsoft.com", "google.com"]))
+    dest, domain, dst_ip = _benign_destination(config, user)
     geo          = _ext_geo()
     app_entry    = random.choice(_BENIGN_APPS)
     duration_s   = random.randint(10, 600)
@@ -729,15 +893,12 @@ def _generate_inbound_block(config):
         "reason":                   "no-policy-match",
         "msg":                      f"Denied by implicit policy from {geo['country']}",
     }
-    return _format_fortinet_cef(config, "0000000014", "traffic", "forward", "notice", fields)
+    return _format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields)
 
 
 def _generate_webfilter_allow(config, src_ip, user, shost):
     """Outbound web request inspected and allowed — utm:webfilter ftgd_allow."""
-    destinations = config.get("benign_egress_destinations") or [{}]
-    dest         = random.choice(destinations)
-    dst_ip       = rand_ip_from_network(ip_network(dest.get("ip_range", "40.96.0.0/13"), strict=False))
-    domain       = random.choice(config.get("benign_domains", ["microsoft.com"]))
+    dest, domain, dst_ip = _benign_destination(config, user, weighted=False)
     cat_id       = random.choice(_URL_CAT_BENIGN)
     geo          = _ext_geo()
 
@@ -765,21 +926,31 @@ def _generate_webfilter_allow(config, src_ip, user, shost):
 
 def _generate_dns_query(config, src_ip, user, shost):
     """Outbound DNS query — utm:dns dns-query."""
-    domain    = random.choice(config.get("benign_domains", ["microsoft.com", "google.com"]))
-    resolver  = random.choice(["8.8.8.8", "8.8.4.4", "1.1.1.1", "9.9.9.9", "208.67.222.222"])
-    resolved  = f"{random.randint(13,185)}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+    # `resolver_ip` -- NOT `resolver`, which would shadow the resolver module.
+    _dest, domain, resolved = _benign_destination(config, user, weighted=False)
     qtype     = random.choices(["A", "AAAA", "MX", "TXT"], weights=[70, 15, 10, 5])[0]
+    # Clients resolve through their Infoblox grid member (inside -> dmz). The
+    # grid's own recursion (member -> forwarder) is the only DNS that reaches
+    # the WAN, and it carries no user.
+    grid_name, grid_ip = resolver.dns_server_for(config, src_ip)
+    grid_fqdn = f"{grid_name}.{resolver.internal_domain(config)}"
+    if random.random() < 0.4:
+        src_ip, user, shost = grid_ip, None, grid_fqdn
+        resolver_ip, dst_name, dst_role, dst_country = (
+            random.choice(resolver.dns_forwarders(config)), None, "wan", "United States")
+        dst_name = "dns.google" if resolver_ip.startswith("8.8.") else None
+        src_role = "dmz"
+    else:
+        resolver_ip, dst_name, dst_role, dst_country, src_role = grid_ip, grid_fqdn, "dmz", "Reserved", "lan"
 
     fields = {
         "src":              src_ip,
         "spt":              random.randint(49152, 65535),
         "shost":            shost,
         "suser":            user,
-        "dst":              resolver,
+        "dst":              resolver_ip,
         "dpt":              53,
-        # Only a well-known resolver has a real name; otherwise omit dhost rather
-        # than echo the resolver IP into a hostname field.
-        "dhost":            "dns.google" if resolver.startswith("8.8") else None,
+        "dhost":            dst_name,
         "proto":            "17",
         "act":              "passthrough",
         "app":              "DNS",
@@ -797,13 +968,13 @@ def _generate_dns_query(config, src_ip, user, shost):
         "FTNTFGTsentpkt":   1,
         "FTNTFGTrcvdpkt":   1,
         "FTNTFGTsrccountry":"Reserved",
-        "FTNTFGTdstcountry":"United States",
+        "FTNTFGTdstcountry":dst_country,
         "FTNTFGTosname":    random.choice(_SRC_OS_WINDOWS),
-        "FTNTFGTsrcmac":    _random_mac(),
+        "FTNTFGTsrcmac":    _random_mac(shost),
         "FTNTFGTservice":   "DNS",
         "FTNTFGTlogdesc":   "DNS response",
-        "FTNTFGTsrcintfrole": "lan",
-        "FTNTFGTdstintfrole": "wan",
+        "FTNTFGTsrcintfrole": src_role,
+        "FTNTFGTdstintfrole": dst_role,
         "externalId":       _session_id(),
         "outcome":          "success",
         "msg":              f"DNS query for {domain} type {qtype}",
@@ -815,11 +986,14 @@ def _generate_admin_event(config):
     """Admin login success or failure — event:system."""
     forti_conf   = _get_config(config)
     admin_users  = forti_conf.get("admin_users", ["admin"])
-    user         = random.choice(admin_users)
+    # The shared operations team (mgmt_plane) mostly; the device's local accounts
+    # occasionally. Admin logins come from the admin subnet only: until 2026-10-19 they
+    # came from any user workstation, which made "admin from an unexpected source" the
+    # baseline.
+    user         = (mgmt_plane.admin_user(config) if random.random() < 0.85
+                    else random.choice(admin_users))
     mgmt_ip      = forti_conf.get("management_ip", "172.16.200.1")
-    # Admin logins originate from operator workstations, not servers
-    umap = (forti_conf.get("user_ip_map") or config.get('shared_user_ip_map', {}))
-    src_ip = random.choice(list(umap.values())) if umap else "172.16.200.50"
+    src_ip       = mgmt_plane.admin_source(config)
     is_success   = random.random() > 0.15
 
     if is_success:
@@ -884,9 +1058,10 @@ def _generate_vpn_event(config, session_context=None):
         "FTNTFGTassignip":      tunnel_ip,
         "FTNTFGTremotegw":      ext_ip,
         "FTNTFGTvpntunnel":     "SSL-VPN-Tunnel",
-        "FTNTFGTsrccountry":    geo["country"],
-        "FTNTFGTsrccity":       geo["city"],
-        "FTNTFGTsrcregion":     geo["region"],
+        # Country label = the IP's REAL country. FortiGate's XIF takes
+        # xdm.source.location.country from this text field; a random
+        # _ext_geo() label gave every user a ten-country VPN baseline.
+        "FTNTFGTsrccountry":    ip_country(ext_ip, config)[1] or "Reserved",
         "FTNTFGTduration":      0,
         "externalId":           _session_id(),
     }
@@ -898,16 +1073,16 @@ def _generate_vpn_event(config, session_context=None):
             "FTNTFGTlogdesc":  "SSL VPN tunnel up",
             "msg":             f"SSL tunnel established",
         })
-        return _format_fortinet_cef(config, "0101039426", "event", "vpn", "notice", fields)
+        return _format_fortinet_cef(config, "0101039424", "event", "vpn", "notice", fields)
     else:
         fields.update({
-            "act":             "tunnel-down",
+            "act":             "ssl-login-fail",
             "outcome":         "failed",
             "reason":          "sslvpn_login_permission_denied",
             "FTNTFGTlogdesc":  "SSL VPN login fail",
             "msg":             f"SSL VPN login failed for user {user}",
         })
-        return _format_fortinet_cef(config, "0101039428", "event", "vpn", "warning", fields)
+        return _format_fortinet_cef(config, "0101039426", "event", "vpn", "warning", fields)
 
 
 def _generate_ntp_sync(config, src_ip, user, shost):
@@ -944,10 +1119,7 @@ def _generate_antivirus_allow(config, src_ip, user, shost):
     inspected and found clean.  File downloads, email attachments, and web content
     all pass through FortiAV; the vast majority result in a clean verdict.
     """
-    destinations = config.get("benign_egress_destinations") or [{}]
-    dest         = random.choice(destinations)
-    dst_ip       = rand_ip_from_network(ip_network(dest.get("ip_range", "40.96.0.0/13"), strict=False))
-    domain       = dest.get("name", "microsoft.com").lower().replace(" ", "")
+    dest, domain, dst_ip = _benign_destination(config, user, weighted=False)
 
     file_extensions = ["exe", "dll", "zip", "docx", "xlsx", "pdf", "msi", "cab"]
     file_ext   = random.choice(file_extensions)
@@ -1017,9 +1189,8 @@ def _generate_ipsec_vpn_event(config):
         "FTNTFGTvpntunnel":     tunnel_name,
         "FTNTFGTtunneltype":    "ipsec",
         "FTNTFGTremotegw":      peer_ip,
-        "FTNTFGTsrccountry":    geo["country"],
-        "FTNTFGTsrccity":       geo["city"],
-        "FTNTFGTsrcregion":     geo["region"],
+        # Label = the peer IP's real country (see _generate_vpn_event).
+        "FTNTFGTsrccountry":    ip_country(peer_ip, config)[1] or "Reserved",
         "act":                  "negotiate",
         "outcome":              "success" if is_up else "failed",
         "msg":                  msg_text,
@@ -1030,10 +1201,7 @@ def _generate_ipsec_vpn_event(config):
 
 def _generate_ssl_inspection(config, src_ip, user, shost):
     """SSL deep-packet inspection certificate event — utm:ssl."""
-    destinations = config.get("benign_egress_destinations") or [{}]
-    dest         = random.choice(destinations)
-    dst_ip       = rand_ip_from_network(ip_network(dest.get("ip_range", "40.96.0.0/13"), strict=False))
-    domain       = random.choice(config.get("benign_domains", ["microsoft.com"]))
+    dest, domain, dst_ip = _benign_destination(config, user, weighted=False)
     cipher       = random.choice(_TLS_CIPHERS)
     tls_ver      = random.choice(_TLS_VERSIONS)
 
@@ -1080,7 +1248,7 @@ def _generate_rdp_internal(config, src_ip, user, shost):
         "FTNTFGTsentpkt": random.randint(20, 200),
         "FTNTFGTrcvdpkt": random.randint(50, 500),
         "FTNTFGTosname": random.choice(_SRC_OS_WINDOWS),
-        "FTNTFGTsrcmac": _random_mac(),
+        "FTNTFGTsrcmac": _random_mac(shost),
         "FTNTFGTservice": "RDP",
         "FTNTFGTlogdesc": "Forward traffic",
         "FTNTFGTsrcintfrole": "lan", "FTNTFGTdstintfrole": "lan",
@@ -1115,7 +1283,7 @@ def _generate_ftp_download(config, src_ip, user, shost):
         "FTNTFGTsentpkt": random.randint(5, 50),
         "FTNTFGTrcvdpkt": random.randint(50, 500),
         "FTNTFGTosname": random.choice(_SRC_OS_WINDOWS),
-        "FTNTFGTsrcmac": _random_mac(),
+        "FTNTFGTsrcmac": _random_mac(shost),
         "FTNTFGTservice": "FTP",
         "FTNTFGTlogdesc": "Forward traffic",
         "FTNTFGTsrcintfrole": "lan", "FTNTFGTdstintfrole": "lan",
@@ -1150,7 +1318,7 @@ def _generate_smb_internal(config, src_ip, user, shost):
         "FTNTFGTsentpkt": random.randint(10, 100),
         "FTNTFGTrcvdpkt": random.randint(20, 200),
         "FTNTFGTosname": random.choice(_SRC_OS_WINDOWS),
-        "FTNTFGTsrcmac": _random_mac(),
+        "FTNTFGTsrcmac": _random_mac(shost),
         "FTNTFGTservice": "SMB",
         "FTNTFGTlogdesc": "Forward traffic",
         "FTNTFGTsrcintfrole": "lan", "FTNTFGTdstintfrole": "lan",
@@ -1182,14 +1350,16 @@ def _generate_vpn_login_benign(config, session_context=None):
         "FTNTFGTtunnelid": tunnel_id, "FTNTFGTtunneltype": "ssl-vpn",
         "FTNTFGTtunnelip": tunnel_ip, "FTNTFGTassignip": tunnel_ip,
         "FTNTFGTremotegw": ext_ip, "FTNTFGTvpntunnel": "SSL-VPN-Tunnel",
-        "FTNTFGTsrccountry": geo["country"],
-        "FTNTFGTsrccity": geo["city"], "FTNTFGTsrcregion": geo["region"],
+        # Country label = the IP's REAL country. FortiGate's XIF takes
+        # xdm.source.location.country from this text field; a random
+        # _ext_geo() label gave every user a ten-country VPN baseline.
+        "FTNTFGTsrccountry": ip_country(ext_ip, config)[1] or "Reserved",
         "FTNTFGTduration": 0, "externalId": _session_id(),
         "act": "tunnel-up", "outcome": "success",
         "FTNTFGTlogdesc": "SSL VPN tunnel up",
         "msg": "SSL tunnel established",
     }
-    return _format_fortinet_cef(config, "0101039426", "event", "vpn", "notice", fields)
+    return _format_fortinet_cef(config, "0101039424", "event", "vpn", "notice", fields)
 
 
 def _simulate_vpn_new_country_login(config, session_context=None):
@@ -1250,7 +1420,7 @@ def _simulate_vpn_new_country_login(config, session_context=None):
         "FTNTFGTlogdesc": "SSL VPN tunnel up",
         "msg": "SSL tunnel established",
     }
-    return _format_fortinet_cef(config, "0101039426", "event", "vpn", "notice", fields)
+    return _format_fortinet_cef(config, "0101039424", "event", "vpn", "notice", fields)
 
 
 def _generate_vpn_failure_benign(config, session_context=None):
@@ -1273,14 +1443,16 @@ def _generate_vpn_failure_benign(config, session_context=None):
         "FTNTFGTxauthgroup": "VPN_Users",
         "FTNTFGTtunneltype": "ssl-vpn",
         "FTNTFGTremotegw": ext_ip, "FTNTFGTvpntunnel": "SSL-VPN-Tunnel",
-        "FTNTFGTsrccountry": geo["country"],
-        "FTNTFGTsrccity": geo["city"], "FTNTFGTsrcregion": geo["region"],
+        # Country label = the IP's REAL country. FortiGate's XIF takes
+        # xdm.source.location.country from this text field; a random
+        # _ext_geo() label gave every user a ten-country VPN baseline.
+        "FTNTFGTsrccountry": ip_country(ext_ip, config)[1] or "Reserved",
         "FTNTFGTduration": 0, "externalId": _session_id(),
-        "act": "tunnel-down", "outcome": "failed", "reason": reason,
+        "act": "ssl-login-fail", "outcome": "failed", "reason": reason,
         "FTNTFGTlogdesc": "SSL VPN tunnel down",
         "msg": f"SSL tunnel failed: {reason}",
     }
-    return _format_fortinet_cef(config, "0101039424", "event", "vpn", "warning", fields)
+    return _format_fortinet_cef(config, "0101039426", "event", "vpn", "warning", fields)
 
 
 def _generate_email_event(config, src_ip, user, shost):
@@ -1315,7 +1487,7 @@ def _generate_email_event(config, src_ip, user, shost):
         "FTNTFGTsentpkt": random.randint(5, 50),
         "FTNTFGTrcvdpkt": random.randint(5, 30),
         "FTNTFGTosname": random.choice(_SRC_OS_WINDOWS),
-        "FTNTFGTsrcmac": _random_mac(),
+        "FTNTFGTsrcmac": _random_mac(shost),
         "FTNTFGTservice": _port_to_service(smtp_port),
         "FTNTFGTlogdesc": "Forward traffic",
         "FTNTFGTsrcintfrole": "lan", "FTNTFGTdstintfrole": "wan",
@@ -1340,9 +1512,12 @@ def _generate_benign_log(config, session_context=None):
                    "ntp_sync", "antivirus_allow", "ipsec_vpn",
                    "rdp_internal", "ftp_download", "smb_internal",
                    "vpn_login_benign", "vpn_failure_benign", "email_event",
-                   "ad_auth", "vpn_new_country_login"]
+                   "ad_auth", "vpn_new_country_login",
+                   "mgmt_admin_session", "snmp_poll"]
         weights = [36,               18,              9,                7,
-                   3,             3,            2,
+                   # admin_event: ~40 device-admin logins a day at 1 call/s (was 3,
+                   # i.e. ~2,500/day -- no network team logs in that often).
+                   0.05,          3,            2,
                    4,           3,              2,
                    3,              2,              3,
                    3,                  1,                  2,
@@ -1350,7 +1525,9 @@ def _generate_benign_log(config, session_context=None):
                    # path: threats are interval-gated (~12/day at "Realistic") and then
                    # weighted, giving ~0.3 firings/day, but the day-keyed country rotation
                    # needs at least ONE emission every day or that day's country is skipped.
-                   5,        2]
+                   5,        2,
+                   # management plane: ~40 sessions, ~800 polls a day at 1 call/s
+                   0.05, 1]
 
     chosen = random.choices(events, weights=weights, k=1)[0]
 
@@ -1358,9 +1535,11 @@ def _generate_benign_log(config, session_context=None):
     user, src_ip, shost = "unknown", "192.168.1.100", None
     if chosen not in ("inbound_block", "admin_event", "vpn_event", "ipsec_vpn",
                       "vpn_login_benign", "vpn_failure_benign",
-                      "vpn_new_country_login"):
+                      "vpn_new_country_login", "mgmt_admin_session", "snmp_poll"):
         if session_context:
-            user_info = get_random_user(session_context, preferred_device_type="workstation")
+            # follow-on egress: prefer a recently-active user so the flow's src IP + identity match
+            # a current logon (cross-plane correlation)
+            user_info = correlated_or_random_user(session_context, preferred_device_type="workstation")
             if user_info:
                 user   = user_info["username"]
                 src_ip = user_info["ip"]
@@ -1384,6 +1563,10 @@ def _generate_benign_log(config, session_context=None):
         return _generate_dns_query(config, src_ip, user, shost)
     elif chosen == "admin_event":
         return _generate_admin_event(config)
+    elif chosen == "mgmt_admin_session":
+        return _simulate_mgmt_admin_session(config, session_context)
+    elif chosen == "snmp_poll":
+        return _simulate_snmp_poll(config, session_context)
     elif chosen == "vpn_event":
         return _generate_vpn_event(config, session_context)
     elif chosen == "ntp_sync":
@@ -1412,9 +1595,7 @@ def _generate_benign_log(config, session_context=None):
         return _generate_ssl_inspection(config, src_ip, user, shost)
 
 
-# ---------------------------------------------------------------------------
 # Threat event generators
-# ---------------------------------------------------------------------------
 
 def _simulate_ips_attack(config):
     """Inbound IPS signature trigger — utm:ips (external attacker → internal server)."""
@@ -1585,19 +1766,25 @@ def _simulate_webfilter_block(config, src_ip, user, shost):
     return _format_fortinet_cef(config, "0201008192", "utm", "webfilter", "warning", fields)
 
 
-def _simulate_large_upload(config, src_ip, user, shost):
-    """DNS precursor + large upload — returns list."""
+def _simulate_large_upload(config, src_ip, user, shost, domain=None, dst_ip=None):
+    """DNS precursor + large upload — returns list.
+
+    domain/dst_ip: pinned by an orchestrated scenario to the name it had
+    Infoblox resolve and the address that answer carried, so this session
+    lands on the host the victim actually looked up.
+    """
     print(f"    - Fortinet Module simulating: Large upload from {src_ip}")
     forti_conf   = _get_config(config)
     exfil_dests  = config.get("exfiltration_destinations") or [{}]
     dest         = random.choice(exfil_dests)
-    dst_ip       = rand_ip_from_network(ip_network(dest.get("ip_range", "154.53.224.0/24"), strict=False))
-    domain       = dest.get("domain", "file-sharing-service.com")
+    domain       = domain or dest.get("domain", "file-sharing-service.com")
+    dst_ip       = (dst_ip or resolver.resolve_one(domain)
+                    or rand_ip_from_network(ip_network(dest.get("ip_range", "154.53.224.0/24"), strict=False)))
     geo          = _ext_geo()
     sent_mb      = random.randint(100, 500)
     duration_s   = random.randint(300, 1800)
 
-    logs = [_dns_precursor(config, src_ip, user, shost, domain)]
+    logs = [_dns_precursor(config, src_ip, user, shost, domain, dst_ip)]
 
     fields = _base_traffic_fields(
         config, src_ip, shost, user, dst_ip, domain, "6", 443, "accept",
@@ -1605,7 +1792,12 @@ def _simulate_large_upload(config, src_ip, user, shost):
         dst_city=geo["city"], dst_region=geo["region"]
     )
     fields.update({
-        "app":              "HTTPS",
+        # "SSL", not "HTTPS": xdm.network.application_protocol comes from `app`, and the
+        # Large Upload (HTTPS) alerts that fire (Check Point) carry app_id 'ip,tcp,ssl'
+        # from an "SSL" application. FortiGate uploads labelled "HTTPS" -- 11 over
+        # 100 MB in 14 days -- never fired. Real FortiOS App Control names generic TLS
+        # "SSL"; the upload-specific signature stays in FTNTFGTapp.
+        "app":              "SSL",
         "out":              sent_mb * 1024 * 1024,
         "in":               random.randint(1000, 10000),
         "FTNTFGTapp":       "HTTPS.Upload",
@@ -1656,7 +1848,7 @@ def _simulate_port_scan(config, src_ip, user, shost):
             "FTNTFGTsentpkt":           1,
             "FTNTFGTrcvdpkt":           0,
             "FTNTFGTosname":            random.choice(_SRC_OS_WINDOWS),
-            "FTNTFGTsrcmac":            _random_mac(),
+            "FTNTFGTsrcmac":            _random_mac(shost),
             "FTNTFGTservice":           _port_to_service(port),
             "FTNTFGTlogdesc":           "Forward traffic denied",
             "FTNTFGTsrcintfrole":       "lan",
@@ -1666,7 +1858,7 @@ def _simulate_port_scan(config, src_ip, user, shost):
             "reason":                   "no-policy-match",
             "msg":                      f"Denied by forward policy check port {port}",
         }
-        logs.append(_format_fortinet_cef(config, "0000000014", "traffic", "forward", "warning", fields))
+        logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "warning", fields))
     # 1-2 successful connections on open ports — attacker finds live services
     open_ports = random.sample([22, 80, 443, 445, 3389], k=random.randint(1, 2))
     for port in open_ports:
@@ -1692,7 +1884,7 @@ def _simulate_port_scan(config, src_ip, user, shost):
             "FTNTFGTsentpkt":           random.randint(10, 100),
             "FTNTFGTrcvdpkt":           random.randint(10, 100),
             "FTNTFGTosname":            random.choice(_SRC_OS_WINDOWS),
-            "FTNTFGTsrcmac":            _random_mac(),
+            "FTNTFGTsrcmac":            _random_mac(shost),
             "FTNTFGTservice":           _port_to_service(port),
             "FTNTFGTlogdesc":           "Forward traffic accepted",
             "FTNTFGTsrcintfrole":       "lan",
@@ -1818,138 +2010,154 @@ def _simulate_auth_brute_force(config):
     return logs
 
 
-def _simulate_vpn_brute_force(config):
-    """
-    SSL VPN credential stuffing — repeated failed tunnel events.
-    Returns list of log strings.
-    """
-    print(f"    - Fortinet Module simulating: VPN brute force")
-    forti_conf   = _get_config(config)
-    gw_ip        = forti_conf.get("vpn_gateway_ip", "203.0.113.20")
-    attacker_ip  = _random_external_ip()
-    geo          = _ext_geo()
-    attempt_cnt  = random.randint(15, 40)
-    # Cycle through usernames for credential stuffing
-    candidate_users = ["admin", "vpnuser", "jsmith", "bjones", "mwilliams",
-                       "rthomas", "agarcia", "dlee", "service", "test"]
-    logs         = []
+def _simulate_vpn_brute_force(config, session_context=None):
+    """ONE real user's SSL-VPN account hammered from one IP — XSIAM "VPN login
+    Brute-Force attempt": "A user account failed to log in to a VPN service multiple
+    times in a short time period." Identity Analytics, test period 1 hour.
 
-    for i in range(attempt_cnt):
-        user = candidate_users[i % len(candidate_users)]
-        fields = {
-            "src":                  attacker_ip,
-            "dst":                  gw_ip,
-            "dpt":                  443,
-            "proto":                "6",
-            "suser":                user,
-            "FTNTFGTxauthuser":     user,
-            "FTNTFGTxauthgroup":    "N/A",
-            "FTNTFGTtunneltype":    "ssl-vpn",
-            "FTNTFGTremotegw":      attacker_ip,
-            "FTNTFGTvpntunnel":     "SSL-VPN-Tunnel",
-            "FTNTFGTduration":      0,
-            "act":                  "tunnel-down",
-            "outcome":              "failed",
-            "reason":               "sslvpn_login_permission_denied",
-            "FTNTFGTlogdesc":       "SSL VPN login fail",
-            "FTNTFGTsrccountry":    geo["country"],
-            "FTNTFGTsrccity":       geo["city"],
-            "externalId":           _session_id(),
-            "msg":                  f"SSL VPN login failed for user {user}",
+    REBUILT 2026-09-17. The previous version was a PASSWORD SPRAY mislabelled as brute
+    force: it cycled 10 usernames so each got only 1-4 failures, and half of them
+    (admin, test, vpnuser, service) are not real identities. Every username also
+    reached XSIAM as EXAMPLECORP\\user, which collapses all VPN users into one identity
+    (see _format_fortinet_cef). The spray shape now lives in _simulate_vpn_password_spray.
+
+    Now: one real user from the session, 12-25 failures from one attacker IP inside a
+    6-12 minute window, then 50% of the time a success ("Successful VPN Login Brute
+    Force" variation). The attacker IP comes from the AMBIENT external pool — countries
+    already in the org baseline — so this cannot burn the new-country detector, and its
+    country label is the IP's real country.
+    """
+    print("    - Fortinet Module simulating: VPN brute force (single account)")
+    forti_conf  = _get_config(config)
+    gw_ip       = forti_conf.get("vpn_gateway_ip", "203.0.113.20")
+    user_info   = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
+    user        = user_info["username"] if user_info else "jsmith"
+    attacker_ip = _random_external_ip()
+    country     = ip_country(attacker_ip, config)[1] or "Reserved"
+    n_fail      = random.randint(12, 25)
+    now         = time.time()
+    t           = now - random.randint(360, 720)
+    logs        = []
+
+    def _evt(ts, success):
+        f = {
+            "src": attacker_ip, "dst": gw_ip, "dpt": 443, "proto": "6",
+            "suser": user, "FTNTFGTxauthuser": user, "FTNTFGTxauthgroup": "VPN_Users",
+            "FTNTFGTtunneltype": "ssl-vpn", "FTNTFGTremotegw": attacker_ip,
+            "FTNTFGTvpntunnel": "SSL-VPN-Tunnel", "FTNTFGTduration": 0,
+            "FTNTFGTsrccountry": country,
+            "FTNTFGTeventtime": int(ts * 1_000_000_000),
+            "externalId": _session_id(),
         }
-        logs.append(_format_fortinet_cef(config, "0101039428", "event", "vpn", "warning", fields))
-    # Final success — attacker found valid credentials; triggers XSIAM brute-force detection
-    success_user = candidate_users[attempt_cnt % len(candidate_users)]
-    success_fields = {
-        "src":                  attacker_ip,
-        "dst":                  gw_ip,
-        "dpt":                  443,
-        "proto":                "6",
-        "suser":                success_user,
-        "FTNTFGTxauthuser":    success_user,
-        "FTNTFGTxauthgroup":   "N/A",
-        "FTNTFGTtunneltype":   "ssl-vpn",
-        "FTNTFGTremotegw":     attacker_ip,
-        "FTNTFGTvpntunnel":    "SSL-VPN-Tunnel",
-        "FTNTFGTduration":     0,
-        "act":                 "tunnel-up",
-        "outcome":             "success",
-        "FTNTFGTlogdesc":      "SSL VPN new connection",
-        "FTNTFGTsrccountry":   geo["country"],
-        "FTNTFGTsrccity":      geo["city"],
-        "externalId":          _session_id(),
-        "msg":                 f"SSL VPN tunnel established for user {success_user}",
-    }
-    logs.append(_format_fortinet_cef(config, "0101039424", "event", "vpn", "notice", success_fields))
+        if success:
+            ip = f"10.212.134.{random.randint(100, 200)}"
+            f.update({"act": "tunnel-up", "outcome": "success",
+                      "FTNTFGTlogdesc": "SSL VPN tunnel up",
+                      "FTNTFGTtunnelid": random.randint(100000, 999999),
+                      "FTNTFGTtunnelip": ip, "FTNTFGTassignip": ip,
+                      "msg": "SSL tunnel established"})
+            return _format_fortinet_cef(config, "0101039424", "event", "vpn", "notice", f)
+        f.update({"act": "ssl-login-fail", "outcome": "failed",
+                  "reason": "sslvpn_login_permission_denied",
+                  "FTNTFGTlogdesc": "SSL VPN login fail",
+                  "msg": f"SSL VPN login failed for user {user}"})
+        return _format_fortinet_cef(config, "0101039426", "event", "vpn", "warning", f)
+
+    step = (now - t) / (n_fail + 1)
+    for _ in range(n_fail):
+        t += step * random.uniform(0.6, 1.4)
+        logs.append(_evt(min(t, now - 1), success=False))
+    if random.random() < 0.5:
+        logs.append(_evt(now, success=True))
+    return logs
+
+
+def _simulate_vpn_password_spray(config, session_context=None):
+    """One IP trying ONE or two passwords against MANY real accounts — XSIAM "VPN Login
+    Password Spray".
+
+    This is the shape the old _simulate_vpn_brute_force actually produced, rebuilt with
+    REAL session usernames (it used placeholders like admin/test/vpnuser) and bare VPN
+    identities. 15-40 distinct users, 1-2 failures each, from one ambient-pool IP over
+    10-30 minutes.
+    """
+    print("    - Fortinet Module simulating: VPN password spray")
+    forti_conf  = _get_config(config)
+    gw_ip       = forti_conf.get("vpn_gateway_ip", "203.0.113.20")
+    attacker_ip = _random_external_ip()
+    country     = ip_country(attacker_ip, config)[1] or "Reserved"
+    users = set()
+    for _ in range(200):
+        if len(users) >= random.randint(15, 40):
+            break
+        ui = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
+        users.add(ui["username"] if ui else f"user{random.randint(1, 500)}")
+    now  = time.time()
+    span = random.randint(600, 1800)
+    logs = []
+    for u in users:
+        for _ in range(random.randint(1, 2)):
+            ts = now - random.randint(0, span)
+            f = {
+                "src": attacker_ip, "dst": gw_ip, "dpt": 443, "proto": "6",
+                "suser": u, "FTNTFGTxauthuser": u, "FTNTFGTxauthgroup": "VPN_Users",
+                "FTNTFGTtunneltype": "ssl-vpn", "FTNTFGTremotegw": attacker_ip,
+                "FTNTFGTvpntunnel": "SSL-VPN-Tunnel", "FTNTFGTduration": 0,
+                "FTNTFGTsrccountry": country,
+                "FTNTFGTeventtime": int(ts * 1_000_000_000),
+                "externalId": _session_id(),
+                "act": "ssl-login-fail", "outcome": "failed",
+                "reason": "sslvpn_login_permission_denied",
+                "FTNTFGTlogdesc": "SSL VPN login fail",
+                "msg": f"SSL VPN login failed for user {u}",
+            }
+            logs.append(_format_fortinet_cef(config, "0101039426", "event", "vpn", "warning", f))
     return logs
 
 
 def _simulate_vpn_impossible_travel(config, session_context=None):
+    """Same user, two SUCCESSFUL SSL-VPN tunnels from two continents minutes apart —
+    XSIAM "Impossible traveler - VPN": "A user connected to a VPN service from
+    multiple remote countries in a short period of time". Test period 3 hours.
+
+    REBUILT 2026-09-17. The previous version:
+      * was built on a failed-then-succeeded premise the detector does not describe —
+        it keys on CONNECTIONS from multiple countries;
+      * labelled 175.45.176.10 (a North Korean netblock) as "China", and FortiGate's
+        XIF records the TEXT label as the country;
+      * used a fixed "benign" IP that was not the user's own home IP;
+      * and, like every FortiGate VPN event, reached XSIAM as EXAMPLECORP\\user.
+    Now the first tunnel is from the user's stable home IP and the second from a
+    home-pool range on a DIFFERENT continent (session_utils.impossible_travel_ips),
+    8-20 minutes later, each labelled with its real country. Both countries are already
+    in the org baseline, so this adds ZERO new countries.
     """
-    Same VPN user: FAILED logins then a SUCCESS from two geographically distant IPs
-    in an impossible time window.
-
-    The XSIAM UEBA impossible-travel detector fires on a failed-then-succeeded auth
-    pattern (compromised-credential signal) in EACH location — not on bare successful
-    logins ("door-knocking" that only fails is background noise). So each of the two
-    geos emits several SSL-VPN login failures (0101039428) followed by a successful
-    tunnel-up (0101039426). Same user; the trusted location is back-dated 5-10 min via
-    FTNTFGTeventtime so the two successes sit an impossible distance apart in time.
-
-    Returns list of log strings (multi-event).
-    """
-    print("    - Fortinet Module simulating: VPN Impossible Travel (door-knock + success x2 geos)")
-    forti_conf  = _get_config(config)
-    gw_ip       = forti_conf.get("vpn_gateway_ip", "203.0.113.20")
-    travel      = config.get("impossible_travel_scenario", {})
-    benign_loc  = travel.get("benign_location",     {"ip": "68.185.12.14",  "country": "United States", "city": "New York"})
-    suspect_loc = travel.get("suspicious_location", {"ip": "175.45.176.10", "country": "China",         "city": "Shanghai"})
-
-    if session_context:
-        user_info = get_random_user(session_context, preferred_device_type="workstation")
-        user = user_info["username"] if user_info else "jsmith"
-    else:
-        user = random.choice(["jsmith", "bjones", "mwilliams"])
-
-    now         = time.time()
-    gap_seconds = random.randint(5, 10) * 60
-
-    def _vpn_auth(loc, eventtime_ns, success):
-        fields = {
-            "src": loc["ip"], "dst": gw_ip, "dpt": 443, "proto": "6",
+    print("    - Fortinet Module simulating: VPN impossible travel (two continents)")
+    forti_conf = _get_config(config)
+    gw_ip      = forti_conf.get("vpn_gateway_ip", "203.0.113.20")
+    user_info  = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
+    user       = user_info["username"] if user_info else "jsmith"
+    ip1, _, ip2, _ = impossible_travel_ips(vpn_username(user), config)
+    now  = time.time()
+    logs = []
+    for ip, ts in ((ip1, now - random.randint(8, 20) * 60), (ip2, now)):
+        assign = f"10.212.134.{random.randint(100, 200)}"
+        f = {
+            "src": ip, "dst": gw_ip, "dpt": 443, "proto": "6",
             "suser": user, "FTNTFGTxauthuser": user, "FTNTFGTxauthgroup": "VPN_Users",
             "FTNTFGTtunneltype": "ssl-vpn", "FTNTFGTvpntunnel": "SSL-VPN-Tunnel",
-            "FTNTFGTremotegw": loc["ip"],
-            "FTNTFGTsrccountry": loc.get("country"), "FTNTFGTsrccity": loc.get("city"),
+            "FTNTFGTremotegw": ip,
+            "FTNTFGTsrccountry": ip_country(ip, config)[1] or "Reserved",
             "FTNTFGTduration": 0,
-            "FTNTFGTeventtime": eventtime_ns,     # back-dated -> XSIAM _time (parse: eventtime-duration)
+            "FTNTFGTeventtime": int(ts * 1_000_000_000),
             "externalId": _session_id(),
+            "act": "tunnel-up", "outcome": "success",
+            "FTNTFGTlogdesc": "SSL VPN tunnel up",
+            "FTNTFGTtunnelid": random.randint(100000, 999999),
+            "FTNTFGTtunnelip": assign, "FTNTFGTassignip": assign,
+            "msg": "SSL tunnel established",
         }
-        if success:
-            assign = f"10.212.134.{random.randint(100,200)}"
-            fields.update({
-                "act": "tunnel-up", "outcome": "success",
-                "FTNTFGTlogdesc": "SSL VPN tunnel up",
-                "FTNTFGTtunnelid": random.randint(100000, 999999),
-                "FTNTFGTtunnelip": assign, "FTNTFGTassignip": assign,
-                "msg": f"SSL VPN tunnel established for user {user} from {loc['ip']}",
-            })
-            return _format_fortinet_cef(config, "0101039426", "event", "vpn", "notice", fields)
-        fields.update({
-            "act": "tunnel-down", "outcome": "failed",
-            "reason": "sslvpn_login_permission_denied",
-            "FTNTFGTlogdesc": "SSL VPN login fail",
-            "msg": f"SSL VPN login failed for user {user} from {loc['ip']}",
-        })
-        return _format_fortinet_cef(config, "0101039428", "event", "vpn", "warning", fields)
-
-    logs = []
-    for loc, base_offset in [(benign_loc, -gap_seconds), (suspect_loc, 0)]:
-        n_fails = random.randint(3, 5)
-        for i in range(n_fails):     # door-knocking: failed logins
-            logs.append(_vpn_auth(loc, int((now + base_offset + i * 3) * 1_000_000_000), success=False))
-        # successful login after the failures — the pattern the detector fires on
-        logs.append(_vpn_auth(loc, int((now + base_offset + n_fails * 3) * 1_000_000_000), success=True))
+        logs.append(_format_fortinet_cef(config, "0101039424", "event", "vpn", "notice", f))
     return logs
 
 
@@ -2013,7 +2221,7 @@ def _simulate_vpn_tor_login(config, session_context=None):
         "FTNTFGTlogdesc": "SSL VPN tunnel up",
         "msg": "SSL tunnel established",
     }
-    logs.append(_format_fortinet_cef(config, "0101039426", "event", "vpn", "notice", vpn_fields))
+    logs.append(_format_fortinet_cef(config, "0101039424", "event", "vpn", "notice", vpn_fields))
 
     # Logs 3+: Post-auth internal activity from VPN pool IP
     servers = config.get("internal_servers", ["10.0.10.50"])
@@ -2107,7 +2315,7 @@ def _simulate_smb_new_host_lateral(config, src_ip, user, shost, session_context=
             "FTNTFGTsentpkt":          random.randint(2, 20),
             "FTNTFGTrcvdpkt":          random.randint(5, 50),
             "FTNTFGTosname":           random.choice(_SRC_OS_WINDOWS),
-            "FTNTFGTsrcmac":           _random_mac(),
+            "FTNTFGTsrcmac":           _random_mac(shost),
             "FTNTFGTservice":          "SMB",
             "FTNTFGTlogdesc":          "Forward traffic",
             "FTNTFGTsrcintfrole":      "lan",
@@ -2132,8 +2340,13 @@ def _simulate_smb_rare_file_transfer(config, src_ip, user, shost):
     print(f"    - Fortinet Module simulating: SMB Rare File Transfer from {src_ip}")
     forti_conf       = _get_config(config)
     lan_iface        = forti_conf.get("interface_lan", "port10")
-    internal_servers = config.get("internal_servers", ["10.0.10.50"])
-    dst_ip     = random.choice([s for s in internal_servers if s != src_ip] or internal_servers)
+    try:
+        from modules.session_utils import rare_known_host
+    except ImportError:
+        from session_utils import rare_known_host
+    # A live workstation in another subnet: rare_internal_host() addresses were never
+    # seen anywhere, and Rare SMB/RDP never fired from any vendor while using them.
+    dst_ip     = rare_known_host(config, exclude=(src_ip,), avoid_subnet_of=src_ip)   # rarely-receiving host, not hot pool
     file_size  = random.randint(104_857_600, 1_073_741_824)  # 100 MB – 1 GB
     duration_s = random.randint(120, 900)
 
@@ -2159,7 +2372,7 @@ def _simulate_smb_rare_file_transfer(config, src_ip, user, shost):
         "FTNTFGTsentpkt":          random.randint(100000, 1000000),
         "FTNTFGTrcvdpkt":          random.randint(1000, 50000),
         "FTNTFGTosname":           random.choice(_SRC_OS_WINDOWS),
-        "FTNTFGTsrcmac":           _random_mac(),
+        "FTNTFGTsrcmac":           _random_mac(shost),
         "FTNTFGTservice":          "SMB",
         "FTNTFGTlogdesc":          "Forward traffic",
         "FTNTFGTsrcintfrole":      "lan",
@@ -2219,7 +2432,7 @@ def _simulate_smb_share_enumeration(config, src_ip, user, shost):
             "FTNTFGTsentpkt":          1,
             "FTNTFGTrcvdpkt":          0,
             "FTNTFGTosname":           random.choice(_SRC_OS_WINDOWS),
-            "FTNTFGTsrcmac":           _random_mac(),
+            "FTNTFGTsrcmac":           _random_mac(shost),
             "FTNTFGTservice":          "SMB",
             "FTNTFGTlogdesc":          "Forward traffic",
             "FTNTFGTsrcintfrole":      "lan",
@@ -2270,7 +2483,7 @@ def _simulate_lateral_movement(config, src_ip, user, shost):
             "FTNTFGTsentpkt":           random.randint(5, 50),
             "FTNTFGTrcvdpkt":           random.randint(3, 30),
             "FTNTFGTosname":            random.choice(_SRC_OS_WINDOWS),
-            "FTNTFGTsrcmac":            _random_mac(),
+            "FTNTFGTsrcmac":            _random_mac(shost),
             "FTNTFGTservice":           _port_to_service(lateral_port),
             "FTNTFGTlogdesc":           "Forward traffic" if act != "deny" else "Forward traffic denied",
             "FTNTFGTsrcintfrole":       "lan",
@@ -2281,9 +2494,9 @@ def _simulate_lateral_movement(config, src_ip, user, shost):
         }
         logs.append(_format_fortinet_cef(
             config,
-            "0000000013" if act == "accept" else "0000000014",
+            "0000000013",
             "traffic", "forward",
-            "notice" if act == "accept" else "warning",
+            "notice",
             fields
         ))
     return logs
@@ -2370,11 +2583,13 @@ def _simulate_tor_connection(config, src_ip, user, shost):
     """DNS precursor + Tor connection — returns list."""
     print(f"    - Fortinet Module simulating: Tor connection from {src_ip}")
     tor_nodes  = config.get("tor_exit_nodes", [])
+    _tor_entry = None
     if tor_nodes:
         _tor_entry = random.choice(tor_nodes)
         tor_ip = _tor_entry.get("ip", _random_external_ip()) if isinstance(_tor_entry, dict) else _tor_entry
     else:
         tor_ip = _random_external_ip()
+    tor_country = _tor_exit_country(_tor_entry)
     tor_port  = random.choices([443, 9001, 9030], weights=[60, 30, 10])[0]
     duration_s = random.randint(60, 3600)
 
@@ -2382,7 +2597,7 @@ def _simulate_tor_connection(config, src_ip, user, shost):
 
     fields = _base_traffic_fields(
         config, src_ip, shost, user, tor_ip, None, "6", tor_port, "accept",
-        duration_s=duration_s, dst_country="Reserved"
+        duration_s=duration_s, dst_country=tor_country
     )
     fields.update({
         "out":              random.randint(10000, 100000),
@@ -2395,32 +2610,52 @@ def _simulate_tor_connection(config, src_ip, user, shost):
         "FTNTFGTappcat":    "Proxy",
         "FTNTFGTapprisk":   "critical",
         "FTNTFGTapplist":   _get_config(config).get("applist", "g-default"),
-        "FTNTFGTdstcountry": "Reserved",
         "msg":              f"Connection to Tor exit node {tor_ip}:{tor_port}",
     })
     logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "warning", fields))
     return logs
 
 
-_beacon_target_map: dict = {}   # src_ip -> stable (resolver_ip, c2_base_domain) for recurring-rare-domain detection
+try:
+    from modules.session_utils import beacon_targets as _beacon_targets
+except ImportError:
+    from session_utils import beacon_targets as _beacon_targets
+# Persists across restarts (state/beacon_targets.json): a source keeps its C2, as a
+# real implant does, so recurring-access detectors can see the pair on many days.
+_beacon_target_map = _beacon_targets("fortinet_fortigate")
 
 
 def _simulate_dns_c2_beacon(config, src_ip, user, shost):
     """
-    DNS beaconing to suspected C2 resolver — repeated queries (returns list).
-    Signal: regularity and volume of DNS queries to same suspicious resolver.
+    DNS beaconing to suspected C2 resolver_ip — repeated queries (returns list).
+    Signal: regularity and volume of DNS queries to same suspicious resolver_ip.
     """
+    # Recurring-access detectors need the SAME host on many days; a random pick among
+    # ~500 users almost never repeats. One of a few fixed hosts (session_utils.recurring_host).
+    try:
+        from modules.session_utils import recurring_host
+    except ImportError:
+        from session_utils import recurring_host
+    _h = recurring_host("fortinet_fortigate:dns_c2_beacon")
+    if _h:
+        src_ip, user, shost = _h
     print(f"    - Fortinet Module simulating: DNS C2 beacon from {src_ip}")
     forti_conf   = _get_config(config)
+    # Eight curated DGA names meant a "beacon to an algorithmic domain" detector saw
+    # eight labels forever. dga_domain() is effectively unique per draw; the curated
+    # pool stays the head via threat_domains.pick.
     dga_domains  = forti_conf.get("dga_beacon_domains",
                                    forti_conf.get("malicious_dns_domains", ["asdfqwerlkj.info"]))
-    # Stable resolver + C2 base domain per source so successive runs recur to the same
+    # Stable resolver_ip + C2 base domain per source so successive runs recur to the same
     # rare destination; only the DGA subdomain varies (genuine beacon behaviour).
     target = _beacon_target_map.get(src_ip)
     if not target:
-        target = (_random_external_ip(), random.choice(dga_domains))
+        target = (rare_external_ip(),
+                  threat_domains.pick(config, pool_key="dga_beacon_domains",
+                                      section="fortinet_config")
+                  if config else random.choice(dga_domains))   # rare resolver_ip
         _beacon_target_map[src_ip] = target
-    resolver, base_domain = target
+    resolver_ip, base_domain = target
     query_count  = random.randint(15, 40)
     logs         = []
 
@@ -2433,7 +2668,7 @@ def _simulate_dns_c2_beacon(config, src_ip, user, shost):
             "spt":              random.randint(49152, 65535),
             "shost":            shost,
             "suser":            user,
-            "dst":              resolver,
+            "dst":              resolver_ip,
             "dpt":              53,
             "proto":            "17",
             "act":              "passthrough",
@@ -2452,7 +2687,7 @@ def _simulate_dns_c2_beacon(config, src_ip, user, shost):
             "FTNTFGTsentpkt":   1,
             "FTNTFGTrcvdpkt":   1,
             "FTNTFGTosname":    random.choice(_SRC_OS_WINDOWS),
-            "FTNTFGTsrcmac":    _random_mac(),
+            "FTNTFGTsrcmac":    _random_mac(shost),
             "FTNTFGTservice":   "DNS",
             "FTNTFGTlogdesc":   "DNS response",
             "FTNTFGTsrcintfrole": "lan",
@@ -2469,13 +2704,18 @@ def _simulate_server_outbound_http(config):
     """DNS precursor + server outbound HTTP — returns list."""
     print(f"    - Fortinet Module simulating: Server outbound HTTP")
     servers     = config.get("internal_servers", ["10.0.10.50"])
-    src_ip      = random.choice(servers)
-    dst_ip      = _random_external_ip()
+    try:
+        from modules.session_utils import stable_subset
+    except ImportError:
+        from session_utils import stable_subset
+    src_ip      = random.choice(stable_subset(servers, "fortinet_fortigate:server_outbound_http") or servers)
+    dst_ip      = _beacon_target_map.get(f"srvhttp::{src_ip}") or rare_external_ip()
+    _beacon_target_map[f"srvhttp::{src_ip}"] = dst_ip
     geo         = _ext_geo()
     duration_s  = random.randint(5, 120)
     domain      = random.choice(["cdn-update.biz", "api-sync.net", "telemetry-relay.com"])
 
-    logs = [_dns_precursor(config, src_ip, "N/A", None, domain)]
+    logs = [_dns_precursor(config, src_ip, "N/A", None, domain, dst_ip)]
 
     fields = _base_traffic_fields(
         config, src_ip, None, "N/A", dst_ip, None, "6", 80, "accept",
@@ -2563,7 +2803,7 @@ def _simulate_rdp_lateral(config, src_ip, user, shost, session_context=None):
             "FTNTFGTrcvdpkt":           random.randint(20, 2000) if ok else 0,
             "FTNTFGTosname":            random.choice(_SRC_OS_WINDOWS),
             "FTNTFGTdstosname":         random.choice(_SRC_OS_WINDOWS),
-            "FTNTFGTsrcmac":            _random_mac(),
+            "FTNTFGTsrcmac":            _random_mac(shost),
             "FTNTFGTservice":           "RDP",
             "FTNTFGTlogdesc":           "Forward traffic" if ok else "Forward traffic denied",
             "FTNTFGTsrcintfrole":       "lan",
@@ -2573,8 +2813,8 @@ def _simulate_rdp_lateral(config, src_ip, user, shost, session_context=None):
             "msg":                      f"RDP {act} from {src_ip} to {dst_ip}:3389",
         }
         return _format_fortinet_cef(config,
-            "0000000013" if ok else "0000000014",
-            "traffic", "forward", "notice" if ok else "warning", fields)
+            "0000000013",
+            "traffic", "forward", "notice", fields)
 
     logs = []
     for dst_ip in targets:
@@ -2616,6 +2856,281 @@ def _simulate_app_control_block(config, src_ip, user, shost):
         "msg":              f"Application {app_entry['app']} blocked by policy (risk: {app_entry['risk']})",
     })
     return _format_fortinet_cef(config, "1059028992", "utm", "app-ctrl", "warning", fields)
+
+
+def _simulate_rare_domain_communication(config, src_ip, user, shost):
+    """ALLOWED web session from a workstation to a domain nobody in the org has ever
+    resolved — XSIAM "Abnormal Communication to a Rare Domain" (single event, NDR C2
+    Detection; variations for an attack-platform port and a less common port).
+
+    NEW 2026-09-17 — the analytic successor to webfilter_block, which stays as vendor
+    noise. webfilter_block never fired because it could not: it is a BLOCK (no
+    communication happened), its "domains" come from a small fixed config map that
+    recurs every run, and its destination was the ambient IP pool.
+
+    FortiGate is one of only two firewall datasets whose domain reaches XDM
+    (xdm.target.url from `request`, xdm.network.dns.dns_question.name from DNS). Emits
+    the DNS precursor for the name, a passthrough utm:webfilter record, and the
+    traffic:forward accept, to a fresh session_utils.rare_domain() hosted on a
+    rare-pool IP. 25% of the time on a less common / attack-platform port.
+    """
+    domain = rare_domain()
+    dst_ip = rare_external_ip()
+    dpt    = random.choices([443, 8443, 4443, 8080, 4444], weights=[75, 8, 7, 6, 4])[0]
+    logs   = [_dns_precursor(config, src_ip, user, shost, domain, dst_ip)]
+
+    wf = _base_traffic_fields(config, src_ip, shost, user, dst_ip, domain, "6", dpt, "passthrough",
+                              duration_s=random.randint(2, 40))
+    wf.update({
+        "app": "HTTPS", "act": "passthrough", "FTNTFGTutmaction": "passthrough",
+        "FTNTFGTeventtype": "ftgd_allow",
+        "FTNTFGTlogdesc": "URL belongs to an allowed category in policy",
+        "FTNTFGTcatdesc": "Newly Observed Domain",
+        "request": f"https://{domain}/", "FTNTFGThttpmethod": "GET", "FTNTFGThttpcode": "200",
+        "requestClientApplication": random.choice(_BROWSER_UA),
+        "outcome": "success", "msg": f"URL visited: https://{domain}/",
+    })
+    logs.append(_format_fortinet_cef(config, "0316013057", "utm", "webfilter", "notice", wf))
+
+    tr = _base_traffic_fields(config, src_ip, shost, user, dst_ip, domain, "6", dpt, "accept",
+                              duration_s=random.randint(2, 40))
+    tr.update({"app": "HTTPS", "request": f"https://{domain}/",
+               "out": random.randint(800, 6_000), "in": random.randint(2_000, 60_000),
+               "msg": f"HTTPS session to {domain}"})
+    logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", tr))
+    return logs
+
+
+# Peer ports a BitTorrent client actually uses: the classic 6881-6889 range, the
+# uTorrent/Transmission default 51413, and DHT on the same ports over UDP.
+_BT_PORTS = [6881, 6882, 6883, 6884, 6885, 6886, 6887, 6888, 6889, 51413]
+
+
+def _simulate_torrent_client(config, src_ip, user, shost):
+    """A workstation running a BitTorrent client — XSIAM "A Torrent client was
+    detected on a host": "The host produced traffic consistent with the BitTorrent
+    protocol."
+
+    NEW 2026-09-17 — the analytic successor to app_control_block, which stays as vendor
+    noise. app_control_block could not fire: it was a single BLOCKED event (no BitTorrent
+    traffic ever flowed), and it put the app name in FTNTFGTapp — the FortiGate XIF
+    maps xdm.network.application_protocol from `app` (measured: `app` and XDM agree
+    row-for-row; FTNTFGTapp never reaches it).
+
+    Now: 12-30 ALLOWED sessions to distinct peers on BitTorrent ports, ~40% UDP (DHT /
+    uTP), app="BitTorrent" in the field XSIAM reads, spread across 5-20 minutes.
+    """
+    print(f"    - Fortinet Module simulating: BitTorrent client on {src_ip}")
+    now  = time.time()
+    logs = []
+    for _ in range(random.randint(12, 30)):
+        udp  = random.random() < 0.4
+        peer = _random_external_ip() if random.random() < 0.5 else rare_external_ip()
+        dpt  = random.choice(_BT_PORTS)
+        f = _base_traffic_fields(config, src_ip, shost, user, peer, None,
+                                 "17" if udp else "6", dpt, "accept",
+                                 duration_s=random.randint(5, 900))
+        f.update({
+            "app": "BitTorrent", "FTNTFGTapp": "BitTorrent", "FTNTFGTappid": 15001,
+            "FTNTFGTappcat": "P2P", "FTNTFGTapprisk": "high",
+            "FTNTFGTservice": "udp/" + str(dpt) if udp else "tcp/" + str(dpt),
+            "out": random.randint(20_000, 4_000_000), "in": random.randint(50_000, 12_000_000),
+            "FTNTFGTeventtime": int((now - random.randint(0, 1200)) * 1_000_000_000),
+            "msg": f"BitTorrent peer session to {peer}:{dpt}",
+        })
+        logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", f))
+    return logs
+
+
+# ── Analytic detectors added 2026-09-18 (Tier 1-3 coverage; see docs/firewall-analytics.md) ──
+
+def _fg_conn(config, src, dst, dpt, app, act, user=None, shost=None,
+             in_role="lan", out_role="wan", proto="6", out_b=None, in_b=None,
+             duration_s=None, event_time=None, appcat="Network.Service", apprisk="elevated",
+             dst_country="United States", logdesc="Forward traffic"):
+    """Compact FortiGate traffic:forward event builder for the added detectors.
+
+    `app` lands in the `app` field, which FortiGate's XIF maps to
+    xdm.network.application_protocol (measured 2026-09-17). in_role/out_role set the
+    interface roles: lan->wan outbound, wan->lan inbound (New FTP Server), lan->lan
+    east-west (Port Sweep, DC SMB).
+    """
+    forti_conf = _get_config(config)
+    iface = {"lan": forti_conf.get("interface_lan", "port10"),
+             "wan": forti_conf.get("interface_wan", "port1")}
+    f = {
+        "src": src, "spt": random.randint(49152, 65535), "shost": shost, "suser": user,
+        "dst": dst, "dpt": dpt, "proto": proto, "app": app, "act": act,
+        "deviceInboundInterface": iface[in_role], "deviceOutboundInterface": iface[out_role],
+        "FTNTFGTpolicyid": forti_conf.get("default_policy_id", "1"),
+        "FTNTFGTpolicyname": logdesc.replace(" ", "_"),
+        "FTNTFGTapp": app, "FTNTFGTappcat": appcat, "FTNTFGTapprisk": apprisk,
+        "FTNTFGTsrccountry": "Reserved" if in_role == "lan" else dst_country,
+        "FTNTFGTdstcountry": dst_country if out_role == "wan" else "Reserved",
+        "FTNTFGTduration": (duration_s if duration_s is not None else random.randint(1, 60)),
+        "out": out_b if out_b is not None else random.randint(200, 5000),
+        "in": in_b if in_b is not None else random.randint(2000, 50000),
+        "FTNTFGTsentpkt": random.randint(2, 40), "FTNTFGTrcvdpkt": random.randint(5, 80),
+        "FTNTFGTosname": random.choice(_SRC_OS_WINDOWS), "FTNTFGTsrcmac": _random_mac(shost),
+        "FTNTFGTservice": _port_to_service(dpt) or app,
+        "FTNTFGTlogdesc": logdesc,
+        "FTNTFGTsrcintfrole": in_role, "FTNTFGTdstintfrole": out_role,
+        "externalId": _session_id(),
+        "outcome": "success" if act in ("accept", "allow", "passthrough") else "failed",
+        "msg": f"{act} {app} {src} -> {dst}:{dpt}",
+    }
+    if event_time is not None:
+        f["FTNTFGTeventtime"] = int(event_time * 1_000_000_000)
+    return _format_fortinet_cef(config, "0000000013", "traffic", "forward",
+                                "notice" if act == "accept" else "warning", f)
+
+
+# Privileged ports only. The Cortex "Port Sweep" analytic counts connections to many
+# hosts "using privileged ports that serve a well-defined function"; privileged means
+# below 1024. This pool used to include 1433 (MSSQL) and 3389 (RDP), so a quarter of
+# sweeps -- in all four firewall modules, which shared the list -- could never satisfy
+# the detector. RDP and MSSQL sweeps are real attacker behaviour, but they belong to
+# the RDP/SQL analytics, not to Port Sweep.
+_FG_SWEEP_PORTS = [21, 22, 23, 88, 135, 139, 389, 445, 636]
+
+
+def _simulate_port_sweep(config, src_ip, user, shost):
+    """One internal host probing the SAME privileged port across MANY internal hosts in
+    several subnets — XSIAM "Port Sweep" (mirror of Port Scan; needs only
+    source/destination/port). Returns list."""
+    print(f"    - Fortinet Module simulating: Port Sweep from {src_ip}")
+    port = random.choice(_FG_SWEEP_PORTS)
+    try:
+        from modules.session_utils import sweep_targets
+    except ImportError:
+        from session_utils import sweep_targets
+    # Known live hosts over several /24s (session_utils.sweep_targets): random
+    # addresses in the /16s are hosts the analytics engine has never seen.
+    targets = set(sweep_targets(config, exclude={src_ip}))
+    responders = set(random.sample(sorted(targets), max(1, int(len(targets) * random.uniform(0.10, 0.30)))))
+    now = time.time(); window = random.randint(120, 600)
+    logs = []
+    for dst in targets:
+        ok = dst in responders
+        logs.append(_fg_conn(config, src_ip, dst, port, _port_to_service(port) or "tcp/" + str(port),
+                             "accept" if ok else "deny", user=user, shost=shost,
+                             in_role="lan", out_role="lan",
+                             out_b=(random.randint(200, 4000) if ok else 40),
+                             in_b=(random.randint(400, 20000) if ok else 0),
+                             duration_s=(random.randint(2, 45) if ok else 0),
+                             event_time=now - random.randint(0, window),
+                             logdesc="Forward traffic" if ok else "Forward traffic denied"))
+    return logs
+
+
+def _simulate_dc_smb_outbound(config, src_ip, user, shost):
+    """SMB from a DOMAIN CONTROLLER to a workstation — XSIAM "Suspicious SMB connection
+    from domain controller". Normal direction is workstation->DC. The source must be a
+    host XSIAM already sees as a DC, so it comes from _get_domain_controllers(). Returns
+    list."""
+    dcs = _get_domain_controllers(config)
+    if not dcs:
+        return None
+    dc_ip = random.choice(dcs)
+    print(f"    - Fortinet Module simulating: DC->workstation SMB from {dc_ip}")
+    nets = config.get("internal_networks", ["192.168.1.0/24"])
+    try:
+        target = rand_ip_from_network(ip_network(random.choice(nets), strict=False))
+    except Exception:
+        target = "192.168.1.101"
+    logs = []
+    for _ in range(random.randint(2, 4)):
+        logs.append(_fg_conn(config, dc_ip, target, 445, "SMB", "accept", user="SYSTEM",
+                             in_role="lan", out_role="lan", appcat="Network.Service",
+                             out_b=random.randint(5_000, 50_000), in_b=random.randint(5_000, 200_000),
+                             duration_s=random.randint(5, 60), logdesc="Forward traffic"))
+    return logs
+
+
+def _simulate_new_ftp_server(config, src_ip, user, shost):
+    """An internal host begins SERVING inbound FTP — XSIAM "New FTP Server" (and its
+    "from an external source" variation). 3-6 distinct external clients connect INBOUND
+    to an internal host on TCP/21. This is the correct shape; ftp_large_exfil (outbound
+    upload) was reclassified 2026-09-18. Returns list."""
+    print("    - Fortinet Module simulating: New FTP Server (inbound TCP/21)")
+    servers = config.get("internal_servers", [])
+    try:
+        from modules.session_utils import new_ftp_server_host
+    except ImportError:
+        from session_utils import new_ftp_server_host
+    ftp_ip = new_ftp_server_host(config)   # never a hot internal_servers host: see helper
+    now = time.time()
+    logs = []
+    for _ in range(random.randint(3, 6)):
+        client = _random_external_ip()
+        logs.append(_fg_conn(config, client, ftp_ip, 21, "FTP", "accept", user=None,
+                             in_role="wan", out_role="lan",
+                             out_b=random.randint(2_000, 20_000),
+                             in_b=random.randint(50_000, 5_000_000),
+                             duration_s=random.randint(10, 300),
+                             event_time=now - random.randint(0, 600),
+                             dst_country="Reserved", logdesc="Forward traffic"))
+    return logs
+
+
+_FG_RARE_APPID_PORTS = [443, 8443, 993, 465]
+
+
+def _simulate_rare_appid(config, src_ip, user, shost):
+    """A recognisable application on a port it does not belong on, to a RARE destination
+    — XSIAM "Rare AppID usage to a rare destination". FortiGate DPI identifies the app
+    regardless of port; the mismatch + rare dest is the signal. Returns list."""
+    print("    - Fortinet Module simulating: Rare AppID to rare destination")
+    app = random.choice(["SSH", "RDP", "SMTP", "IRC"])
+    dpt = random.choice(_FG_RARE_APPID_PORTS)
+    dst = rare_external_ip()
+    now = time.time()
+    logs = []
+    for _ in range(random.randint(1, 3)):
+        logs.append(_fg_conn(config, src_ip, dst, dpt, app, "accept", user=user, shost=shost,
+                             appcat="unscanned", apprisk="high",
+                             out_b=random.randint(20_000, 2_000_000),
+                             in_b=random.randint(20_000, 2_000_000),
+                             duration_s=random.randint(60, 1800),
+                             event_time=now - random.randint(0, 600),
+                             logdesc="Forward traffic"))
+    return logs
+
+
+def _simulate_abnormal_rdp_rare_host(config, src_ip, user, shost):
+    """A single RDP session from a seldom-seen internal host to a seldom-targeted one —
+    XSIAM "Abnormal RDP session to a remote host from a rarely seen host". Source from a
+    stable rare-source pool (an ordinary workstation carries too much traffic to be
+    "rarely seen"); destination from rare_internal_host(). Returns list of 1-2."""
+    # The rare host speaks for itself: no borrowed employee identity, and a hostname of
+    # its own (see session_utils.stable_rare_sources for why both matter).
+    try:
+        from modules.session_utils import rare_source_host
+    except ImportError:
+        from session_utils import rare_source_host
+    src, src_host = rare_source_host(config, "fortinet_fortigate")
+    dst = rare_internal_host(config, exclude=(src,))
+    print(f"    - Fortinet Module simulating: Abnormal RDP from rare host {src} -> {dst}")
+    logs = [_fg_conn(config, src, dst, 3389, "RDP", "accept", user=None, shost=src_host,
+                     in_role="lan", out_role="lan", appcat="Remote.Access", apprisk="high",
+                     out_b=random.randint(50_000, 3_000_000), in_b=random.randint(200_000, 5_000_000),
+                     duration_s=random.randint(120, 2400), logdesc="Forward traffic")]
+    return logs
+
+
+def _simulate_rare_smtp_session(config, src_ip, user, shost):
+    """A workstation opening an SMTP/S session to a mail server it has never used — XSIAM
+    "Rare SMTP/S Session". Distinct from smtp_spray (many servers): ONE rare server, a
+    normal-looking single session. app=SMTP/SMTPS carries the AppID. Returns list."""
+    print("    - Fortinet Module simulating: Rare SMTP/S session")
+    smtps = random.random() < 0.5
+    dpt, app = (465, "SMTPS") if smtps else (25, "SMTP")
+    dst = rare_external_ip()
+    logs = [_fg_conn(config, src_ip, dst, dpt, app, "accept", user=user, shost=shost,
+                     appcat="Email", apprisk="medium",
+                     out_b=random.randint(2_000, 200_000), in_b=random.randint(500, 5_000),
+                     duration_s=random.randint(1, 30), logdesc="Forward traffic")]
+    return logs
 
 
 def _simulate_dos_anomaly(config, src_ip=None, user=None, shost=None):
@@ -2716,7 +3231,7 @@ def _simulate_dlp_block(config, src_ip, user, shost):
     print(f"    - Fortinet Module simulating: DLP exfil chain ({rule}) from {src_ip}")
 
     # Log 1: DNS resolution of the exfil destination
-    logs = [_dns_precursor(config, src_ip, user, shost, dst_domain)]
+    logs = [_dns_precursor(config, src_ip, user, shost, dst_domain, dst_ip)]
 
     # Log 2: outbound HTTPS upload session — accepted at the network layer (traffic:forward)
     fwd = _base_traffic_fields(
@@ -2779,12 +3294,12 @@ def _simulate_rare_external_rdp(config, src_ip, user, shost):
     """DNS precursor + rare external RDP — returns list."""
     print(f"    - Fortinet Module simulating: Rare external RDP from {src_ip}")
     forti_conf = _get_config(config)
-    dst_ip     = _random_external_ip()
+    dst_ip     = rare_external_ip()   # rare pool, not ambient
     geo        = _ext_geo()
     duration_s = random.randint(30, 1800)
     rdp_domain = f"rdp-{random.randint(10,99)}.{random.choice(['cloud-desktop.net', 'remote-access.biz', 'vdi-host.com'])}"
 
-    logs = [_dns_precursor(config, src_ip, user, shost, rdp_domain)]
+    logs = [_dns_precursor(config, src_ip, user, shost, rdp_domain, dst_ip)]
 
     fields = _base_traffic_fields(
         config, src_ip, shost, user, dst_ip, None, "6", 3389, "accept",
@@ -2850,7 +3365,7 @@ def _simulate_smtp_spray(config, src_ip, user, shost):
             "FTNTFGTsentpkt":          random.randint(3, 15),
             "FTNTFGTrcvdpkt":          random.randint(2, 10),
             "FTNTFGTosname":           random.choice(_SRC_OS_WINDOWS),
-            "FTNTFGTsrcmac":           _random_mac(),
+            "FTNTFGTsrcmac":           _random_mac(shost),
             "FTNTFGTservice":          _port_to_service(smtp_port),
             "FTNTFGTlogdesc":          "Forward traffic",
             "FTNTFGTsrcintfrole":      "lan",
@@ -2872,7 +3387,7 @@ def _simulate_smtp_large_exfil(config, src_ip, user, shost):
     duration_s = random.randint(120, 900)
     mx_domain  = random.choice(["mail-relay.biz", "smtp-out.net", "mx-forward.com"])
 
-    logs = [_dns_precursor(config, src_ip, user, shost, mx_domain)]
+    logs = [_dns_precursor(config, src_ip, user, shost, mx_domain, dst_ip)]
 
     fields = _base_traffic_fields(
         config, src_ip, shost, user, dst_ip, None, "6",
@@ -2903,7 +3418,7 @@ def _simulate_ftp_large_exfil(config, src_ip, user, shost):
     duration_s = random.randint(120, 1200)
     ftp_domain = random.choice(["ftp-upload.biz", "file-drop.net", "storage-sync.com"])
 
-    logs = [_dns_precursor(config, src_ip, user, shost, ftp_domain)]
+    logs = [_dns_precursor(config, src_ip, user, shost, ftp_domain, dst_ip)]
 
     fields = _base_traffic_fields(
         config, src_ip, shost, user, dst_ip, None, "6", 21, "accept",
@@ -2995,7 +3510,7 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
         "FTNTFGTsentpkt":   1,
         "FTNTFGTrcvdpkt":   1,
         "FTNTFGTosname":    random.choice(_SRC_OS_WINDOWS),
-        "FTNTFGTsrcmac":    _random_mac(),
+        "FTNTFGTsrcmac":    _random_mac(shost),
         "FTNTFGTservice":   "DNS",
         "FTNTFGTlogdesc":   "DNS response",
         "FTNTFGTsrcintfrole": "lan",
@@ -3026,9 +3541,7 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
     return logs
 
 
-# ---------------------------------------------------------------------------
 # XSIAM-firewall-analytics-aligned threat generators
-# ---------------------------------------------------------------------------
 
 _dns_tunnel_target_map: dict = {}   # src_ip -> stable (resolver_ip, tunnel_domain) for DNS-tunnel recurrence
 
@@ -3061,7 +3574,7 @@ def _simulate_large_download(config, src_ip, user, shost):
     geo     = _ext_geo()
     recv_mb = random.randint(500, 4000)
 
-    logs = [_dns_precursor(config, src_ip, user, shost, domain)]
+    logs = [_dns_precursor(config, src_ip, user, shost, domain, dst_ip)]
     fields = _base_traffic_fields(
         config, src_ip, shost, user, dst_ip, domain, "6", 443, "accept",
         duration_s=random.randint(300, 2400), dst_country=geo["country"],
@@ -3085,10 +3598,10 @@ def _simulate_large_download(config, src_ip, user, shost):
 
 def _simulate_dns_tunneling(config, src_ip, user, shost):
     """
-    High-volume DNS with long, high-entropy encoded labels to one resolver — DNS
+    High-volume DNS with long, high-entropy encoded labels to one resolver_ip — DNS
     tunneling / data-in-DNS exfil. Distinct from the beacon (recurrence-only): the
     signal here is query VOLUME + qname LENGTH + entropy + TXT/NULL data records.
-    Stable resolver+domain per source so the rare destination recurs across runs.
+    Stable resolver_ip+domain per source so the rare destination recurs across runs.
     """
     print(f"    - Fortinet Module simulating: DNS tunneling from {src_ip}")
     forti_conf = _get_config(config)
@@ -3098,7 +3611,7 @@ def _simulate_dns_tunneling(config, src_ip, user, shost):
     if not target:
         target = (_random_external_ip(), random.choice(domains))
         _dns_tunnel_target_map[src_ip] = target
-    resolver, tunnel_domain = target
+    resolver_ip, tunnel_domain = target
     geo   = random.choice(_EXT_LOCATIONS)
     logs  = []
     for _ in range(random.randint(40, 90)):
@@ -3109,7 +3622,7 @@ def _simulate_dns_tunneling(config, src_ip, user, shost):
             "spt":              random.randint(49152, 65535),
             "shost":            shost,
             "suser":            user,
-            "dst":              resolver,
+            "dst":              resolver_ip,
             "dpt":              53,
             "proto":            "17",
             "act":              "passthrough",
@@ -3128,7 +3641,7 @@ def _simulate_dns_tunneling(config, src_ip, user, shost):
             "FTNTFGTsentpkt":   1,
             "FTNTFGTrcvdpkt":   random.randint(1, 4),
             "FTNTFGTosname":    random.choice(_SRC_OS_WINDOWS),
-            "FTNTFGTsrcmac":    _random_mac(),
+            "FTNTFGTsrcmac":    _random_mac(shost),
             "FTNTFGTservice":   "DNS",
             "FTNTFGTlogdesc":   "DNS response",
             "FTNTFGTsrcintfrole": "lan",
@@ -3147,8 +3660,18 @@ def _simulate_reverse_ssh_tunnel(config, src_ip, user, shost):
     tunnel / C2 over SSH. Long-lived, high bidirectional volume; a few sessions to
     the SAME external host show persistence.
     """
+    # Recurring-access detectors need the SAME host on many days; a random pick among
+    # ~500 users almost never repeats. One of a few fixed hosts (session_utils.recurring_host).
+    try:
+        from modules.session_utils import recurring_host
+    except ImportError:
+        from session_utils import recurring_host
+    _h = recurring_host("fortinet_fortigate:reverse_ssh_tunnel")
+    if _h:
+        src_ip, user, shost = _h
     print(f"    - Fortinet Module simulating: Reverse SSH tunnel from {src_ip}")
-    ext_ip = _random_external_ip()
+    ext_ip = _beacon_target_map.get(f"revssh::{src_ip}") or rare_external_ip()
+    _beacon_target_map[f"revssh::{src_ip}"] = ext_ip   # stable rare dest
     geo    = _ext_geo()
     logs   = []
     for _ in range(random.randint(2, 4)):
@@ -3221,8 +3744,10 @@ def _simulate_vpn_abnormal_os(config, session_context=None):
         user = user_info["username"] if user_info else "jsmith"
     else:
         user = random.choice(["jsmith", "bjones", "mwilliams"])
-    ext_ip      = _random_external_ip()
-    geo         = _ext_geo()
+    # From the user's OWN home IP, labelled with its real country (2026-09-17). This
+    # previously used a random ambient IP and a random _ext_geo() country, so the login
+    # was anomalous in location as well as OS; the detector should see ONLY the OS.
+    ext_ip      = stable_vpn_ip(user, config)
     abnormal_os = random.choice(_ABNORMAL_VPN_OS)
     assign      = f"10.212.134.{random.randint(100, 200)}"
     fields = {
@@ -3230,7 +3755,7 @@ def _simulate_vpn_abnormal_os(config, session_context=None):
         "suser": user, "FTNTFGTxauthuser": user, "FTNTFGTxauthgroup": "VPN_Users",
         "FTNTFGTtunneltype": "ssl-vpn", "FTNTFGTvpntunnel": "SSL-VPN-Tunnel",
         "FTNTFGTremotegw": ext_ip,
-        "FTNTFGTsrccountry": geo["country"], "FTNTFGTsrccity": geo["city"],
+        "FTNTFGTsrccountry": ip_country(ext_ip, config)[1] or "Reserved",
         "FTNTFGTosname": abnormal_os, "FTNTFGTosversion": abnormal_os,
         "FTNTFGTduration": 0, "FTNTFGTeventtime": int(time.time() * 1_000_000_000),
         "act": "tunnel-up", "outcome": "success",
@@ -3240,7 +3765,7 @@ def _simulate_vpn_abnormal_os(config, session_context=None):
         "externalId": _session_id(),
         "msg": f"SSL VPN tunnel established for user {user} from {abnormal_os} client",
     }
-    return [_format_fortinet_cef(config, "0101039426", "event", "vpn", "notice", fields)]
+    return [_format_fortinet_cef(config, "0101039424", "event", "vpn", "notice", fields)]
 
 
 def _simulate_external_port_scan(config):
@@ -3288,7 +3813,7 @@ def _simulate_external_port_scan(config):
             "reason":                   "no-policy-match",
             "msg":                      f"Denied inbound scan to port {port}",
         }
-        logs.append(_format_fortinet_cef(config, "0000000014", "traffic", "forward", "warning", fields))
+        logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "warning", fields))
     return logs
 
 
@@ -3317,9 +3842,7 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost):
     return _format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields)
 
 
-# ---------------------------------------------------------------------------
 # Threat log dispatcher
-# ---------------------------------------------------------------------------
 
 def _generate_threat_log(config, session_context=None, forced_event=None):
     """
@@ -3359,7 +3882,10 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_simulate_auth_brute_force(config), display_name)
 
     if chosen == "vpn_brute_force":
-        return (_simulate_vpn_brute_force(config), display_name)
+        return (_simulate_vpn_brute_force(config, session_context), display_name)
+
+    if chosen == "vpn_password_spray":
+        return (_simulate_vpn_password_spray(config, session_context), display_name)
 
     if chosen == "vpn_impossible_travel":
         return (_simulate_vpn_impossible_travel(config, session_context), display_name)
@@ -3439,6 +3965,19 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     if chosen == "server_outbound_http":
         return (_simulate_server_outbound_http(config), display_name)
 
+    # --- Management plane ---
+    if chosen == "mgmt_admin_unexpected_source":
+        return (_simulate_mgmt_admin_unexpected_source(config, session_context), display_name)
+    if chosen == "mgmt_config_route_change":
+        return (_simulate_mgmt_config_route_change(config, session_context), display_name)
+    if chosen == "mgmt_logging_suppressed":
+        return (_simulate_mgmt_logging_suppressed(config, session_context,
+                                                  backdate=_MGMT_BACKDATE.get("on", False)), display_name)
+    if chosen == "mgmt_config_harvest":
+        return (_simulate_mgmt_config_harvest(config, session_context), display_name)
+    if chosen == "snmp_unexpected_source":
+        return (_simulate_snmp_unexpected_source(config, session_context), display_name)
+
     # --- Generators that now return lists (DNS precursor + event) ---
     # Resolve user/IP for user-attributed generators
     user, src_ip, shost = "unknown", "192.168.1.100", None
@@ -3458,6 +3997,13 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_simulate_tor_connection(config, src_ip, user, shost), display_name)
     if chosen == "large_upload":
         return (_simulate_large_upload(config, src_ip, user, shost), display_name)
+    if chosen == "large_upload_nonstd_port":
+        try:
+            from modules.session_utils import to_nonstandard_https
+        except ImportError:
+            from session_utils import to_nonstandard_https
+        return (to_nonstandard_https(_simulate_large_upload(config, src_ip, user, shost)),
+                display_name)
     if chosen == "rare_external_rdp":
         return (_simulate_rare_external_rdp(config, src_ip, user, shost), display_name)
     if chosen == "smtp_large_exfil":
@@ -3486,15 +4032,246 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_simulate_rdp_lateral(config, src_ip, user, shost, session_context), display_name)
     elif chosen == "app_control_block":
         return (_simulate_app_control_block(config, src_ip, user, shost), display_name)
+    elif chosen == "rare_domain_communication":
+        return (_simulate_rare_domain_communication(config, src_ip, user, shost), display_name)
+    elif chosen == "torrent_client":
+        return (_simulate_torrent_client(config, src_ip, user, shost), display_name)
+    elif chosen == "port_sweep":
+        return (_simulate_port_sweep(config, src_ip, user, shost), display_name)
+    elif chosen == "dc_smb_outbound":
+        return (_simulate_dc_smb_outbound(config, src_ip, user, shost), display_name)
+    elif chosen == "new_ftp_server":
+        return (_simulate_new_ftp_server(config, src_ip, user, shost), display_name)
+    elif chosen == "rare_appid":
+        return (_simulate_rare_appid(config, src_ip, user, shost), display_name)
+    elif chosen == "abnormal_rdp_rare_host":
+        return (_simulate_abnormal_rdp_rare_host(config, src_ip, user, shost), display_name)
+    elif chosen == "rare_smtp_session":
+        return (_simulate_rare_smtp_session(config, src_ip, user, shost), display_name)
     elif chosen == "smb_rare_file_transfer":
         return (_simulate_smb_rare_file_transfer(config, src_ip, user, shost), display_name)
     else:
         return (_simulate_ips_attack(config), display_name)
 
 
-# ---------------------------------------------------------------------------
+# Management plane
+#
+# FortiOS 7.4.4 log IDs (Log Message Reference, "Log ID definitions"):
+#   0100032001 LOG_ID_ADMIN_LOGIN_SUCC     0100032002 LOG_ID_ADMIN_LOGIN_FAIL
+#   0100032003 LOG_ID_ADMIN_LOGOUT         0100032143 LOG_ID_BACKUP_CONF_BY_SCP
+#   0100044546 LOGID_EVENT_CONFIG_ATTR     0100044547 LOGID_EVENT_CONFIG_OBJATTR
+#   0100044548 LOGID_EVENT_CONFIG_EXEC     0100029021 LOG_ID_EVENT_AUTH_SNMP_QUERY_FAILED
+# The FortiGate modeling rule maps cfgpath -> xdm.target.resource.type, cfgattr ->
+# .resource.name, cfgobj -> .resource.value; the admin is `user`, which Fortinet's CEF
+# mapping carries as duser (as the existing admin_event does).
+
+def _fgt_mgmt_event(config, logid, level, ts, fields):
+    return _format_fortinet_cef(config, logid, "event", "system", level, {
+        "_no_user_qualify": True,          # local admin accounts, not AD identities
+        "FTNTFGTeventtime": int(ts * 1_000_000_000),
+        **fields})
+
+
+def _fgt_admin_session(config, user, src, actions, method="ssh", start=None,
+                       failures=0, gap=(2, 25), devname=None):
+    """failures x 32002 -> 32001 login -> config/exec events -> 32003 logout.
+    actions: list of (logid, fields) built by _fgt_cfg_attr / _fgt_cfg_exec."""
+    forti_conf = _get_config(config)
+    dst = (forti_conf.get("management_ip", "172.16.200.1")
+           if src.startswith(("10.", "172.", "192.168."))
+           else forti_conf.get("vpn_gateway_ip", "203.0.113.20"))
+    ui = f"{method}({src})"
+    t = start or time.time() - (len(actions) + 3) * gap[1]
+    base = {"duser": user, "src": src, "dst": dst, "FTNTFGTui": ui, "FTNTFGTmethod": method}
+    if devname:   # a peer FortiGate: its own name and serial
+        serial = forti_conf.get("serial_number", "FGVM08TM21000001")
+        base["dvchost"] = devname
+        base["deviceExternalId"] = serial[:-4] + hashlib.sha1(devname.encode()).hexdigest()[:4].upper()
+    out = []
+    for _ in range(failures):
+        out.append(_fgt_mgmt_event(config, "0100032002", "alert", t, {
+            **base, "act": "login", "outcome": "failed", "reason": "passwd_invalid",
+            "FTNTFGTlogdesc": "Admin login failed",
+            "msg": f"Administrator {user} login failed from {ui} because of invalid password"}))
+        t += random.randint(2, 6)
+    out.append(_fgt_mgmt_event(config, "0100032001", "information", t, {
+        **base, "act": "login", "outcome": "success", "FTNTFGTlogdesc": "Admin login successful",
+        "msg": f"Administrator {user} logged in successfully from {ui}"}))
+    login_t = t
+    for logid, f in actions:
+        t += random.randint(*gap)
+        out.append(_fgt_mgmt_event(config, logid, "information", t, {**base, **f}))
+    t += random.randint(*gap)
+    out.append(_fgt_mgmt_event(config, "0100032003", "information", t, {
+        **base, "act": "logout", "outcome": "success", "FTNTFGTlogdesc": "Admin logout successful",
+        "FTNTFGTduration": int(t - login_t),
+        "msg": f"Administrator {user} timed out on {ui}" if random.random() < 0.2
+               else f"Administrator {user} logged out from {ui}"}))
+    return out
+
+
+def _fgt_cfg_attr(path, attr, act="Edit", obj=None):
+    f = {"act": act, "FTNTFGTcfgtid": random.randint(1000000, 9999999), "FTNTFGTcfgpath": path,
+         "FTNTFGTcfgattr": attr}
+    if obj is not None:
+        f.update({"FTNTFGTcfgobj": str(obj), "FTNTFGTlogdesc": "Object attribute configured",
+                  "msg": f"{act} {path} {obj}"})
+        return ("0100044547", f)
+    f.update({"FTNTFGTlogdesc": "Attribute configured", "msg": f"{act} {path}"})
+    return ("0100044546", f)
+
+
+def _fgt_cfg_exec(command):
+    return ("0100044548", {"act": "Execute", "FTNTFGTcfgpath": "execute",
+                           "FTNTFGTlogdesc": "Configuration executed", "msg": command})
+
+
+_FGT_ROUTINE_CHANGES = [
+    lambda n: _fgt_cfg_attr("firewall.address", f"subnet[10.0.10.{n} 255.255.255.255]",
+                            act="Add", obj=f"SRV-WEB-{n}"),
+    lambda n: _fgt_cfg_attr("firewall.policy", f"comments[CHG{n} patch window]", obj=str(n % 40 + 1)),
+    lambda n: _fgt_cfg_attr("firewall.addrgrp", f"member[SRV-WEB-{n}]", obj="GRP-PATCH-SRV"),
+]
+
+
+def _simulate_mgmt_admin_session(config, session_context=None):
+    """BENIGN: a network admin from the NOC jump host; one session in five changes
+    something routine. Status checks leave only the login/logout pair, as on a real
+    FortiGate (show/get commands are not logged)."""
+    user, src = mgmt_plane.admin_user(config), mgmt_plane.admin_source(config)
+    acts = []
+    if random.random() < 0.2:
+        n = random.randint(20, 240)
+        acts = [random.choice(_FGT_ROUTINE_CHANGES)(n)]
+    return _fgt_admin_session(config, user, src, acts, method=random.choice(["ssh", "https"]))
+
+
+def _simulate_mgmt_config_backup(config, session_context=None):
+    """BENIGN: the nightly backup job pulls the config over SCP."""
+    host, acct = mgmt_plane.backup(config)
+    return [_fgt_mgmt_event(config, "0100032143", "information", time.time(), {
+        "duser": acct, "src": host, "dst": _get_config(config).get("management_ip", "172.16.200.1"),
+        "FTNTFGTui": f"ssh({host})", "act": "backup", "outcome": "success",
+        "FTNTFGTlogdesc": "Configuration backed up by SCP",
+        "msg": f"System config file has been downloaded by user {acct} via SCP"})]
+
+
+def _simulate_snmp_poll(config, session_context=None):
+    """BENIGN: the monitoring poller reads SNMP from infrastructure behind the FortiGate."""
+    poller = mgmt_plane.snmp_poller(config)
+    dev = random.choice(mgmt_plane.network_devices(config))
+    fields = _base_traffic_fields(config, poller, None, None, dev, None, "17", 161, "accept",
+                                  duration_s=random.randint(0, 2))
+    fields.update({"app": "SNMP", "FTNTFGTapp": "SNMP", "FTNTFGTappcat": "Network.Service",
+                   "FTNTFGTservice": "SNMP", "out": random.randint(80, 300),
+                   "in": random.randint(200, 1500), "msg": "SNMP poll"})
+    return _format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields)
+
+
+def _simulate_mgmt_admin_unexpected_source(config, session_context=None):
+    """THREAT device-admin-from-unexpected-source (see cisco_asa for the pattern)."""
+    src, kind = mgmt_plane.unexpected_source(config, session_context)
+    user = mgmt_plane.admin_user(config)
+    print(f"    - Fortinet Module simulating: admin login from unexpected source {src} ({kind})")
+    return _fgt_admin_session(config, user, src, [], method=random.choice(["ssh", "https"]),
+                              failures=random.randint(0, 2))
+
+
+def _simulate_mgmt_config_route_change(config, session_context=None):
+    """THREAT network-device-config-or-route-change: rogue static route, permit-any
+    policy and an IPsec tunnel to an attacker-controlled peer."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.6 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    user, rogue = mgmt_plane.admin_user(config), rare_external_ip()
+    wan = _get_config(config).get("interface_wan", "port1")
+    print(f"    - Fortinet Module simulating: route/policy change via {rogue} from {src} ({kind})")
+    acts = [
+        _fgt_cfg_attr("router.static", f"gateway[{rogue}]dst[10.0.10.0 255.255.255.0]device[{wan}]",
+                      act="Add", obj=str(random.randint(20, 90))),
+        _fgt_cfg_attr("firewall.policy", "srcaddr[all]dstaddr[all]action[accept]service[ALL]",
+                      act="Add", obj=str(random.randint(900, 990))),
+        _fgt_cfg_attr("vpn.ipsec.phase1-interface", f"remote-gw[{rogue}]interface[{wan}]",
+                      act="Add", obj="sync-tun"),
+    ]
+    return _fgt_admin_session(config, user, src, acts, method="ssh")
+
+
+_FGT_SUPPRESS_KEY = "fortinet_fortigate"
+_MGMT_BACKDATE = {"on": False}   # set by generate_log for an on-demand fire (harness)
+
+
+def _fgt_logging_toggle(config, user, src, ts, enable):
+    old, new = ("disable", "enable") if enable else ("enable", "disable")
+    forti_conf = _get_config(config)
+    return _fgt_mgmt_event(config, "0100044546", "information", ts, {
+        "duser": user, "src": src, "dst": forti_conf.get("management_ip", "172.16.200.1"),
+        "FTNTFGTui": f"ssh({src})", **_fgt_cfg_attr("log.syslogd.setting",
+                                                     f"status[{old}->{new}]")[1]})
+
+
+def _simulate_mgmt_logging_suppressed(config, session_context=None, backdate=False):
+    """THREAT network-device-logging-suppressed-for-a-window: syslog forwarding set to
+    disable, silence, then re-enabled (see cisco_asa for the window mechanics)."""
+    user = mgmt_plane.admin_user(config)
+    src, _ = (mgmt_plane.unexpected_source(config, session_context)
+              if random.random() < 0.5 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    window = mgmt_plane.suppression_window_seconds()
+    now = time.time()
+    print(f"    - Fortinet Module simulating: logging suppressed by {user} from {src} for {window}s")
+    start = now - window - 60 if backdate else now - 40
+    off = _fgt_admin_session(config, user, src, [], method="ssh", start=start)[:-1]  # no logout yet
+    off.append(_fgt_logging_toggle(config, user, src, start + 30, enable=False))
+    if backdate:
+        return off + [_fgt_logging_toggle(config, user, src, now, enable=True)]
+    mgmt_plane.open_suppression(_FGT_SUPPRESS_KEY, window, user, src)
+    return off
+
+
+def _simulate_mgmt_config_harvest(config, session_context=None):
+    """THREAT scripted-device-config-harvesting: one source, several FortiGates, a few
+    seconds each, every session exporting the full config to an outside TFTP server."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.5 else (random.choice(mgmt_plane.conf(config)["jump_hosts"]), "jump-host"))
+    user, drop = mgmt_plane.admin_user(config), rare_external_ip()
+    devices = mgmt_plane.sibling_hostnames(_get_config(config).get("hostname", "FG-FW-01"),
+                                           random.randint(3, 5))
+    print(f"    - Fortinet Module simulating: config harvest of {len(devices)} devices from {src} ({kind})")
+    t, out = time.time() - 75 * len(devices), []
+    for dev in devices:
+        out += _fgt_admin_session(config, user, src,
+                                  [_fgt_cfg_exec(f"execute backup full-config tftp {dev.lower()}.conf {drop}")],
+                                  method="ssh", start=t, gap=(1, 3), devname=dev)
+        t += random.randint(15, 60)
+    return out
+
+
+def _simulate_snmp_unexpected_source(config, session_context=None):
+    """THREAT snmp-from-unexpected-source: a workstation walks every network device on
+    UDP/161, and its guesses at the FortiGate's own community string fail."""
+    ui = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
+    src, user, shost = (ui["ip"], ui["username"], ui.get("hostname")) if ui else ("192.168.1.100", None, None)
+    print(f"    - Fortinet Module simulating: SNMP walk from {src}")
+    t, out = time.time() - 60, []
+    for dev in mgmt_plane.network_devices(config):
+        f = _base_traffic_fields(config, src, shost, user, dev, None, "17", 161, "accept",
+                                 duration_s=random.randint(0, 3))
+        f.update({"app": "SNMP", "FTNTFGTapp": "SNMP", "FTNTFGTappcat": "Network.Service",
+                  "FTNTFGTservice": "SNMP", "out": random.randint(60, 200),
+                  "in": random.randint(800, 40000), "FTNTFGTeventtime": int(t * 1_000_000_000),
+                  "msg": "SNMP request"})
+        out.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", f))
+        t += random.randint(1, 4)
+    for community in ("public", "private", "cisco"):
+        out.append(_fgt_mgmt_event(config, "0100029021", "warning", t, {
+            "src": src, "dst": _get_config(config).get("management_ip", "172.16.200.1"),
+            "dpt": 161, "act": "snmp-query", "outcome": "failed",
+            "FTNTFGTlogdesc": "SNMP query failed",
+            "msg": f"SNMP query failed from {src}: community '{community}' not configured"}))
+        t += 1
+    return out
+
+
 # Scenario handler
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_log(config, scenario):
     """Generates a specific CEF log for an orchestrator scenario."""
@@ -3533,9 +4310,7 @@ def _generate_scenario_log(config, scenario):
         return _format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields)
 
 
-# ---------------------------------------------------------------------------
 # Main entry point
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, threat_level="Realistic", benign_only=False, context=None, scenario_event=None):
     """
@@ -3550,16 +4325,74 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     if scenario:
         scenario_event = scenario if isinstance(scenario, str) else scenario.get("name", "")
         if scenario_event == "LARGE_EGRESS":
+            _sctx = scenario if isinstance(scenario, dict) else {}
             return _simulate_large_upload(
                 config,
-                random.choice(config.get("internal_servers", ["192.168.1.100"])),
-                "svc_account", None
+                _sctx.get("src_ip") or random.choice(config.get("internal_servers", ["192.168.1.100"])),
+                "svc_account", None,
+                domain=_sctx.get("domain"), dst_ip=_sctx.get("dst_ip")
             )
         return _generate_scenario_log(config, scenario if isinstance(scenario, dict) else {})
 
-    # Named threat from dashboard — dispatch to the specific event
     if scenario_event:
-        return _generate_threat_log(config, session_context, forced_event=scenario_event)
+        ctx = context or {}
+        if scenario_event == "C2_EGRESS":
+            # Workstation → external C2 egress carrying the pinned box identity
+            # (suser/shost/src), so it stitches to the endpoint case.
+            print("    - Fortinet Module simulating: C2 egress (workstation -> external)")
+            user  = ctx.get('user')
+            src_ip = ctx.get('src_ip')
+            shost = ctx.get('hostname')
+            if not (user and src_ip):
+                ui = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
+                if ui:
+                    user, src_ip, shost = user or ui['username'], src_ip or ui['ip'], shost or ui['hostname']
+                else:
+                    src_ip = src_ip or rand_ip_from_network(ip_network(random.choice(config.get('internal_networks', ['192.168.1.0/24']))))
+            user = user or 'unknown'
+            domain = ctx.get('domain') or f"sync-{random.randint(100,999)}.telemetry-cdn.net"
+            dst_ip = ctx.get('dst_ip') or _random_external_ip()
+            port   = int(ctx.get('port', 443))
+            logs = []
+            for _ in range(random.randint(10, 16)):     # beacon cadence
+                fields = _base_traffic_fields(config, src_ip, shost, user, dst_ip, domain,
+                                              "6", port, "accept", duration_s=random.randint(1, 30))
+                fields.update({
+                    "_no_user_qualify": True,   # keep the exact box user (bare) for the stitch
+                    "app": "HTTPS",
+                    "request": "/api/v1/checkin", "FTNTFGThttpmethod": "GET", "FTNTFGThttpcode": "200",
+                    "requestClientApplication": random.choice(["python-requests/2.31.0", "Go-http-client/1.1", "curl/8.4.0"]),
+                    "FTNTFGTapp": "HTTPS.BROWSER", "FTNTFGTappcat": "Web.Client",
+                    "out": random.randint(200, 900), "in": random.randint(120, 400),
+                    "msg": f"Recurring outbound to uncommon domain {domain}",
+                })
+                logs.append(_format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields))
+            return logs
+        # Named threat from dashboard — dispatch to the specific event
+        _MGMT_BACKDATE["on"] = bool(ctx.get("mgmt_backdate"))
+        try:
+            return _generate_threat_log(config, session_context, forced_event=scenario_event)
+        finally:
+            _MGMT_BACKDATE["on"] = False
+
+    # Logging suppressed: silent until the window closes, then the same admin turns
+    # syslog forwarding back on and logs out (_simulate_mgmt_logging_suppressed).
+    _sup = mgmt_plane.suppression_state(_FGT_SUPPRESS_KEY)
+    if _sup == "active":
+        return None
+    if _sup:
+        now = time.time()
+        forti_conf = _get_config(config)
+        return [_fgt_logging_toggle(config, _sup["user"], _sup["src"], now, enable=True),
+                _fgt_mgmt_event(config, "0100032003", "information", now + 3, {
+                    "duser": _sup["user"], "src": _sup["src"],
+                    "dst": forti_conf.get("management_ip", "172.16.200.1"),
+                    "FTNTFGTui": f"ssh({_sup['src']})", "act": "logout", "outcome": "success",
+                    "FTNTFGTlogdesc": "Admin logout successful",
+                    "FTNTFGTduration": int(now - _sup["since"]),
+                    "msg": f"Administrator {_sup['user']} logged out from ssh({_sup['src']})"})]
+    if mgmt_plane.backup_due(_FGT_SUPPRESS_KEY):
+        return _simulate_mgmt_config_backup(config, session_context)
 
     if benign_only:
         return _generate_benign_log(config, session_context)

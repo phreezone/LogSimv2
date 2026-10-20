@@ -117,13 +117,13 @@ This section defines *how* logs are sent. Each module uses one of four transport
 }
 ```
 
-**`http_collectors`** — required for HTTP-based modules (Okta, Proofpoint, Google Workspace). Each entry has four fields:
+**`http_collectors`** — required for HTTP-based modules (Okta, Proofpoint, Windows Events). Each entry has four fields:
 - `url_env_var` — names the `.env` variable holding the XSIAM HTTP Collector endpoint URL for this collector
 - `auth_type_env_var` — names the `.env` variable holding the authentication type (e.g., `"api_key"`)
 - `api_key_env_var` — names the `.env` variable holding the API key for this collector
 - `content_type` — MIME type sent in the `Content-Type` header (always `"application/json"`)
 
-The dict key (e.g., `"okta_collector"`) is referenced by the module's `collector_id` setting. The five `google_*` collectors are used by the Google Workspace module, which is currently not operational.
+The dict key (e.g., `"okta_collector"`) is referenced by the module's `collector_id` setting.
 
 **`aws_config`** — required for the AWS module. Contains `transport: "s3"` and a `users_and_roles` array defining the simulated IAM identities used to generate CloudTrail events. All AWS credentials (access key, secret key, bucket name, region, account ID) live in `.env` — see [Getting Started](getting-started.md) for the full `.env` reference.
 
@@ -274,6 +274,43 @@ terraform -chdir=terraform/gcp_pubsub output -raw xsiam_sa_key_json
 7. The simulator substitutes all `PLACEHOLDER_GCP_*` values from your `.env` at startup — no manual edits to `config.json` are needed.
 8. In XSIAM, create a **GCP Pub/Sub** data source: enter your project ID, the subscription name, and paste the XSIAM service account key JSON.
 
+### Delivery: buffers, not limits
+
+Nothing in the delivery path caps volume or drops events to keep up. Where producers
+outrun delivery they **wait** (backpressure), and anything that still cannot be delivered
+is **counted** in the health check rather than lost silently.
+
+| Setting | Where | Default | What it controls |
+|---|---|---|---|
+| `wks_interval_multiplier` | `windows_events_config` | `1.0` | **Windows volume.** Seconds between batches per workstation, as a multiple of `base_event_interval_seconds`. At 1.0 (production pacing) the 265 workstations send ~484 events/s (~42 M/day); lower values send proportionally more. |
+| `dc_interval_multiplier` | `windows_events_config` | `0.5` | Domain-controller pacing (~7 events/s). |
+| `output_queue_size` / `threat_queue_size` | `windows_events_config` | `20000` / `100` | Memory buffers between Windows workers and delivery. Workers wait when full. Drained once per interval, so `output_queue_size` must exceed events per interval or it becomes a ceiling (at 1000 it held 4x pacing to exactly 1,000/s). |
+| `wec_batch_size` / `wec_sender_threads` | `windows_events_config` | `100` / `4` | Events per WEC POST and concurrent POSTs. Measured broker latency is ~28 ms per POST almost regardless of size, so size matters more than threads: 100 per POST is ~3,600 events/s per thread. |
+| `wec_send_retries` / `wec_retry_backoff_s` | `windows_events_config` | `3` / `1.0` | Retries per failed POST, with exponential backoff. |
+| `wec_max_pending` | `windows_events_config` | `10000` | WEC backlog at which the **Windows** module pauses generation. Other modules are never held by it. |
+| `s3_flush_idle_s` / `s3_flush_max_age_s` / `s3_flush_max_events` | `aws_config` | `4` / `30` / `500` | When a CloudTrail object is cut. More events mean more objects, never fewer events. |
+| `SEND_QUEUE_SIZE` | env | `5000` | Buffer between module workers and the shared sender pool. Modules wait when full. |
+| `SEND_WORKERS` | env | `8` | Shared sender threads. |
+| `HTTP_POOL_SIZE` | env | `32` | Reused HTTP connections. Not a cap: extra requests open new connections. |
+
+Until 2026-10-06 Windows had a hidden ceiling of 50 events per second (one 50-event drain
+per call). The workers were configured for ~476/s, so ~90% of what they generated was
+discarded, threats included. The ceiling is gone and Windows now runs at its production
+pacing.
+
+**Measured capacity** (real chain, broker stubbed at the measured 28 ms per POST):
+
+| Pacing | Delivered | CPU (one core) |
+|---|---|---|
+| 1x (production) | ~484/s, ~42 M/day | 22% |
+| 4x | ~1,785/s, ~154 M/day | 72% |
+| 10x | ~2,480/s, falls behind | 99% |
+
+The remaining ceiling, ~2,500 events/s, is physical: the simulator is one Python process
+and its threads share one core. Going beyond it (the WEC broker scales to ~25,000
+production workstations) would need generation split across processes. Re-measure with
+`python _local_validation/windows_throughput_check.py --mult <x>`.
+
 ## C. Module-Specific Configuration
 
 These sections allow modules to override global settings or provide their own metadata.
@@ -299,6 +336,54 @@ These sections allow modules to override global settings or provide their own me
 ## D. Simulated Environment & Threat Intel
 
 These sections build the "world" your simulated logs live in. They provide realistic and consistent data for users, devices, and external sites.
+
+### Curated pools vs generated values
+
+Most of the pools in this section are a **head, not the whole population**. Threat
+domains, file names, cloud resource identifiers and browser user-agents are composed
+per event by `modules/threat_domains.py`, `modules/threat_files.py`,
+`modules/cloud_ids.py` and `modules/user_agents.py`, because a fixed list of 25 entries
+stops being rare the moment a run is long enough — every entry accumulates thousands of
+hits and UEBA learns it as normal.
+
+What the curated pools still do:
+
+* **Manual hunting.** You need a handful of names you can remember and type, and the
+  scenario walkthroughs quote them. They stay in circulation for that reason.
+* **Detection contracts.** Nine tokens are matched as literal substrings of the threat
+  domain names (`command-control`, `credential-stealer`, `phishing-kit`,
+  `ransomware-payload` and others). Those tokens are reproduced verbatim in every
+  generated domain of that family. **Renaming one silences live detections** — the rule
+  goes quiet with no error anywhere.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `infoblox_threats.generated_share` | `0.75` | Fraction of threat-domain draws that are generated rather than taken from `malicious_domains` / `dga_domains`. `0` pins everything to the curated pools; `1` generates every one. |
+
+Two pools are deliberately **not** generated over:
+
+* `exfiltration_destinations` — the shared file-sharing pool every network module draws
+  from. It holds **real** services (60 of them: `mega.nz`, `dropbox.com`, `transfer.sh`,
+  `filebin.net`, `pastebin.com` and more) rather than generated names, because the
+  "Infoblox — DNS Resolution of Unsanctioned Cloud Storage" rule matches them as literals.
+  Grow it by adding genuine services; a generated name would never match. Tag an entry
+  `"direction": "upload"` only when a download is not credible (paste and snippet sites
+  are text-sized).
+* `aws_config.pentest_ami_ids` — these encode distro names
+  (`ami-kali-linux-official`, `ami-parrot-sec-os`) that the Kali-AMI rule matches.
+
+At startup you will see the cloud pools being grown, which is expected:
+
+```
+[cloud_ids] expanded 15 identifier pool(s): ec2_instances 26->400, ebs_volumes 26->600, ...
+```
+
+Your own AWS account ID and GCP project ID are never generated — they are your identity
+and are read from `.env`. Only *foreign* account IDs (the counterparty in a cross-account
+AssumeRole) vary.
+
+Full rationale, measurements and the list of what may never be renamed:
+[value-cardinality.md](value-cardinality.md).
 
 ```json
 "internal_networks": ["192.168.1.0/24", "10.0.10.0/24"],

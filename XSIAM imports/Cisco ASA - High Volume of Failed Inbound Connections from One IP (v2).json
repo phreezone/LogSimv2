@@ -1,0 +1,43 @@
+[
+ {
+  "rule_id": 1676,
+  "name": "Cisco ASA — High Volume of Failed Inbound Connections from One IP (v2)",
+  "alert_name": "Cisco ASA — High Volume of Failed Inbound Connections from One IP (v2)",
+  "description": "One external address opens and immediately loses 50+ inbound TCP connections across 10+ internal ports in 10 minutes - a perimeter sweep. Replaces the 106023 rule, which could never fire: the simulator emits permitted-then-SYN-Timeout teardowns rather than ACL denies, and the ASA parser never sets xdm.observer.action = \"Deny\" (21,435 rows held only Built/Teardown/null). parse_cisco discards the teardown reason, so this runs in RAW mode and extracts the 5-tuple from _raw_log.",
+  "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\" and _raw_log contains \"SYN Timeout\"\n| alter src_ip   = arrayindex(regextract(_raw_log, \"for outside:(\\d+\\.\\d+\\.\\d+\\.\\d+)/\"), 0)\n| alter src_port = arrayindex(regextract(_raw_log, \"for outside:\\d+\\.\\d+\\.\\d+\\.\\d+/(\\d+)\"), 0)\n| alter dst_ip   = arrayindex(regextract(_raw_log, \"to inside:(\\d+\\.\\d+\\.\\d+\\.\\d+)/\"), 0)\n| alter dst_port = arrayindex(regextract(_raw_log, \"to inside:\\d+\\.\\d+\\.\\d+\\.\\d+/(\\d+)\"), 0)\n| filter src_ip != null and dst_ip != null\n| bin _time span = 10m\n| comp count() as failed_conns,\n       count_distinct(dst_port) as ports_probed,\n       count_distinct(dst_ip) as hosts_probed,\n       values(dst_ip) as dst_ips,\n       values(dst_port) as dst_ports\n       by src_ip, _time\n| filter failed_conns >= 50 and ports_probed >= 10\n| alter app_proto = \"TCP\"\n| fields src_ip, dst_ips, dst_ports, app_proto, failed_conns, ports_probed, hosts_probed\n",
+  "severity": "SEV_030_MEDIUM",
+  "alert_category": "DISCOVERY",
+  "mitre_defs": {
+   "TA0007 - Discovery": [
+    "T1046 - Network Service Discovery"
+   ]
+  },
+  "alert_fields": {
+   "action_remote_ip": "src_ip",
+   "action_local_ip": "dst_ips",
+   "action_local_port": "dst_ports"
+  },
+  "execution_mode": "SCHEDULED",
+  "search_window": "10 minutes",
+  "simple_schedule": "10 minutes",
+  "crontab": "*/10 * * * *",
+  "suppression_enabled": true,
+  "suppression_duration": "1 hours",
+  "suppression_fields": [
+   "src_ip"
+  ],
+  "is_enabled": true,
+  "alert_type": null,
+  "alert_description": null,
+  "alert_domain": "DOMAIN_SECURITY",
+  "dataset": "alerts",
+  "user_defined_severity": null,
+  "user_defined_category": null,
+  "investigation_query_link": "",
+  "drilldown_query_timeframe": "ALERT",
+  "mapping_strategy": "CUSTOM",
+  "action": "ALERTS",
+  "lookup_mapping": [],
+  "timezone": "America/New_York"
+ }
+]

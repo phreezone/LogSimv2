@@ -1,13 +1,13 @@
 """Live MCP smoke test — drives integrations/mcp_server.py over real stdio.
 
-Run:  python tests/mcp_server_smoke.py
+Run:  python _local_validation/mcp_server_smoke.py
 Needs the optional MCP SDK (pip install -r integrations/requirements.txt); without it the
 test SKIPS with exit 0, since the MCP server is an optional integration. No XSIAM tenant is
 needed and NO log traffic is emitted: only read-only tools are called (plus reset_all_metrics,
 which merely zeroes counters). run_scenario, fire_event, start_module and start_bad_user are
 deliberately never called — those would send events to the configured destinations.
 
-Unlike tests/api_contract.py, which checks the contract in-process via Flask's test_client,
+Unlike _local_validation/api_contract.py, which checks the contract in-process via Flask's test_client,
 this exercises the whole external path an agent actually takes: a separate dashboard process,
 an auth-gated HTTP API, and the MCP server as a stdio child speaking JSON-RPC.
 

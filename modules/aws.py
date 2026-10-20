@@ -92,6 +92,15 @@ def _normalize_role_identity(identity, account_id):
         return identity
     role_name = (identity.get('name') or 'DefaultRole').split('/')[0]
     session = _role_session_name(role_name)
+    # Keep the role's real PATH before overwriting arn_suffix with the session ARN.
+    # Most roles live at role/<name>, but a service-linked role lives at
+    # role/aws-service-role/<service>.amazonaws.com/<name>, and CloudTrail reports
+    # that full path in sessionContext.sessionIssuer.arn. Reconstructing a flat
+    # role/<name> there loses it, and with it the `/aws-service-role/` string that
+    # four correlation rules use to recognise -- and exclude -- AWS's own automation.
+    original_suffix = identity.get('arn_suffix') or ''
+    if original_suffix.startswith('role/'):
+        identity['_rolePath'] = original_suffix
     identity['type'] = 'AssumedRole'
     identity['name'] = f"{role_name}/{session}"
     identity['arn_suffix'] = f"assumed-role/{role_name}/{session}"
@@ -344,7 +353,12 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
          # Ensure 'name' exists before splitting
          session_name = user_identity.get('name', 'DefaultSession').split('/')[-1] if '/' in user_identity.get('name', 'DefaultSession') else 'DefaultSession'
          role_name_for_issuer = user_identity['name'].split('/')[0] if '/' in user_identity.get('name','') else user_identity.get('name','')
-         role_arn_for_issuer = f"arn:aws:iam::{account_id}:role/{role_name_for_issuer}" # Construct role ARN for issuer
+         # Prefer the role's real path when _normalize_role_identity preserved one,
+         # so a service-linked role reports its true
+         # role/aws-service-role/<svc>.amazonaws.com/<name> ARN here.
+         _role_path = user_identity.get('_rolePath')
+         role_arn_for_issuer = (f"arn:aws:iam::{account_id}:{_role_path}" if _role_path
+                                else f"arn:aws:iam::{account_id}:role/{role_name_for_issuer}")
          role_id_for_issuer = user_identity.get('_baseRoleId', f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}") # Use stored base ID or generate
 
          user_identity_block["sessionContext"] = {
@@ -465,7 +479,7 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
         "userAgent": user_agent_choice,                                   # -> xdm.source.user_agent
         "requestID": str(uuid.uuid4()),                                   # -> xdm.network.session_id
         "eventID": str(uuid.uuid4()),                                     # -> xdm.event.id
-        "readOnly": str(read_only).lower(),                               # CloudTrail uses string "true"/"false"
+        "readOnly": bool(read_only),                                      # CloudTrail emits a JSON boolean, NOT the string "true"/"false"
         "eventType": "AwsConsoleSignIn" if event_name == "ConsoleLogin" else "AwsApiCall", # -> xdm.event.original_event_type
         "managementEvent": management_event,                              # Set based on category
         "recipientAccountId": account_id,                                 # -> xdm.target.cloud.project_id (partially)
@@ -512,6 +526,18 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
         base_event["sourceIPAddress"] = invoker
 
     return base_event
+
+# Read-only CloudTrail events normally carry "responseElements": null.  The STS
+# AssumeRole family is the exception documented by AWS -- the call is read-only
+# but returns the issued credentials in responseElements, so those records
+# legitimately carry a body.
+_RESPONSE_ELEMENTS_ON_READONLY = {
+    "AssumeRole",
+    "AssumeRoleWithSAML",
+    "AssumeRoleWithWebIdentity",
+    "GetSessionToken",
+    "GetFederationToken",
+}
 
 # --- Event Template Functions ---
 
@@ -578,28 +604,46 @@ def _generate_s3_make_public_acl(config, context=None):
     target_bucket = random.choice(s3_buckets)
     bucket_arn = f"arn:aws:s3:::{target_bucket}"
 
-    # Construct the ACL grant for public read
-    acl_policy = {
-        "AccessControlList": {
-            "Grant": [{
-                "Grantee": {
-                    # URI for the "AllUsers" group
-                    "URI": "http://acs.amazonaws.com/groups/global/AllUsers",
-                    "Type": "Group"
-                },
-                "Permission": "READ" # Grant read permission
-            }]
-            # Note: A real PutBucketAcl would likely include the Owner grant too,
-            # but for detection, the AllUsers grant is the critical part.
+    # Two real shapes of the same call, and the split matters.
+    #
+    # `put-bucket-acl --grant-read uri=...AllUsers` logs an AccessControlPolicy with
+    # the AllUsers grant URI. `put-bucket-acl --acl public-read` logs a CANNED acl in
+    # x-amz-acl instead, with no AccessControlPolicy at all -- CloudTrail carries one
+    # form or the other, never both.
+    #
+    # The grant-URI form stays dominant on purpose: per the 2026-08-02 note below on
+    # the removed PutBucketPolicy variant, the built-in BIOC "AWS S3 bucket was
+    # exposed to public access" only recognises that form (it alerted in 65s where the
+    # policy form was silent for 20 minutes). The canned form is a real minority of
+    # traffic and is what the `public-read` / `public-read-write` branches of
+    # correlation rule 01_step6 match, so a quarter of events take it.
+    use_canned = random.random() < 0.25
+    canned_acl = random.choice(["public-read", "public-read-write"])
+    if use_canned:
+        acl_policy = None
+    else:
+        acl_policy = {
+            "AccessControlList": {
+                "Grant": [{
+                    "Grantee": {
+                        # URI for the "AllUsers" group
+                        "URI": "http://acs.amazonaws.com/groups/global/AllUsers",
+                        "Type": "Group"
+                    },
+                    "Permission": "READ" # Grant read permission
+                }]
+                # Note: A real PutBucketAcl would likely include the Owner grant too,
+                # but for detection, the AllUsers grant is the critical part.
+            }
+            # Owner is implicitly the bucket owner
         }
-        # Owner is implicitly the bucket owner
-    }
 
     event = _get_base_event(config, user_identity, ip_address, region, "PutBucketAcl", "s3.amazonaws.com", api_version="2006-03-01", read_only=False)
     event.update({
         "requestParameters": {
             "bucketName": target_bucket,
-            "AccessControlPolicy": acl_policy,
+            **({"x-amz-acl": canned_acl} if use_canned
+               else {"AccessControlPolicy": acl_policy}),
             "Host": f"{target_bucket}.s3.{region}.amazonaws.com"
         },
         "responseElements": None, # Successful PutBucketAcl often has null responseElements
@@ -3378,37 +3422,71 @@ def _generate_multiple_deletes(config, context=None):
     region = aws_conf.get('aws_region', 'us-east-1')
     account_id = user_identity.get('accountId', aws_conf.get('aws_account_id', '123456789012'))
 
-    events = []
-    
-    # 1. Delete S3 Bucket
-    s3_buckets = aws_conf.get("s3_buckets", ["default-sim-bucket-1"])
-    target_bucket = random.choice(s3_buckets)
-    bucket_arn = f"arn:aws:s3:::{target_bucket}"
-    
-    s3_event = _get_base_event(config, user_identity, ip_address, region, "DeleteBucket", "s3.amazonaws.com", api_version="2006-03-01", read_only=False)
-    s3_event.update({
-        "requestParameters": {"bucketName": target_bucket, "Host": f"{target_bucket}.s3.{region}.amazonaws.com"},
-        "responseElements": None,
-        "resources": [{"type": "AWS::S3::Bucket", "ARN": bucket_arn, "accountId": account_id}]
-    })
-    events.append(s3_event)
+    # "Deletion of multiple cloud resources" keys on ONE identity destroying many
+    # resources in a short window. Two deletes (a bucket + an instance) is not "multiple"
+    # by any baseline, so this now spreads a realistic destruction burst across resource
+    # TYPES and counts -- buckets, instances, volumes, snapshots, security groups -- over
+    # a few minutes, which is what wiper/ransomware cleanup actually looks like.
+    now = datetime.datetime.now(datetime.UTC)
+    offset = [0.0]
 
-    # 2. Terminate EC2 Instance
-    instance_id = random.choice(aws_conf.get("ec2_instances", ["i-00000000000000000"]))
-    instance_arn = f"arn:aws:ec2:{region}:{account_id}:instance/{instance_id}"
-    
-    ec2_event = _get_base_event(config, user_identity, ip_address, region, "TerminateInstances", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
-    ec2_event.update({
-        "requestParameters": {"instancesSet": {"items": [{"instanceId": instance_id}]}},
-        "responseElements": {
-            "instancesSet": {"items": [
-                {"instanceId": instance_id, "currentState": {"code": 32, "name": "shutting-down"}, "previousState": {"code": 16, "name": "running"}}
-            ]}
-        },
-        "resources": [{"type": "AWS::EC2::Instance", "ARN": instance_arn, "accountId": account_id}]
-    })
-    events.append(ec2_event)
-    
+    def _at():
+        offset[0] += random.uniform(2, 20)
+        return (now + datetime.timedelta(seconds=offset[0])).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def _pick(key, default, n):
+        pool = aws_conf.get(key) or default
+        return random.sample(pool, min(n, len(pool)))
+
+    events = []
+
+    # S3 buckets
+    for b in _pick("s3_buckets", ["default-sim-bucket-1"], random.randint(2, 4)):
+        e = _get_base_event(config, user_identity, ip_address, region, "DeleteBucket", "s3.amazonaws.com", api_version="2006-03-01", read_only=False)
+        e["eventTime"] = _at()
+        e.update({"requestParameters": {"bucketName": b, "Host": f"{b}.s3.{region}.amazonaws.com"},
+                  "responseElements": None,
+                  "resources": [{"type": "AWS::S3::Bucket", "ARN": f"arn:aws:s3:::{b}", "accountId": account_id}]})
+        events.append(e)
+
+    # EC2 instances — a single TerminateInstances can carry several
+    insts = _pick("ec2_instances", ["i-00000000000000000"], random.randint(3, 6))
+    e = _get_base_event(config, user_identity, ip_address, region, "TerminateInstances", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
+    e["eventTime"] = _at()
+    e.update({
+        "requestParameters": {"instancesSet": {"items": [{"instanceId": i} for i in insts]}},
+        "responseElements": {"instancesSet": {"items": [
+            {"instanceId": i, "currentState": {"code": 32, "name": "shutting-down"},
+             "previousState": {"code": 16, "name": "running"}} for i in insts]}},
+        "resources": [{"type": "AWS::EC2::Instance",
+                       "ARN": f"arn:aws:ec2:{region}:{account_id}:instance/{i}", "accountId": account_id}
+                      for i in insts]})
+    events.append(e)
+
+    # EBS volumes
+    for v in _pick("ebs_volumes", ["vol-00000000000000000"], random.randint(2, 4)):
+        e = _get_base_event(config, user_identity, ip_address, region, "DeleteVolume", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
+        e["eventTime"] = _at()
+        e.update({"requestParameters": {"volumeId": v}, "responseElements": {"_return": True},
+                  "resources": [{"type": "AWS::EC2::Volume", "ARN": f"arn:aws:ec2:{region}:{account_id}:volume/{v}", "accountId": account_id}]})
+        events.append(e)
+
+    # EBS snapshots
+    for snap in _pick("ec2_snapshots", ["snap-00000000000000000"], random.randint(2, 4)):
+        e = _get_base_event(config, user_identity, ip_address, region, "DeleteSnapshot", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
+        e["eventTime"] = _at()
+        e.update({"requestParameters": {"snapshotId": snap}, "responseElements": {"_return": True},
+                  "resources": [{"type": "AWS::EC2::Snapshot", "ARN": f"arn:aws:ec2:{region}:{account_id}:snapshot/{snap}", "accountId": account_id}]})
+        events.append(e)
+
+    # Security groups
+    for sg in _pick("security_groups", ["sg-00000000000000000"], random.randint(1, 3)):
+        e = _get_base_event(config, user_identity, ip_address, region, "DeleteSecurityGroup", "ec2.amazonaws.com", api_version="2016-11-15", read_only=False)
+        e["eventTime"] = _at()
+        e.update({"requestParameters": {"groupId": sg}, "responseElements": {"_return": True},
+                  "resources": [{"type": "AWS::EC2::SecurityGroup", "ARN": f"arn:aws:ec2:{region}:{account_id}:security-group/{sg}", "accountId": account_id}]})
+        events.append(e)
+
     return events
 
 def _generate_suspicious_iam_creation(config, context=None):
@@ -3668,12 +3746,20 @@ def _generate_s3_ransomware_encrypt(config, context=None):
     # Generate object inventory once — shared across ListObjectsV2, CopyObject, DeleteObjects
     _prefixes = ["documents/", "data/", "backups/", "reports/", "exports/", "archives/", "db/", "configs/"]
     _exts = [".dat", ".bak", ".docx", ".xlsx", ".pdf", ".db", ".sql", ".csv", ".json", ".tar.gz"]
-    num_files = random.randint(50, 250)
+    # Discover and encrypt the whole bucket: a real ransomware run hits every object it
+    # finds, not a sample. 200-400 objects -> each gets a CopyObject + foreign-KMS
+    # GenerateDataKey (encrypt), and Phase 5 then permanently deletes every original
+    # version. "multiple objects ... for the first time" is cleared with wide margin.
+    num_files = random.randint(200, 400)
     objects = [
         {
             "key": f"{random.choice(_prefixes)}{random.randint(10000, 99999)}{random.choice(_exts)}",
             "size": random.randint(1024, 50 * 1024 * 1024),
             "eTag": '"' + ''.join(random.choices('0123456789abcdef', k=32)) + '"',
+            # S3 version IDs: ~32 chars from S3's own alphabet. The delete phase removes
+            # these specific versions (permanent destruction), not just a delete marker.
+            "versionId": ''.join(random.choices(
+                'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._', k=32)),
         }
         for _ in range(num_files)
     ]
@@ -3843,8 +3929,14 @@ def _generate_s3_ransomware_encrypt(config, context=None):
 
         t_offset += random.uniform(0.1, 0.5)  # Tight interval — rapid bulk operation
 
-    # ── Phase 5: DeleteObjects — remove originals in batches of 500 ──────────
-    batch_size = 500
+    # ── Phase 5: DeleteObjects — PERMANENTLY destroy the original versions ────
+    # Real ransomware deletes the specific prior versions (each carries a versionId) so
+    # the victim cannot roll back; a plain delete only adds a delete marker and leaves the
+    # data recoverable. Specifying versionId is what distinguishes "permanently deleted"
+    # from an ordinary delete, and is the signal behind the deletion analytics
+    # ("Mass deletion of versioned S3 objects", "...permanently deleted multiple objects").
+    # S3 caps DeleteObjects at 1000 keys per call; use that batch size.
+    batch_size = 1000
     for i in range(0, len(objects), batch_size):
         batch = objects[i:i + batch_size]
         e = _strip_vpc(_get_base_event(config, user_identity, ip_address, region, "DeleteObjects", "s3.amazonaws.com", api_version="2006-03-01", read_only=False))
@@ -3862,13 +3954,14 @@ def _generate_s3_ransomware_encrypt(config, context=None):
             "requestParameters": {
                 "bucketName": target_bucket,
                 "delete": {
-                    "objects": [{"key": obj['key']} for obj in batch],
+                    "objects": [{"key": obj['key'], "versionId": obj['versionId']} for obj in batch],
                     "quiet": False
                 }
             },
             "responseElements": {
                 "DeleteResult": {
-                    "Deleted": [{"Key": obj['key']} for obj in batch]
+                    "Deleted": [{"Key": obj['key'], "versionId": obj['versionId'],
+                                 "deleteMarker": False} for obj in batch]
                 }
             },
             "resources": [{"type": "AWS::S3::Bucket", "ARN": bucket_arn, "accountId": account_id}]
@@ -7043,8 +7136,177 @@ SCENARIO_FUNCTIONS = {
     "PUT_EVENT_SELECTORS": _generate_put_event_selectors,
     "S3_READ_EXFIL_CHAIN": _generate_s3_read_exfil_chain,
     "UPDATE_TRAIL": _generate_cloudtrail_update_trail,
+    # Registered 2026-10-03: these already ran in THREAT_SCENARIOS /
+    # SUSPICIOUS_SCENARIOS but had no name, so nothing could fire or sweep them.
+    "MULTIPLE_DENIED_ACTIONS": _generate_multiple_denied_actions,
+    "SECURITY_GROUP_OPEN_ALL": _generate_security_group_modified,
+    "KMS_KEY_DISABLED": _generate_kms_key_disabled,
+    "ROOT_USER_ACTIVITY": _generate_root_user_activity,
+    "TRAIL_DELETED": _generate_trail_deleted,
+    "MULTIPLE_DELETES": _generate_multiple_deletes,
+    "S3_SUSPICIOUS_ENCRYPTION": _generate_s3_suspicious_encryption,
+    "K8S_SA_OUTSIDE_CLUSTER": _generate_k8s_sa_outside_cluster,
+    "PENTEST_USER_AGENT": _generate_api_call_with_pentest_ua,
+    "EC2_INSTANCE_TYPE_CHANGE": _generate_ec2_instance_type_change,
+    "S3_COPY_TO_FOREIGN_ACCOUNT": _generate_s3_copy_to_foreign_account,
+    "API_CALL_FROM_TOR": _generate_api_call_from_tor,
+    # Registered 2026-10-07: a benign generator (stays in BENIGN_SCENARIOS too) whose
+    # ListFoundationModels emits "AI model discovery" [Low] unconditionally. An ambient
+    # benign draw still reports the function name, not this key, so it is not counted a threat.
+    "AI_MODEL_DISCOVERY": _generate_bedrock_list_foundation_models,
+    "DELETE_LOG_STREAM": _generate_cloudwatch_delete_log_stream,
+    "DELETE_MFA_DEVICE": _generate_iam_delete_mfa_device,
+    "CREATE_AND_SHARE_SNAPSHOT": _generate_ec2_create_and_share_snapshot,
+    "UPDATE_LOGIN_PROFILE": _generate_iam_update_login_profile,
+    "CREATE_ACCESS_KEY": _generate_iam_create_access_key,
+    "LAMBDA_UNUSUAL_RUNTIME": _generate_lambda_create_function_unusual_runtime,
+    "EBS_DETACH_VOLUME": _generate_ebs_detach_volume,
+    "MODIFY_USER_DATA": _generate_ec2_modify_user_data,
+    "EC2_EXPORT_TO_S3": _generate_ec2_export_to_s3,
+    "REMOVE_BILLING_ADMIN": _generate_iam_remove_billing_admin,
+    "VPC_CREATE_FLOW_LOG": _generate_vpc_create_flow_log,
+    "MODIFY_ROUTE_TABLE": _generate_ec2_modify_route_table,
+    "IAM_RECON_LIST": _generate_iam_recon_list,
+    "S3_SET_REPLICATION": _generate_s3_set_replication,
 }
 
+
+# Threat -> the XSIAM analytics alert it is built to trigger. Only these threats are
+# offered for on-demand firing (dashboard / MCP / CLI, via modules/threat_catalog.py);
+# every threat still runs in long-running sessions. Names are as the tenant raises them
+# where observed, else the published Cortex name. Mapped 2026-09-29 against the Cortex
+# "AWS Audit Log" analytics list and 90 days of tenant alerts.
+ANALYTIC_ALERTS = {
+    # Unmapped (background only): ASSUME_ROLE_WITH_SAML is a benign SSO baseline;
+    # DISABLE_SECURITY_HUB, DISABLE_MACIE, DISABLE_INSPECTOR, EVENTBRIDGE_RULE_DELETED,
+    # GLUE_JOB_EXFIL and ATHENA_QUERY_EXFIL have no matching published analytic.
+    "KMS_KEY_DESTRUCTION":            "Unusual key management activity",
+    "IMDS_CREDENTIAL_THEFT":          "Suspicious usage of EC2 token",
+    "TOR_LOGIN":                      "Suspicious API call from a Tor exit node",
+    "PENTEST_LAUNCH":                 "Cloud penetration testing tool activity",
+    "DISABLE_GUARDDUTY":              "AWS Guard-Duty detector deletion",
+    "STOP_CLOUDTRAIL":                "AWS CloudTrail has been stopped",
+    "MAKE_S3_PUBLIC":                 "AWS S3 bucket was exposed to public access",
+    "DISABLE_S3_LOGGING":             "An identity disabled bucket logging",
+    "ATTACH_ADMIN_POLICY":            "An identity attached an administrative policy to itself",
+    "CREATE_SUSPICIOUS_USER":         "Administrative IAM User Created with Credentials",
+    "SSM_START_SESSION":              "An identity started an unusual AWS SSM session",
+    "SSM_SEND_COMMAND":               "Command execution via AWS SSM",
+    "SSM_EXECUTION_CHAIN":            "Command execution via AWS SSM",
+    "RDS_SHARE_SNAPSHOT":             "Cloud snapshot of a database or storage instance was shared with an unknown AWS account",
+    "LAMBDA_ROLE_REMOTE":             "Remote command line usage of AWS Lambda's role",
+    "S3_RANSOMWARE_ENCRYPT":          "Suspicious objects encryption in an AWS bucket",
+    "BEDROCK_DELETE_LOGGING":         "AWS Bedrock model invocation logging deletion",
+    "CROSS_ACCOUNT_ASSUME_ROLE":      "Unusual cross projects activity",
+    "STOP_CONFIG_RECORDER":           "AWS Config Recorder stopped",
+    "DELETE_WAF_RULE":                "Successful AWS web ACL deletion by a non-admin identity",
+    "KB_MODIFICATION":                "Unusual AI Knowledge Base Modification",
+    "BEDROCK_RAG_KB_MODIFICATION":    "Unusual AI RAG Knowledge Base Modification",
+    "CREDENTIAL_FILE_ACCESS":         "Unusual secret management activity",
+    "BEDROCK_GUARDRAIL_DELETED":      "AI safeguards were successfully deleted",
+    "BEDROCK_DENIAL_OF_WALLET":       "Potential denial of wallet abusing AI services",
+    "SAGEMAKER_DATASET_MODIFICATION": "Unusual AI dataset modification",
+    "SAGEMAKER_LABEL_MODIFICATION":   "Suspicious AI Dataset Label Modification",
+    "BEDROCK_UNUSUAL_MODEL_ACCESS":   "Unusual AWS Bedrock model access request",
+    "BEDROCK_TOR_USAGE":              "Suspicious AI model usage from a Tor exit node",
+    "IAM_PASSROLE":                   "An AWS Lambda Function was created",
+    "LAMBDA_UPDATE_CODE":             "An AWS Lambda function was modified",
+    "ORGANIZATIONS_RECON":            "Cloud infrastructure enumeration activity",
+    "CONSOLE_LOGIN_BRUTE_FORCE":      "Multiple failed logins from a single IP",
+    "PUT_EVENT_SELECTORS":            "Disable AWS audit logs through Event Selectors",
+    "S3_READ_EXFIL_CHAIN":            "An identity initiated a download of multiple cloud objects",
+    "UPDATE_TRAIL":                   "AWS CloudTrail modification",
+    # Registered 2026-10-03 (previously unnamed background generators). Unmapped:
+    # VPC_CREATE_FLOW_LOG (benign) and MODIFY_ROUTE_TABLE (no matching analytic).
+    "MULTIPLE_DENIED_ACTIONS":    "Cloud user performed multiple actions that were denied",
+    "SECURITY_GROUP_OPEN_ALL":    "A cloud identity created or modified a security group",
+    "KMS_KEY_DISABLED":           "Unusual key management activity",
+    "ROOT_USER_ACTIVITY":         "AWS root account activity",
+    "TRAIL_DELETED":              "CloudTrail logging deletion",
+    "MULTIPLE_DELETES":           "Deletion of multiple cloud resources",
+    "S3_SUSPICIOUS_ENCRYPTION":   "Suspicious objects encryption in an AWS bucket",
+    "K8S_SA_OUTSIDE_CLUSTER":     "Kubernetes service account activity outside the cluster",
+    "PENTEST_USER_AGENT":         "Cloud penetration testing tool activity",
+    "EC2_INSTANCE_TYPE_CHANGE":   "Suspicious heavy allocation of compute resources - possible mining activity",
+    "S3_COPY_TO_FOREIGN_ACCOUNT": "A cloud storage object was copied to a foreign cloud account",
+    "API_CALL_FROM_TOR":          "Suspicious API call from a Tor exit node",
+    "AI_MODEL_DISCOVERY":         "AI model discovery",
+    "DELETE_LOG_STREAM":          "AWS CloudWatch log stream deletion",
+    "DELETE_MFA_DEVICE":          "MFA device was removed/deactivated from an IAM user",
+    "CREATE_AND_SHARE_SNAPSHOT":  "A cloud snapshot of AWS database or storage was modified or shared",
+    "UPDATE_LOGIN_PROFILE":       "An identity created or updated password for an IAM user",
+    "CREATE_ACCESS_KEY":          "Cloud access key creation",
+    "LAMBDA_UNUSUAL_RUNTIME":     "A cloud function was created with an unusual runtime",
+    "EBS_DETACH_VOLUME":          "EBS volume detachment attempt",
+    "MODIFY_USER_DATA":           "Cloud compute instance user data script modification",
+    "EC2_EXPORT_TO_S3":           "AWS EC2 instance exported into S3",
+    "REMOVE_BILLING_ADMIN":       "Billing admin role was removed",
+    "IAM_RECON_LIST":             "IAM Enumeration sequence",
+    "S3_SET_REPLICATION":         "An S3 replication policy to an unknown bucket was created",
+}
+
+# Additional analytics the SAME events already satisfy, beyond each threat's primary
+# ANALYTIC_ALERTS target. Added 2026-10-03 after auditing every generator's API calls
+# against the uncovered Low+ AWS analytics: these need no change to any generated
+# event. The on-demand label still shows only the primary target; the coverage report
+# and the sweep read this table too.
+#
+# Deliberately NOT listed, because the events do not actually satisfy the analytic --
+# each needs a higher event COUNT, which is an event change, not a mapping:
+#   MULTIPLE_DELETES              2 events  vs "deleted multiple cloud resources"
+#   CREDENTIAL_FILE_ACCESS        1 secret  vs "extracted multiple secrets" / dump
+#   SAGEMAKER_DATASET_MODIFICATION 1 delete vs "deleted multiple ML artifacts"
+#   S3_RANSOMWARE_ENCRYPT    1 DeleteObjects vs "mass deletion of versioned objects"
+ANALYTIC_ALERTS_SECONDARY = {
+    # Verified by event shape: the generator emits 6-14 GetObject calls per run.
+    "S3_READ_EXFIL_CHAIN": [
+        "An identity performed a suspicious download of multiple cloud storage objects",
+        "Suspicious identity downloaded multiple objects from a bucket",
+    ],
+    # Verified: sets a known pentest-tool user agent on the API call.
+    "PENTEST_USER_AGENT": ["Unusual user-agent for a cloud identity"],
+    # Verified: Lambda execution-role credentials used from an external IP via the CLI.
+    "LAMBDA_ROLE_REMOTE": [
+        "A Command Line Interface (CLI) command was executed from an AWS serverless compute service",
+        "Remote usage of an AWS service token",
+    ],
+    # Verified: AssumeRoleWithWebIdentity from outside the cluster = a service token
+    # used remotely.
+    "K8S_SA_OUTSIDE_CLUSTER": ["Remote usage of an AWS service token"],
+    # Verified: defaults to self-escalation (AttachUserPolicy of an admin policy).
+    "ATTACH_ADMIN_POLICY": ["A cloud identity had escalated its permissions"],
+    # Verified: SendCommand / DescribeInstanceInformation are exactly what these two
+    # SSM analytics describe.
+    "SSM_SEND_COMMAND": ["AWS SSM send command attempt"],
+    "SSM_EXECUTION_CHAIN": [
+        "AWS SSM send command attempt",
+        "AWS Systems Manager hosts enumeration",
+    ],
+    # Verified: an S3 bucket is a data asset, made public by ACL.
+    "MAKE_S3_PUBLIC": ["AWS data asset shared public"],
+    # Dropped 2026-10-08: the cross-account-impersonation and unusual-IAM-activity
+    # secondaries never fired in 90 days of history, and all three target alerts are
+    # Informational base severity (this tenant does not raise Informational) with a
+    # 14-day activation -- so they cannot credit here regardless of time. The threats
+    # keep their proven primaries (CROSS_ACCOUNT_ASSUME_ROLE -> "Unusual cross projects
+    # activity", which fired as recently as 2026-10-08; IAM_RECON_LIST -> "IAM
+    # Enumeration sequence").
+    # The ransomware chain permanently deletes the original object VERSIONS (Phase 5,
+    # each delete carries a versionId, deleteMarker=False). That is a direct match for
+    # the Medium "permanently deleted multiple objects" variation. "Mass deletion of
+    # versioned S3 objects" is PLAUSIBLE only: its Low+ variations additionally need the
+    # bucket/account classed production or sensitive-data (tenant-side), so drop it if the
+    # sweep never credits it.
+    "S3_RANSOMWARE_ENCRYPT": [
+        "Unusual AWS S3 objects deletion",
+        "Mass deletion of versioned S3 objects",
+    ],
+    # A Tor exit node is a high-risk IP, so every Tor-sourced API call also raises
+    # "Cloud activity from an unusual high-risk IP" [Low] (observed firing 2026-10-07).
+    "TOR_LOGIN": ["Cloud activity from a high-risk IP address"],
+    "API_CALL_FROM_TOR": ["Cloud activity from a high-risk IP address"],
+    "BEDROCK_TOR_USAGE": ["Cloud activity from a high-risk IP address"],
+}
 
 def get_threat_names():
     """Return available threat names dynamically from SCENARIO_FUNCTIONS.
@@ -7363,7 +7625,20 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
 
     # Determine event name for return tuple — use scenario key if available
     _func_to_key = {fn: k for k, fn in SCENARIO_FUNCTIONS.items()}
-    event_name_for_return = scenario_event if scenario_event else _func_to_key.get(chosen_func, getattr(chosen_func, "__name__", "unknown_generator"))
+    if scenario_event:
+        # Explicitly requested one-shot: report the name that was asked for.
+        event_name_for_return = scenario_event
+    elif chosen_func in BENIGN_SCENARIOS:
+        # An ambient baseline draw is NOT a threat, even when the same generator is
+        # also registered in SCENARIO_FUNCTIONS so it can be fired one-shot by name.
+        # Reverse-mapping it here gave every baseline firing a named-threat label, and
+        # the dashboard counts any name in get_threat_names() as a threat
+        # (dashboard/app.py record_log). _generate_assume_role_with_saml is an SSO
+        # login baseline at weight 6/350 of the benign pool: it alone reported 1,182
+        # of 1,188 AWS "threats", hiding that only ~6 real threats had fired.
+        event_name_for_return = getattr(chosen_func, "__name__", "unknown_generator")
+    else:
+        event_name_for_return = _func_to_key.get(chosen_func, getattr(chosen_func, "__name__", "unknown_generator"))
 
     logger.info("Generated events from: %s (count=%d)", event_name_for_return, len(events))
 
@@ -7392,6 +7667,21 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
                 evt[k] = v
         if not isinstance(evt.get("eventTime"), str):
             evt["eventTime"] = datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        # --- CloudTrail invariants (enforced last, after template update()) ---
+        # readOnly is a JSON boolean.  Templates that pre-date this may still set
+        # the string form, so coerce rather than trust.
+        _ro = evt.get("readOnly")
+        if isinstance(_ro, str):
+            _ro = _ro.strip().lower() == "true"
+            evt["readOnly"] = _ro
+
+        # Real CloudTrail sets responseElements to null for read-only calls; it
+        # only records a response body for calls that change state.  The STS
+        # AssumeRole family is the documented exception -- those are read-only and
+        # DO return responseElements (the issued credentials), so leave them be.
+        if _ro is True and evt.get("eventName") not in _RESPONSE_ELEMENTS_ON_READONLY:
+            evt["responseElements"] = None
         return evt
     # --- End _validate_event ---
 

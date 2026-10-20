@@ -9,13 +9,21 @@ from datetime import datetime, timedelta, timezone
 import uuid
 from ipaddress import ip_network
 try:
-    from modules.session_utils import (get_random_user, get_user_by_name, rand_ip_from_network,
+    from modules import resolver
+    from modules import threat_domains
+    from modules import mgmt_plane
+    from modules.session_utils import (get_random_user, weighted_dns_domain, get_user_by_name, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
+        rare_external_ip, rare_internal_host, vpn_username, impossible_travel_ips, correlated_or_random_user)
 except ImportError:
-    from session_utils import (get_random_user, get_user_by_name, rand_ip_from_network,
+    import resolver
+    import threat_domains
+    import mgmt_plane
+    from session_utils import (get_random_user, weighted_dns_domain, get_user_by_name, rand_ip_from_network,
         stable_vpn_ip, stable_mail_servers, weighted_destination,
-        novel_country_vpn_ip, tor_vpn_ip, random_external_ip)
+        novel_country_vpn_ip, tor_vpn_ip, random_external_ip,
+        rare_external_ip, rare_internal_host, vpn_username, impossible_travel_ips, correlated_or_random_user)
 
 NAME = "Check Point Firewall"
 DESCRIPTION = "Simulates Check Point traffic, threat prevention, URL filtering, and identity logs in CEF format."
@@ -41,6 +49,9 @@ CONFIG_KEY = "checkpoint_config"
 # "xsiam_alert" is the matching XSIAM analytics alert name when analytic=True.
 _NON_ANALYTIC_PREFIX = "[Non-Analytic] "
 _DEFAULT_THREAT_EVENTS = [
+    # 2026-09-17: vpn_brute_force, vpn_impossible_travel and workstation_rdp REBUILT
+    # and made analytic; torrent_client added as the analytic successor to
+    # app_control (see each generator's docstring).
     {"event": "ips",                   "weight": 18, "analytic": False,
      "xsiam_alert": None},
     {"event": "port_scan",             "weight": 14, "analytic": True,
@@ -51,22 +62,26 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Failed Connections"},
     {"event": "url_block",             "weight": 8,  "analytic": False,
      "xsiam_alert": None},
-    {"event": "vpn_brute_force",       "weight": 8,  "analytic": False,
-     "xsiam_alert": None},
+    {"event": "vpn_brute_force",       "weight": 8,  "analytic": True,
+     "xsiam_alert": "VPN login Brute-Force attempt"},
     {"event": "large_upload",          "weight": 5,  "analytic": True,
+     "xsiam_alert": "Large Upload (HTTPS)"},
+    # Same exfil to an HTTPS service on a non-standard port -> the Low-severity
+    # "Large Upload (HTTPS) to non-standard port" variation.
+    {"event": "large_upload_nonstd_port", "weight": 2, "analytic": True,
      "xsiam_alert": "Large Upload (HTTPS)"},
     {"event": "rare_ssh",              "weight": 3,  "analytic": True,
      "xsiam_alert": "Uncommon SSH session was established"},
     {"event": "tor_connection",        "weight": 3,  "analytic": True,
      "xsiam_alert": "Recurring access to rare IP"},
-    {"event": "vpn_impossible_travel", "weight": 3,  "analytic": False,
-     "xsiam_alert": None},
+    {"event": "vpn_impossible_travel", "weight": 3,  "analytic": True,
+     "xsiam_alert": "Impossible traveler - VPN"},
     {"event": "dns_c2_beacon",         "weight": 3,  "analytic": True,
-     "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
+     "xsiam_alert": "Recurring access to rare IP"},
     {"event": "server_outbound_http",  "weight": 2,  "analytic": True,
-     "xsiam_alert": "New Administrative Behavior"},
-    {"event": "workstation_rdp",       "weight": 2,  "analytic": False,
-     "xsiam_alert": None},
+     "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "workstation_rdp",       "weight": 2,  "analytic": True,
+     "xsiam_alert": "Rare RDP session to a remote host"},
     {"event": "identity",              "weight": 2,  "analytic": False,
      "xsiam_alert": None},
     {"event": "smartdefense",          "weight": 4,  "analytic": False,
@@ -89,22 +104,52 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Spam Bot Traffic"},
     {"event": "smtp_large_exfil",      "weight": 2,  "analytic": True,
      "xsiam_alert": "Large Upload (SMTP)"},
+    # "Large Upload (FTP)" is a third-party-firewall analytic: it fired from Firepower
+    # data on 2026-09-25 while this entry still said non-analytic.
     {"event": "ftp_large_exfil",       "weight": 2,  "analytic": True,
-     "xsiam_alert": "New FTP Server"},
-    {"event": "ddns_connection",       "weight": 3,  "analytic": True,
-     "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
-    {"event": "large_download",        "weight": 3,  "analytic": True,
-     "xsiam_alert": "Large Download"},
-    {"event": "dns_tunneling",         "weight": 3,  "analytic": True,
-     "xsiam_alert": "DNS Tunneling"},
+     "xsiam_alert": "Large Upload (FTP)"},
+    {"event": "ddns_connection",       "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "large_download",        "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
+    {"event": "dns_tunneling",         "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
     {"event": "reverse_ssh_tunnel",    "weight": 2,  "analytic": True,
-     "xsiam_alert": "Uncommon reverse SSH tunnel to external domain/ip"},
-    {"event": "ldap_recon",            "weight": 3,  "analytic": True,
-     "xsiam_alert": "Suspicious reconnaissance using LDAP"},
-    {"event": "external_port_scan",    "weight": 3,  "analytic": True,
-     "xsiam_alert": "Port Scan"},
+     "xsiam_alert": "Uncommon SSH session was established"},
+    {"event": "ldap_recon",            "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
+    # external_port_scan is realistic perimeter traffic but NOT a "Port Scan" analytic:
+    # that detector profiles YOUR endpoints ("The endpoint connected, or attempted to
+    # connect, to multiple privileged ports"), and an internet scanner hitting the WAN is
+    # not one of them. It was claimed analytic with xsiam_alert "Port Scan" and could
+    # never fire that way. Relabelled [Non-Analytic]; the internal port_scan threat is
+    # the one that exercises the detector.
+    {"event": "external_port_scan",    "weight": 3,  "analytic": False,
+     "xsiam_alert": None},
     {"event": "new_admin_behavior",    "weight": 3,  "analytic": True,
      "xsiam_alert": "New Administrative Behavior"},
+    {"event": "torrent_client",        "weight": 3,  "analytic": True,
+     "xsiam_alert": "A Torrent client was detected on a host"},
+    # Tier 1-3 detectors added 2026-09-18.
+    {"event": "port_sweep",            "weight": 5,  "analytic": True,
+     "xsiam_alert": "Port Sweep"},
+    {"event": "dc_smb_outbound",       "weight": 3,  "analytic": True,
+     "xsiam_alert": "Suspicious SMB connection from domain controller"},
+    {"event": "new_ftp_server",        "weight": 2,  "analytic": True,
+     "xsiam_alert": "New FTP Server"},
+    {"event": "rare_appid",            "weight": 3,  "analytic": True,
+     "xsiam_alert": "Rare AppID usage to a rare destination"},
+    {"event": "abnormal_rdp_rare_host","weight": 2,  "analytic": True,
+     "xsiam_alert": "Abnormal RDP session to a remote host from a rarely seen host"},
+    {"event": "rare_smtp_session",     "weight": 2,  "analytic": True,
+     "xsiam_alert": "Rare SMTP/S Session"},
+    # Management plane (2026-10-19, gocortexio advisory corpus MANAGEMENT patterns).
+    # No shipped Cortex analytic covers device administration: hunting / correlation.
+    {"event": "mgmt_admin_unexpected_source", "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_config_route_change",     "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_logging_suppressed",      "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "mgmt_config_harvest",          "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "snmp_unexpected_source",       "weight": 1, "analytic": False, "xsiam_alert": None},
 ]
 
 
@@ -114,19 +159,20 @@ _EVENT_DISPLAY_NAMES = {}   # event_key → display_name
 _DISPLAY_TO_EVENT    = {}   # display_name → event_key  (reverse lookup)
 for _e in _DEFAULT_THREAT_EVENTS:
     _key  = _e["event"]
-    _name = _key if _e.get("analytic", True) else _NON_ANALYTIC_PREFIX + _key
+    # The "[Non-Analytic] " display prefix is retired: non-analytic threats are simply
+    # not offered on demand (modules/threat_catalog.py). Old prefixed names still resolve.
+    _name = _key
+    _DISPLAY_TO_EVENT[_NON_ANALYTIC_PREFIX + _key] = _key
     _EVENT_DISPLAY_NAMES[_key]  = _name
     _DISPLAY_TO_EVENT[_name]    = _key
     _DISPLAY_TO_EVENT[_key]     = _key      # also accept raw key for back-compat
 
 
 def get_threat_names():
-    """Return available threat names dynamically from _DEFAULT_THREAT_EVENTS.
+    """Return every threat name in _DEFAULT_THREAT_EVENTS (analytic or not).
 
-    Non-analytic events (those that won't trigger an XSIAM Third-Party Firewall
-    analytics detection) are prefixed with '[Non-Analytic] ' so operators can
-    focus on events that will produce alerts.
-    """
+    get_threat_info() carries the analytic flag and target alert; only analytic threats
+    are offered for on-demand firing (modules/threat_catalog.py)."""
     return [_EVENT_DISPLAY_NAMES[e["event"]] for e in _DEFAULT_THREAT_EVENTS]
 
 
@@ -150,9 +196,7 @@ def get_threat_info():
 last_threat_event_time = 0
 
 
-# ---------------------------------------------------------------------------
 # Administrative-behaviour analytics support
-# ---------------------------------------------------------------------------
 # Ports XSIAM's NDR lateral-movement analytics treats as an "administrative
 # action": remote shell, remote file transfer and remote console services.
 # Mapped to (service_id, app) so the parser derives a real app_id per session.
@@ -221,9 +265,7 @@ def _admin_port_sequence(count):
     return seq[:count]
 
 
-# ---------------------------------------------------------------------------
 # Check Point field generation helpers
-# ---------------------------------------------------------------------------
 
 def _generate_loguid():
     """Generate a Check Point-style loguid in the {0xhex,...} format used by R80+ gateways.
@@ -272,9 +314,7 @@ def _get_layer_uuid(hostname):
     return "{" + str(uuid.uuid5(_LAYER_NAMESPACE, hostname + "_Network")) + "}"
 
 
-# ---------------------------------------------------------------------------
 # Internal utilities
-# ---------------------------------------------------------------------------
 
 def _get_threat_interval(threat_level, config):
     """Gets the threat interval from the main config."""
@@ -310,6 +350,13 @@ def _random_external_ip():
     return random_external_ip()
 
 
+def _grid(config, src_ip):
+    """(fqdn, ip) of the client's Infoblox grid member -- the same member the
+    Infoblox module logs this client's queries on (resolver.dns_server_for)."""
+    member, ip = resolver.dns_server_for(config, src_ip)
+    return f"{member}.{resolver.internal_domain(config)}", ip
+
+
 def _dns_precursor(config, src_ip, user, shost, domain, event_time=None):
     """Generate a DNS resolution log preceding an outbound connection.
 
@@ -321,14 +368,17 @@ def _dns_precursor(config, src_ip, user, shost, domain, event_time=None):
     """
     if not domain:
         return None
+    # The client asks its Infoblox grid member (internal), not 8.8.8.8 -- a
+    # workstation going to a public resolver is a bypass in an Infoblox estate.
+    grid_name, grid_ip = _grid(config, src_ip)
     ext = {
         "act": "Accept",
-        "src": src_ip, "dst": "8.8.8.8",
+        "src": src_ip, "dst": grid_ip,
         "spt": random.randint(49152, 65535), "dpt": 53,
         "proto": "17",
-        "suser": user, "shost": shost, "dhost": "dns.google",
+        "suser": user, "shost": shost, "dhost": grid_name,
         "dns_query": domain, "dns_type": "A",
-        "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
+        "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
         "deviceDirection": "1",
         "service_id": "domain-udp", "app": "DNS",
         "cs1": "Allow_DNS", "cs1Label": "Rule Name",
@@ -456,10 +506,24 @@ def _format_checkpoint_cef(config, extensions_dict, device_product=None, event_t
 
     # AD domain-qualify bare usernames so XSIAM Identity can stitch
     # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com)
-    for _ufield in ("suser", "duser"):
-        _uval = ext.get(_ufield)
-        if _uval and "\\" not in _uval and "@" not in _uval:
-            ext[_ufield] = f"EXAMPLECORP\\{_uval}"
+    # Orchestrated events set _no_user_qualify to keep the EXACT box user (bare) so
+    # it matches the endpoint case identity; ambient events AD-qualify as before.
+    #
+    # EXCEPT VPN authentication (Identity Awareness, Authentication Method = VPN).
+    # Identity Analytics reduces a domain-prefixed user to the DOMAIN, collapsing every
+    # VPN user into one identity (proven by A/B on ASA 2026-07-28). Measured 2026-09-17:
+    # 100% of the 6,318 weekly Check Point VPN logins carried the prefix and no Check
+    # Point VPN analytic had ever fired. VPN auth is forced bare, prefix stripped.
+    if ext.get("cs5") == "VPN" and ext.get("cs5Label") == "Authentication Method":
+        ext.pop('_no_user_qualify', None)
+        for _ufield in ("suser", "duser"):
+            if ext.get(_ufield):
+                ext[_ufield] = vpn_username(ext[_ufield])
+    elif not ext.pop('_no_user_qualify', False):
+        for _ufield in ("suser", "duser"):
+            _uval = ext.get(_ufield)
+            if _uval and "\\" not in _uval and "@" not in _uval:
+                ext[_ufield] = f"EXAMPLECORP\\{_uval}"
 
     extension_string = " ".join(
         f"{key}={_cef_escape(value)}" for key, value in ext.items() if value is not None
@@ -469,13 +533,12 @@ def _format_checkpoint_cef(config, extensions_dict, device_product=None, event_t
     return f"<134>{timestamp} {hostname} CheckPoint: {cef_header}{extension_string}"
 
 
-# ---------------------------------------------------------------------------
 # Benign event generators
-# ---------------------------------------------------------------------------
 
 def _generate_benign_log(config, session_context=None):
     """Generates a variety of benign log types (traffic, dns, icmp)."""
-    user_info = get_random_user(session_context, preferred_device_type='workstation') if session_context else None
+    # follow-on traffic: prefer a recently-active user so src IP + identity match a current logon
+    user_info = correlated_or_random_user(session_context, preferred_device_type='workstation') if session_context else None
     if user_info:
         user, src_ip, shost = user_info['username'], user_info['ip'], user_info['hostname']
     else:
@@ -503,6 +566,14 @@ def _generate_benign_log(config, session_context=None):
         k=1,
     )[0]
 
+    # Management plane baseline, ahead of the draw: ~40 admin sessions and ~800 SNMP
+    # polls a day at one call per second.
+    mroll = random.random()
+    if mroll < 0.0005:
+        return _simulate_mgmt_admin_session(config, session_context)
+    if mroll < 0.01:
+        return _simulate_snmp_poll(config, session_context)
+
     if log_type == 'vpn_new_country_login':
         return _simulate_vpn_new_country_login(config, user)
 
@@ -510,11 +581,13 @@ def _generate_benign_log(config, session_context=None):
         return _generate_ldap_kerberos_benign(config, src_ip, user, shost)
 
     destination = weighted_destination(user, config.get('benign_egress_destinations', [{}]))
-    try:
-        dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range", "8.8.8.0/24"), strict=False))
-    except (ValueError, Exception):
-        dest_ip = "8.8.8.8"
-    dhost = destination.get("name", "").lower().replace(" ", "")
+    # The address the destination's NAME resolves to -- the same answer Infoblox gives.
+    _dom, dest_ip = resolver.benign_target(config, destination)
+    # Real FQDN, not a slugified service name. Check Point's modeling rule maps this
+    # to xdm.target.host.hostname; emitting "zoom"/"atlassian(jira/confluence)" fed
+    # made-up "domains" into the rare-domain baselines (81% of hostname values were
+    # such labels, measured 2026-09-17). config carries a real `domain` per entry.
+    dhost = destination.get("domain") or destination.get("name", "").lower().replace(" ", "")
 
     if log_type == 'icmp':
         _icmp_dur = random.randint(1, 3)
@@ -533,12 +606,35 @@ def _generate_benign_log(config, session_context=None):
             "ifname": "eth0",
             "msg": f"Accept ICMP echo from {src_ip} to {dest_ip}",
         }
-    elif log_type == 'dns':
+    elif log_type == 'dns' and random.random() < 0.4:
+        # The grid's own recursion -- member to forwarder -- is the only DNS that
+        # crosses to External in an Infoblox estate. A server flow: no user.
+        member, grid_ip = resolver.dns_server_for(config, None)
+        fwd = random.choice(resolver.dns_forwarders(config))
         extensions = {
             "act": "Accept",
-            "src": src_ip, "dst": "8.8.8.8", "spt": random.randint(49152, 65535), "dpt": 53, "proto": "17",
-            "suser": user, "shost": shost, "dhost": "dns.google",
-            "dns_query": random.choice(config.get('benign_domains', ['example.com'])),
+            "src": grid_ip, "dst": fwd, "spt": random.randint(1024, 65535), "dpt": 53, "proto": "17",
+            "shost": f"{member}.{resolver.internal_domain(config)}",
+            "dns_query": weighted_dns_domain(member, config.get('benign_domains', ['example.com'])),
+            "dns_type": "A",
+            "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
+            "cs1": "Allow_DNS_Forwarders", "cs1Label": "Rule Name",
+            "deviceDirection": "1",
+            "ifname": "eth0",
+            "msg": f"Accept DNS recursion from {member} to {fwd}",
+        }
+        if fwd.startswith("8.8."):
+            extensions["dhost"] = "dns.google"
+    elif log_type == 'dns':
+        grid_name, grid_ip = _grid(config, src_ip)
+        extensions = {
+            "act": "Accept",
+            "src": src_ip, "dst": grid_ip, "spt": random.randint(49152, 65535), "dpt": 53, "proto": "17",
+            "suser": user, "shost": shost, "dhost": grid_name,
+            "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
+            # Per-user domain affinity, same basis as the Infoblox DNS path, so a
+            # user's query profile is consistent across both DNS sources.
+            "dns_query": weighted_dns_domain(user, config.get('benign_domains', ['example.com'])),
             "dns_type": "A",
             "cs1": "Allow_DNS", "cs1Label": "Rule Name",
             "deviceDirection": "1",
@@ -767,22 +863,27 @@ def _generate_benign_log(config, session_context=None):
     return _format_checkpoint_cef(config, extensions)
 
 
-# ---------------------------------------------------------------------------
 # Threat / analytics event generators
-# ---------------------------------------------------------------------------
 
-def _simulate_large_upload(config, src_ip, user, shost):
+def _simulate_large_upload(config, src_ip, user, shost, domain=None, dst_ip=None):
     """DNS precursor + large outbound HTTPS upload.
 
     Triggers XSIAM: large outbound data transfer / exfiltration analytics.
+
+    domain/dst_ip: pinned by an orchestrated scenario to the name it had
+    Infoblox resolve and the address that answer carried, so this session
+    lands on the host the victim actually looked up.
     """
     print(f"    - Check Point Module simulating: Large Upload from {src_ip}")
     destination = random.choice(config.get('exfiltration_destinations', [{}]))
-    try:
-        dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range", "154.53.224.0/24"), strict=False))
-    except (ValueError, Exception):
-        dest_ip = "154.53.224.10"
-    dhost = destination.get("domain", dest_ip)
+    dhost = domain or destination.get("domain")
+    dest_ip = dst_ip or (resolver.resolve_one(dhost) if dhost else None)
+    if not dest_ip:
+        try:
+            dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range", "154.53.224.0/24"), strict=False))
+        except (ValueError, Exception):
+            dest_ip = "154.53.224.10"
+    dhost = dhost or dest_ip
 
     base_time = datetime.now(timezone.utc)
     logs = [_l for _l in [_dns_precursor(config, src_ip, user, shost, dhost, event_time=base_time)] if _l]
@@ -884,7 +985,7 @@ def _simulate_rare_ssh(config, src_ip, user, shost):
     Triggers XSIAM: outbound SSH to rare external destination.
     """
     print(f"    - Check Point Module simulating: Rare External SSH from {src_ip}")
-    dest_ip = _random_external_ip()
+    dest_ip = rare_external_ip()   # rare pool
     base_time = datetime.now(timezone.utc)
     logs = [_l for _l in [_dns_precursor(config, src_ip, user, shost, None, event_time=base_time)] if _l]
     extensions = {
@@ -982,19 +1083,22 @@ def _simulate_auth_brute_force(config, src_ip, user, shost):
         # Name the server rather than echoing its IP into dhost — the LDAP/VPN/
         # RADIUS branches below already use real names, and an address in a
         # hostname field makes XSIAM believe a host named "10.0.10.50" exists.
-        dhost       = "srv-%s.examplecorp.com" % dest_ip.split(".")[-1]
+        dhost       = resolver.internal_fqdn(config, dest_ip)
         auth_method = "SSH Public Key"
     elif auth_port in [389, 636]:  # LDAP/LDAPS → Domain Controller
-        dest_ip     = random.choice(internal_servers)
-        dhost       = "dc01.examplecorp.com"
+        # A domain controller, named as the grid names it. The name and address
+        # used to disagree: dhost said dc01 while dst was a random member server.
+        dest_ip     = random.choice(_cp_domain_controllers(config))
+        dhost       = resolver.internal_fqdn(config, dest_ip)
         auth_method = "LDAP"
     elif auth_port == 443:   # VPN-SSL → gateway
         dest_ip     = checkpoint_conf.get('gateway_ip', '203.0.113.10')
         dhost       = "vpn-gateway.examplecorp.com"
         auth_method = "VPN"
     else:                    # RADIUS/1812 → dedicated RADIUS server
-        dest_ip     = random.choice(internal_servers)
-        dhost       = "radius.examplecorp.com"
+        ad          = resolver.internal_domain(config)
+        dest_ip     = resolver.resolve_one(f"radius.{ad}") or random.choice(internal_servers)
+        dhost       = f"radius.{ad}"
         auth_method = "RADIUS"
 
     logs = []
@@ -1175,136 +1279,83 @@ def _simulate_new_admin_behavior(config, src_ip, user, shost, session_context=No
     return logs
 
 
-def _simulate_vpn_brute_force(config, src_ip, user, shost):
-    """Simulates a VPN credential-stuffing attack from a single external IP.
-
-    Generates 20–50 failed Identity Awareness / VPN login events from one attacker
-    against the gateway on port 443, cycling through real usernames from session_context.
-    Each failure uses act='Failed Log In' directed at the VPN gateway external interface.
-
-    Triggers XSIAM: VPN Brute Force / Credential Scan analytics detection.
-    """
-    print("    - Check Point Module simulating: VPN Brute Force from external attacker")
-    checkpoint_conf = config.get(CONFIG_KEY, {})
-    gateway_ip      = checkpoint_conf.get('gateway_ip', '203.0.113.10')
-    attacker_ip     = _random_external_ip()
-
-    logs = []
-    base_time = datetime.now(timezone.utc)
-    offset = 0.0
-    for i in range(random.randint(20, 50)):
-        offset += random.uniform(0.3, 0.8)
-        extensions = {
-            "signatureId": "45679",
-            "name":        "Identity Awareness",
-            "severity":    "7",
-            "act":         "Failed Log In",
-            "auth_status": "Failed Log In",
-            "src": attacker_ip, "dst": gateway_ip,
-            "spt": random.randint(49152, 65535), "dpt": 443,
-            "proto": "6",
-            "suser": user, "shost": shost,
-            "deviceInboundInterface": "External", "deviceOutboundInterface": "Internal",
-            "deviceDirection": "0",
-            "cs3": "user",        "cs3Label": "User Type",
-            "cs5": "VPN",         "cs5Label": "Authentication Method",
-            "blade": "Identity Awareness",
-            "reason": "Authorization Failed",
-            "dhost": "vpn-gateway.examplecorp.com",
-            "ifname": "eth0",
-            "msg": f"VPN authentication failed for {user} from {attacker_ip} (attempt {i + 1})",
-        }
-        logs.append(_format_checkpoint_cef(config, extensions, device_product="Identity Awareness",
-                                           event_time=base_time + timedelta(seconds=offset)))
-    # Final success — attacker found valid credentials; triggers XSIAM brute-force detection
-    offset += random.uniform(0.3, 0.8)
-    success_ext = {
-        "signatureId": "45679",
-        "name":        "Identity Awareness",
-        "severity":    "3",
-        "act":         "Log In",
-        "auth_status": "Successful Login",
-        "src": attacker_ip, "dst": gateway_ip,
-        "spt": random.randint(49152, 65535), "dpt": 443,
-        "proto": "6",
-        "suser": user, "shost": shost,
+def _cp_vpn_auth(config, vpn_src_ip, user, event_time, success):
+    """One Identity Awareness VPN authentication record (check_point_identity_awareness_raw),
+    shared by the rebuilt VPN generators. auth_status "Log In" models to SUCCESS and
+    "Failed Log In" to FAILED (measured 2026-09-17)."""
+    gateway_ip = config.get(CONFIG_KEY, {}).get('gateway_ip', '203.0.113.10')
+    ext = {
+        "signatureId": "45678" if success else "45679",
+        "name": "Identity Awareness",
+        "severity": "3" if success else "7",
+        "act": "Log In" if success else "Failed Log In",
+        "auth_status": "Log In" if success else "Failed Log In",
+        "src": vpn_src_ip, "dst": gateway_ip,
+        "spt": random.randint(49152, 65535), "dpt": 443, "proto": "6",
+        "suser": user,
         "deviceInboundInterface": "External", "deviceOutboundInterface": "Internal",
         "deviceDirection": "0",
-        "cs3": "user",        "cs3Label": "User Type",
-        "cs5": "VPN",         "cs5Label": "Authentication Method",
+        "cs3": "user", "cs3Label": "User Type",
+        "cs5": "VPN", "cs5Label": "Authentication Method",
         "blade": "Identity Awareness",
-        "reason": "Authorization Succeeded",
+        "reason": "Authorization Succeeded" if success else "Authorization Failed",
         "dhost": "vpn-gateway.examplecorp.com",
         "ifname": "eth0",
-        "msg": f"VPN authentication succeeded for {user} from {attacker_ip}",
+        "msg": (f"VPN authentication {'succeeded' if success else 'failed'} "
+                f"for {vpn_username(user)} from {vpn_src_ip}"),
     }
-    logs.append(_format_checkpoint_cef(config, success_ext, device_product="Identity Awareness",
-                                       event_time=base_time + timedelta(seconds=offset)))
+    return _format_checkpoint_cef(config, ext, device_product="Identity Awareness",
+                                  event_time=event_time)
+
+
+def _simulate_vpn_brute_force(config, src_ip, user, shost):
+    """ONE real user's VPN account hammered from one IP — XSIAM "VPN login Brute-Force
+    attempt": "A user account failed to log in to a VPN service multiple times in a
+    short time period." Identity Analytics, test period 1 hour.
+
+    REBUILT 2026-09-17. The shape was nearly right — one real user, many failures — but
+    every event reached XSIAM domain-prefixed, which collapses all VPN users into one
+    identity (fixed in _format_checkpoint_cef), so the per-user count never belonged
+    to a real user. It also always ended in a success and packed 20-50 failures into
+    ~30 seconds. Now: 12-25 failures across 6-12 minutes from one ambient-pool IP
+    (countries already in the org baseline), success half the time ("Successful VPN
+    Login Brute Force" variation). The victim's workstation hostname is no longer
+    attached to an external attacker's login.
+    """
+    print(f"    - Check Point Module simulating: VPN brute force against {user}")
+    attacker_ip = _random_external_ip()
+    now  = datetime.now(timezone.utc)
+    t    = now - timedelta(seconds=random.randint(360, 720))
+    n    = random.randint(12, 25)
+    step = (now - t).total_seconds() / (n + 1)
+    logs = []
+    for _ in range(n):
+        t += timedelta(seconds=step * random.uniform(0.6, 1.4))
+        logs.append(_cp_vpn_auth(config, attacker_ip, user, min(t, now - timedelta(seconds=1)), False))
+    if random.random() < 0.5:
+        logs.append(_cp_vpn_auth(config, attacker_ip, user, now, True))
     return logs
 
 
 def _simulate_vpn_impossible_travel(config, src_ip, user, shost):
-    """Simulates an impossible travel alert: same user connects from two distant IPs.
+    """Same user, two SUCCESSFUL VPN logins from two continents minutes apart — XSIAM
+    "Impossible traveler - VPN": "A user connected to a VPN service from multiple
+    remote countries in a short period of time". Test period 3 hours.
 
-    Generates two VPN session-close logs from the same user — the legitimate login
-    is back-dated 5–10 minutes so XSIAM sees two authentications within the same
-    analytics window but far enough apart to pass the circuit-breaker minimum.
-    Models compromised credentials: the attacker uses stolen creds minutes after
-    the real user authenticated from their home location.
-
-    Triggers XSIAM: Impossible Travel / Anomalous VPN Location analytics detection.
+    REBUILT 2026-09-17. The previous version was built on a failed-then-succeeded
+    premise the detector does not describe, used a fixed "benign" IP that was not the
+    user's own home IP, sent the far leg from 175.45.176.x (a North Korean netblock,
+    adding a country to the org baseline), and reached XSIAM domain-prefixed.
+    Now: home IP first, then a home-pool range on a DIFFERENT continent
+    (session_utils.impossible_travel_ips) 8-20 minutes later. Zero new countries.
     """
-    print(f"    - Check Point Module simulating: VPN Impossible Travel (door-knock + success x2 geos) for {user}")
-    checkpoint_conf = config.get(CONFIG_KEY, {})
-    gateway_ip      = checkpoint_conf.get('gateway_ip', '203.0.113.10')
-
-    benign_loc     = config.get('impossible_travel_scenario', {}).get('benign_location', {})
-    suspicious_loc = config.get('impossible_travel_scenario', {}).get('suspicious_location', {})
-    benign_ip      = benign_loc.get('ip',      '68.185.12.14')
-    suspicious_ip  = suspicious_loc.get('ip', '175.45.176.10')
-
-    # Legitimate user logged in 5–10 minutes ago; attacker logs in now.
-    gap_minutes  = random.randint(5, 10)
-    t_benign     = datetime.now(timezone.utc) - timedelta(minutes=gap_minutes)
-    t_suspicious = datetime.now(timezone.utc)
-
-    def _auth(vpn_src_ip, label, vpn_shost, event_time, success):
-        # Identity Awareness auth: auth_status "Log In" -> outcome SUCCESS,
-        # "Failed Log In" -> FAILED. The detector needs the fail->success pattern.
-        ext = {
-            "signatureId": "45678",
-            "name": "Identity Awareness",
-            "severity": "3" if success else "4",
-            "act": "Log In" if success else "Failed Log In",
-            "auth_status": "Log In" if success else "Failed Log In",
-            "src": vpn_src_ip, "dst": gateway_ip,
-            "spt": random.randint(49152, 65535), "dpt": 443, "proto": "6",
-            "suser": user, "shost": vpn_shost,
-            "deviceInboundInterface": "External", "deviceOutboundInterface": "Internal",
-            "deviceDirection": "0",
-            "cs3": "user", "cs3Label": "User Type",
-            "cs5": "VPN", "cs5Label": "Authentication Method",
-            "blade": "Identity Awareness",
-            "dhost": "vpn-gateway.examplecorp.com",
-            "ifname": "eth0",
-            "msg": f"VPN {'login' if success else 'login failed'} for {user} from {vpn_src_ip} ({label})",
-        }
-        if not success:
-            ext["reason"] = "Authentication failed"
-        return _format_checkpoint_cef(config, ext, event_time=event_time,
-                                       device_product="Identity Awareness")
-
-    logs = []
-    for vpn_src_ip, label, t_base, vpn_shost in [
-        (benign_ip,     'home-office',        t_benign,     shost),
-        (suspicious_ip, 'suspicious-foreign', t_suspicious, None),
-    ]:
-        n_fails = random.randint(3, 5)
-        for i in range(n_fails):     # door-knocking: failed logins
-            logs.append(_auth(vpn_src_ip, label, vpn_shost, t_base + timedelta(seconds=i * 3), success=False))
-        # successful login after the failures — the pattern the detector fires on
-        logs.append(_auth(vpn_src_ip, label, vpn_shost, t_base + timedelta(seconds=n_fails * 3), success=True))
-    return logs
+    print(f"    - Check Point Module simulating: VPN impossible travel for {user}")
+    ip1, _, ip2, _ = impossible_travel_ips(vpn_username(user), config)
+    now = datetime.now(timezone.utc)
+    return [
+        _cp_vpn_auth(config, ip1, user, now - timedelta(minutes=random.randint(8, 20)), True),
+        _cp_vpn_auth(config, ip2, user, now, True),
+    ]
 
 
 def _simulate_vpn_new_country_login(config, user):
@@ -1534,10 +1585,13 @@ def _simulate_smb_rare_file_transfer(config, src_ip, user, shost):
     insider file collection. Session ALLOWED — only volume analytics detect it.
     """
     print(f"    - Check Point Module simulating: SMB Rare File Transfer from {src_ip}")
-    internal_servers = config.get('internal_servers', [])
-    dst_ip = random.choice(
-        [s for s in internal_servers if s != src_ip] or internal_servers or ['10.0.10.50']
-    )
+    try:
+        from modules.session_utils import rare_known_host
+    except ImportError:
+        from session_utils import rare_known_host
+    # A live workstation in another subnet: rare_internal_host() addresses were never
+    # seen anywhere, and Rare SMB/RDP never fired from any vendor while using them.
+    dst_ip = rare_known_host(config, exclude=(src_ip,), avoid_subnet_of=src_ip)   # rarely-receiving host, not hot pool
     file_size_bytes = random.randint(104_857_600, 1_073_741_824)  # 100 MB – 1 GB
     duration        = random.randint(120, 900)
     src_port        = random.randint(49152, 65535)
@@ -1613,7 +1667,13 @@ def _simulate_smb_share_enumeration(config, src_ip, user, shost):
     return logs
 
 
-_beacon_target_map: dict = {}   # src_ip -> stable (resolver_ip, c2_domain) for recurring-rare-domain detection
+try:
+    from modules.session_utils import beacon_targets as _beacon_targets
+except ImportError:
+    from session_utils import beacon_targets as _beacon_targets
+# Persists across restarts (state/beacon_targets.json): a source keeps its C2, as a
+# real implant does, so recurring-access detectors can see the pair on many days.
+_beacon_target_map = _beacon_targets("checkpoint_firewall")
 
 
 def _simulate_dns_c2_beacon(config, src_ip, user, shost):
@@ -1625,22 +1685,31 @@ def _simulate_dns_c2_beacon(config, src_ip, user, shost):
 
     Triggers XSIAM: DNS Tunnelling / C2 Beacon analytics detection.
     """
+    # Recurring-access detectors need the SAME host on many days; a random pick among
+    # ~500 users almost never repeats. One of a few fixed hosts (session_utils.recurring_host).
+    try:
+        from modules.session_utils import recurring_host
+    except ImportError:
+        from session_utils import recurring_host
+    _h = recurring_host("checkpoint_firewall:dns_c2_beacon")
+    if _h:
+        src_ip, user, shost = _h
     print(f"    - Check Point Module simulating: DNS C2 Beacon from {src_ip}")
-    c2_domains = [
-        "updates.totallylegit.xyz",    "cdn.fastdelivery.top",
-        "api.cloudservicehelper.info",  "telemetry.softupdater.biz",
-        "beacon.homenetworktools.ru",
-    ]
+    # Was five hard-coded names, so every Check Point beacon in every run called
+    # home to one of five hosts. Generated per source instead -- and only when the
+    # source has no target yet, because the stability below is the detection signal.
+    def _new_c2_domain():
+        return threat_domains.threat_domain("c2")
     # Stable resolver IP + C2 domain per source so successive runs recur to the same
     # rare destination (the "recurring rare domain/IP" detection signal), not noise.
-    target = _beacon_target_map.get(src_ip)
+    target = _beacon_target_map.get(src_ip)   # rare resolver seeded below
     if not target:
         destination = random.choice(config.get('exfiltration_destinations', [{}]))
         try:
             dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range", "154.53.224.0/24"), strict=False))
         except Exception:
-            dest_ip = _random_external_ip()
-        target = (dest_ip, random.choice(c2_domains))
+            dest_ip = rare_external_ip()
+        target = (dest_ip, _new_c2_domain())
         _beacon_target_map[src_ip] = target
     dest_ip, c2_domain = target
 
@@ -1683,12 +1752,9 @@ def _simulate_server_outbound_http(config):
     print(f"    - Check Point Module simulating: Anomalous Server Outbound HTTP from {server_ip}")
 
     destination = random.choice(config.get('benign_egress_destinations', [{}]))
-    try:
-        dest_ip = rand_ip_from_network(ip_network(destination.get("ip_range", "8.8.8.0/24"), strict=False))
-    except Exception:
-        dest_ip = _random_external_ip()
-
-    dhost      = destination.get("name", dest_ip)
+    # The real FQDN and the address it resolves to. dhost used to be the display
+    # label ("GitHub.com", "Zoom") against an unrelated host in the CIDR.
+    dhost, dest_ip = resolver.benign_target(config, destination)
     bytes_out  = random.randint(300, 2000)
     bytes_in   = random.randint(5000, 500000)
     duration   = random.randint(1, 30)
@@ -1703,7 +1769,7 @@ def _simulate_server_outbound_http(config):
         "spt": src_port, "dpt": 80,
         "proto": "6",
         # shost is a NAME field — name the internal server instead of its address.
-        "shost": "srv-%s.examplecorp.com" % server_ip.split(".")[-1], "dhost": dhost,
+        "shost": resolver.internal_fqdn(config, server_ip), "dhost": dhost,
         "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
         "deviceDirection": "1",
         "service_id": "http", "app": "HTTP",
@@ -1724,52 +1790,46 @@ def _simulate_server_outbound_http(config):
 
 
 def _simulate_workstation_rdp(config, src_ip, user, shost):
-    """Workstation RDP to MULTIPLE internal hosts — anomalous lateral movement.
+    """ONE interactive RDP session from a workstation to a host that rarely receives
+    RDP — XSIAM "Rare RDP session to a remote host" ("The endpoint performed a rare RDP
+    session to a remote host"; single event, dedup 2 days).
 
-    In normal operations a user RDPs to at most one or two known hosts. UEBA
-    lateral-movement detection keys on BREADTH — a single RDP is background noise, but
-    one workstation opening RDP (3389) to many internal hosts (mostly blocked, a few
-    succeeding) is the pivot signal. Generates 5-8 RDP connections to DISTINCT internal
-    destinations. Returns list of CEF log strings (multi-event).
+    REBUILT 2026-09-17. The previous version was an RDP SWEEP — 5-8 distinct hosts,
+    60% dropped — which is a breadth pattern, not a rare session; and its destinations
+    were drawn uniformly from internal_networks with no regard for how often each
+    receives RDP. Now: one accepted, long, interactive session (1-3 with the same
+    host, as a real admin reconnects) to a session_utils.rare_internal_host(), never
+    the hot internal_servers / DC pool.
     """
-    print(f"    - Check Point Module simulating: Workstation RDP lateral (multi-host) from {src_ip}")
-    n_hosts  = random.randint(5, 8)
-    dest_ips = set()
-    internal_nets = config.get('internal_networks', ['192.168.1.0/24'])
-    while len(dest_ips) < n_hosts:
-        try:
-            host = rand_ip_from_network(ip_network(random.choice(internal_nets), strict=False))
-            if host != src_ip:
-                dest_ips.add(host)
-        except Exception:
-            dest_ips.add(f"192.168.1.{random.randint(101, 200)}")
-
+    print(f"    - Check Point Module simulating: rare RDP session from {src_ip}")
+    try:
+        from modules.session_utils import rare_known_host
+    except ImportError:
+        from session_utils import rare_known_host
+    # A live workstation in another subnet: rare_internal_host() addresses were never
+    # seen anywhere, and Rare SMB/RDP never fired from any vendor while using them.
+    dest_ip = rare_known_host(config, exclude=(src_ip,), avoid_subnet_of=src_ip)
+    now  = datetime.now(timezone.utc)
     logs = []
-    for dest_ip in list(dest_ips)[:n_hosts]:
-        # Most lateral RDP attempts are blocked; a few reachable hosts accept.
-        accepted  = random.random() < 0.4
-        src_port  = random.randint(49152, 65535)
-        duration  = random.randint(120, 3600) if accepted else 0
-        bytes_out = random.randint(10000, 200000) if accepted else 0
-        bytes_in  = random.randint(50000, 2000000) if accepted else 0
+    for i in range(random.randint(1, 3)):
+        duration = random.randint(300, 5400)
         ext = {
-            "act": "Accept" if accepted else "Drop",
+            "act": "Accept",
             "src": src_ip, "dst": dest_ip,
-            "spt": src_port, "dpt": 3389,
-            "proto": "6",
-            "suser": user, "shost": shost, "dhost": None,
+            "spt": random.randint(49152, 65535), "dpt": 3389, "proto": "6",
+            "suser": user, "shost": shost,
             "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
             "deviceDirection": "1",
             "service_id": "rdp", "app": "RDP",
-            "cs1": "Allow_Internal_Traffic" if accepted else "Cleanup_Rule", "cs1Label": "Rule Name",
-            "out": bytes_out, "in": bytes_in,
+            "cs1": "Allow_Internal_Traffic", "cs1Label": "Rule Name",
+            "out": random.randint(200_000, 6_000_000), "in": random.randint(1_000_000, 40_000_000),
             "cn1": duration, "cn1Label": "Elapsed Time in Seconds",
             "duration": str(duration),
-            "reason": "TCP FIN" if accepted else "Blocked by policy",
-            "ifname": "eth1",
-            "msg": f"{'Accept' if accepted else 'Drop'} W2W RDP {src_ip} -> {dest_ip}:3389 (lateral movement)",
+            "reason": "TCP FIN", "ifname": "eth1",
+            "msg": f"Accept RDP {src_ip} -> {dest_ip}:3389",
         }
-        logs.append(_format_checkpoint_cef(config, ext))
+        logs.append(_format_checkpoint_cef(
+            config, ext, event_time=now - timedelta(seconds=(2 - i) * random.randint(900, 3600))))
     return logs
 
 
@@ -1779,7 +1839,7 @@ def _simulate_rare_external_rdp(config, src_ip, user, shost):
     Triggers XSIAM: outbound RDP to rare/unusual external destination analytics.
     """
     print(f"    - Check Point Module simulating: Rare External RDP from {src_ip}")
-    dest_ip  = _random_external_ip()
+    dest_ip  = rare_external_ip()   # rare pool
     duration = random.randint(60, 1800)
     bytes_out = random.randint(10000, 200000)
     bytes_in  = random.randint(50000, 2000000)
@@ -2017,7 +2077,8 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
     ddns_hostname, resolved_ip = _ddns_beacon_map[src_ip]
 
     checkpoint_conf = config.get(CONFIG_KEY, {})
-    dns_server = "8.8.8.8"   # internal DNS forwarding query
+    # The infected host uses the system resolver: its Infoblox grid member.
+    dns_name, dns_server = _grid(config, src_ip)
 
     logs = []
     base_time = datetime.now(timezone.utc)
@@ -2028,8 +2089,8 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
         "src": src_ip, "dst": dns_server,
         "spt": random.randint(49152, 65535), "dpt": 53,
         "proto": "17",
-        "suser": user, "shost": shost, "dhost": "dns.google",
-        "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
+        "suser": user, "shost": shost, "dhost": dns_name,
+        "deviceInboundInterface": "Internal", "deviceOutboundInterface": "Internal",
         "deviceDirection": "1",
         "service_id": "domain-udp", "app": "DNS",
         "cs1": "Allow_DNS", "cs1Label": "Rule Name",
@@ -2127,7 +2188,7 @@ def _simulate_smartdefense_event(config, src_ip, user, shost):
         "cs3": "IPS",                        "cs3Label": "Protection Type",
         "cs4": protection_name,              "cs4Label": "Protection Name",
         "flexString2": description,          "flexString2Label": "Attack Information",
-        "dhost": f"srv-{victim_ip.split('.')[-1]}.examplecorp.com",
+        "dhost": resolver.internal_fqdn(config, victim_ip),
         "blade": "IPS",
         "session_id": _generate_session_id(),
         "ifname": "eth0",
@@ -2196,9 +2257,217 @@ def _simulate_app_control_block(config, src_ip, user, shost):
     return _format_checkpoint_cef(config, extensions, device_product="Application Control")
 
 
-# ---------------------------------------------------------------------------
+# Peer ports a BitTorrent client actually uses: 6881-6889, 51413 (uTorrent /
+# Transmission default), and DHT / uTP on the same ports over UDP.
+_BT_PORTS = [6881, 6882, 6883, 6884, 6885, 6886, 6887, 6888, 6889, 51413]
+
+
+def _simulate_torrent_client(config, src_ip, user, shost):
+    """A workstation running a BitTorrent client — XSIAM "A Torrent client was
+    detected on a host": "The host produced traffic consistent with the BitTorrent
+    protocol."
+
+    NEW 2026-09-17 — the analytic successor to app_control, which stays as vendor
+    noise. app_control could not fire: it emitted a single BLOCK (no BitTorrent traffic
+    flowed) under device_product "Application Control", which routes to
+    check_point_app_control_raw — a dataset separate from the firewall data the
+    network analytics profile. Now: 12-30 ACCEPTED firewall-log (VPN-1 & FireWall-1)
+    sessions to distinct peers on BitTorrent ports, ~40% UDP, with app="BitTorrent" —
+    Check Point's XIF maps xdm.network.application_protocol from app, falling back to
+    service_id (measured 2026-09-17) — spread across the past 5-20 minutes.
+    """
+    print(f"    - Check Point Module simulating: BitTorrent client on {src_ip}")
+    now  = datetime.now(timezone.utc)
+    logs = []
+    for _ in range(random.randint(12, 30)):
+        udp  = random.random() < 0.4
+        peer = _random_external_ip() if random.random() < 0.5 else rare_external_ip()
+        dur  = random.randint(5, 900)
+        ext = {
+            "act": "Accept",
+            "src": src_ip, "dst": peer,
+            "spt": random.randint(49152, 65535), "dpt": random.choice(_BT_PORTS),
+            "proto": "17" if udp else "6",
+            "suser": user, "shost": shost,
+            "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
+            "deviceDirection": "1",
+            "service_id": "bittorrent", "app": "BitTorrent",
+            "cs1": "Allow_Outbound_Any", "cs1Label": "Rule Name",
+            "out": random.randint(20_000, 4_000_000), "in": random.randint(50_000, 12_000_000),
+            "cn1": dur, "cn1Label": "Elapsed Time in Seconds", "duration": str(dur),
+            "reason": "UDP" if udp else "TCP FIN", "ifname": "eth0",
+            "msg": f"Accept BitTorrent {src_ip} -> {peer}",
+        }
+        logs.append(_format_checkpoint_cef(
+            config, ext, event_time=now - timedelta(seconds=random.randint(0, 1200))))
+    return logs
+
+
+# ── Analytic detectors added 2026-09-18 (Tier 1-3; see docs/firewall-analytics.md) ──
+
+def _cp_conn(config, src, dst, dpt, service_id, app, act="Accept", user=None, shost=None,
+             inbound=False, internal=False, proto="6", out_b=None, in_b=None,
+             duration=None, event_time=None, rule="Allow_Outbound", reason="TCP FIN"):
+    """Compact Check Point firewall-log builder for the added detectors. `app` (and
+    `service_id`) map to xdm.network.application_protocol. inbound flips the interfaces
+    (New FTP Server); internal keeps both interfaces Internal (Port Sweep, DC SMB)."""
+    if internal:
+        in_if, out_if, direction = "Internal", "Internal", "1"
+    elif inbound:
+        in_if, out_if, direction = "External", "Internal", "0"
+    else:
+        in_if, out_if, direction = "Internal", "External", "1"
+    ext = {
+        "act": act, "src": src, "dst": dst,
+        "spt": random.randint(49152, 65535), "dpt": dpt, "proto": proto,
+        "suser": user, "shost": shost,
+        "deviceInboundInterface": in_if, "deviceOutboundInterface": out_if,
+        "deviceDirection": direction,
+        "service_id": service_id, "app": app,
+        "cs1": rule, "cs1Label": "Rule Name", "blade": "Firewall",
+        "out": out_b if out_b is not None else random.randint(500, 5000),
+        "in": in_b if in_b is not None else random.randint(2000, 50000),
+        "cn1": duration if duration is not None else random.randint(1, 60),
+        "cn1Label": "Elapsed Time in Seconds",
+        "duration": str(duration if duration is not None else 1),
+        "reason": reason if act == "Accept" else "Blocked by policy",
+        "ifname": "eth0",
+        "msg": f"{act} {app} {src} -> {dst}:{dpt}",
+    }
+    return _format_checkpoint_cef(config, ext, event_time=event_time or datetime.now(timezone.utc))
+
+
+# Privileged ports only. The Cortex "Port Sweep" analytic counts connections to many
+# hosts "using privileged ports that serve a well-defined function"; privileged means
+# below 1024. This pool used to include 1433 (MSSQL) and 3389 (RDP), so a quarter of
+# sweeps -- in all four firewall modules, which shared the list -- could never satisfy
+# the detector. RDP and MSSQL sweeps are real attacker behaviour, but they belong to
+# the RDP/SQL analytics, not to Port Sweep.
+_CP_SWEEP_PORTS = [21, 22, 23, 88, 135, 139, 389, 445, 636]
+
+
+def _simulate_port_sweep(config, src_ip, user, shost):
+    """One internal host probing the SAME privileged port across MANY internal hosts in
+    several subnets — XSIAM "Port Sweep". Returns list."""
+    print(f"    - Check Point Module simulating: Port Sweep from {src_ip}")
+    port = random.choice(_CP_SWEEP_PORTS)
+    try:
+        from modules.session_utils import sweep_targets
+    except ImportError:
+        from session_utils import sweep_targets
+    # Known live hosts over several /24s (session_utils.sweep_targets): random
+    # addresses in the /16s are hosts the analytics engine has never seen.
+    targets = set(sweep_targets(config, exclude={src_ip}))
+    responders = set(random.sample(sorted(targets), max(1, int(len(targets) * random.uniform(0.10, 0.30)))))
+    now = datetime.now(timezone.utc); window = random.randint(120, 600)
+    svc = {22: "ssh", 23: "telnet", 135: "epmap", 139: "netbios", 389: "ldap",
+           445: "microsoft-ds", 1433: "ms-sql", 3389: "rdp"}.get(port, "tcp-" + str(port))
+    logs = []
+    for dst in targets:
+        ok = dst in responders
+        logs.append(_cp_conn(config, src_ip, dst, port, svc, svc.upper(),
+                             act="Accept" if ok else "Drop", user=user, shost=shost, internal=True,
+                             out_b=(random.randint(200, 4000) if ok else 0),
+                             in_b=(random.randint(400, 20000) if ok else 0),
+                             duration=(random.randint(2, 45) if ok else 0),
+                             event_time=now - timedelta(seconds=random.randint(0, window)),
+                             rule="Allow_Internal_Traffic" if ok else "Cleanup_Rule"))
+    return logs
+
+
+def _simulate_dc_smb_outbound(config, src_ip, user, shost):
+    """SMB from a DOMAIN CONTROLLER to a workstation — XSIAM "Suspicious SMB connection
+    from domain controller". Source from _cp_domain_controllers(). Returns list."""
+    dcs = _cp_domain_controllers(config)
+    if not dcs:
+        return None
+    dc_ip = random.choice(dcs)
+    print(f"    - Check Point Module simulating: DC->workstation SMB from {dc_ip}")
+    nets = config.get("internal_networks", ["192.168.1.0/24"])
+    try:
+        target = rand_ip_from_network(ip_network(random.choice(nets), strict=False))
+    except Exception:
+        target = "192.168.1.101"
+    logs = []
+    for _ in range(random.randint(2, 4)):
+        logs.append(_cp_conn(config, dc_ip, target, 445, "microsoft-ds", "SMB", user="SYSTEM",
+                             internal=True, out_b=random.randint(5_000, 50_000),
+                             in_b=random.randint(5_000, 200_000), duration=random.randint(5, 60),
+                             rule="Allow_Internal_Traffic"))
+    return logs
+
+
+def _simulate_new_ftp_server(config, src_ip, user, shost):
+    """Internal host begins SERVING inbound FTP — XSIAM "New FTP Server". 3-6 distinct
+    external clients connect inbound to an internal host on TCP/21. Returns list."""
+    print("    - Check Point Module simulating: New FTP Server (inbound TCP/21)")
+    servers = config.get("internal_servers", [])
+    try:
+        from modules.session_utils import new_ftp_server_host
+    except ImportError:
+        from session_utils import new_ftp_server_host
+    ftp_ip = new_ftp_server_host(config)   # never a hot internal_servers host: see helper
+    now = datetime.now(timezone.utc)
+    logs = []
+    for _ in range(random.randint(3, 6)):
+        logs.append(_cp_conn(config, _random_external_ip(), ftp_ip, 21, "ftp", "FTP",
+                             inbound=True, out_b=random.randint(2_000, 20_000),
+                             in_b=random.randint(50_000, 5_000_000), duration=random.randint(10, 300),
+                             event_time=now - timedelta(seconds=random.randint(0, 600)),
+                             rule="Allow_Inbound_FTP"))
+    return logs
+
+
+_CP_RARE_APPID_PORTS = [443, 8443, 993, 465]
+
+
+def _simulate_rare_appid(config, src_ip, user, shost):
+    """A recognisable application on a port it does not belong on, to a RARE destination —
+    XSIAM "Rare AppID usage to a rare destination". Returns list."""
+    print("    - Check Point Module simulating: Rare AppID to rare destination")
+    app = random.choice([("ssh", "SSH"), ("rdp", "RDP"), ("smtp", "SMTP"), ("irc", "IRC")])
+    dpt = random.choice(_CP_RARE_APPID_PORTS)
+    dst = rare_external_ip()
+    now = datetime.now(timezone.utc)
+    logs = []
+    for _ in range(random.randint(1, 3)):
+        logs.append(_cp_conn(config, src_ip, dst, dpt, app[0], app[1], user=user, shost=shost,
+                             out_b=random.randint(20_000, 2_000_000), in_b=random.randint(20_000, 2_000_000),
+                             duration=random.randint(60, 1800),
+                             event_time=now - timedelta(seconds=random.randint(0, 600))))
+    return logs
+
+
+def _simulate_abnormal_rdp_rare_host(config, src_ip, user, shost):
+    """Single RDP session from a seldom-seen internal host to a seldom-targeted one —
+    XSIAM "Abnormal RDP session to a remote host from a rarely seen host". Returns list."""
+    # No borrowed employee identity, and a hostname of its own
+    # (see session_utils.stable_rare_sources).
+    try:
+        from modules.session_utils import rare_source_host
+    except ImportError:
+        from session_utils import rare_source_host
+    src, src_host = rare_source_host(config, "checkpoint_firewall")
+    dst = rare_internal_host(config, exclude=(src,))
+    print(f"    - Check Point Module simulating: Abnormal RDP from rare host {src} -> {dst}")
+    return [_cp_conn(config, src, dst, 3389, "rdp", "RDP", user=None, shost=src_host, internal=True,
+                     out_b=random.randint(50_000, 3_000_000), in_b=random.randint(200_000, 5_000_000),
+                     duration=random.randint(120, 2400), rule="Allow_Internal_Traffic")]
+
+
+def _simulate_rare_smtp_session(config, src_ip, user, shost):
+    """A workstation opening an SMTP/S session to a mail server it has never used — XSIAM
+    "Rare SMTP/S Session". Returns list."""
+    print("    - Check Point Module simulating: Rare SMTP/S session")
+    smtps = random.random() < 0.5
+    dpt, sid, app = (465, "smtps", "SMTPS") if smtps else (25, "smtp", "SMTP")
+    return [_cp_conn(config, src_ip, rare_external_ip(), dpt, sid, app, user=user, shost=shost,
+                     out_b=random.randint(2_000, 200_000), in_b=random.randint(500, 5_000),
+                     duration=random.randint(1, 30))]
+
+
+
 # Main threat dispatcher
-# ---------------------------------------------------------------------------
 
 _dns_tunnel_target_map: dict = {}   # src_ip -> stable (resolver_ip, tunnel_domain) for DNS-tunnel recurrence
 
@@ -2300,8 +2569,18 @@ def _simulate_dns_tunneling(config, src_ip, user, shost):
 def _simulate_reverse_ssh_tunnel(config, src_ip, user, shost):
     """Internal host -> EXTERNAL IP on SSH/22 — reverse SSH tunnel / C2 over SSH.
     Long-lived, high bidirectional volume; a few sessions to the SAME external host."""
+    # Recurring-access detectors need the SAME host on many days; a random pick among
+    # ~500 users almost never repeats. One of a few fixed hosts (session_utils.recurring_host).
+    try:
+        from modules.session_utils import recurring_host
+    except ImportError:
+        from session_utils import recurring_host
+    _h = recurring_host("checkpoint_firewall:reverse_ssh_tunnel")
+    if _h:
+        src_ip, user, shost = _h
     print(f"    - Check Point Module simulating: Reverse SSH tunnel from {src_ip}")
-    dest_ip = _random_external_ip()
+    dest_ip = _beacon_target_map.get(f"revssh::{src_ip}") or rare_external_ip()
+    _beacon_target_map[f"revssh::{src_ip}"] = dest_ip   # stable rare dest
     base_time = datetime.now(timezone.utc)
     logs = []
     offset = 0.0
@@ -2420,6 +2699,189 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost):
     return _format_checkpoint_cef(config, extensions)
 
 
+# Management plane
+#
+# Check Point administration is recorded as SmartConsole / management-server AUDIT
+# logs, which Log Exporter sends with Device Product "SmartConsole" and the audit
+# fields operation / subject / administrator / client_ip / audit_status / machine.
+# XSIAM routes them by product, so they do NOT land in check_point_vpn_1_firewall_1_raw,
+# and the CheckpointFirewall pack ships modeling rules for only five datasets
+# (FireWall-1, URL Filtering, SmartDefense, Application Control, Identity Awareness).
+# Audit records are therefore raw-only (hunt / correlation-rule material); see
+# _local_validation/mgmt_plane_probe.py for where they land. SNMP is ordinary
+# FireWall-1 connection data and is modeled.
+
+_CP_MGMT_SERVER = "CP-MGMT-01"
+
+
+def _cp_audit(config, user, src, operation, subject, ts, status="Success", extra=None):
+    ext = {
+        "signatureId": "Log", "name": operation, "severity": "Unknown",
+        "act": operation, "operation": operation, "subject": subject,
+        "administrator": user, "suser": user, "_no_user_qualify": True,
+        "client_ip": src, "src": src,
+        "dst": config.get(CONFIG_KEY, {}).get("management_server_ip", "10.0.30.5"),
+        "machine": src, "audit_status": status, "outcome": status,
+        "origin": config.get(CONFIG_KEY, {}).get("management_server_ip", "10.0.30.5"),
+        "product": "SmartConsole",
+        "session_id": None, "layer_name": None, "layer_uuid": None,
+        "msg": f"{operation}: {subject}",
+    }
+    ext.update(extra or {})
+    return _format_checkpoint_cef(config, ext, device_product="SmartConsole", event_time=ts)
+
+
+def _cp_admin_session(config, user, src, actions, start=None, failures=0, gap=(5, 60),
+                      logout=True, client="SmartConsole"):
+    """[Failed Log In] -> Log In -> actions -> [Publish] -> Log Out.
+    actions: list of (operation, subject, extra)."""
+    t = start or datetime.now(timezone.utc) - timedelta(seconds=(len(actions) + 3) * gap[1])
+    out = []
+    for _ in range(failures):
+        out.append(_cp_audit(config, user, src, "Log In", "Administrator Login", t, status="Failure",
+                             extra={"reason": "Wrong password"}))
+        t += timedelta(seconds=random.randint(3, 8))
+    out.append(_cp_audit(config, user, src, "Log In", "Administrator Login", t,
+                         extra={"client_name": client}))
+    for op, subj, extra in actions:
+        t += timedelta(seconds=random.randint(*gap))
+        out.append(_cp_audit(config, user, src, op, subj, t, extra=extra))
+    if logout:
+        t += timedelta(seconds=random.randint(*gap))
+        out.append(_cp_audit(config, user, src, "Log Out", "Administrator Logout", t))
+    return out
+
+
+_CP_ROUTINE_CHANGES = [
+    lambda n: [("Create Object", f"Host SRV-WEB-{n}", {"object_type": "host", "ip": f"10.0.10.{n}"}),
+               ("Publish", "Session published", {"changes": "1"})],
+    lambda n: [("Modify Rule", f"Rule {n % 60 + 1} comments: CHG{n} patch window", {"layer": "Network"}),
+               ("Publish", "Session published", {"changes": "1"}),
+               ("Install Policy", "Standard policy installed on CP-FW-1", {"target": "CP-FW-1"})],
+]
+
+
+def _simulate_mgmt_admin_session(config, session_context=None):
+    """BENIGN: a network admin from the NOC jump host reviews logs/policy; one session
+    in five makes, publishes and installs a routine change."""
+    user, src = mgmt_plane.admin_user(config), mgmt_plane.admin_source(config)
+    acts = [("View", random.choice(["Logs & Monitor", "Gateways & Servers", "Security Policies"]), None)]
+    if random.random() < 0.2:
+        acts += random.choice(_CP_ROUTINE_CHANGES)(random.randint(20, 240))
+    return _cp_admin_session(config, user, src, acts)
+
+
+def _simulate_mgmt_config_backup(config, session_context=None):
+    """BENIGN: nightly backup job (management API) exports the configuration."""
+    host, acct = mgmt_plane.backup(config)
+    return _cp_admin_session(config, acct, host,
+                             [("Export", "Database export (migrate export)", {"client_name": "Web API"})],
+                             gap=(2, 5), client="Web API")
+
+
+def _simulate_snmp_poll(config, session_context=None):
+    """BENIGN: the monitoring poller reads SNMP from infrastructure behind the gateway."""
+    return _cp_conn(config, mgmt_plane.snmp_poller(config), random.choice(mgmt_plane.network_devices(config)),
+                    161, "snmp", "snmp", internal=True, proto="17",
+                    out_b=random.randint(80, 300), in_b=random.randint(200, 1500), duration=1,
+                    rule="Allow_Mgmt_SNMP", reason="UDP session end")
+
+
+def _simulate_mgmt_admin_unexpected_source(config, session_context=None):
+    """THREAT device-admin-from-unexpected-source: SmartConsole / Web API login with a
+    valid admin from outside the admin subnet."""
+    src, kind = mgmt_plane.unexpected_source(config, session_context)
+    print(f"    - Check Point Module simulating: admin login from unexpected source {src} ({kind})")
+    return _cp_admin_session(config, mgmt_plane.admin_user(config), src,
+                             [("View", "Gateways & Servers", None), ("View", "Security Policies", None)],
+                             failures=random.randint(0, 2),
+                             client=random.choice(["SmartConsole", "Web API"]))
+
+
+def _simulate_mgmt_config_route_change(config, session_context=None):
+    """THREAT network-device-config-or-route-change: a static route via an attacker
+    next hop on the gateway, an any-any accept rule, published and installed."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.6 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    rogue = rare_external_ip()
+    gw = config.get(CONFIG_KEY, {}).get("hostname", "CP-FW-1")
+    print(f"    - Check Point Module simulating: route/rule change via {rogue} from {src} ({kind})")
+    acts = [("Modify Object", f"Gateway {gw} static route 10.0.10.0/24 via {rogue}",
+             {"object_type": "simple-gateway", "next_hop": rogue}),
+            ("Create Rule", "Rule 1: Any -> Any Accept (Track: None)", {"layer": "Network"}),
+            ("Publish", "Session published", {"changes": "2"}),
+            ("Install Policy", f"Standard policy installed on {gw}", {"target": gw})]
+    return _cp_admin_session(config, mgmt_plane.admin_user(config), src, acts)
+
+
+_CP_SUPPRESS_KEY = "checkpoint_firewall"
+
+
+def _cp_logging_toggle(config, user, src, ts, enable):
+    gw = config.get(CONFIG_KEY, {}).get("hostname", "CP-FW-1")
+    state = "enabled" if enable else "disabled"
+    return [_cp_audit(config, user, src, "Modify Object",
+                      f"Gateway {gw} Logs: send logs to management server {state}",
+                      ts, extra={"object_type": "simple-gateway"}),
+            _cp_audit(config, user, src, "Install Policy", f"Standard policy installed on {gw}",
+                      ts + timedelta(seconds=20), extra={"target": gw})]
+
+
+def _simulate_mgmt_logging_suppressed(config, session_context=None, backdate=False):
+    """THREAT network-device-logging-suppressed-for-a-window: the gateway's log
+    forwarding is turned off, the gateway goes silent, then it is turned back on."""
+    user = mgmt_plane.admin_user(config)
+    src, _ = (mgmt_plane.unexpected_source(config, session_context)
+              if random.random() < 0.5 else (mgmt_plane.admin_source(config), "admin-subnet"))
+    window = mgmt_plane.suppression_window_seconds()
+    now = datetime.now(timezone.utc)
+    print(f"    - Check Point Module simulating: logging suppressed by {user} from {src} for {window}s")
+    start = now - timedelta(seconds=window + 120) if backdate else now - timedelta(seconds=60)
+    off = _cp_admin_session(config, user, src, [], start=start, logout=False)
+    off += _cp_logging_toggle(config, user, src, start + timedelta(seconds=30), enable=False)
+    if backdate:
+        return off + _cp_logging_toggle(config, user, src, now - timedelta(seconds=30), enable=True) \
+            + [_cp_audit(config, user, src, "Log Out", "Administrator Logout", now)]
+    mgmt_plane.open_suppression(_CP_SUPPRESS_KEY, window, user, src)
+    return off
+
+
+def _simulate_mgmt_config_harvest(config, session_context=None):
+    """THREAT scripted-device-config-harvesting: Web API logins from one source to
+    several management domains / gateways in minutes, each pulling the full config."""
+    src, kind = (mgmt_plane.unexpected_source(config, session_context)
+                 if random.random() < 0.5 else (random.choice(mgmt_plane.conf(config)["jump_hosts"]), "jump-host"))
+    user = mgmt_plane.admin_user(config)
+    gws = mgmt_plane.sibling_hostnames(config.get(CONFIG_KEY, {}).get("hostname", "CP-FW-1"),
+                                       random.randint(3, 5))
+    print(f"    - Check Point Module simulating: config harvest of {len(gws)} gateways from {src} ({kind})")
+    t, out = datetime.now(timezone.utc) - timedelta(seconds=80 * len(gws)), []   # <=75 s per gateway
+    for gw in gws:
+        out += _cp_admin_session(config, user, src, [
+            ("Show", f"show-gateways-and-servers details-level full ({gw})", {"client_name": "Web API"}),
+            ("Show", f"show-access-rulebase Network ({gw})", {"client_name": "Web API"}),
+            ("Export", f"show configuration ({gw}) via gaia-api", {"client_name": "Web API", "target": gw})],
+            start=t, gap=(1, 3), client="Web API")
+        # next gateway only after this session's logout (5 steps x <=3 s) plus a gap
+        t += timedelta(seconds=15 + random.randint(10, 45))
+    return out
+
+
+def _simulate_snmp_unexpected_source(config, src_ip, user, shost):
+    """THREAT snmp-from-unexpected-source: a workstation walks every network device."""
+    t, out = datetime.now(timezone.utc) - timedelta(seconds=40), []
+    for dev in mgmt_plane.network_devices(config):
+        out.append(_cp_conn(config, src_ip, dev, 161, "snmp", "snmp", user=user, shost=shost,
+                            internal=True, proto="17", out_b=random.randint(60, 200),
+                            in_b=random.randint(800, 40000), duration=random.randint(0, 3),
+                            event_time=t, rule="Allow_Internal", reason="UDP session end"))
+        t += timedelta(seconds=random.randint(1, 4))
+    return out
+
+
+_MGMT_BACKDATE = {"on": False}
+
+
 def _generate_threat_log(config, session_context=None, forced_event=None):
     """Generates a random threat event (IPS, URL Filtering, Identity, or Analytics-based).
     If forced_event is given, that specific event is generated instead of a random pick.
@@ -2459,9 +2921,29 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     # dashboard / CLI threat_names set (built from get_threat_names()) matches.
     display_name = _EVENT_DISPLAY_NAMES.get(threat_type, threat_type)
 
+    # --- management plane (sources come from mgmt_plane) ---
+    if threat_type == 'mgmt_admin_unexpected_source':
+        return (_simulate_mgmt_admin_unexpected_source(config, session_context), display_name)
+    if threat_type == 'mgmt_config_route_change':
+        return (_simulate_mgmt_config_route_change(config, session_context), display_name)
+    if threat_type == 'mgmt_logging_suppressed':
+        return (_simulate_mgmt_logging_suppressed(config, session_context,
+                                                  backdate=_MGMT_BACKDATE["on"]), display_name)
+    if threat_type == 'mgmt_config_harvest':
+        return (_simulate_mgmt_config_harvest(config, session_context), display_name)
+    if threat_type == 'snmp_unexpected_source':
+        return (_simulate_snmp_unexpected_source(config, src_ip, user, shost), display_name)
+
     # --- multi-event generators ---
     if threat_type == 'large_upload':
         return (_simulate_large_upload(config, src_ip, user, shost), display_name)
+    if threat_type == 'large_upload_nonstd_port':
+        try:
+            from modules.session_utils import to_nonstandard_https
+        except ImportError:
+            from session_utils import to_nonstandard_https
+        return (to_nonstandard_https(_simulate_large_upload(config, src_ip, user, shost)),
+                display_name)
     if threat_type == 'port_scan':
         return (_simulate_port_scan(config, src_ip, user, shost), display_name)
     if threat_type == 'auth_brute_force':
@@ -2486,6 +2968,20 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_simulate_smartdefense_event(config, src_ip, user, shost), display_name)
     if threat_type == 'app_control':
         return (_simulate_app_control_block(config, src_ip, user, shost), display_name)
+    if threat_type == 'torrent_client':
+        return (_simulate_torrent_client(config, src_ip, user, shost), display_name)
+    if threat_type == 'port_sweep':
+        return (_simulate_port_sweep(config, src_ip, user, shost), display_name)
+    if threat_type == 'dc_smb_outbound':
+        return (_simulate_dc_smb_outbound(config, src_ip, user, shost), display_name)
+    if threat_type == 'new_ftp_server':
+        return (_simulate_new_ftp_server(config, src_ip, user, shost), display_name)
+    if threat_type == 'rare_appid':
+        return (_simulate_rare_appid(config, src_ip, user, shost), display_name)
+    if threat_type == 'abnormal_rdp_rare_host':
+        return (_simulate_abnormal_rdp_rare_host(config, src_ip, user, shost), display_name)
+    if threat_type == 'rare_smtp_session':
+        return (_simulate_rare_smtp_session(config, src_ip, user, shost), display_name)
     if threat_type == 'vpn_tor_login':
         return (_simulate_vpn_tor_login(config, src_ip, user, shost), display_name)
     if threat_type == 'vpn_new_country_login':
@@ -2571,7 +3067,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
             "flexString2": (f"Signature-based IPS protection triggered: {protection_name}"
                             + (f" ({cve_ref})" if cve_ref != "N/A" else "")),
             "flexString2Label": "Attack Information",
-            "dhost": f"srv-{victim_ip.split('.')[-1]}.examplecorp.com",
+            "dhost": resolver.internal_fqdn(config, victim_ip),
             "blade": "IPS",
             "industry_reference": cve_ref if cve_ref != "N/A" else None,
             "protection_type": "Signature",
@@ -2613,7 +3109,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
 
     # identity – single failed login (internal user → DC)
     print(f"    - Check Point Module simulating: Failed Login from {src_ip}")
-    dc_ip = random.choice(config.get('internal_servers', ['10.0.0.10']))
+    dc_ip = random.choice(_cp_domain_controllers(config))
     extensions = {
         "signatureId": "45678",
         "name":        "Identity Awareness",
@@ -2630,16 +3126,14 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         "cs5": "LDAP", "cs5Label": "Authentication Method",
         "blade": "Identity Awareness",
         "reason": "Authorization Failed",
-        "dhost": "dc01.examplecorp.com",
+        "dhost": resolver.internal_fqdn(config, dc_ip),
         "ifname": "eth0",
         "msg": f"Authentication failed for {user} from {src_ip}",
     }
     return (_format_checkpoint_cef(config, extensions, device_product="Identity Awareness"), display_name)
 
 
-# ---------------------------------------------------------------------------
 # Scenario log generator
-# ---------------------------------------------------------------------------
 
 def _generate_scenario_log(config, scenario):
     """Generates a single log entry for a storytelling / scripted scenario."""
@@ -2664,12 +3158,14 @@ def _generate_scenario_log(config, scenario):
     return _format_checkpoint_cef(config, extensions)
 
 
-# ---------------------------------------------------------------------------
 # Main entry point
-# ---------------------------------------------------------------------------
 
 def generate_log(config, scenario=None, threat_level="Realistic", benign_only=False, context=None, scenario_event=None):
     """Main log generation function for Check Point."""
+    # The company's VPN gateway is a public name the grid also serves; pin it to
+    # the gateway address so Infoblox and these VPN logs name the same host.
+    resolver.pin("vpn-gateway.examplecorp.com",
+                 f"{config.get(CONFIG_KEY, {}).get('gateway_ip', '203.0.113.10')}/32")
     global last_threat_event_time
     session_context = (context or {}).get('session_context')
 
@@ -2677,11 +3173,14 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     if scenario_event:
         ctx    = context or {}
         src_ip = ctx.get('src_ip')
-        user   = ctx.get('user', 'unknown')
-        shost  = None
-        if src_ip:
+        # Prefer an orchestrator-pinned identity (real box user/host) over the
+        # IP-based lookup, so orchestrated events carry the exact box user for the
+        # stitch. Only look up by IP when no user was pinned.
+        user   = ctx.get('user')
+        shost  = ctx.get('hostname')
+        if src_ip and not user:
             user, shost = _get_user_and_host_info(config, src_ip)
-        else:
+        elif not src_ip:
             user_info = get_random_user(session_context, preferred_device_type='workstation') if session_context else None
             if user_info:
                 src_ip = user_info['ip']
@@ -2690,12 +3189,17 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
             else:
                 internal_nets = config.get('internal_networks', ['192.168.1.0/24'])
                 src_ip = rand_ip_from_network(ip_network(random.choice(internal_nets)))
+        if not user:
+            user = 'unknown'
 
         if scenario_event == "THREAT_BLOCK":
             print(f"    - Check Point Module simulating: THREAT_BLOCK URL block from {src_ip}")
             blocked_cats = config.get(CONFIG_KEY, {}).get('blocked_url_categories', {})
             cat, domain  = random.choice(list(blocked_cats.items())) if blocked_cats else ("Phishing", "evil-site.com")
-            dest_ip      = _random_external_ip()
+            # The scenario pins the name it had Infoblox resolve, and the address
+            # that answer gave, so this block names the host the victim looked up.
+            domain       = context.get('domain') or domain
+            dest_ip      = context.get('dst_ip') or _random_external_ip()
             extensions   = {
                 "signatureId": cat,
                 "name":        domain,
@@ -2723,14 +3227,60 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
 
         elif scenario_event == "LARGE_EGRESS":
             print(f"    - Check Point Module simulating: LARGE_EGRESS upload from {src_ip}")
-            result = _simulate_large_upload(config, src_ip, user, shost)
+            result = _simulate_large_upload(config, src_ip, user, shost,
+                                            domain=context.get('domain'),
+                                            dst_ip=context.get('dst_ip'))
             return (result, "LARGE_EGRESS")
 
+        elif scenario_event == "C2_EGRESS":
+            # Workstation → external C2 egress carrying the pinned box identity
+            # (suser/shost/src), so it stitches to the endpoint case.
+            print(f"    - Check Point Module simulating: C2 egress from {src_ip}")
+            domain = ctx.get('domain') or f"sync-{random.randint(100,999)}.telemetry-cdn.net"
+            dst_ip = ctx.get('dst_ip') or _random_external_ip()
+            port   = int(ctx.get('port', 443))
+            logs = []
+            for _ in range(random.randint(10, 16)):     # beacon cadence
+                ext = {
+                    "_no_user_qualify": True,   # keep the exact box user (bare) for the stitch
+                    "name": domain, "severity": "2", "act": "Accept",
+                    "src": src_ip, "dst": dst_ip,
+                    "spt": random.randint(49152, 65535), "dpt": port, "proto": "6",
+                    "suser": user, "shost": shost, "dhost": domain,
+                    "deviceInboundInterface": "Internal", "deviceOutboundInterface": "External",
+                    "deviceDirection": "1",
+                    "cs1": "Allow_Outbound_Web", "cs1Label": "Application Rule Name",
+                    "cs2": "Allow_Outbound_Web", "cs2Label": "Rule Name",
+                    "cs5": "Uncategorized",      "cs5Label": "Matched Category",
+                    "cp_severity": "Low", "blade": "Application Control",
+                    "request": f"https://{domain}/api/v1/checkin", "requestMethod": "GET",
+                    "duration": "1", "reason": "Application Control", "ifname": "eth0",
+                    "msg": f"Recurring outbound to uncommon domain {domain}",
+                }
+                logs.append(_format_checkpoint_cef(config, ext, device_product="Application Control"))
+            return (logs, "C2_EGRESS")
+
         # Named threat from dashboard — dispatch to the specific event
-        return _generate_threat_log(config, session_context, forced_event=scenario_event)
+        _MGMT_BACKDATE["on"] = bool(ctx.get("mgmt_backdate"))
+        try:
+            return _generate_threat_log(config, session_context, forced_event=scenario_event)
+        finally:
+            _MGMT_BACKDATE["on"] = False
 
     if scenario:
         return _generate_scenario_log(config, scenario)
+
+    # Logging suppressed: the gateway is silent until the window closes, then the same
+    # admin turns log forwarding back on and logs out (_simulate_mgmt_logging_suppressed).
+    _sup = mgmt_plane.suppression_state(_CP_SUPPRESS_KEY)
+    if _sup == "active":
+        return None
+    if _sup:
+        now = datetime.now(timezone.utc)
+        return (_cp_logging_toggle(config, _sup["user"], _sup["src"], now - timedelta(seconds=25), enable=True)
+                + [_cp_audit(config, _sup["user"], _sup["src"], "Log Out", "Administrator Logout", now)])
+    if mgmt_plane.backup_due(_CP_SUPPRESS_KEY):
+        return _simulate_mgmt_config_backup(config, session_context)
 
     if benign_only:
         return _generate_benign_log(config, session_context)

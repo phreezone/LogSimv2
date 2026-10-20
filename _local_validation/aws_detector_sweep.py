@@ -1,6 +1,6 @@
 """Tenant-side sweep: fire every named AWS threat and read back what XSIAM did.
 
-The companion to tests/aws_event_smoke.py. That one proves events are well-formed;
+The companion to _local_validation/aws_event_smoke.py. That one proves events are well-formed;
 this one proves what the tenant actually does with them — the only evidence that
 counts, because on 2026-08-02 two S3 generators normalised *identically* in
 cloud_audit_logs and only one fired its detector.
@@ -12,7 +12,7 @@ when not) and per-object, so batching is what makes a full sweep practical.
 Events are correlated back by CloudTrail eventID -> cloud_provider_event_id,
 so attribution is exact and no marker has to be injected into the payloads.
 
-usage:  python tests/aws_detector_sweep.py [--wait-minutes N] [--threat NAME]
+usage:  python _local_validation/aws_detector_sweep.py [--wait-minutes N] [--threat NAME]
 """
 from __future__ import annotations
 

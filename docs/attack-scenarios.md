@@ -18,7 +18,6 @@ The following scenarios can be run using **Mode 2**. Scenarios 2 and 3 include o
 >
 > **All other steps — including firewall C2 connections, DNS NXDOMAIN storms, lateral movement, SMB enumeration, VPN compromise, web shell activity, and Infoblox Threat Protect events — require you to build custom XSIAM correlation rules** to surface them as alerts and stitch them into a single case. Use these scenarios to generate the raw data, then build the rules to detect it.
 
-> **Google Workspace scenario (Compromised Account & Data Exfiltration via Google Drive) is currently disabled** — the Google Workspace module is not yet functional. It will be re-added to the menu once the module is restored.
 
 ---
 
