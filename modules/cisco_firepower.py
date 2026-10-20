@@ -3691,10 +3691,11 @@ def _generate_mgmt_config_route_change(config, session_context=None):
 _FTD_SUPPRESS_KEY = "cisco_firepower"
 
 
-def _ftd_logging_on_lines(config, user, src, start):
-    pairs = [(start, mgmt_plane.cisco_cmd("FTD", user, src, "logging enable")),
-             (start + timedelta(seconds=3), f"%FTD-5-111008: User '{user}' executed the 'write memory' command."),
-             (start + timedelta(seconds=6), f"%FTD-5-611103: User logged out: Uname: {user}")]
+def _ftd_logging_on_lines(config, user, src, end):
+    """Re-enable -> write memory -> logout, ending at `end` (now), never after it."""
+    pairs = [(end - timedelta(seconds=6), mgmt_plane.cisco_cmd("FTD", user, src, "logging enable")),
+             (end - timedelta(seconds=3), f"%FTD-5-111008: User '{user}' executed the 'write memory' command."),
+             (end, f"%FTD-5-611103: User logged out: Uname: {user}")]
     return [_ftd_syslog(config, m, t) for t, m in pairs]
 
 

@@ -2100,7 +2100,7 @@
         },
         {
           "event": "admin_event",
-          "weight": 5
+          "weight": 0.05
         },
         {
           "event": "inbound_block",

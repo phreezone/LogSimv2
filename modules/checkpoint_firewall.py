@@ -2855,14 +2855,15 @@ def _simulate_mgmt_config_harvest(config, session_context=None):
     gws = mgmt_plane.sibling_hostnames(config.get(CONFIG_KEY, {}).get("hostname", "CP-FW-1"),
                                        random.randint(3, 5))
     print(f"    - Check Point Module simulating: config harvest of {len(gws)} gateways from {src} ({kind})")
-    t, out = datetime.now(timezone.utc) - timedelta(seconds=60 * len(gws)), []
+    t, out = datetime.now(timezone.utc) - timedelta(seconds=80 * len(gws)), []   # <=75 s per gateway
     for gw in gws:
         out += _cp_admin_session(config, user, src, [
             ("Show", f"show-gateways-and-servers details-level full ({gw})", {"client_name": "Web API"}),
             ("Show", f"show-access-rulebase Network ({gw})", {"client_name": "Web API"}),
             ("Export", f"show configuration ({gw}) via gaia-api", {"client_name": "Web API", "target": gw})],
             start=t, gap=(1, 3), client="Web API")
-        t += timedelta(seconds=random.randint(10, 45))
+        # next gateway only after this session's logout (5 steps x <=3 s) plus a gap
+        t += timedelta(seconds=15 + random.randint(10, 45))
     return out
 
 
