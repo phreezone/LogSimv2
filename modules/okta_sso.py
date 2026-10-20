@@ -3324,6 +3324,16 @@ def _generate_sso_unusual_time(config, user_info, session_context=None):
     # "today at 02-04" is still ahead, which shipped this event hours in the future.
     if ts > datetime.now(timezone.utc):
         ts -= timedelta(days=1)
+    # A training (hermetic) run replays a short window -- 30 s to 4 h -- that almost never
+    # contains 02-04 UTC, so the override put this event hours outside the pack's
+    # backfill window (training_multistudent failed on it). There the run's own clock
+    # wins; the "unusual time" premise belongs to ambient runs.
+    try:
+        from modules.session_utils import hermetic as _hermetic
+    except ImportError:
+        from session_utils import hermetic as _hermetic
+    if _hermetic():
+        ts = datetime.now(timezone.utc)
     published  = _okta_timestamp(ts)
 
     ip_ctx = _get_random_ip_and_context(config, "benign_ingress_sources")
