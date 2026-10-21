@@ -405,6 +405,17 @@ def _min_interval(module) -> float:
         return _MIN_EVENT_INTERVAL
 
 
+def _notify_interval(state) -> None:
+    """Tell a module that sets its own volume (Windows: worker threads, not calls) the
+    rate it was given; modules without the hook are paced by their calls alone."""
+    hook = getattr(state.module, "set_event_interval", None)
+    if callable(hook):
+        try:
+            hook(state.event_interval)
+        except Exception as exc:
+            print(f"[{state.name}] set_event_interval failed: {exc}")
+
+
 # Seconds of per-second event counts each module keeps (the timeline shows 120 s).
 _RATE_HISTORY_S = 130
 # A worker more than this far behind its schedule (generation slower than the requested
@@ -435,7 +446,7 @@ class ModuleState:
         self.total_logs = 0
         self.total_threats = 0
         self.last_threat: str = ""
-        # [epoch_second, events, benign events] per second, newest last. These were
+        # [epoch_second, events, benign events, log lines] per second, newest last. These were
         # deques of the last 600 event timestamps until 2026-10-21, which capped the
         # reported 10 s rate (and the timeline) at 60 events/s.
         self._sec_counts: deque = deque(maxlen=_RATE_HISTORY_S)
@@ -469,9 +480,10 @@ class ModuleState:
             self.total_logs += log_count
             counts = self._sec_counts
             if not counts or counts[-1][0] != sec:
-                counts.append([sec, 0, 0])
+                counts.append([sec, 0, 0, 0])
             bucket = counts[-1]
             bucket[1] += 1                        # one per event, not per log line
+            bucket[3] += log_count
             if event_name and event_name in self.threat_names:
                 self.total_threats += 1           # one threat per event, not per log line
                 self._threat_timestamps.append(now)
@@ -482,10 +494,13 @@ class ModuleState:
                 bucket[2] += 1
 
     def get_rate(self, window: int = 10) -> float:
-        """Events/s over the last *window* complete seconds."""
+        """Log lines/s over the last *window* complete seconds -- what total_logs counts.
+        It counted generate_log calls until 2026-10-21, so a module that returns many
+        lines per call (Windows drains its workers) showed its poll rate: 0.1/s on the
+        card while ~425 events/s went out."""
         end = int(time.time())
         with self._lock:
-            recent = sum(c[1] for c in self._sec_counts if end - window <= c[0] < end)
+            recent = sum(c[3] for c in self._sec_counts if end - window <= c[0] < end)
         return round(recent / window, 2)
 
     def reset_metrics(self):
@@ -1041,7 +1056,8 @@ def _start_module_state(state: ModuleState, threat_level: str,
     if threat_level in THREAT_LEVELS:
         state.threat_level = threat_level
     if event_interval is not None and event_interval >= _MIN_EVENT_INTERVAL:
-        state.event_interval = max(event_interval, _min_interval(state.module))
+        state.event_interval = event_interval
+    _notify_interval(state)
     state._stop_event.clear()
     state.error_msg = ""
     if _session_start is None:
@@ -1165,7 +1181,8 @@ def api_set_interval(name: str):
             raise ValueError
     except (ValueError, TypeError):
         return jsonify({"error": f"event_interval must be a number >= {_MIN_EVENT_INTERVAL}"}), 400
-    state.event_interval = max(iv, _min_interval(state.module))
+    state.event_interval = iv
+    _notify_interval(state)
     return jsonify(state.to_dict())
 
 
@@ -1690,7 +1707,8 @@ def _execute_job(job: dict) -> None:
                 try:
                     iv = float(p["event_interval"])
                     if iv >= _MIN_EVENT_INTERVAL:
-                        state.event_interval = max(iv, _min_interval(state.module))
+                        state.event_interval = iv
+                        _notify_interval(state)
                 except (KeyError, TypeError, ValueError):
                     pass
         with _schedule_lock:
@@ -2413,7 +2431,7 @@ def api_timeline():
         threats      = [0] * BUCKETS
         threat_names = [[] for _ in range(BUCKETS)]
         with state._lock:
-            for sec, _events, n_benign in state._sec_counts:
+            for sec, _events, n_benign, _lines in state._sec_counts:
                 age = now - sec
                 if 0 <= age < window:
                     idx = BUCKETS - 1 - int(age / BUCKET_SEC)
