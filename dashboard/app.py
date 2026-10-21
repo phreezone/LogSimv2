@@ -726,6 +726,28 @@ def _stop_baduser():
 # dashboard over-reported delivery. SEND_QUEUE_SIZE resizes it.
 _SEND_QUEUE: _queue.Queue = _queue.Queue(maxsize=max(1, int(os.getenv("SEND_QUEUE_SIZE", "5000"))))
 
+# Per-transport lanes. HTTP-collector and Cribl-receiver events get their own queue and
+# sender pool, and are sent in BATCHES (many events per request, log_simulator
+# send_http_batch / send_cribl_batch). Before 2026-10-21 every transport shared the one
+# pool above with one request per HTTP/Cribl event: those topped out near ~145 events/s
+# at WAN latency, and a slow collector held syslog behind it (1,500 syslog events that
+# take 0.2 s alone took 10.4 s next to an HTTP backlog). Syslog, S3, WEC and Pub/Sub stay
+# on the default lane.
+_BATCHED_TRANSPORTS = ("http", "cribl")
+_BATCH_QUEUES: dict = {t: _queue.Queue(maxsize=max(1, int(os.getenv("SEND_QUEUE_SIZE", "5000"))))
+                       for t in _BATCHED_TRANSPORTS}
+_BATCH_SEND_WORKER_COUNT = max(1, int(os.getenv("BATCH_SEND_WORKERS", "4")))   # per lane
+_BATCH_LINGER_S = max(0.0, float(os.getenv("BATCH_LINGER_MS", "100")) / 1000)
+_BATCH_MAX_EVENTS = max(1, int(os.getenv("HTTP_BATCH_MAX_EVENTS", "1000")))
+
+
+def _lane_queue(item):
+    """The queue for this event's transport: a batched lane for HTTP/Cribl, else default."""
+    _msg, module, config, _name = item
+    key = getattr(module, "CONFIG_KEY", None)
+    transport = ((config or {}).get(key, {}) or {}).get("transport", "syslog") if key else "syslog"
+    return _BATCH_QUEUES.get(transport, _SEND_QUEUE)
+
 
 _ENQUEUE_MAX_WAIT_S = float(os.getenv("SEND_ENQUEUE_MAX_WAIT_S", "30"))
 
@@ -741,10 +763,11 @@ def _enqueue_send(item, stop_event=None):
     together while Windows, which has its own WEC path, kept running). Degrading to lossy
     (drop + count) keeps generation alive; a permanent freeze does not.
     Returns False only if the producer is being stopped."""
+    q = _lane_queue(item)
     waited = 0.0
     while True:
         try:
-            _SEND_QUEUE.put(item, timeout=1.0)
+            q.put(item, timeout=1.0)
             return True
         except _queue.Full:
             if stop_event is not None and stop_event.is_set():
@@ -825,9 +848,41 @@ def _send_worker():
             time.sleep(0.5)
 
 
+def _batch_send_worker(lane: str):
+    """Sender for one batched lane (HTTP collector or Cribl receiver). Takes everything
+    queued -- waiting up to _BATCH_LINGER_S for more to accumulate -- and sends it as one
+    process_and_send() call per (module, config, event name), which goes out as batched
+    requests. Ordering within a module is preserved."""
+    process_and_send = _get_process_and_send()
+    q = _BATCH_QUEUES[lane]
+    while True:
+        try:
+            batch = [q.get()]
+            deadline = time.monotonic() + _BATCH_LINGER_S
+            while len(batch) < _BATCH_MAX_EVENTS:
+                remaining = deadline - time.monotonic()
+                try:
+                    batch.append(q.get(timeout=remaining) if remaining > 0 else q.get_nowait())
+                except _queue.Empty:
+                    break
+            groups: dict = {}
+            for msg, module, config, event_name in batch:
+                g = groups.setdefault((id(module), id(config), event_name),
+                                      (module, config, event_name, []))
+                g[3].append(msg)
+            for module, config, event_name, msgs in groups.values():
+                try:
+                    process_and_send(msgs, module, config, event_name)
+                except Exception as exc:
+                    _note_send_failure(exc)
+        except Exception as exc:
+            _note_send_failure(exc)
+            time.sleep(0.5)
+
+
 def _ensure_send_workers(count=None):
-    """Start sender pool once (idempotent). Worker count defaults to _SEND_WORKER_COUNT
-    (SEND_WORKERS env, default 8)."""
+    """Start the sender pools once (idempotent): the default lane (SEND_WORKERS, default 8)
+    and one pool per batched lane (BATCH_SEND_WORKERS each, default 4)."""
     global _SEND_WORKERS_STARTED
     if count is None:
         count = _SEND_WORKER_COUNT
@@ -838,6 +893,10 @@ def _ensure_send_workers(count=None):
     for i in range(count):
         t = threading.Thread(target=_send_worker, daemon=True, name=f"send-worker-{i}")
         t.start()
+    for lane in _BATCHED_TRANSPORTS:
+        for i in range(_BATCH_SEND_WORKER_COUNT):
+            threading.Thread(target=_batch_send_worker, args=(lane,), daemon=True,
+                             name=f"send-{lane}-{i}").start()
 
 
 # ── Module worker thread ──────────────────────────────────────────────────────
@@ -2198,17 +2257,23 @@ def _run_health_checks() -> dict:
     # senders are the bottleneck and are holding generation back -- not data loss.
     # Shown because module counters include these: on 2026-10-07 ~10,300 events sat
     # here and a dashboard total read as an over-count until they drained.
-    depth, cap = _SEND_QUEUE.qsize(), _SEND_QUEUE.maxsize
+    # Default lane plus the batched HTTP/Cribl lanes; the fullest lane decides the status.
+    lanes = {"default": _SEND_QUEUE, **_BATCH_QUEUES}
+    depth = sum(q.qsize() for q in lanes.values())
+    cap = sum(q.maxsize for q in lanes.values())
+    fullest = max(lanes.values(), key=lambda q: q.qsize() / max(q.maxsize, 1))
+    near_full = fullest.maxsize and fullest.qsize() >= 0.9 * fullest.maxsize
+    per_lane = ", ".join(f"{n} {q.qsize()}/{q.maxsize}" for n, q in lanes.items())
     results.append({
         "group": "Delivery", "check": "send queue",
         "status": "error" if _DELIVERY_STATS.get("queue_drops") else
-                  ("warn" if cap and depth >= 0.9 * cap else "ok"),
-        "detail": (f"{depth}/{cap} counted but not yet sent"
+                  ("warn" if near_full else "ok"),
+        "detail": (f"{depth}/{cap} counted but not yet sent ({per_lane})"
                    + (f"; DROPPED {_DELIVERY_STATS['queue_drops']} after >"
                       f"{_ENQUEUE_MAX_WAIT_S:.0f}s full -- a transport is stalled"
                       if _DELIVERY_STATS.get("queue_drops") else
-                      "; senders are holding generation back (SEND_WORKERS)"
-                      if cap and depth >= 0.9 * cap else "")),
+                      "; senders are holding generation back (SEND_WORKERS / BATCH_SEND_WORKERS)"
+                      if near_full else "")),
     })
 
     overall = ("error" if any(r["status"] == "error" for r in results)

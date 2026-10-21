@@ -11,6 +11,7 @@ Research basis (Microsoft Entra sign-in / audit schema + typical tenant volume):
   far the highest volume, then interactive user sign-ins, then benign failures, then
   directory-audit activity. generate-side weighting reflects that.
 """
+import functools
 import hashlib
 import json
 import math
@@ -578,8 +579,13 @@ _LIFECYCLE_DORMANT_PCT = 6
 _LIFECYCLE_DEPARTED_PCT = 6
 
 
+@functools.lru_cache(maxsize=None)
 def lifecycle_cohort(username):
-    """Deterministic lifecycle cohort for an identity: 'active' | 'dormant' | 'departed'."""
+    """Deterministic lifecycle cohort for an identity: 'active' | 'dormant' | 'departed'.
+
+    Memoised: it is a pure hash of the username, and the roster filters call it for every
+    user on every event -- uncached that was ~500 SHA-256s per Exchange event (~90% of the
+    module's generation time)."""
     b = _h("lifecycle:v1:" + str(username)) % 100
     if b < _LIFECYCLE_DORMANT_PCT:
         return "dormant"
@@ -720,6 +726,21 @@ def auth_details(method="Password", succeeded=True, step_ts=None):
              "authenticationStepRequirement": ""}]
 
 
+_ACTIVE_NAMES = {}   # id(profiles) -> (profiles, len, active names)
+
+
+def _active_profile_names(profiles):
+    """ACTIVE-cohort usernames of a user_profiles dict (all names if none are active),
+    cached per roster -- this ran a cohort check over every profile on every event. The
+    dict itself is kept in the entry so its id cannot be reused by another object."""
+    hit = _ACTIVE_NAMES.get(id(profiles))
+    if hit is not None and hit[0] is profiles and hit[1] == len(profiles):
+        return hit[2]
+    names = [n for n in profiles if lifecycle_cohort(n) == "active"] or list(profiles)
+    _ACTIVE_NAMES[id(profiles)] = (profiles, len(profiles), names)
+    return names
+
+
 def pick_user(config=None, context=None, include_reserved=False):
     """Return a normalized identity from LogSim's user model.
 
@@ -760,10 +781,7 @@ def pick_user(config=None, context=None, include_reserved=False):
                         "os_version": u.get("os_version", "10")}
     profiles = (config or {}).get("user_profiles") or {}
     if profiles:
-        names = list(profiles)
-        if not include_reserved:
-            active = [n for n in names if lifecycle_cohort(n) == "active"]
-            names = active or names
+        names = list(profiles) if include_reserved else _active_profile_names(profiles)
         uname = random.choice(names)
         p = profiles[uname]
         dev = (p.get("devices") or [{}])[0]

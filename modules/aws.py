@@ -7483,6 +7483,11 @@ THREAT_SCENARIOS = {
 
 # --- Main Module Function ---
 
+# (id(session_context), id(aws_config)) -> (session_context, aws_config) already merged;
+# the objects are held so their ids cannot be reused by a later session context.
+_LINKED_IAM_MERGED: dict = {}
+
+
 def generate_log(config, context=None, threat_level="Benign", benign_only=False, scenario_event=None):
     """
     Patched generate_log with:
@@ -7495,9 +7500,15 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
     # These imports are needed here
     import random, io, gzip, json, logging, traceback, time, datetime 
     
-    # Extract session context — if provided, enrich IAM user pool with linked users
+    # Extract session context — if provided, enrich IAM user pool with linked users.
+    # The merge is idempotent, so it runs ONCE per (session_context, aws_config) pair:
+    # it used to rescan every session user and rebuild the users_and_roles set on every
+    # call, ~900 dict lookups per event (most of this module's generation time).
     session_context = (context or {}).get('session_context')
-    if session_context and 'aws_config' in config:
+    _merge_key = (id(session_context), id(config.get('aws_config'))) if session_context else None
+    if (session_context and 'aws_config' in config
+            and _LINKED_IAM_MERGED.get(_merge_key, (None, None))[0] is not session_context):
+        _LINKED_IAM_MERGED[_merge_key] = (session_context, config['aws_config'])
         _linked_iam = [
             {"type": "IAMUser", "name": p.get('aws_iam_user'),
              "arn_suffix": f"user/{p.get('aws_iam_user')}"}
