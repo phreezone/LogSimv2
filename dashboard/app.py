@@ -533,8 +533,11 @@ class ModuleState:
 
 
 # Instantiate states for every loaded module
+# A module with DASHBOARD_MODULE = False gets no card; Identity Threat Campaigns is
+# offered as one Run Attack Scenario entry per campaign instead (_get_scenarios).
 MODULE_STATES: dict[str, ModuleState] = {
     name: ModuleState(mod) for name, mod in MODULES.items()
+    if getattr(mod, "DASHBOARD_MODULE", True)
 }
 
 
@@ -1288,7 +1291,26 @@ def _get_scenarios():
     except Exception as e:
         print(f"[dashboard] Could not load scenarios from log_simulator: {e}")
         _SCENARIOS = []
+    _SCENARIOS += _campaign_scenarios()
     return _SCENARIOS
+
+
+def _campaign_scenarios():
+    """One Run Attack Scenario entry per Identity Threat Campaign. Dashboard-only: they
+    self-send (Cribl + WEC), so they stay out of log_simulator.get_scenarios(), which the
+    hermetic training engine also resolves."""
+    camp = next((m for m in MODULES.values()
+                 if callable(getattr(m, "run_campaign", None))), None)
+    if camp is None:
+        return []
+
+    def runner(name):
+        return lambda _modules, cfg: camp.run_campaign(
+            name, cfg, context={"session_context": SESSION_CONTEXT})
+
+    return [{"id": f"campaign-{name}", "name": f"Identity Campaign — {title}",
+             "func": runner(name)}
+            for name, title in camp.CAMPAIGN_TITLES.items()]
 
 
 @app.get("/api/scenarios")

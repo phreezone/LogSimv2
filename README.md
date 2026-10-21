@@ -250,7 +250,7 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | Office 365 SharePoint / OneDrive | Cribl receiver | File and sharing operations, business-hours weighted | 15 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Office 365 DLP | Cribl receiver | Low-severity notify-only rule matches | 4 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Office 365 General | Cribl receiver | Copilot interactions, Power BI views | 2 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
-| Identity Threat Campaigns | *(coordinator — Cribl + WEC)* | *(none — opt-in)* | 21 cross-feed identity kill chains | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
+| Identity Threat Campaigns | *(coordinator — Cribl + WEC)* | *(none)* | 21 cross-feed identity kill chains, run from **Threats & Scenarios → Run Attack Scenario** (no module card) | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
 | Check Point Firewall | Syslog (TCP) | 5 types (web, DNS, VPN session, internal traffic, connection logs) + management plane (SmartConsole admin sessions, nightly backup, SNMP polling) | 45 (29 on demand) | [docs/modules/checkpoint.md](docs/modules/checkpoint.md) |
 | Cisco ASA Firewall | Syslog (TCP) | 6 types (office traffic, DHCP, DNS, inbound block, VPN, connections) + management plane (CLI admin sessions, nightly backup, SNMP polling) | 38 (29 on demand) | [docs/modules/cisco-asa.md](docs/modules/cisco-asa.md) |
 | Cisco Firepower | Syslog (TCP) | 14 types (web, FTP, SSH, SMB, RDP, DNS, VPN, mail, connections) + management plane | 46 (30 on demand) | [docs/modules/cisco-firepower.md](docs/modules/cisco-firepower.md) |
@@ -284,7 +284,7 @@ belong to the same person. Details: [Entra](docs/modules/microsoft-entra.md) and
   `.env.example`).
 - **Episode-based threat rate.** Microsoft threats fire as wall-clock Poisson episodes
   after a benign warmup, so rate doesn't depend on poll frequency or burst size.
-- **Identity Threat Campaigns** (opt-in): 21 cross-feed kill chains (BEC, ransomware,
+- **Identity Threat Campaigns** (Threats & Scenarios → Run Attack Scenario): 21 cross-feed kill chains (BEC, ransomware,
   OAuth abuse, golden SAML, AiTM token theft, hybrid on-prem→cloud, and more) that span
   the Graph, O365 and Windows datasets. They're sent over Cribl and WEC together.
 - **Validation:** `_local_validation/threat_harness.py` fires a threat, confirms
