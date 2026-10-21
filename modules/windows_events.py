@@ -193,6 +193,7 @@ _EVENT_META = {
     4663: {"task": 12800, "category": "File System",            "version": 1, "outcome": "success"},
     4741: {"task": 13825, "category": "Computer Account Management","version": 0, "outcome": "success"},
     4742: {"task": 13825, "category": "Computer Account Management","version": 0, "outcome": "success"},
+    4781: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4728: {"task": 13826, "category": "Security Group Management",   "version": 0, "outcome": "success"},
     4732: {"task": 13826, "category": "Security Group Management",   "version": 0, "outcome": "success"},
     4756: {"task": 13826, "category": "Security Group Management",   "version": 0, "outcome": "success"},
@@ -781,6 +782,24 @@ def _msg_4742(d):
     )
 
 
+def _msg_4781(d):
+    return (
+        "The name of an account was changed.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Target Account:\r\n"
+        f"\tSecurity ID:\t\t{d.get('TargetSid','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n"
+        f"\tOld Account Name:\t{d.get('OldTargetUserName','')}\r\n"
+        f"\tNew Account Name:\t{d.get('NewTargetUserName','')}\r\n\r\n"
+        "Additional Information:\r\n"
+        f"\tPrivileges:\t\t{d.get('PrivilegeList','-')}"
+    )
+
+
 def _msg_5136(d):
     return (
         "A directory service object was modified.\r\n\r\n"
@@ -1363,6 +1382,7 @@ _MSG_BUILDERS = {
     4732: _msg_4732,
     4741: _msg_4741,
     4742: _msg_4742,
+    4781: _msg_4781,
     4756: _msg_4756,
     4729: _msg_4729,
     4733: _msg_4733,
@@ -3327,10 +3347,11 @@ def _build_4728(user_info, config, *, member_name, member_sid,
 
 def _build_4732(user_info, config, *, member_name, member_sid,
                 target_group="Administrators", target_sid=None,
-                target_domain=None,
+                target_domain=None, computer=None,
                 logon_id=None, ts=None) -> dict:
-    """4732 – A member was added to a security-enabled local group (DC event)."""
-    dc_host = _get_dc_hostname(config)
+    """4732 – A member was added to a security-enabled local group (DC event; on a
+    member server when *computer* is given)."""
+    dc_host = computer or _get_dc_hostname(config)
     domain = _get_domain(config)
     event_data = {
         "MemberName":         member_name,
@@ -3713,7 +3734,7 @@ def _dc_logon_event(user_info, config, *, logon_type=3, auth_pkg=_KRB_PACKAGE,
 
 def _build_4768(user_info, config, *, ip_override=None, encryption=None,
                 status="0x0", cert_issuer="", cert_serial="", cert_thumbprint="",
-                ts=None) -> dict:
+                pre_auth_type="2", ts=None) -> dict:
     """4768 – Kerberos TGT request (DC event, success=Status 0x0)."""
     domain = _get_domain(config)
     dc_host = _get_dc_hostname(config)
@@ -3736,7 +3757,7 @@ def _build_4768(user_info, config, *, ip_override=None, encryption=None,
         "TicketOptions":                    "0x40810010",
         "Status":                           status,
         "TicketEncryptionType":             enc,
-        "PreAuthType":                      "2",
+        "PreAuthType":                      pre_auth_type,
         "IpAddress":                        f"::ffff:{ip}" if ip and "." in str(ip) else ip,
         "IpPort":                           str(random.randint(49152, 65535)) if ip and ip != "-" else "0",
         "CertIssuerName":                   cert_issuer,
@@ -3864,16 +3885,38 @@ _UAC_PASSWD_NOTREQD        = "0x220"     # 544: PASSWD_NOTREQD + normal
 _DEFAULT_LOCAL_ACCOUNTS = ["Administrator", "Guest", "DefaultAccount", "WDAGUtilityAccount"]
 
 
-def _build_4720(user_info, config, *, target_username, target_sid,
-                sam_account_name=None, display_name="-", upn="-",
-                new_uac_value=_UAC_ACCOUNTDISABLE, logon_id=None,
-                ts=None) -> dict:
-    """4720 – A user account was created (DC event)."""
+def _build_4781(user_info, config, *, old_name, new_name, target_sid,
+                logon_id=None, ts=None) -> dict:
+    """4781 – The name of an account was changed (DC event). Logged for user AND computer
+    accounts; a computer account renamed without its trailing $ is the noPac
+    (CVE-2021-42278) shape."""
     dc_host = _get_dc_hostname(config)
     domain = _get_domain(config)
     event_data = {
+        "OldTargetUserName":  old_name,
+        "NewTargetUserName":  new_name,
+        "TargetDomainName":   domain,
+        "TargetSid":          target_sid,
+        "SubjectUserSid":     _stable_user_sid(user_info["username"]),
+        "SubjectUserName":    user_info["username"],
+        "SubjectDomainName":  domain,
+        "SubjectLogonId":     logon_id or _new_logon_id(),
+        "PrivilegeList":      "-",
+    }
+    return _build_event(4781, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_4720(user_info, config, *, target_username, target_sid,
+                sam_account_name=None, display_name="-", upn="-",
+                new_uac_value=_UAC_ACCOUNTDISABLE, logon_id=None,
+                computer=None, target_domain=None, ts=None) -> dict:
+    """4720 – A user account was created (DC event; a LOCAL account when *computer*
+    and *target_domain* name a member server)."""
+    dc_host = computer or _get_dc_hostname(config)
+    domain = _get_domain(config)
+    event_data = {
         "TargetUserName":      target_username,
-        "TargetDomainName":    domain,
+        "TargetDomainName":    target_domain or domain,
         "TargetSid":           target_sid,
         "SubjectUserSid":      _stable_user_sid(user_info["username"]),
         "SubjectUserName":     user_info["username"],
@@ -3899,17 +3942,20 @@ def _build_4720(user_info, config, *, target_username, target_sid,
         "SidHistory":          "-",
         "LogonHours":          "%%1793",
     }
+    if target_domain:                     # local SAM account: no domain primary group
+        event_data["PrimaryGroupId"] = "513"
+        event_data["UserPrincipalName"] = "-"
     return _build_event(4720, dc_host, event_data, success=True, ts=ts)
 
 
 def _build_4722(user_info, config, *, target_username, target_sid,
-                logon_id=None, ts=None) -> dict:
-    """4722 – A user account was enabled (DC event)."""
-    dc_host = _get_dc_hostname(config)
+                logon_id=None, computer=None, target_domain=None, ts=None) -> dict:
+    """4722 – A user account was enabled (DC event; local when *computer* is given)."""
+    dc_host = computer or _get_dc_hostname(config)
     domain = _get_domain(config)
     event_data = {
         "TargetUserName":    target_username,
-        "TargetDomainName":  domain,
+        "TargetDomainName":  target_domain or domain,
         "TargetSid":         target_sid,
         "SubjectUserSid":    _stable_user_sid(user_info["username"]),
         "SubjectUserName":   user_info["username"],
@@ -8245,6 +8291,194 @@ def _threat_default_account_enabled(config, session_context):
     return events
 
 
+_MEMBER_SERVERS = ("FS01", "FS02", "SQL01", "APP01", "BACKUP01")
+
+
+def _machine_domain_sid(host):
+    """Stable local-SAM domain SID for a member server (its own S-1-5-21-a-b-c)."""
+    h = hashlib.sha1(f"machine:{host}".encode()).digest()
+    a, b, c = (int.from_bytes(h[i:i + 4], "big") % 4_000_000_000 for i in (0, 4, 8))
+    return f"S-1-5-21-{a}-{b}-{c}"
+
+
+def _threat_shadow_credentials(config, session_context):
+    """Shadow credentials (Whisker / pywhisker / Certipy shadow): an ordinary user with
+    write access adds a key to another account's msDS-KeyCredentialLink, then
+    authenticates as that account with PKINIT -- no password needed.
+
+    Detection targets: "Key credential attribute modification" (variation "Possible
+    shadow credentials addition"; Identity Analytics, Windows Event Collector).
+
+    Sequence:
+      1. Attacker authenticates -> DC 4624 + endpoint 4624
+      2. 4688 Whisker / pywhisker / Certipy on the attacker's workstation
+      3. 5136 msDS-KeyCredentialLink Value Added on the target object (DN-Binary
+         syntax 2.5.5.7) by a subject that is NOT the target -- the trigger
+      4. 4768 PKINIT TGT (PreAuthType 16) for the target, from the attacker's IP
+      5. 4689 process exit
+    Windows Hello for Business writes the same attribute, but as the device itself.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    dns_domain = _get_dns_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    if random.random() < 0.6:                     # a server's machine account
+        host = random.choice(_MEMBER_SERVERS)
+        target_name, target_dn, target_class = f"{host}$", f"CN={host},CN=Computers,{base_dn}", "computer"
+    else:                                         # a privileged user
+        others = [w for w in _get_windows_users(session_context) if w["username"] != u["username"]]
+        victim = random.choice(others)["username"] if others else "svc_backup"
+        target_name, target_dn, target_class = victim, f"CN={victim},CN=Users,{base_dn}", "user"
+    device_id = str(uuid.uuid4())
+    key_blob = "".join(random.choice("0123456789ABCDEF") for _ in range(56))
+    key_value = f"B:828:000200002000{key_blob}:{target_dn}"
+    logon_id = _new_logon_id()
+    t = time.time()
+    events = [json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"), logon_id=logon_id, ts=t))]
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2, auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id, ts=t)))
+    t += random.uniform(3.0, 8.0)
+    short = target_name.rstrip("$")
+    tool = random.choice([
+        ("C:\\Users\\Public\\Whisker.exe",
+         f"Whisker.exe add /target:{target_name} /domain:{dns_domain} /path:C:\\Users\\Public\\{short}.pfx"),
+        ("C:\\Users\\Public\\Certipy.exe",
+         f"Certipy.exe shadow auto -u {u['username']}@{dns_domain} -account {target_name}"),
+        ("C:\\Python311\\python.exe",
+         f"python.exe pywhisker.py -d {dns_domain} -u {u['username']} --target {target_name} --action add"),
+    ])
+    events.append(json.dumps(_build_4688(u, config, process_name=tool[0], command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    events.append(json.dumps(_build_5136(
+        u, config, object_dn=target_dn, object_class=target_class,
+        object_guid="{" + str(uuid.uuid4()) + "}",
+        attribute_name="msDS-KeyCredentialLink", attribute_value=key_value,
+        attribute_syntax_oid="2.5.5.7", operation_type="%%14674",
+        op_correlation_id="{" + device_id + "}", logon_id=logon_id, ts=t)))
+    t += random.uniform(5.0, 20.0)
+    events.append(json.dumps(_build_4768({"username": target_name, "ip": u.get("ip")}, config,
+                                         ip_override=u.get("ip"), encryption="0x12",
+                                         pre_auth_type="16", ts=t)))
+    t += random.uniform(1.0, 3.0)
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0], logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_default_account_masquerade(config, session_context):
+    """A LOCAL account named like a built-in default (Guest, DefaultAccount) is created on
+    a member server, so it blends in with the real one (T1036 / T1564.002 / T1078.001).
+
+    Detection targets: "Masquerading as a default local account" (Identity Analytics,
+    Windows Event Collector; one alert per account).
+
+    Sequence (all on the server, local SAM):
+      1. Admin logon to the server (4624 type 10 / 3) + 4672
+      2. 4688 net user <name> <pwd> /add
+      3. 4720 the local account created (TargetDomainName = the server) -- the trigger
+      4. 4722 enabled, 4732 added to the local Administrators group
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    host = random.choice(_MEMBER_SERVERS)
+    server = dict(u, hostname=host)
+    computer = _fqdn(host, config)
+    local_sid = _machine_domain_sid(host)
+    names = random.sample(["DefaultAccount", "Guest"], k=random.choice([1, 2]))
+    logon_id = _new_logon_id()
+    t = time.time()
+    events = [json.dumps(_build_4624(server, config, logon_type=random.choice([10, 3]),
+                                     auth_pkg=_NEG_PACKAGE, target_logon_id=logon_id,
+                                     elevated=True, ts=t))]
+    t += 0.05
+    events.append(json.dumps(_build_4672(server, config, logon_id=logon_id, is_admin=True, ts=t)))
+    for name in names:
+        rid = random.randint(1001, 1099)
+        sid = f"{local_sid}-{rid}"
+        t += random.uniform(5.0, 15.0)
+        events.append(json.dumps(_build_4688(server, config, process_name="C:\\Windows\\System32\\net.exe",
+                                             command_line=f"net user {name} P@ssw0rd!{rid} /add",
+                                             parent_process="C:\\Windows\\System32\\cmd.exe",
+                                             logon_id=logon_id, ts=t)))
+        t += random.uniform(0.2, 0.8)
+        events.append(json.dumps(_build_4720(u, config, target_username=name, target_sid=sid,
+                                             new_uac_value=_UAC_NORMAL_ACCOUNT, logon_id=logon_id,
+                                             computer=computer, target_domain=host, ts=t)))
+        t += random.uniform(0.05, 0.2)
+        events.append(json.dumps(_build_4722(u, config, target_username=name, target_sid=sid,
+                                             logon_id=logon_id, computer=computer,
+                                             target_domain=host, ts=t)))
+        t += random.uniform(2.0, 6.0)
+        events.append(json.dumps(_build_4732(u, config, member_name="-", member_sid=sid,
+                                             target_group="Administrators", target_domain="Builtin",
+                                             computer=computer, logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_samaccountname_change(config, session_context):
+    """A machine account's sAMAccountName is changed to a name WITHOUT the trailing $ --
+    the first step of noPac (CVE-2021-42278), seen here on its own: 4781 + 4742 on the DC.
+    Half the time the new name is the DC's own (the Medium "to DC hostname" variation).
+
+    Detection target: "Suspicious sAMAccountName change" (Identity Analytics, Windows
+    Event Collector). samaccountname_spoofing covers the full chain via 5136 + TGT.
+
+    Sequence:
+      1. Attacker authenticates -> DC 4624 + endpoint 4624
+      2. 4741 machine account created (MachineAccountQuota)
+      3. 4688 PowerShell / noPac tool
+      4. 4781 OldTargetUserName WKS1234$ -> NewTargetUserName WKS1234 or DC01 -- trigger
+      5. 4742 SamAccountName final value
+      6. 4781 renamed back (often minutes later)
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+    dns_domain = _get_dns_domain(config)
+    machine = random.choice(["YOURPC", "WKSTMP", "DESKTOP", "CLIENT"]) + str(random.randint(100, 9999))
+    machine_sam = f"{machine}$"
+    machine_sid = _stable_user_sid(machine)
+    new_name = _get_dc_short(config) if random.random() < 0.5 else machine
+    logon_id = _new_logon_id()
+    t = time.time()
+    events = [json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"), logon_id=logon_id, ts=t))]
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2, auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id, ts=t)))
+    t += random.uniform(2.0, 5.0)
+    events.append(json.dumps(_build_4741(u, config, target_computer_name=machine_sam,
+                                         target_sid=machine_sid, sam_account_name=machine_sam,
+                                         dns_host_name=f"{machine.lower()}.{dns_domain}",
+                                         new_uac_value="0x80", logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 3.0)
+    tool = random.choice([
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f'powershell.exe -c "Set-MachineAccountAttribute -MachineAccount {machine} '
+         f'-Value \'{new_name}\' -Attribute samaccountname"'),
+        ("C:\\Users\\Public\\noPac.exe",
+         f"noPac.exe -domain {dns_domain} -user {u['username']} -mAccount {machine} -dc {_get_dc_hostname(config)}"),
+    ])
+    events.append(json.dumps(_build_4688(u, config, process_name=tool[0], command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    events.append(json.dumps(_build_4781(u, config, old_name=machine_sam, new_name=new_name,
+                                         target_sid=machine_sid, logon_id=logon_id, ts=t)))
+    t += 0.01
+    events.append(json.dumps(_build_4742(u, config, target_computer_name=new_name,
+                                         target_sid=machine_sid, sam_account_name=new_name,
+                                         logon_id=logon_id, ts=t)))
+    if random.random() < 0.7:
+        t += random.uniform(20.0, 120.0)
+        events.append(json.dumps(_build_4781(u, config, old_name=new_name, new_name=machine_sam,
+                                             target_sid=machine_sid, logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 3.0)
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0], logon_id=logon_id, ts=t)))
+    return events
+
+
 # Threats renamed once their detection was confirmed firing in the tenant: the wip_
 # ("work in progress") prefix marked a generator whose detection had not yet been
 # seen. The old names still dispatch, so saved scenarios and MCP callers keep working.
@@ -8924,6 +9158,9 @@ _THREAT_WEIGHTS = {
     "remote_scheduled_task":       3,
     "share_enumeration":           3,
     "malicious_service_install":   3,
+    "wip_shadow_credentials":      3,
+    "wip_default_account_masquerade": 3,
+    "wip_samaccountname_change":   3,
 }
 
 _THREAT_GENERATORS = {
@@ -8966,6 +9203,9 @@ _THREAT_GENERATORS = {
     "remote_scheduled_task":            _threat_remote_scheduled_task,
     "share_enumeration":                _threat_share_enumeration,
     "malicious_service_install":        _threat_malicious_service_install,
+    "wip_shadow_credentials":           _threat_shadow_credentials,
+    "wip_default_account_masquerade":   _threat_default_account_masquerade,
+    "wip_samaccountname_change":        _threat_samaccountname_change,
 }
 _THREAT_GENERATORS = {k: _ending_by_now(v) for k, v in _THREAT_GENERATORS.items()}
 
@@ -9009,11 +9249,19 @@ ANALYTIC_ALERTS = {
     "mailbox_export":              "PowerShell used to export mailbox contents",
     "mailbox_export_log_removal":  "PowerShell used to remove mailbox export request logs",
     "mailbox_cas_change":          "Mailbox Client Access Setting (CAS) changed",
+    # Added 2026-10-21 from the Cortex alert pages (not yet seen firing in the tenant).
+    "wip_shadow_credentials":      "Key credential attribute modification",
+    "wip_default_account_masquerade": "Masquerading as a default local account",
+    "wip_samaccountname_change":   "Suspicious sAMAccountName change",
 }
 
 # Further analytics a threat's events are built to satisfy, beyond its ANALYTIC_ALERTS
 # entry. Coverage reporting reads these (the on-demand label uses the primary only).
 ANALYTIC_ALERTS_SECONDARY = {
+    "wip_shadow_credentials": ["Possible shadow credentials addition",
+                               "Key credential attribute addition"],
+    "wip_samaccountname_change": ["Suspicious sAMAccountName change to DC hostname"],
+    "wip_default_account_masquerade": ["Masquerading as a default local account for the first time"],
     "suspicious_account_creation": [
         "Short-lived user account",                         # 1-3 of the accounts deleted
         "Multiple suspicious user accounts were created",
@@ -9186,6 +9434,9 @@ def _generate_scenario_event(scenario_event, config, context):
         "REMOTE_SCHEDULED_TASK":            _threat_remote_scheduled_task,
         "SHARE_ENUMERATION":                _threat_share_enumeration,
         "MALICIOUS_SERVICE_INSTALL":        _threat_malicious_service_install,
+        "WIP_SHADOW_CREDENTIALS":           _threat_shadow_credentials,
+        "WIP_DEFAULT_ACCOUNT_MASQUERADE":   _threat_default_account_masquerade,
+        "WIP_SAMACCOUNTNAME_CHANGE":        _threat_samaccountname_change,
     }
     if ev in _threat_dispatch:
         result = _end_by_now(_threat_dispatch[ev](config, session_context))

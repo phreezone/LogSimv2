@@ -2456,10 +2456,58 @@ def _run_health_checks() -> dict:
                       if near_full else "")),
     })
 
+    results.extend(_tenant_health_rows())
+
     overall = ("error" if any(r["status"] == "error" for r in results)
                else "warn" if any(r["status"] == "warn" for r in results)
                else "ok")
     return {"overall": overall, "checks": results}
+
+
+# ── XSIAM tenant HEALTH alerts (integrations/tenant_health.py) ────────────────
+# The tenant raises its own alerts when a parsing rule throws on our data, a
+# correlation rule fails, a LogSim collector goes quiet or a Broker collector cannot
+# forward. One read-only XQL query, refreshed in the background every
+# _TENANT_HEALTH_TTL_S -- the health monitor runs every 60 s and must never block on
+# (or spend API quota for) a tenant round trip. Skipped without XSIAM_API_* in .env.
+_TENANT_HEALTH_TTL_S = float(os.getenv("TENANT_HEALTH_REFRESH_S", "900"))
+_TENANT_HEALTH = {"result": None, "error": None, "ts": 0.0, "running": False}
+_TENANT_HEALTH_LOCK = threading.Lock()
+
+
+def _tenant_health_refresh():
+    try:
+        from integrations import tenant_health
+        result, err = tenant_health.scan(hours=24), None
+    except Exception as exc:
+        result, err = None, f"{type(exc).__name__}: {exc}"[:200]
+    with _TENANT_HEALTH_LOCK:
+        if result is not None:
+            _TENANT_HEALTH["result"] = result
+        _TENANT_HEALTH.update(error=err, ts=time.time(), running=False)
+
+
+def _tenant_health_rows():
+    if not all(os.getenv(v) for v in ("XSIAM_API_BASE", "XSIAM_API_KEY_ID", "XSIAM_API_KEY")):
+        return [{"group": "XSIAM tenant", "check": "tenant HEALTH alerts", "status": "skip",
+                 "detail": "XSIAM_API_BASE / XSIAM_API_KEY_ID / XSIAM_API_KEY not set"}]
+    with _TENANT_HEALTH_LOCK:
+        stale = time.time() - _TENANT_HEALTH["ts"] > _TENANT_HEALTH_TTL_S
+        if stale and not _TENANT_HEALTH["running"]:
+            _TENANT_HEALTH["running"] = True
+            threading.Thread(target=_tenant_health_refresh, daemon=True,
+                             name="tenant-health").start()
+        result, err = _TENANT_HEALTH["result"], _TENANT_HEALTH["error"]
+    if result is None:
+        return [{"group": "XSIAM tenant", "check": "tenant HEALTH alerts",
+                 "status": "warn" if err else "skip",
+                 "detail": f"query failed: {err}" if err else "first check in progress"}]
+    from integrations import tenant_health
+    rows = tenant_health.check_rows(result)
+    if err:
+        rows.append({"group": "XSIAM tenant", "check": "tenant HEALTH alerts", "status": "warn",
+                     "detail": f"last refresh failed ({err}); showing the previous result"})
+    return rows
 
 
 def _health_monitor_tick():

@@ -67,7 +67,7 @@ on 2026-09-29; each has fired at least once. `PRIV_GROUP_ADD_REMOVE` and
 `DMSA_PRIVESC` and `SENSITIVE_PASSWORD_RESET` dropped their `WIP_` prefix for the same
 reason; the old `WIP_` names still dispatch.
 
-**WIP** (events ingest correctly; detection not yet seen firing): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_PASSWORD_NEVER_EXPIRES`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
+**WIP** (events ingest correctly; detection not yet seen firing): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_PASSWORD_NEVER_EXPIRES`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`, the three added 2026-10-21 from the Cortex alert pages — `WIP_SHADOW_CREDENTIALS` (5136 `msDS-KeyCredentialLink` written by another user, then a PKINIT 4768 → *Key credential attribute modification* / *Possible shadow credentials addition*), `WIP_DEFAULT_ACCOUNT_MASQUERADE` (a local 4720 named `DefaultAccount` or `Guest` on a member server → *Masquerading as a default local account*) and `WIP_SAMACCOUNTNAME_CHANGE` (4781 machine account renamed without its `$`, sometimes to the DC's name → *Suspicious sAMAccountName change*) — and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
 
 **On-demand firing** offers the threats in the module's `ANALYTIC_ALERTS` table: everything
 above plus the four remaining `WIP_` detections, which target published analytics. Not

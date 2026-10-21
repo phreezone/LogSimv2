@@ -15,7 +15,7 @@ A modular, high-fidelity log simulation tool for **Palo Alto Networks Cortex XSI
 - **Correlated Attack Scenarios** — 23 pre-built multi-module kill chains (phishing, cloud pentest, ransomware precursor, AiTM session hijack, VPN compromise, web app compromise, insider threat, DNS C2, and more) — including 6 *advanced linked kill chains* (Domain Dominance, Beaconing Implant, Server Breach → Cloud, Cloud Ransomware, Perimeter Intrusion, Identity Attack → Cloud) built around a single pivot entity with full alert-field enrichment
 - **Live Threat Intel** — fetches current Tor exit nodes on startup for realistic indicators
 - **Job Scheduler** — queue module start/stop, rate changes, and scenario runs at specific times or delays
-- **Health Checks** — validates .env configuration, syslog connectivity, HTTP collector reachability, AWS S3 permissions, and GCP Pub/Sub credentials
+- **Health Checks** — validates .env configuration, syslog connectivity, HTTP collector reachability, AWS S3 permissions, and GCP Pub/Sub credentials, and reads the tenant's own HEALTH alerts (parsing-rule and correlation-rule errors, LogSim collectors gone quiet, Broker collector errors) when `XSIAM_API_*` is set — also `python -m integrations.tenant_health`
 
 ## Quick Start
 
@@ -131,6 +131,9 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `wip_irregular_service_tgs` | Only ever raises the weak-encryption ticket alert that `multiple_service_tickets` owns; `irregular_tgt_burst` covers its intended detection. Background only — not offered on demand |
 | `wip_priv_cert_request` | Not yet investigated |
 | `wip_sccm_container_recon` | Environment dependent — requires SCCM/ConfigMgr deployment |
+| `wip_shadow_credentials` | Added 2026-10-21 — *Key credential attribute modification* (5136 `msDS-KeyCredentialLink` + PKINIT 4768) |
+| `wip_default_account_masquerade` | Added 2026-10-21 — *Masquerading as a default local account* (local 4720 `DefaultAccount` / `Guest` on a member server) |
+| `wip_samaccountname_change` | Added 2026-10-21 — *Suspicious sAMAccountName change* (4781 machine account renamed without `$`) |
 
 **Endpoint execution telemetry** (for the advanced linked kill chains): the module also generates **4688 process trees** (Office → PowerShell → cmd → LOLBin, with real parent/child linkage and command lines), **4697** (a service was installed — malware persistence), and **1102** (the audit log was cleared — anti-forensics). Emitted via the `PROCESS_TREE`, `SERVICE_INSTALL`, and `CLEAR_LOGS` scenario events. Verified to ingest and parse in `microsoft_windows_raw`. *Note:* the Broker VM's WEC subscription must forward these Event IDs for them to reach XSIAM — see the Subscription Filter note below.
 
