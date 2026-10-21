@@ -16,6 +16,7 @@ import time
 import json
 import copy
 import ctypes
+import random
 import uuid as _uuid
 from collections import deque
 
@@ -1355,6 +1356,92 @@ def api_get_run(run_id: str):
     return jsonify(view)
 
 
+# ── Random identity campaigns (Threats & Scenarios toggle) ─────────────────────
+# When enabled, launches one random Identity Threat Campaign at a deliberately LOW
+# rate: a campaign is a whole multi-feed incident, so a realistic tenant sees a
+# couple a day, not a stream. Waits are exponential (Poisson arrivals) with mean
+# random_mean_hours, never shorter than random_min_gap_hours. Each launch goes
+# through the same run registry as a manual Run, so it shows in /api/scenarios/runs.
+# Off on every start; nothing is persisted.
+_RANDOM_CAMPAIGNS = {"enabled": False, "fired": 0, "last_name": None, "last_ts": None,
+                     "next_ts": None, "last_run_id": None, "stop": None}
+_RANDOM_CAMPAIGNS_LOCK = threading.Lock()
+
+
+def _random_campaign_cfg():
+    conf = (CONFIG.get("azuread_campaigns_config") or {})
+    mean_h = max(0.5, float(conf.get("random_mean_hours", 12)))
+    gap_h = max(0.0, min(mean_h, float(conf.get("random_min_gap_hours", 2))))
+    return mean_h * 3600, gap_h * 3600
+
+
+def _random_campaign_wait():
+    mean_s, gap_s = _random_campaign_cfg()
+    return max(gap_s, random.expovariate(1.0 / mean_s))
+
+
+def _random_campaign_worker(stop, wait):
+    while True:
+        if stop.wait(timeout=wait):
+            return
+        camps = [s for s in _get_scenarios() if s["id"].startswith("campaign-")]
+        if not camps:
+            continue
+        s = random.choice(camps)
+        run_id = _new_run(s["id"], s["name"])
+        modules = {name: st.module for name, st in MODULE_STATES.items()}
+        print(f"[random-campaigns] launching {s['name']}")
+        with _RANDOM_CAMPAIGNS_LOCK:
+            _RANDOM_CAMPAIGNS.update(fired=_RANDOM_CAMPAIGNS["fired"] + 1, last_name=s["name"],
+                                     last_ts=time.time(), last_run_id=run_id)
+        try:
+            _run_scenario_and_flush(s["func"], modules, copy.deepcopy(CONFIG), run_id)
+        except Exception as exc:
+            print(f"[random-campaigns] {s['id']} failed: {type(exc).__name__}: {exc}")
+        wait = _random_campaign_wait()
+        with _RANDOM_CAMPAIGNS_LOCK:
+            if not stop.is_set():
+                _RANDOM_CAMPAIGNS["next_ts"] = time.time() + wait
+
+
+def _random_campaigns_view():
+    mean_s, gap_s = _random_campaign_cfg()
+    with _RANDOM_CAMPAIGNS_LOCK:
+        view = {k: v for k, v in _RANDOM_CAMPAIGNS.items() if k != "stop"}
+    view["mean_hours"] = mean_s / 3600
+    view["min_gap_hours"] = gap_s / 3600
+    if view["last_run_id"]:
+        with _RUNS_LOCK:
+            rec = _RUNS.get(view["last_run_id"])
+            view["last_status"] = rec["status"] if rec else None
+            view["last_error"] = rec["error"] if rec else None
+    if not view["enabled"]:
+        view["next_ts"] = None
+    return view
+
+
+@app.route("/api/campaigns/random", methods=["GET", "POST"])
+def api_random_campaigns():
+    """GET: the random-campaign runner's state. POST {"enabled": bool}: turn it on/off."""
+    if request.method == "GET":
+        return jsonify(_random_campaigns_view())
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body.get("enabled"), bool):
+        return jsonify({"error": "body must be {\"enabled\": true|false}"}), 400
+    with _RANDOM_CAMPAIGNS_LOCK:
+        running = _RANDOM_CAMPAIGNS["enabled"]
+        if body["enabled"] and not running:
+            stop = threading.Event()
+            wait = _random_campaign_wait()
+            _RANDOM_CAMPAIGNS.update(enabled=True, stop=stop, next_ts=time.time() + wait)
+            threading.Thread(target=_random_campaign_worker, args=(stop, wait), daemon=True,
+                             name="random-campaigns").start()
+        elif not body["enabled"] and running:
+            _RANDOM_CAMPAIGNS["stop"].set()
+            _RANDOM_CAMPAIGNS.update(enabled=False, stop=None, next_ts=None)
+    return jsonify(_random_campaigns_view())
+
+
 # ── XDR attack orchestration (dedicated console tab) ──────────────────────────
 # Real Atomic techniques on a live Cortex-agent box + identity-aligned synthetic
 # network logs, stitched into one XSIAM incident. Isolated from the module/scenario
@@ -2588,6 +2675,7 @@ def _register_v1_aliases():
         ("/api/v1/scenarios/<scenario_id>/run", "api_run_scenario",  ["POST"]),
         ("/api/v1/scenarios/runs",            "api_list_runs",       ["GET"]),
         ("/api/v1/scenarios/runs/<run_id>",   "api_get_run",         ["GET"]),
+        ("/api/v1/campaigns/random",          "api_random_campaigns", ["GET", "POST"]),
         ("/api/v1/modules",                   "api_get_modules",     ["GET"]),
         ("/api/v1/modules/<name>/start",      "api_start_module",    ["POST"]),
         ("/api/v1/modules/<name>/stop",       "api_stop_module",     ["POST"]),

@@ -146,6 +146,11 @@ Windows over WEC. The Windows steps are skipped cleanly when `WEC_BROKER_URL` /
 - **Dashboard:** each campaign is an entry under **Threats & Scenarios → Run Attack
   Scenario** ("Identity Campaign — …"); there is no module card. A run fails visibly if
   the Cribl receiver rejects a batch.
+- **Random campaigns:** the **Random identity campaigns** toggle at the top of that panel
+  launches one random campaign about every 12 hours (exponential waits, never less than
+  2 hours apart). Change it with `random_mean_hours` / `random_min_gap_hours` in
+  `azuread_campaigns_config`. It is off on every dashboard start. API:
+  `GET/POST /api/v1/campaigns/random` with `{"enabled": true|false}`.
 - **CLI:** still loadable as the opt-in coordinator module. It emits nothing in Benign
   Traffic Only and fires rarer than single-feed episodes: a campaign is one high-signal
   incident.

@@ -633,6 +633,13 @@
     <div class="threats-panel">
       <div class="panel-title">Run Attack Scenario</div>
       <p style="font-size:12px;color:var(--text-muted);margin-bottom:14px;">Scenarios run in a background thread and print progress to the terminal.</p>
+      <div class="scenario-row" id="random-campaigns-row" style="margin-bottom:10px;">
+        <span>
+          <b>Random identity campaigns</b>
+          <span id="random-campaigns-status" style="font-size:11px;color:var(--text-muted);margin-left:6px;">off</span>
+        </span>
+        <button class="btn btn-ghost btn-sm" id="random-campaigns-btn" onclick="toggleRandomCampaigns()">Enable</button>
+      </div>
       <div id="scenarios-list"></div>
       <div class="result-msg" id="scenario-result"></div>
     </div>
@@ -1727,6 +1734,7 @@
     try {
       const data = await api('/api/scenarios');
       window._schedScenarios = data;   // share with schedule tab
+      loadRandomCampaigns();
       const list = document.getElementById('scenarios-list');
       if (!data.length) {
         list.innerHTML = '<p style="font-size:12px;color:var(--text-muted);">No scenarios available (log_simulator not reachable).</p>';
@@ -1740,6 +1748,42 @@
     } catch (e) {
       document.getElementById('scenarios-list').innerHTML =
         `<p style="font-size:12px;color:var(--red);">Failed to load scenarios: ${escHtml(e.message)}</p>`;
+    }
+  }
+
+  // ── Random identity campaigns toggle ───────────────────────────────────────
+  function _fmtWhen(ts) {
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    return d.toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+  }
+  function renderRandomCampaigns(v) {
+    const btn = document.getElementById('random-campaigns-btn');
+    const st  = document.getElementById('random-campaigns-status');
+    if (!btn || !st || !v) return;
+    btn.textContent = v.enabled ? 'Disable' : 'Enable';
+    const rate = `~1 every ${v.mean_hours} h (at least ${v.min_gap_hours} h apart)`;
+    let txt = v.enabled ? `on — ${rate}` : `off — when on: ${rate}`;
+    if (v.enabled && v.next_ts) txt += ` · next ≈ ${_fmtWhen(v.next_ts)}`;
+    if (v.last_name) {
+      const short = v.last_name.replace(/^Identity Campaign — /, '').split(' (')[0];
+      txt += ` · last: ${short} ${_fmtWhen(v.last_ts)}${v.last_status ? ' (' + v.last_status + ')' : ''}`;
+    }
+    if (v.fired) txt += ` · ${v.fired} launched`;
+    st.textContent = txt;
+    st.style.color = v.last_status === 'error' ? 'var(--red)' : 'var(--text-muted)';
+  }
+  async function loadRandomCampaigns() {
+    try { renderRandomCampaigns(await api('/api/campaigns/random')); } catch (e) {}
+  }
+  async function toggleRandomCampaigns() {
+    const btn = document.getElementById('random-campaigns-btn');
+    const enable = btn.textContent.trim() === 'Enable';
+    try {
+      renderRandomCampaigns(await api('/api/campaigns/random', 'POST', {enabled: enable}));
+    } catch (e) {
+      const st = document.getElementById('random-campaigns-status');
+      st.style.color = 'var(--red)'; st.textContent = `Error: ${e.message}`;
     }
   }
 
