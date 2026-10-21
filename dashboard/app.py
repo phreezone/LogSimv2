@@ -390,6 +390,28 @@ _schedule_lock = threading.Lock()
 
 
 # ── Per-module state ──────────────────────────────────────────────────────────
+# Smallest event_interval the API accepts: 10,000 generate_log calls/s per module. Was
+# 0.01 s (100/s) until 2026-10-21; the sender lanes now deliver ~190k events/s.
+_MIN_EVENT_INTERVAL = 0.0001
+
+
+def _min_interval(module) -> float:
+    """The event_interval floor for *module*: _MIN_EVENT_INTERVAL, or the module's own
+    MIN_EVENT_INTERVAL when it declares a higher one (Windows: generate_log only drains
+    its worker threads, so polling it faster just starves them of the GIL)."""
+    try:
+        return max(_MIN_EVENT_INTERVAL, float(getattr(module, "MIN_EVENT_INTERVAL", 0) or 0))
+    except (TypeError, ValueError):
+        return _MIN_EVENT_INTERVAL
+
+
+# Seconds of per-second event counts each module keeps (the timeline shows 120 s).
+_RATE_HISTORY_S = 130
+# A worker more than this far behind its schedule (generation slower than the requested
+# rate, a transport hold, an error pause) drops the backlog instead of bursting to catch up.
+_MAX_PACE_LAG_S = 1.0
+
+
 class ModuleState:
     """Holds runtime state and metrics for a single log-generation module."""
 
@@ -413,8 +435,10 @@ class ModuleState:
         self.total_logs = 0
         self.total_threats = 0
         self.last_threat: str = ""
-        self._timestamps: deque = deque(maxlen=600)        # all events
-        self._benign_timestamps: deque = deque(maxlen=600) # non-threat events
+        # [epoch_second, events, benign events] per second, newest last. These were
+        # deques of the last 600 event timestamps until 2026-10-21, which capped the
+        # reported 10 s rate (and the timeline) at 60 events/s.
+        self._sec_counts: deque = deque(maxlen=_RATE_HISTORY_S)
         self._threat_timestamps: deque = deque(maxlen=600) # threat events
         self._threat_event_details: deque = deque(maxlen=600)  # (timestamp, event_name) pairs
         self._threat_counts: dict = {}                         # {event_name: int} this session
@@ -440,9 +464,14 @@ class ModuleState:
         the burst (e.g. 30 for a port-scan).  Threat counter increments by 1
         regardless of burst size — a brute-force is one event, not 30."""
         now = time.time()
+        sec = int(now)
         with self._lock:
             self.total_logs += log_count
-            self._timestamps.append(now)          # one per event, not per log line
+            counts = self._sec_counts
+            if not counts or counts[-1][0] != sec:
+                counts.append([sec, 0, 0])
+            bucket = counts[-1]
+            bucket[1] += 1                        # one per event, not per log line
             if event_name and event_name in self.threat_names:
                 self.total_threats += 1           # one threat per event, not per log line
                 self._threat_timestamps.append(now)
@@ -450,12 +479,13 @@ class ModuleState:
                 self.last_threat = event_name
                 self._threat_counts[event_name] = self._threat_counts.get(event_name, 0) + 1
             else:
-                self._benign_timestamps.append(now)  # one per event, not per log line
+                bucket[2] += 1
 
     def get_rate(self, window: int = 10) -> float:
-        cutoff = time.time() - window
+        """Events/s over the last *window* complete seconds."""
+        end = int(time.time())
         with self._lock:
-            recent = sum(1 for t in self._timestamps if t > cutoff)
+            recent = sum(c[1] for c in self._sec_counts if end - window <= c[0] < end)
         return round(recent / window, 2)
 
     def reset_metrics(self):
@@ -463,8 +493,7 @@ class ModuleState:
             self.total_logs = 0
             self.total_threats = 0
             self.last_threat = ""
-            self._timestamps.clear()
-            self._benign_timestamps.clear()
+            self._sec_counts.clear()
             self._threat_timestamps.clear()
             self._threat_event_details.clear()
             self._threat_counts.clear()
@@ -549,6 +578,24 @@ def _build_baduser_aws_config(username, config):
     return cfg
 
 
+def _pace_wait(next_due, stop_event):
+    """Wait until *next_due* (time.monotonic()) and return the due time to schedule
+    from, or None if stopped. A worker makes one generate_log call per return and adds
+    its interval to the result, so it runs on a fixed schedule rather than "sleep one
+    interval after each call". That matters above ~60 calls/s: a thread wait cannot be
+    shorter than the OS timer tick (~15.6 ms on Windows, measured 64 wake-ups/s), so
+    the worker sleeps only when it is ahead and otherwise makes every call that is due
+    back to back. More than _MAX_PACE_LAG_S behind, it drops the backlog."""
+    now = time.monotonic()
+    if now < next_due:
+        if stop_event.wait(timeout=next_due - now):
+            return None
+        return next_due
+    if now - next_due > _MAX_PACE_LAG_S:
+        return now
+    return next_due
+
+
 def _baduser_worker(module, config, context, stop_event, metrics_key,
                     threat_level, event_interval_func):
     """Worker loop for a single module in bad-user mode.
@@ -558,10 +605,14 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
     """
     _ensure_send_workers()
 
+    next_due = time.monotonic()
     while not stop_event.is_set():
+        next_due = _pace_wait(next_due, stop_event)
+        if next_due is None:
+            break
+        next_due += max(event_interval_func(), _min_interval(module))
         current_level = threat_level
         benign_only = (current_level == "Benign Traffic Only")
-        cycle_start = time.time()
         try:
             result = module.generate_log(
                 config=config,
@@ -596,10 +647,6 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
             print(f"[bad-user][{module.NAME}] worker error: {exc}")
             stop_event.wait(timeout=5)
             continue
-
-        elapsed = time.time() - cycle_start
-        remaining = max(0.0, event_interval_func() - elapsed)
-        stop_event.wait(timeout=remaining)
 
 
 def _baduser_watchdog(duration_seconds, stop_event):
@@ -726,6 +773,35 @@ def _stop_baduser():
 # dashboard over-reported delivery. SEND_QUEUE_SIZE resizes it.
 _SEND_QUEUE: _queue.Queue = _queue.Queue(maxsize=max(1, int(os.getenv("SEND_QUEUE_SIZE", "5000"))))
 
+# Per-transport lanes. HTTP-collector and Cribl-receiver events get their own queue and
+# sender pool, and are sent in BATCHES (many events per request, log_simulator
+# send_http_batch / send_cribl_batch). Before 2026-10-21 every transport shared the one
+# pool above with one request per HTTP/Cribl event: those topped out near ~145 events/s
+# at WAN latency, and a slow collector held syslog behind it (1,500 syslog events that
+# take 0.2 s alone took 10.4 s next to an HTTP backlog). Syslog got its own batched lane
+# the same day (send_syslog_batch: many lines per TCP write): one write per event on the
+# default lane managed ~6-8k events/s across ALL syslog modules. S3, WEC and Pub/Sub stay
+# on the default lane, unbatched.
+_BATCHED_TRANSPORTS = ("http", "cribl", "syslog")
+# process_and_send sends every transport it does not name explicitly as syslog
+# (e.g. "tcp", or no transport at all), so those go to the syslog lane too.
+_UNBATCHED_TRANSPORTS = ("s3", "wec", "pubsub")
+_BATCH_QUEUES: dict = {t: _queue.Queue(maxsize=max(1, int(os.getenv("SEND_QUEUE_SIZE", "5000"))))
+                       for t in _BATCHED_TRANSPORTS}
+_BATCH_SEND_WORKER_COUNT = max(1, int(os.getenv("BATCH_SEND_WORKERS", "4")))   # per lane
+_BATCH_LINGER_S = max(0.0, float(os.getenv("BATCH_LINGER_MS", "100")) / 1000)
+_BATCH_MAX_EVENTS = max(1, int(os.getenv("HTTP_BATCH_MAX_EVENTS", "1000")))
+
+
+def _lane_queue(item):
+    """The queue for this event's transport: a batched lane for HTTP/Cribl/syslog, else default."""
+    _msg, module, config, _name = item
+    key = getattr(module, "CONFIG_KEY", None)
+    transport = ((config or {}).get(key, {}) or {}).get("transport", "syslog") if key else "syslog"
+    if transport in _UNBATCHED_TRANSPORTS:
+        return _SEND_QUEUE
+    return _BATCH_QUEUES.get(transport, _BATCH_QUEUES["syslog"])
+
 
 _ENQUEUE_MAX_WAIT_S = float(os.getenv("SEND_ENQUEUE_MAX_WAIT_S", "30"))
 
@@ -741,10 +817,11 @@ def _enqueue_send(item, stop_event=None):
     together while Windows, which has its own WEC path, kept running). Degrading to lossy
     (drop + count) keeps generation alive; a permanent freeze does not.
     Returns False only if the producer is being stopped."""
+    q = _lane_queue(item)
     waited = 0.0
     while True:
         try:
-            _SEND_QUEUE.put(item, timeout=1.0)
+            q.put(item, timeout=1.0)
             return True
         except _queue.Full:
             if stop_event is not None and stop_event.is_set():
@@ -825,9 +902,41 @@ def _send_worker():
             time.sleep(0.5)
 
 
+def _batch_send_worker(lane: str):
+    """Sender for one batched lane (HTTP collector, Cribl receiver, syslog). Takes everything
+    queued -- waiting up to _BATCH_LINGER_S for more to accumulate -- and sends it as one
+    process_and_send() call per (module, config, event name), which goes out as batched
+    requests / TCP writes. Ordering within a batch is preserved."""
+    process_and_send = _get_process_and_send()
+    q = _BATCH_QUEUES[lane]
+    while True:
+        try:
+            batch = [q.get()]
+            deadline = time.monotonic() + _BATCH_LINGER_S
+            while len(batch) < _BATCH_MAX_EVENTS:
+                remaining = deadline - time.monotonic()
+                try:
+                    batch.append(q.get(timeout=remaining) if remaining > 0 else q.get_nowait())
+                except _queue.Empty:
+                    break
+            groups: dict = {}
+            for msg, module, config, event_name in batch:
+                g = groups.setdefault((id(module), id(config), event_name),
+                                      (module, config, event_name, []))
+                g[3].append(msg)
+            for module, config, event_name, msgs in groups.values():
+                try:
+                    process_and_send(msgs, module, config, event_name)
+                except Exception as exc:
+                    _note_send_failure(exc)
+        except Exception as exc:
+            _note_send_failure(exc)
+            time.sleep(0.5)
+
+
 def _ensure_send_workers(count=None):
-    """Start sender pool once (idempotent). Worker count defaults to _SEND_WORKER_COUNT
-    (SEND_WORKERS env, default 8)."""
+    """Start the sender pools once (idempotent): the default lane (SEND_WORKERS, default 8)
+    and one pool per batched lane (BATCH_SEND_WORKERS each, default 4)."""
     global _SEND_WORKERS_STARTED
     if count is None:
         count = _SEND_WORKER_COUNT
@@ -838,6 +947,10 @@ def _ensure_send_workers(count=None):
     for i in range(count):
         t = threading.Thread(target=_send_worker, daemon=True, name=f"send-worker-{i}")
         t.start()
+    for lane in _BATCHED_TRANSPORTS:
+        for i in range(_BATCH_SEND_WORKER_COUNT):
+            threading.Thread(target=_batch_send_worker, args=(lane,), daemon=True,
+                             name=f"send-{lane}-{i}").start()
 
 
 # ── Module worker thread ──────────────────────────────────────────────────────
@@ -865,11 +978,15 @@ def _module_worker(state: ModuleState, config: dict):
     if hasattr(state.module, "last_threat_event_time") and not state.module.last_threat_event_time:
         state.module.last_threat_event_time = time.time()
 
+    next_due = time.monotonic()
     while not state._stop_event.is_set():
+        next_due = _pace_wait(next_due, state._stop_event)
+        if next_due is None:
+            break
         # Read both live values each iteration so PATCH updates apply immediately.
+        next_due += max(state.event_interval, _min_interval(state.module))
         current_level = state.threat_level
         benign_only   = (current_level == "Benign Traffic Only")
-        cycle_start   = time.time()
         try:
             # Hold generation while this module's transport is backed up (WEC today),
             # so a slow broker slows Windows only -- never the shared senders.
@@ -908,13 +1025,6 @@ def _module_worker(state: ModuleState, config: dict):
                 state.error_msg = ""
             continue
 
-        # Wait only the remaining portion of the interval so that generate_log +
-        # process_and_send time (e.g. S3 upload latency for AWS) doesn't inflate
-        # the effective cycle time beyond event_interval.
-        elapsed = time.time() - cycle_start
-        remaining = max(0.0, state.event_interval - elapsed)
-        state._stop_event.wait(timeout=remaining)
-
     state.status = "stopped"
 
 
@@ -930,8 +1040,8 @@ def _start_module_state(state: ModuleState, threat_level: str,
         return
     if threat_level in THREAT_LEVELS:
         state.threat_level = threat_level
-    if event_interval is not None and event_interval >= 0.01:
-        state.event_interval = event_interval
+    if event_interval is not None and event_interval >= _MIN_EVENT_INTERVAL:
+        state.event_interval = max(event_interval, _min_interval(state.module))
     state._stop_event.clear()
     state.error_msg = ""
     if _session_start is None:
@@ -1051,11 +1161,11 @@ def api_set_interval(name: str):
     body = request.get_json(silent=True) or {}
     try:
         iv = float(body.get("event_interval", 0))
-        if iv < 0.01:
+        if iv < _MIN_EVENT_INTERVAL:
             raise ValueError
     except (ValueError, TypeError):
-        return jsonify({"error": "event_interval must be a number >= 0.01"}), 400
-    state.event_interval = iv
+        return jsonify({"error": f"event_interval must be a number >= {_MIN_EVENT_INTERVAL}"}), 400
+    state.event_interval = max(iv, _min_interval(state.module))
     return jsonify(state.to_dict())
 
 
@@ -1578,7 +1688,9 @@ def _execute_job(job: dict) -> None:
                        else list(MODULE_STATES.values()))
             for state in targets:
                 try:
-                    state.event_interval = float(p["event_interval"])
+                    iv = float(p["event_interval"])
+                    if iv >= _MIN_EVENT_INTERVAL:
+                        state.event_interval = max(iv, _min_interval(state.module))
                 except (KeyError, TypeError, ValueError):
                     pass
         with _schedule_lock:
@@ -2198,17 +2310,23 @@ def _run_health_checks() -> dict:
     # senders are the bottleneck and are holding generation back -- not data loss.
     # Shown because module counters include these: on 2026-10-07 ~10,300 events sat
     # here and a dashboard total read as an over-count until they drained.
-    depth, cap = _SEND_QUEUE.qsize(), _SEND_QUEUE.maxsize
+    # Default lane plus the batched HTTP/Cribl/syslog lanes; the fullest lane decides the status.
+    lanes = {"default": _SEND_QUEUE, **_BATCH_QUEUES}
+    depth = sum(q.qsize() for q in lanes.values())
+    cap = sum(q.maxsize for q in lanes.values())
+    fullest = max(lanes.values(), key=lambda q: q.qsize() / max(q.maxsize, 1))
+    near_full = fullest.maxsize and fullest.qsize() >= 0.9 * fullest.maxsize
+    per_lane = ", ".join(f"{n} {q.qsize()}/{q.maxsize}" for n, q in lanes.items())
     results.append({
         "group": "Delivery", "check": "send queue",
         "status": "error" if _DELIVERY_STATS.get("queue_drops") else
-                  ("warn" if cap and depth >= 0.9 * cap else "ok"),
-        "detail": (f"{depth}/{cap} counted but not yet sent"
+                  ("warn" if near_full else "ok"),
+        "detail": (f"{depth}/{cap} counted but not yet sent ({per_lane})"
                    + (f"; DROPPED {_DELIVERY_STATS['queue_drops']} after >"
                       f"{_ENQUEUE_MAX_WAIT_S:.0f}s full -- a transport is stalled"
                       if _DELIVERY_STATS.get("queue_drops") else
-                      "; senders are holding generation back (SEND_WORKERS)"
-                      if cap and depth >= 0.9 * cap else "")),
+                      "; senders are holding generation back (SEND_WORKERS / BATCH_SEND_WORKERS)"
+                      if near_full else "")),
     })
 
     overall = ("error" if any(r["status"] == "error" for r in results)
@@ -2295,11 +2413,11 @@ def api_timeline():
         threats      = [0] * BUCKETS
         threat_names = [[] for _ in range(BUCKETS)]
         with state._lock:
-            for ts in state._benign_timestamps:
-                age = now - ts
+            for sec, _events, n_benign in state._sec_counts:
+                age = now - sec
                 if 0 <= age < window:
                     idx = BUCKETS - 1 - int(age / BUCKET_SEC)
-                    benign[max(0, idx)] += 1
+                    benign[max(0, idx)] += n_benign
             for ts in state._threat_timestamps:
                 age = now - ts
                 if 0 <= age < window:
@@ -2359,8 +2477,8 @@ def api_baduser_start():
     if threat_level not in THREAT_LEVELS:
         return jsonify({"error": f"Unknown threat level '{threat_level}'"}), 400
     event_interval = float(body.get("event_interval", 0.5))
-    if event_interval < 0.01:
-        return jsonify({"error": "event_interval must be >= 0.01"}), 400
+    if event_interval < _MIN_EVENT_INTERVAL:
+        return jsonify({"error": f"event_interval must be >= {_MIN_EVENT_INTERVAL}"}), 400
     selected_modules = body.get("selected_modules")  # list of module names or None
     if selected_modules is not None and not isinstance(selected_modules, list):
         return jsonify({"error": "selected_modules must be a list"}), 400

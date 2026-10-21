@@ -342,7 +342,7 @@ def generate_benign(config=None, context=None):
     # A realistic minority of human-driven admin operations fail (permissions/config/policy).
     if random.random() < 0.25:
         return [_maybe_fail(random.choice(_B_HUMAN)(config))]
-    return [_maybe_fail(_catalog_record(config, random.choice(cat.AUDIT_ACTIVITIES)))]
+    return [_maybe_fail(_catalog_record(config, random.choice(cat.BENIGN_ACTIVITIES)))]
 
 
 # ── detection-relevant scenarios (named, on-demand) ─────────────────────────────────
@@ -838,6 +838,24 @@ SCENARIOS = {
     "sp_removed": scenario_sp_removed,
     "auth_method_added": scenario_auth_method_added,
     "unverified_domain_added": scenario_unverified_domain_added,
+}
+
+# On-demand threats (threat_catalog): only scenarios whose analytic has been SEEN firing
+# in the tenant on this feed's synthetic data -- alerts attributed to examplecorp
+# identities on the exact operation the scenario emits (alerts dataset, 2026-09-30 ..
+# 2026-10-21; admin_role_add and federated_domain_backdoor also confirmed fire->alert by
+# _local_validation/threat_harness.py on 2026-10-12). Every other scenario stays
+# background-only until an alert is observed for it. account_unlock_password_reset is
+# held back: one alert in three weeks, not attributable to the scenario over the
+# catalog's own password-reset records.
+ANALYTIC_ALERTS = {
+    "admin_role_add":           "Suspicious Azure AD Administrator Role assignment",
+    "ca_policy_removed":        "Conditional Access policy removed",
+    "pim_alert_disabled":       "Azure AD PIM alert disabled",
+    "pim_role_settings_change": "Azure AD PIM role settings change",
+    "unverified_domain_added":  "Rare unverified domain addition to Azure AD",
+    "federated_domain_backdoor": "A successful Azure domain federation settings modification",
+    "failed_federation_change": "Azure domain federation settings modification attempt",
 }
 
 

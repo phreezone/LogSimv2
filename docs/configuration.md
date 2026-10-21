@@ -33,7 +33,7 @@ These settings control the simulator's overall behavior.
 >
 > **This is the most important tuning knob in the simulator.** It controls the sleep delay between every individual log event across all modules. A lower value means events are generated faster; a higher value means fewer events per second.
 >
-> **Lower bound: `0.01` seconds** (100 events/sec). Values below this are not effective — Python's sleep precision and socket overhead make sub-10ms intervals unreliable.
+> **Lower bound (CLI): `0.01` seconds** (100 events/sec). Values below this are not effective in the CLI loop — Python's sleep precision makes sub-10ms sleeps unreliable. The dashboard and API pace each module on a fixed schedule instead (it makes every call that is due back to back rather than sleeping per call), so a module's `event_interval` there goes down to `0.0001` s (10,000 calls/sec).
 >
 > **How to calculate throughput:**
 >

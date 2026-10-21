@@ -47,6 +47,32 @@ _http_adapter = requests.adapters.HTTPAdapter(pool_connections=_HTTP_POOL_SIZE,
 _http_session.mount('https://', _http_adapter)
 _http_session.mount('http://', _http_adapter)
 
+# Batch limits for one POST to an XSIAM HTTP Log Collector or the integrated Cribl receiver.
+# The collector takes newline-delimited records, up to 10 MiB per request (1 MiB recommended),
+# and rate-limits at 400 requests/s per endpoint -- so one event per request topped out near
+# ~140 events/s at WAN latency and could never exceed ~400. Defaults follow the recommended
+# 1 MiB; both are overridable.
+HTTP_BATCH_MAX_EVENTS = max(1, int(os.getenv("HTTP_BATCH_MAX_EVENTS", "1000")))
+HTTP_BATCH_MAX_BYTES = max(1024, int(os.getenv("HTTP_BATCH_MAX_BYTES", str(1 << 20))))
+
+
+def _chunked(items, max_events=None, max_bytes=None):
+    """Split `items` (strings) into lists that respect the per-request event and byte
+    limits. A single item larger than max_bytes still goes out, alone."""
+    max_events = max_events or HTTP_BATCH_MAX_EVENTS
+    max_bytes = max_bytes or HTTP_BATCH_MAX_BYTES
+    chunk, size = [], 0
+    for it in items:
+        n = len(it) + 1
+        if chunk and (len(chunk) >= max_events or size + n > max_bytes):
+            yield chunk
+            chunk, size = [], 0
+        chunk.append(it)
+        size += n
+    if chunk:
+        yield chunk
+
+
 # When True, suppress the routine per-event "Sending ..." success prints. A bulk run emits
 # 100k+ events and the per-event console I/O (under _print_lock) is itself a bottleneck.
 # Errors are always printed regardless.
@@ -129,18 +155,37 @@ def load_modules():
 # ── Persistent Syslog TCP Connection Pool ──────────────────────────────────
 # Reuses a single TCP socket per (host, port) instead of opening a new
 # connection for every log line.  Reconnects automatically on failure.
+# Each (host, port) has its own lock: one socket must not interleave two writers'
+# bytes, but modules on different ports must not wait on each other. Before
+# 2026-10-21 one global lock serialized every syslog module (~6,400 events/s total).
 _syslog_connections: dict[tuple[str, int], socket.socket] = {}
 _syslog_last_used: dict[tuple[str, int], float] = {}
-_syslog_lock = threading.Lock()
+_syslog_locks: dict[tuple[str, int], threading.Lock] = {}
+_syslog_locks_guard = threading.Lock()
 
 # A cached TCP socket idle longer than this may have been silently dropped by the
 # broker/firewall (TCP half-open). Recycle it proactively so the first sends of a
 # run — which happen hours after the previous run — don't vanish into a dead socket.
 _SYSLOG_IDLE_MAX = 60.0
 
+# Broker VM syslog over TCP uses non-transparent framing ('\n' delimiter) with a 64 KB
+# per-message cap. A batch is written as whole lines, many per sendall, up to this many
+# bytes per write; a line is never split across writes.
+_SYSLOG_CHUNK_BYTES = max(1024, int(os.getenv("SYSLOG_BATCH_MAX_BYTES", str(256 * 1024))))
+_SYSLOG_MAX_MESSAGE_BYTES = 64 * 1024
+
+
+def _syslog_lock_for(key: tuple[str, int]) -> threading.Lock:
+    lock = _syslog_locks.get(key)
+    if lock is None:
+        with _syslog_locks_guard:
+            lock = _syslog_locks.setdefault(key, threading.Lock())
+    return lock
+
 
 def _get_syslog_sock(host: str, port: int) -> socket.socket:
-    """Return a persistent TCP socket for (host, port), recycling stale/idle ones."""
+    """Return a persistent TCP socket for (host, port), recycling stale/idle ones.
+    Caller holds that (host, port)'s lock."""
     key = (host, port)
     sock = _syslog_connections.get(key)
     now = time.time()
@@ -159,7 +204,7 @@ def _get_syslog_sock(host: str, port: int) -> socket.socket:
 
 
 def _close_syslog_sock(host: str, port: int) -> None:
-    """Close and discard the cached socket for (host, port)."""
+    """Close and discard the cached socket for (host, port). Caller holds its lock."""
     key = (host, port)
     _syslog_last_used.pop(key, None)
     sock = _syslog_connections.pop(key, None)
@@ -170,38 +215,81 @@ def _close_syslog_sock(host: str, port: int) -> None:
             pass
 
 
-def send_syslog_message(message, host, port, app_name="LogSim"):
-    """Send a message over a persistent TCP syslog connection.
-
-    Retries once on a fresh socket so a stale/half-open cached connection does
-    not silently drop the triggering message (the previous behaviour lost it).
-    """
-    payload = f"{message}\n".encode('utf-8')
+def _syslog_write(payload: bytes, host: str, port: int) -> bool:
+    """Write already-framed bytes to (host, port). Retries once on a fresh socket so a
+    stale/half-open cached connection does not silently drop the data."""
+    key = (host, port)
     last_err = None
-    for attempt in (1, 2):
-        try:
-            with _syslog_lock:
+    with _syslog_lock_for(key):
+        for attempt in (1, 2):
+            try:
                 sock = _get_syslog_sock(host, port)
                 sock.sendall(payload)
-                _syslog_last_used[(host, port)] = time.time()
-            if not _quiet_sends:
-                _tprint(f"Sending Syslog for {app_name}: {host}:{port}")
-            return
-        except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, OSError) as e:
-            last_err = e
-            _close_syslog_sock(host, port)  # force a fresh connection, then retry once
-        except Exception as e:
-            last_err = e
-            _close_syslog_sock(host, port)
-            break
+                _syslog_last_used[key] = time.time()
+                return True
+            except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, OSError) as e:
+                last_err = e
+                _close_syslog_sock(host, port)  # force a fresh connection, then retry once
+            except Exception as e:
+                last_err = e
+                _close_syslog_sock(host, port)
+                break
     if isinstance(last_err, ConnectionRefusedError):
         _tprint(f"ERROR: Connection refused for Syslog. Is the Broker VM at {host}:{port} listening?")
     else:
         _tprint(f"ERROR: syslog send to {host}:{port} failed after retry ({last_err})")
+    return False
+
+
+def send_syslog_message(message, host, port, app_name="LogSim"):
+    """Send a message over a persistent TCP syslog connection."""
+    if _syslog_write(f"{message}\n".encode('utf-8'), host, port) and not _quiet_sends:
+        _tprint(f"Sending Syslog for {app_name}: {host}:{port}")
+
+
+def send_syslog_batch(messages, host, port, app_name="LogSim"):
+    """Send many messages over the persistent TCP syslog connection: newline-framed,
+    whole lines packed into one sendall per ~_SYSLOG_CHUNK_BYTES. Returns the number of
+    messages in chunks that were written."""
+    sent = 0
+    chunk: list[bytes] = []
+    size = 0
+    oversize = 0
+
+    def flush():
+        nonlocal sent, chunk, size
+        if chunk and _syslog_write(b"".join(chunk), host, port):
+            sent += len(chunk)
+        chunk, size = [], 0
+
+    for m in messages:
+        if not m:
+            continue
+        line = f"{m}\n".encode('utf-8')
+        if len(line) > _SYSLOG_MAX_MESSAGE_BYTES:
+            oversize += 1  # sent intact, as send_syslog_message would; the broker may cut it
+        if size and size + len(line) > _SYSLOG_CHUNK_BYTES:
+            flush()
+        chunk.append(line)
+        size += len(line)
+    flush()
+    if oversize:
+        _tprint(f"WARNING: {oversize} {app_name} syslog message(s) exceed 64 KB; the broker may truncate them")
+    if sent and not _quiet_sends:
+        _tprint(f"Sending Syslog for {app_name}: {host}:{port} ({sent} messages)")
+    return sent
 
 def send_http_message(message, module, config):
+    """Send one event to the module's HTTP collector (see send_http_batch)."""
+    return send_http_batch([message], module, config)
+
+
+def send_http_batch(messages, module, config):
     """
-    Sends a message to the HTTP endpoint for this module's collector.
+    Sends events to the HTTP endpoint for this module's collector, many per request:
+    newline-delimited, chunked to HTTP_BATCH_MAX_EVENTS / HTTP_BATCH_MAX_BYTES. Collector,
+    auth and headers are resolved once per call; the circuit breaker applies per request.
+    Returns the number of events in requests the collector accepted.
 
     All runtime values (URLs, keys, auth types) are read exclusively from
     environment variables — never from config.json.  config.json holds only
@@ -238,15 +326,17 @@ def send_http_message(message, module, config):
       OKTA_AUTH_TYPE=splunk_hec
       OKTA_KEY=your-cribl-hec-token
     """
+    if not messages:
+        return 0
     conf_key = getattr(module, 'CONFIG_KEY', None)
     if not conf_key or conf_key not in config:
-        return
+        return 0
 
     module_conf    = config.get(conf_key, {})
     collector_id   = module_conf.get('collector_id')
     collector_conf = config.get('http_collectors', {}).get(collector_id)
     if not collector_conf:
-        return
+        return 0
 
     # ── URL ──────────────────────────────────────────────────────────────────
     url_env_var = collector_conf.get('url_env_var')
@@ -254,7 +344,7 @@ def send_http_message(message, module, config):
     if not url:
         _tprint(f"Error: No destination URL for collector '{collector_id}'. "
                f"Set {url_env_var or 'HTTP_COLLECTOR_URL'} in your .env file.")
-        return
+        return 0
 
     # ── Auth type ─────────────────────────────────────────────────────────────
     auth_type_env_var = collector_conf.get('auth_type_env_var')
@@ -267,37 +357,41 @@ def send_http_message(message, module, config):
 
     # ── Build headers ─────────────────────────────────────────────────────────
     headers = {'Content-Type': collector_conf.get('content_type', 'application/json')}
+    messages = [m if isinstance(m, str) else json.dumps(m, default=str) for m in messages if m]
 
     if auth_type == 'xsiam':
         # Direct XSIAM HTTP Log Collector — bare token + PA vendor headers.
         # Also works for Cribl: Cribl accepts bare tokens and ignores the extra headers.
         if not api_key:
             _tprint(f"Error: {module.NAME} key not found — set {api_key_env_var} in .env")
-            return
+            return 0
         headers['Authorization'] = api_key
         headers['x-palo-alto-networks-vendor'] = getattr(module, 'XSIAM_VENDOR', 'Custom')
         headers['x-palo-alto-networks-product'] = getattr(module, 'XSIAM_PRODUCT', 'LogSim')
 
     elif auth_type == 'splunk_hec':
         # Cribl Splunk HEC Source (and real Splunk HEC).
-        # HEC requires payload wrapped as {"event": <data>} -- we handle that below
-        # before the POST so the caller never needs to know.
+        # HEC requires each payload wrapped as {"event": <data>} -- we handle that here
+        # before the POST so the caller never needs to know. HEC accepts many envelopes
+        # in one request, newline-separated.
         if not api_key:
             _tprint(f"Error: {module.NAME} Splunk HEC token not found -- set {api_key_env_var} in .env")
-            return
+            return 0
         headers['Authorization'] = f"Splunk {api_key}"
-        # Wrap plain JSON string into HEC envelope {"event": <parsed_object>}
-        try:
-            message = json.dumps({"event": json.loads(message)})
-        except (json.JSONDecodeError, TypeError):
-            # If message isn't valid JSON, wrap it as a raw string value
-            message = json.dumps({"event": message})
+        wrapped = []
+        for m in messages:
+            try:
+                wrapped.append(json.dumps({"event": json.loads(m)}))
+            except (json.JSONDecodeError, TypeError):
+                # If message isn't valid JSON, wrap it as a raw string value
+                wrapped.append(json.dumps({"event": m}))
+        messages = wrapped
 
     elif auth_type == 'basic':
         import base64
         if not api_key:
             _tprint(f"Error: {module.NAME} basic-auth credentials not found — set {api_key_env_var} in .env")
-            return
+            return 0
         headers['Authorization'] = f"Basic {base64.b64encode(api_key.encode()).decode()}"
 
     elif auth_type == 'none':
@@ -306,49 +400,56 @@ def send_http_message(message, module, config):
     else:
         _tprint(f"Warning: Unknown {auth_type_env_var}='{auth_type}' for '{collector_id}'. Skipping auth header.")
 
-    # ── Circuit breaker check ────────────────────────────────────────────────
-    cb = _http_cb_state.setdefault(collector_id, {"fails": 0, "open_since": None})
-    now = time.time()
-    if cb["open_since"] is not None:
-        elapsed = now - cb["open_since"]
-        if elapsed < HTTP_CB_COOLDOWN:
-            return
-        else:
-            _tprint(f"[HTTP] Circuit re-closing for {module.NAME} after {int(elapsed)}s cooldown — retrying...")
-            cb["fails"] = 0
-            cb["open_since"] = None
+    sent = 0
+    for chunk in _chunked(messages):
+        # ── Circuit breaker check (per request) ──────────────────────────────
+        cb = _http_cb_state.setdefault(collector_id, {"fails": 0, "open_since": None})
+        now = time.time()
+        if cb["open_since"] is not None:
+            elapsed = now - cb["open_since"]
+            if elapsed < HTTP_CB_COOLDOWN:
+                return sent
+            else:
+                _tprint(f"[HTTP] Circuit re-closing for {module.NAME} after {int(elapsed)}s cooldown — retrying...")
+                cb["fails"] = 0
+                cb["open_since"] = None
 
-    try:
-        response = _http_session.post(url, headers=headers, data=message,
-                                      verify=False, timeout=HTTP_CB_POST_TIMEOUT)
-        if response.status_code not in [200, 202, 204]:
-            _tprint(f"HTTP send error for {module.NAME}: status {response.status_code} — {response.text[:120]}")
+        body = "\n".join(chunk)
+        try:
+            response = _http_session.post(url, headers=headers, data=body.encode("utf-8"),
+                                          verify=False, timeout=HTTP_CB_POST_TIMEOUT)
+            if response.status_code not in [200, 202, 204]:
+                _tprint(f"HTTP send error for {module.NAME}: status {response.status_code} "
+                        f"({len(chunk)} events) — {response.text[:120]}")
+                cb["fails"] += 1
+            else:
+                cb["fails"] = 0
+                sent += len(chunk)
+                if not _quiet_sends:
+                    _tprint(f"Sending HTTP for {module.NAME}: {collector_id} -> {response.status_code} "
+                            f"({len(chunk)} events)")
+
+        except requests.exceptions.Timeout:
             cb["fails"] += 1
-        else:
-            cb["fails"] = 0
-            if not _quiet_sends:
-                _tprint(f"Sending HTTP for {module.NAME}: {collector_id} -> {response.status_code}")
+            if cb["fails"] <= HTTP_CB_THRESHOLD:
+                _tprint(f"HTTP send error for {module.NAME}: timed out after {HTTP_CB_POST_TIMEOUT}s "
+                        f"(failure {cb['fails']}/{HTTP_CB_THRESHOLD})")
+        except requests.exceptions.ConnectionError as e:
+            cb["fails"] += 1
+            if cb["fails"] <= HTTP_CB_THRESHOLD:
+                _tprint(f"HTTP send error for {module.NAME}: {str(e).replace(chr(10), ' ')} "
+                        f"(failure {cb['fails']}/{HTTP_CB_THRESHOLD})")
+        except requests.exceptions.RequestException as e:
+            cb["fails"] += 1
+            if cb["fails"] <= HTTP_CB_THRESHOLD:
+                _tprint(f"HTTP send error for {module.NAME}: {e} "
+                        f"(failure {cb['fails']}/{HTTP_CB_THRESHOLD})")
 
-    except requests.exceptions.Timeout:
-        cb["fails"] += 1
-        if cb["fails"] <= HTTP_CB_THRESHOLD:
-            _tprint(f"HTTP send error for {module.NAME}: timed out after {HTTP_CB_POST_TIMEOUT}s "
-                    f"(failure {cb['fails']}/{HTTP_CB_THRESHOLD})")
-    except requests.exceptions.ConnectionError as e:
-        cb["fails"] += 1
-        if cb["fails"] <= HTTP_CB_THRESHOLD:
-            _tprint(f"HTTP send error for {module.NAME}: {str(e).replace(chr(10), ' ')} "
-                    f"(failure {cb['fails']}/{HTTP_CB_THRESHOLD})")
-    except requests.exceptions.RequestException as e:
-        cb["fails"] += 1
-        if cb["fails"] <= HTTP_CB_THRESHOLD:
-            _tprint(f"HTTP send error for {module.NAME}: {e} "
-                    f"(failure {cb['fails']}/{HTTP_CB_THRESHOLD})")
-
-    if cb["fails"] >= HTTP_CB_THRESHOLD and cb["open_since"] is None:
-        cb["open_since"] = now
-        _tprint(f"[HTTP] Circuit OPEN for {module.NAME} after {HTTP_CB_THRESHOLD} failures. "
-                f"Suppressing errors for {HTTP_CB_COOLDOWN}s.")
+        if cb["fails"] >= HTTP_CB_THRESHOLD and cb["open_since"] is None:
+            cb["open_since"] = now
+            _tprint(f"[HTTP] Circuit OPEN for {module.NAME} after {HTTP_CB_THRESHOLD} failures. "
+                    f"Suppressing errors for {HTTP_CB_COOLDOWN}s.")
+    return sent
 
 # ── Cached S3 client ────────────────────────────────────────────────────────
 # Creating a new boto3 Session + S3 client on every PUT adds ~50-100ms of
@@ -630,10 +731,11 @@ _throughput_lock    = threading.Lock()   # protects _throughput_counter for para
 THROUGHPUT_REPORT_INTERVAL = 10  # seconds
 
 
-def _increment_throughput():
-    """Thread-safe increment of the throughput counter."""
+def _increment_throughput(n=1):
+    """Thread-safe increment of the throughput counter (once per batch, not per event:
+    the lock is shared by every sender thread)."""
     with _throughput_lock:
-        _throughput_counter["count"] += 1
+        _throughput_counter["count"] += n
 
 
 def _maybe_report_throughput():
@@ -1102,34 +1204,57 @@ def _get_cribl_sender():
 
 
 def send_cribl_message(record, module, config):
-    """Push one record into XSIAM's integrated Cribl receiver (cribl_direct transport).
+    """Push one record into XSIAM's integrated Cribl receiver (see send_cribl_batch)."""
+    return send_cribl_batch([record], module, config)
 
-    The record goes under the module's dedicated Source-Identifier UUID so XSIAM parses it
+
+def send_cribl_batch(records, module, config):
+    """Push records into XSIAM's integrated Cribl receiver (cribl_direct transport), many
+    per gzip NDJSON request -- the shape the real Cribl destination sends -- chunked to
+    HTTP_BATCH_MAX_EVENTS / HTTP_BATCH_MAX_BYTES.
+
+    Records go under the module's dedicated Source-Identifier UUID so XSIAM parses them
     into the native dataset (Fusion/analytics-eligible). No Cribl instance is involved;
-    CRIBL_COLLECTOR_URL + CRIBL_TOKEN come from the environment.
+    CRIBL_COLLECTOR_URL + CRIBL_TOKEN come from the environment. Returns the number of
+    records in requests the receiver accepted.
     """
     src = getattr(module, 'SOURCE_IDENTIFIER', None)
     if not src:
         _tprint(f"Error: {getattr(module, 'NAME', '?')} cribl transport requires module.SOURCE_IDENTIFIER.")
-        return
+        return 0
     integ = getattr(module, 'INTEGRATION_IDENTIFIER', 'logsim:synthetic')
-    if isinstance(record, str):
+    parsed, sizes = [], []
+    for record in records:
+        if isinstance(record, str):
+            text = record
+            try:
+                record = json.loads(record)
+            except (json.JSONDecodeError, TypeError):
+                _tprint(f"Warning: {module.NAME} cribl transport received non-JSON string. Skipping.")
+                continue
+        else:
+            text = None
+        if not isinstance(record, dict):
+            _tprint(f"Warning: {module.NAME} cribl transport expects a dict record. Skipping.")
+            continue
+        parsed.append(record)
+        sizes.append(text if text is not None else json.dumps(record, default=str))
+    sent = 0
+    i = 0
+    for chunk in _chunked(sizes):          # chunk boundaries from the serialized sizes
+        batch = parsed[i:i + len(chunk)]
+        i += len(chunk)
         try:
-            record = json.loads(record)
-        except (json.JSONDecodeError, TypeError):
-            _tprint(f"Warning: {module.NAME} cribl transport received non-JSON string. Skipping.")
-            return
-    if not isinstance(record, dict):
-        _tprint(f"Warning: {module.NAME} cribl transport expects a dict record. Skipping.")
-        return
-    try:
-        code, text, _ = _get_cribl_sender().send([record], src, integ)
-        if code not in (200, 201, 202, 204):
-            _tprint(f"Cribl send error for {module.NAME}: HTTP {code} — {text[:120]}")
-        elif not _quiet_sends:
-            _tprint(f"Cribl send for {module.NAME}: {code} (src={src[:8]}…)")
-    except Exception as exc:
-        _tprint(f"Cribl send exception for {module.NAME}: {exc}")
+            code, text, _ = _get_cribl_sender().send(batch, src, integ)
+            if code not in (200, 201, 202, 204):
+                _tprint(f"Cribl send error for {module.NAME}: HTTP {code} ({len(batch)} records) — {text[:120]}")
+            else:
+                sent += len(batch)
+                if not _quiet_sends:
+                    _tprint(f"Cribl send for {module.NAME}: {code} ({len(batch)} records, src={src[:8]}…)")
+        except Exception as exc:
+            _tprint(f"Cribl send exception for {module.NAME}: {exc}")
+    return sent
 
 
 def process_and_send(log_content, module, config, event_name=None):
@@ -1170,9 +1295,9 @@ def process_and_send(log_content, module, config, event_name=None):
             _tprint(f"Warning: Module {module.NAME}{event_str} is configured for S3 but did not return bytes content. Skipping.")
     elif transport == "http":
         if isinstance(log_content, list):
-            for msg in log_content:
-                send_http_message(msg, module, config)
-                _increment_throughput()
+            # One request per chunk, not per event (send_http_batch).
+            send_http_batch(log_content, module, config)
+            _increment_throughput(len(log_content))
         elif isinstance(log_content, str):
             send_http_message(log_content, module, config)
             _increment_throughput()
@@ -1203,9 +1328,9 @@ def process_and_send(log_content, module, config, event_name=None):
             _tprint(f"Warning: Module {module.NAME}{event_str} wants Pub/Sub transport but did not return a string or list of strings. Skipping.")
     elif transport == "cribl":
         if isinstance(log_content, list):
-            for rec in log_content:
-                send_cribl_message(rec, module, config)
-                _increment_throughput()
+            # One gzip NDJSON request per chunk, not per record (send_cribl_batch).
+            send_cribl_batch(log_content, module, config)
+            _increment_throughput(len(log_content))
         elif isinstance(log_content, (dict, str)):
             send_cribl_message(log_content, module, config)
             _increment_throughput()
@@ -1216,9 +1341,9 @@ def process_and_send(log_content, module, config, event_name=None):
         syslog_host = os.getenv('SYSLOG_HOST')
         syslog_port = int(module_config.get("syslog_port", config.get('SYSLOG_PORT', '514')))
         if isinstance(log_content, list):
-            for msg in log_content:
-                send_syslog_message(msg, syslog_host, syslog_port, app_name=module.NAME)
-                _increment_throughput()
+            # Many newline-framed lines per write, not one write per event (send_syslog_batch).
+            send_syslog_batch(log_content, syslog_host, syslog_port, app_name=module.NAME)
+            _increment_throughput(len(log_content))
         elif isinstance(log_content, str):
             send_syslog_message(log_content, syslog_host, syslog_port, app_name=module.NAME)
             _increment_throughput()
