@@ -393,6 +393,18 @@ _schedule_lock = threading.Lock()
 # Smallest event_interval the API accepts: 10,000 generate_log calls/s per module. Was
 # 0.01 s (100/s) until 2026-10-21; the sender lanes now deliver ~190k events/s.
 _MIN_EVENT_INTERVAL = 0.0001
+
+
+def _min_interval(module) -> float:
+    """The event_interval floor for *module*: _MIN_EVENT_INTERVAL, or the module's own
+    MIN_EVENT_INTERVAL when it declares a higher one (Windows: generate_log only drains
+    its worker threads, so polling it faster just starves them of the GIL)."""
+    try:
+        return max(_MIN_EVENT_INTERVAL, float(getattr(module, "MIN_EVENT_INTERVAL", 0) or 0))
+    except (TypeError, ValueError):
+        return _MIN_EVENT_INTERVAL
+
+
 # Seconds of per-second event counts each module keeps (the timeline shows 120 s).
 _RATE_HISTORY_S = 130
 # A worker more than this far behind its schedule (generation slower than the requested
@@ -598,7 +610,7 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
         next_due = _pace_wait(next_due, stop_event)
         if next_due is None:
             break
-        next_due += max(event_interval_func(), _MIN_EVENT_INTERVAL)
+        next_due += max(event_interval_func(), _min_interval(module))
         current_level = threat_level
         benign_only = (current_level == "Benign Traffic Only")
         try:
@@ -972,7 +984,7 @@ def _module_worker(state: ModuleState, config: dict):
         if next_due is None:
             break
         # Read both live values each iteration so PATCH updates apply immediately.
-        next_due += max(state.event_interval, _MIN_EVENT_INTERVAL)
+        next_due += max(state.event_interval, _min_interval(state.module))
         current_level = state.threat_level
         benign_only   = (current_level == "Benign Traffic Only")
         try:
@@ -1029,7 +1041,7 @@ def _start_module_state(state: ModuleState, threat_level: str,
     if threat_level in THREAT_LEVELS:
         state.threat_level = threat_level
     if event_interval is not None and event_interval >= _MIN_EVENT_INTERVAL:
-        state.event_interval = event_interval
+        state.event_interval = max(event_interval, _min_interval(state.module))
     state._stop_event.clear()
     state.error_msg = ""
     if _session_start is None:
@@ -1153,7 +1165,7 @@ def api_set_interval(name: str):
             raise ValueError
     except (ValueError, TypeError):
         return jsonify({"error": f"event_interval must be a number >= {_MIN_EVENT_INTERVAL}"}), 400
-    state.event_interval = iv
+    state.event_interval = max(iv, _min_interval(state.module))
     return jsonify(state.to_dict())
 
 
@@ -1678,7 +1690,7 @@ def _execute_job(job: dict) -> None:
                 try:
                     iv = float(p["event_interval"])
                     if iv >= _MIN_EVENT_INTERVAL:
-                        state.event_interval = iv
+                        state.event_interval = max(iv, _min_interval(state.module))
                 except (KeyError, TypeError, ValueError):
                     pass
         with _schedule_lock:

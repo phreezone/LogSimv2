@@ -5,6 +5,7 @@
 # context={'session_context': session_context}.
 
 import random
+import collections
 import contextvars
 import hashlib
 import json
@@ -32,6 +33,16 @@ _ACTIVITY = {}                 # username -> session dict (ts + private_ip/egres
 ACTIVITY_WINDOW_S = 1800.0     # a session stays "active" ~30 min
 ACTIVITY_MAX = 64              # cap on concurrently-active users (keeps correlation meaningful)
 CORRELATE_PROB = 0.6           # P(a follow-on event attaches to an active session)
+# Publishers never take the lock: they append here, and readers fold it in. Readers pick
+# from _ACTIVITY_VIEW, a snapshot rebuilt at most every ACTIVITY_VIEW_TTL_S under a
+# NON-blocking acquire. Until 2026-10-21 every publish and every pick took
+# _ACTIVITY_LOCK and rebuilt the list; with consumers at thousands of calls/s a thread
+# that blocked on it (the Windows releaser, publishing a logon) waited for minutes behind
+# the GIL and Windows delivered nothing. Hermetic (training) runs keep the synchronous
+# path so seeded runs reproduce exactly.
+_ACTIVITY_PENDING = collections.deque()      # (username, session) awaiting a reader
+_ACTIVITY_VIEW = ((), float("-inf"))         # (sessions, built_at)
+ACTIVITY_VIEW_TTL_S = 0.25
 
 
 def _activity_prune(now):
@@ -43,24 +54,45 @@ def _activity_prune(now):
             _ACTIVITY.pop(u, None)
 
 
+def _activity_apply(now):
+    """Fold pending publishes in, prune, and rebuild the view. Caller holds _ACTIVITY_LOCK."""
+    global _ACTIVITY_VIEW
+    while _ACTIVITY_PENDING:
+        username, session = _ACTIVITY_PENDING.popleft()
+        _ACTIVITY[username] = session
+    _activity_prune(now)
+    _ACTIVITY_VIEW = (tuple(_ACTIVITY.values()), now)
+
+
 def publish_activity(username, *, private_ip=None, egress_ip=None, hostname=None,
                      department=None, email=None, display_name=None, ts=None):
     """Record (or refresh) an active session for a user — called by logon-type generators."""
     if not username:
         return
     now = ts or time.time()
-    with _ACTIVITY_LOCK:
-        _ACTIVITY[username] = {"username": username, "ts": now, "private_ip": private_ip,
-                               "egress_ip": egress_ip, "hostname": hostname,
-                               "department": department, "email": email, "display_name": display_name}
-        _activity_prune(now)
+    _ACTIVITY_PENDING.append((username, {
+        "username": username, "ts": now, "private_ip": private_ip,
+        "egress_ip": egress_ip, "hostname": hostname,
+        "department": department, "email": email, "display_name": display_name}))
+    if hermetic():
+        with _ACTIVITY_LOCK:
+            _activity_apply(now)
 
 
 def active_sessions(now=None):
     now = now or time.time()
-    with _ACTIVITY_LOCK:
-        _activity_prune(now)
-        return list(_ACTIVITY.values())
+    if hermetic():
+        with _ACTIVITY_LOCK:
+            _activity_apply(now)
+            return list(_ACTIVITY_VIEW[0])
+    view, built = _ACTIVITY_VIEW
+    if (now - built > ACTIVITY_VIEW_TTL_S or (_ACTIVITY_PENDING and not view))             and _ACTIVITY_LOCK.acquire(blocking=False):
+        try:
+            _activity_apply(now)
+        finally:
+            _ACTIVITY_LOCK.release()
+        view = _ACTIVITY_VIEW[0]
+    return [s for s in view if now - s["ts"] <= ACTIVITY_WINDOW_S]
 
 
 def pick_active_session(now=None):
@@ -1726,8 +1758,11 @@ def reset_caches():
     _USER_DEST_WEIGHTS.clear()
     _USER_BYTE_BANDS.clear()
     _USER_DOMAIN_WEIGHTS.clear()
+    global _ACTIVITY_VIEW
     with _ACTIVITY_LOCK:
         _ACTIVITY.clear()
+        _ACTIVITY_PENDING.clear()
+        _ACTIVITY_VIEW = ((), float("-inf"))
 
 
 def get_users_by_department(session_context):
