@@ -731,9 +731,14 @@ _SEND_QUEUE: _queue.Queue = _queue.Queue(maxsize=max(1, int(os.getenv("SEND_QUEU
 # send_http_batch / send_cribl_batch). Before 2026-10-21 every transport shared the one
 # pool above with one request per HTTP/Cribl event: those topped out near ~145 events/s
 # at WAN latency, and a slow collector held syslog behind it (1,500 syslog events that
-# take 0.2 s alone took 10.4 s next to an HTTP backlog). Syslog, S3, WEC and Pub/Sub stay
-# on the default lane.
-_BATCHED_TRANSPORTS = ("http", "cribl")
+# take 0.2 s alone took 10.4 s next to an HTTP backlog). Syslog got its own batched lane
+# the same day (send_syslog_batch: many lines per TCP write): one write per event on the
+# default lane managed ~6-8k events/s across ALL syslog modules. S3, WEC and Pub/Sub stay
+# on the default lane, unbatched.
+_BATCHED_TRANSPORTS = ("http", "cribl", "syslog")
+# process_and_send sends every transport it does not name explicitly as syslog
+# (e.g. "tcp", or no transport at all), so those go to the syslog lane too.
+_UNBATCHED_TRANSPORTS = ("s3", "wec", "pubsub")
 _BATCH_QUEUES: dict = {t: _queue.Queue(maxsize=max(1, int(os.getenv("SEND_QUEUE_SIZE", "5000"))))
                        for t in _BATCHED_TRANSPORTS}
 _BATCH_SEND_WORKER_COUNT = max(1, int(os.getenv("BATCH_SEND_WORKERS", "4")))   # per lane
@@ -742,11 +747,13 @@ _BATCH_MAX_EVENTS = max(1, int(os.getenv("HTTP_BATCH_MAX_EVENTS", "1000")))
 
 
 def _lane_queue(item):
-    """The queue for this event's transport: a batched lane for HTTP/Cribl, else default."""
+    """The queue for this event's transport: a batched lane for HTTP/Cribl/syslog, else default."""
     _msg, module, config, _name = item
     key = getattr(module, "CONFIG_KEY", None)
     transport = ((config or {}).get(key, {}) or {}).get("transport", "syslog") if key else "syslog"
-    return _BATCH_QUEUES.get(transport, _SEND_QUEUE)
+    if transport in _UNBATCHED_TRANSPORTS:
+        return _SEND_QUEUE
+    return _BATCH_QUEUES.get(transport, _BATCH_QUEUES["syslog"])
 
 
 _ENQUEUE_MAX_WAIT_S = float(os.getenv("SEND_ENQUEUE_MAX_WAIT_S", "30"))
@@ -849,10 +856,10 @@ def _send_worker():
 
 
 def _batch_send_worker(lane: str):
-    """Sender for one batched lane (HTTP collector or Cribl receiver). Takes everything
+    """Sender for one batched lane (HTTP collector, Cribl receiver, syslog). Takes everything
     queued -- waiting up to _BATCH_LINGER_S for more to accumulate -- and sends it as one
     process_and_send() call per (module, config, event name), which goes out as batched
-    requests. Ordering within a module is preserved."""
+    requests / TCP writes. Ordering within a batch is preserved."""
     process_and_send = _get_process_and_send()
     q = _BATCH_QUEUES[lane]
     while True:
@@ -2257,7 +2264,7 @@ def _run_health_checks() -> dict:
     # senders are the bottleneck and are holding generation back -- not data loss.
     # Shown because module counters include these: on 2026-10-07 ~10,300 events sat
     # here and a dashboard total read as an over-count until they drained.
-    # Default lane plus the batched HTTP/Cribl lanes; the fullest lane decides the status.
+    # Default lane plus the batched HTTP/Cribl/syslog lanes; the fullest lane decides the status.
     lanes = {"default": _SEND_QUEUE, **_BATCH_QUEUES}
     depth = sum(q.qsize() for q in lanes.values())
     cap = sum(q.maxsize for q in lanes.values())
