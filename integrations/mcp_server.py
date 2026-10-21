@@ -174,7 +174,7 @@ def fire_event(name: str, event: str) -> dict:
 def set_module_interval(name: str, event_interval: float) -> dict:
     """Change a module's seconds-between-events. Applies live; no restart needed.
 
-    Must be >= 0.01. Returns the updated module state.
+    Must be >= 0.0001 (10,000 events/s). Returns the updated module state.
     """
     return _req("PATCH", f"/modules/{quote(name)}/interval",
                 body={"event_interval": event_interval})

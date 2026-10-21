@@ -390,6 +390,16 @@ _schedule_lock = threading.Lock()
 
 
 # ── Per-module state ──────────────────────────────────────────────────────────
+# Smallest event_interval the API accepts: 10,000 generate_log calls/s per module. Was
+# 0.01 s (100/s) until 2026-10-21; the sender lanes now deliver ~190k events/s.
+_MIN_EVENT_INTERVAL = 0.0001
+# Seconds of per-second event counts each module keeps (the timeline shows 120 s).
+_RATE_HISTORY_S = 130
+# A worker more than this far behind its schedule (generation slower than the requested
+# rate, a transport hold, an error pause) drops the backlog instead of bursting to catch up.
+_MAX_PACE_LAG_S = 1.0
+
+
 class ModuleState:
     """Holds runtime state and metrics for a single log-generation module."""
 
@@ -413,8 +423,10 @@ class ModuleState:
         self.total_logs = 0
         self.total_threats = 0
         self.last_threat: str = ""
-        self._timestamps: deque = deque(maxlen=600)        # all events
-        self._benign_timestamps: deque = deque(maxlen=600) # non-threat events
+        # [epoch_second, events, benign events] per second, newest last. These were
+        # deques of the last 600 event timestamps until 2026-10-21, which capped the
+        # reported 10 s rate (and the timeline) at 60 events/s.
+        self._sec_counts: deque = deque(maxlen=_RATE_HISTORY_S)
         self._threat_timestamps: deque = deque(maxlen=600) # threat events
         self._threat_event_details: deque = deque(maxlen=600)  # (timestamp, event_name) pairs
         self._threat_counts: dict = {}                         # {event_name: int} this session
@@ -440,9 +452,14 @@ class ModuleState:
         the burst (e.g. 30 for a port-scan).  Threat counter increments by 1
         regardless of burst size — a brute-force is one event, not 30."""
         now = time.time()
+        sec = int(now)
         with self._lock:
             self.total_logs += log_count
-            self._timestamps.append(now)          # one per event, not per log line
+            counts = self._sec_counts
+            if not counts or counts[-1][0] != sec:
+                counts.append([sec, 0, 0])
+            bucket = counts[-1]
+            bucket[1] += 1                        # one per event, not per log line
             if event_name and event_name in self.threat_names:
                 self.total_threats += 1           # one threat per event, not per log line
                 self._threat_timestamps.append(now)
@@ -450,12 +467,13 @@ class ModuleState:
                 self.last_threat = event_name
                 self._threat_counts[event_name] = self._threat_counts.get(event_name, 0) + 1
             else:
-                self._benign_timestamps.append(now)  # one per event, not per log line
+                bucket[2] += 1
 
     def get_rate(self, window: int = 10) -> float:
-        cutoff = time.time() - window
+        """Events/s over the last *window* complete seconds."""
+        end = int(time.time())
         with self._lock:
-            recent = sum(1 for t in self._timestamps if t > cutoff)
+            recent = sum(c[1] for c in self._sec_counts if end - window <= c[0] < end)
         return round(recent / window, 2)
 
     def reset_metrics(self):
@@ -463,8 +481,7 @@ class ModuleState:
             self.total_logs = 0
             self.total_threats = 0
             self.last_threat = ""
-            self._timestamps.clear()
-            self._benign_timestamps.clear()
+            self._sec_counts.clear()
             self._threat_timestamps.clear()
             self._threat_event_details.clear()
             self._threat_counts.clear()
@@ -549,6 +566,24 @@ def _build_baduser_aws_config(username, config):
     return cfg
 
 
+def _pace_wait(next_due, stop_event):
+    """Wait until *next_due* (time.monotonic()) and return the due time to schedule
+    from, or None if stopped. A worker makes one generate_log call per return and adds
+    its interval to the result, so it runs on a fixed schedule rather than "sleep one
+    interval after each call". That matters above ~60 calls/s: a thread wait cannot be
+    shorter than the OS timer tick (~15.6 ms on Windows, measured 64 wake-ups/s), so
+    the worker sleeps only when it is ahead and otherwise makes every call that is due
+    back to back. More than _MAX_PACE_LAG_S behind, it drops the backlog."""
+    now = time.monotonic()
+    if now < next_due:
+        if stop_event.wait(timeout=next_due - now):
+            return None
+        return next_due
+    if now - next_due > _MAX_PACE_LAG_S:
+        return now
+    return next_due
+
+
 def _baduser_worker(module, config, context, stop_event, metrics_key,
                     threat_level, event_interval_func):
     """Worker loop for a single module in bad-user mode.
@@ -558,10 +593,14 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
     """
     _ensure_send_workers()
 
+    next_due = time.monotonic()
     while not stop_event.is_set():
+        next_due = _pace_wait(next_due, stop_event)
+        if next_due is None:
+            break
+        next_due += max(event_interval_func(), _MIN_EVENT_INTERVAL)
         current_level = threat_level
         benign_only = (current_level == "Benign Traffic Only")
-        cycle_start = time.time()
         try:
             result = module.generate_log(
                 config=config,
@@ -596,10 +635,6 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
             print(f"[bad-user][{module.NAME}] worker error: {exc}")
             stop_event.wait(timeout=5)
             continue
-
-        elapsed = time.time() - cycle_start
-        remaining = max(0.0, event_interval_func() - elapsed)
-        stop_event.wait(timeout=remaining)
 
 
 def _baduser_watchdog(duration_seconds, stop_event):
@@ -931,11 +966,15 @@ def _module_worker(state: ModuleState, config: dict):
     if hasattr(state.module, "last_threat_event_time") and not state.module.last_threat_event_time:
         state.module.last_threat_event_time = time.time()
 
+    next_due = time.monotonic()
     while not state._stop_event.is_set():
+        next_due = _pace_wait(next_due, state._stop_event)
+        if next_due is None:
+            break
         # Read both live values each iteration so PATCH updates apply immediately.
+        next_due += max(state.event_interval, _MIN_EVENT_INTERVAL)
         current_level = state.threat_level
         benign_only   = (current_level == "Benign Traffic Only")
-        cycle_start   = time.time()
         try:
             # Hold generation while this module's transport is backed up (WEC today),
             # so a slow broker slows Windows only -- never the shared senders.
@@ -974,13 +1013,6 @@ def _module_worker(state: ModuleState, config: dict):
                 state.error_msg = ""
             continue
 
-        # Wait only the remaining portion of the interval so that generate_log +
-        # process_and_send time (e.g. S3 upload latency for AWS) doesn't inflate
-        # the effective cycle time beyond event_interval.
-        elapsed = time.time() - cycle_start
-        remaining = max(0.0, state.event_interval - elapsed)
-        state._stop_event.wait(timeout=remaining)
-
     state.status = "stopped"
 
 
@@ -996,7 +1028,7 @@ def _start_module_state(state: ModuleState, threat_level: str,
         return
     if threat_level in THREAT_LEVELS:
         state.threat_level = threat_level
-    if event_interval is not None and event_interval >= 0.01:
+    if event_interval is not None and event_interval >= _MIN_EVENT_INTERVAL:
         state.event_interval = event_interval
     state._stop_event.clear()
     state.error_msg = ""
@@ -1117,10 +1149,10 @@ def api_set_interval(name: str):
     body = request.get_json(silent=True) or {}
     try:
         iv = float(body.get("event_interval", 0))
-        if iv < 0.01:
+        if iv < _MIN_EVENT_INTERVAL:
             raise ValueError
     except (ValueError, TypeError):
-        return jsonify({"error": "event_interval must be a number >= 0.01"}), 400
+        return jsonify({"error": f"event_interval must be a number >= {_MIN_EVENT_INTERVAL}"}), 400
     state.event_interval = iv
     return jsonify(state.to_dict())
 
@@ -1644,7 +1676,9 @@ def _execute_job(job: dict) -> None:
                        else list(MODULE_STATES.values()))
             for state in targets:
                 try:
-                    state.event_interval = float(p["event_interval"])
+                    iv = float(p["event_interval"])
+                    if iv >= _MIN_EVENT_INTERVAL:
+                        state.event_interval = iv
                 except (KeyError, TypeError, ValueError):
                     pass
         with _schedule_lock:
@@ -2367,11 +2401,11 @@ def api_timeline():
         threats      = [0] * BUCKETS
         threat_names = [[] for _ in range(BUCKETS)]
         with state._lock:
-            for ts in state._benign_timestamps:
-                age = now - ts
+            for sec, _events, n_benign in state._sec_counts:
+                age = now - sec
                 if 0 <= age < window:
                     idx = BUCKETS - 1 - int(age / BUCKET_SEC)
-                    benign[max(0, idx)] += 1
+                    benign[max(0, idx)] += n_benign
             for ts in state._threat_timestamps:
                 age = now - ts
                 if 0 <= age < window:
@@ -2431,8 +2465,8 @@ def api_baduser_start():
     if threat_level not in THREAT_LEVELS:
         return jsonify({"error": f"Unknown threat level '{threat_level}'"}), 400
     event_interval = float(body.get("event_interval", 0.5))
-    if event_interval < 0.01:
-        return jsonify({"error": "event_interval must be >= 0.01"}), 400
+    if event_interval < _MIN_EVENT_INTERVAL:
+        return jsonify({"error": f"event_interval must be >= {_MIN_EVENT_INTERVAL}"}), 400
     selected_modules = body.get("selected_modules")  # list of module names or None
     if selected_modules is not None and not isinstance(selected_modules, list):
         return jsonify({"error": "selected_modules must be a list"}), 400
