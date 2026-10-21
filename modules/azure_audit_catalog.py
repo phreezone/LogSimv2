@@ -388,3 +388,26 @@ AUDIT_ACTIVITIES = [
     ('Self-service password reset flow activity progress', 'UserManagement', 'Self-service Password Management', 'Update', 'User'),
     ('Unlock user account (self-service)', 'UserManagement', 'Self-service Password Management', 'Update', 'User'),
 ]
+
+# Activities XSIAM raises an alert on by themselves (seen firing on LogSim data, alerts
+# dataset 2026-09-30..2026-10-21). They belong to the threat scenarios only: drawn into
+# the benign baseline they raised hundreds of alerts (e.g. 38 federation alerts from the
+# catalog's own "Set domain authentication") and taught XSIAM that the operations are
+# routine. Compared case-insensitively, ignoring O365's trailing period.
+ALERTING_ACTIVITIES = frozenset(a.lower() for a in (
+    "Disable PIM alert",                    # Azure AD PIM alert disabled
+    "Deactivate PIM alert",
+    "Update role setting in PIM",           # Azure AD PIM role settings change
+    "Add unverified domain",                # Rare unverified domain addition to Azure AD
+    "Set domain authentication",            # Azure domain federation settings modification
+    "Set federation settings on domain",    #   (successful / attempt)
+    "Delete Conditional Access policy",     # Conditional Access policy removed
+))
+
+
+def is_alerting(activity):
+    return (activity or "").rstrip(".").strip().lower() in ALERTING_ACTIVITIES
+
+
+# What benign traffic may draw: the full catalog minus ALERTING_ACTIVITIES.
+BENIGN_ACTIVITIES = [a for a in AUDIT_ACTIVITIES if not is_alerting(a[0])]

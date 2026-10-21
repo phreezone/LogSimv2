@@ -19,8 +19,9 @@ from modules import azure_audit_catalog as _auditcat
 # O365 Management Activity directory operations (RecordType 8), derived from the Entra audit
 # catalog's Core Directory activities in O365-MA naming (trailing period). Gives the O365
 # Azure AD feed the same broad directory-operation coverage as the Graph audit feed.
+# BENIGN_ACTIVITIES leaves out the operations XSIAM alerts on by themselves.
 _O365_MA_OPS = [((a if a.endswith(".") else a + "."), c)
-                for a, c, s, op, t in _auditcat.AUDIT_ACTIVITIES
+                for a, c, s, op, t in _auditcat.BENIGN_ACTIVITIES
                 if s == "Core Directory" and c in ("UserManagement", "GroupManagement",
                 "ApplicationManagement", "RoleManagement", "DirectoryManagement", "Device")]
 

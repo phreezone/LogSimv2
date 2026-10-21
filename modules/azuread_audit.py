@@ -342,7 +342,7 @@ def generate_benign(config=None, context=None):
     # A realistic minority of human-driven admin operations fail (permissions/config/policy).
     if random.random() < 0.25:
         return [_maybe_fail(random.choice(_B_HUMAN)(config))]
-    return [_maybe_fail(_catalog_record(config, random.choice(cat.AUDIT_ACTIVITIES)))]
+    return [_maybe_fail(_catalog_record(config, random.choice(cat.BENIGN_ACTIVITIES)))]
 
 
 # ── detection-relevant scenarios (named, on-demand) ─────────────────────────────────
