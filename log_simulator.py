@@ -731,10 +731,11 @@ _throughput_lock    = threading.Lock()   # protects _throughput_counter for para
 THROUGHPUT_REPORT_INTERVAL = 10  # seconds
 
 
-def _increment_throughput():
-    """Thread-safe increment of the throughput counter."""
+def _increment_throughput(n=1):
+    """Thread-safe increment of the throughput counter (once per batch, not per event:
+    the lock is shared by every sender thread)."""
     with _throughput_lock:
-        _throughput_counter["count"] += 1
+        _throughput_counter["count"] += n
 
 
 def _maybe_report_throughput():
@@ -1296,8 +1297,7 @@ def process_and_send(log_content, module, config, event_name=None):
         if isinstance(log_content, list):
             # One request per chunk, not per event (send_http_batch).
             send_http_batch(log_content, module, config)
-            for _ in log_content:
-                _increment_throughput()
+            _increment_throughput(len(log_content))
         elif isinstance(log_content, str):
             send_http_message(log_content, module, config)
             _increment_throughput()
@@ -1330,8 +1330,7 @@ def process_and_send(log_content, module, config, event_name=None):
         if isinstance(log_content, list):
             # One gzip NDJSON request per chunk, not per record (send_cribl_batch).
             send_cribl_batch(log_content, module, config)
-            for _ in log_content:
-                _increment_throughput()
+            _increment_throughput(len(log_content))
         elif isinstance(log_content, (dict, str)):
             send_cribl_message(log_content, module, config)
             _increment_throughput()
@@ -1344,8 +1343,7 @@ def process_and_send(log_content, module, config, event_name=None):
         if isinstance(log_content, list):
             # Many newline-framed lines per write, not one write per event (send_syslog_batch).
             send_syslog_batch(log_content, syslog_host, syslog_port, app_name=module.NAME)
-            for _ in log_content:
-                _increment_throughput()
+            _increment_throughput(len(log_content))
         elif isinstance(log_content, str):
             send_syslog_message(log_content, syslog_host, syslog_port, app_name=module.NAME)
             _increment_throughput()

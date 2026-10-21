@@ -1958,11 +1958,14 @@ def _generate_ecr_create_delete_repo(config, context=None):
     repo_name = f"temp-build-repo-{''.join(random.choices('0123456789abcdef', k=8))}"
     repo_arn = f"arn:aws:ecr:{region}:{account_id}:repository/{repo_name}"
     
-    # Use timezone-aware datetime
+    # The pair ENDS now: created five minutes ago, deleted now. It used to start now and
+    # stamp the delete five minutes in the future.
     now = datetime.datetime.now(datetime.UTC)
-    creation_time = int(now.timestamp()) # ECR uses epoch seconds
+    created = now - datetime.timedelta(minutes=5)
+    creation_time = int(created.timestamp()) # ECR uses epoch seconds
 
     create_event = _get_base_event(config, user_identity, ip_address, region, "CreateRepository", "ecr.amazonaws.com", api_version="2015-09-21", read_only=False)
+    create_event["eventTime"] = created.strftime('%Y-%m-%dT%H:%M:%SZ')
     create_event.update({
         "requestParameters": {"repositoryName": repo_name, "imageTagMutability": "MUTABLE"},
         "responseElements": {
@@ -1979,7 +1982,7 @@ def _generate_ecr_create_delete_repo(config, context=None):
     
     # Simulate a deletion event shortly after
     delete_event = _get_base_event(config, user_identity, ip_address, region, "DeleteRepository", "ecr.amazonaws.com", api_version="2015-09-21", read_only=False)
-    delete_event["eventTime"] = (now + datetime.timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    delete_event["eventTime"] = now.strftime('%Y-%m-%dT%H:%M:%SZ')
     delete_event.update({
         "requestParameters": {"repositoryName": repo_name, "registryId": account_id},
         "responseElements": {
@@ -3520,11 +3523,12 @@ def _generate_suspicious_iam_creation(config, context=None):
     
     events = []
     
-    # Use timezone-aware datetime
-    now = datetime.datetime.now(datetime.UTC)
+    # Start 10 s ago so the three steps (0 / +5 / +10 s) end now, not 10 s in the future.
+    now = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=10)
 
     # 1. Create User
     create_user_event = _get_base_event(config, user_identity, ip_address, region, "CreateUser", "iam.amazonaws.com", api_version="2010-05-08", read_only=False)
+    create_user_event["eventTime"] = now.strftime('%Y-%m-%dT%H:%M:%SZ')
     create_user_event.update({
         "requestParameters": {"userName": new_user_name, "path": "/"},
         "responseElements": {
@@ -7488,6 +7492,31 @@ THREAT_SCENARIOS = {
 _LINKED_IAM_MERGED: dict = {}
 
 
+def _end_by_now(events):
+    """Shift a generated batch's eventTimes back so the last one is not after now.
+
+    A multi-step generator that starts at now and adds gaps (a destruction burst over a
+    few minutes, create -> invoke) stamps its later steps in the FUTURE, which falls
+    outside detection search windows and no real CloudTrail does. Relative spacing is
+    kept; nested times (createDate, expiration) are left alone."""
+    fmt = '%Y-%m-%dT%H:%M:%SZ'
+    times = []
+    for e in events:
+        try:
+            times.append(datetime.datetime.strptime(e["eventTime"], fmt).replace(tzinfo=datetime.UTC))
+        except (KeyError, TypeError, ValueError):
+            times.append(None)
+    known = [t for t in times if t is not None]
+    if not known:
+        return
+    excess = max(known) - datetime.datetime.now(datetime.UTC)
+    if excess.total_seconds() <= 0:
+        return
+    for e, t in zip(events, times):
+        if t is not None:
+            e["eventTime"] = (t - excess).strftime(fmt)
+
+
 def generate_log(config, context=None, threat_level="Benign", benign_only=False, scenario_event=None):
     """
     Patched generate_log with:
@@ -7633,6 +7662,7 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
     if not events:
         logger.warning("Failed to generate events after attempts (or scenario failed).")
         return None
+    _end_by_now(events)
 
     # Determine event name for return tuple — use scenario key if available
     _func_to_key = {fn: k for k, fn in SCENARIO_FUNCTIONS.items()}

@@ -83,11 +83,29 @@ except ImportError:
 
 
 def _publish_logon(u):
-    """Publish a Windows logon as an active session (session start) for cross-plane correlation."""
-    if u:
-        publish_activity(u.get("username"), private_ip=u.get("ip"), hostname=u.get("hostname"),
-                         department=u.get("department"), email=u.get("email"),
-                         display_name=u.get("display_name"))
+    """Publish a Windows logon as an active session (session start) for cross-plane correlation.
+
+    Inside a worker thread the logon is not out yet: _schedule() moves the result to
+    start at now, so its 4624 is stamped up to a few seconds AFTER it was built. A
+    publish at build time let a firewall/proxy/DNS consumer emit for the user BEFORE
+    their logon (17% of correlated picks, 2-4 s early, measured 2026-10-21). Workers
+    therefore hand the publish to _schedule(), which releases it with the result's last
+    event; everything else (scenarios, direct calls) publishes immediately."""
+    if not u:
+        return
+    if _deferring():
+        pending = getattr(_DEFER_IDS, "publish", None)
+        if pending is None:
+            pending = _DEFER_IDS.publish = []
+        pending.append(u)
+        return
+    _publish_now(u)
+
+
+def _publish_now(u, ts=None):
+    publish_activity(u.get("username"), private_ip=u.get("ip"), hostname=u.get("hostname"),
+                     department=u.get("department"), email=u.get("email"),
+                     display_name=u.get("display_name"), ts=ts)
 
 
 def _pick_windows_user_corr(session_context):
@@ -110,6 +128,12 @@ DESCRIPTION = "Simulates Windows Security channel events (4624/4625/4634/4647/46
 XSIAM_VENDOR  = "Microsoft"
 XSIAM_PRODUCT = "Windows"
 CONFIG_KEY    = "windows_events_config"
+# generate_log() only DRAINS what the per-host workers buffered; Windows volume is set by
+# wks/dc_interval_multiplier, not by the dashboard rate. Draining faster than this adds
+# nothing, and at the dashboard's 10,000 calls/s the drain loop (each call walks the
+# whole roster in _get_windows_users) held the GIL so the workers and the releaser
+# starved: 0 events in 30 s (measured 2026-10-21). The dashboard honours this floor.
+MIN_EVENT_INTERVAL = 0.05
 
 # Module-level pacing state
 last_threat_event_time = 0
@@ -1677,6 +1701,11 @@ _release_heap: list = []                # (ts, seq, threat_group|None, threat_na
 _release_cond = threading.Condition()
 _release_seq = itertools.count()
 _RELEASE_MAX_PENDING = 200_000          # schedulers wait above this (memory bound)
+_PUBLISH_KEY = "@publish"               # heap entry that publishes a logon to the activity bus
+# Events handed to the queues per releaser pass. Unbounded, the first pass after start
+# took every due event (thousands) before delivering any; with the dashboard's other
+# modules saturating the GIL that pass ran for minutes and Windows delivered nothing.
+_RELEASE_CHUNK = 2000
 
 
 def _deferring() -> bool:
@@ -1687,8 +1716,12 @@ def _schedule(items, stop_event, threat_name=None) -> bool:
     """Queue one generator result for release at its own timestamps. A threat's
     events share a group, so only its first released chunk carries its name (the
     dashboard counts one threat per labelled chunk). False only when stopping."""
+    publishes = getattr(_DEFER_IDS, "publish", None) or []
+    _DEFER_IDS.publish = None
     recs = [json.loads(i) if isinstance(i, str) else i for i in items if i]
     if not recs:
+        for u in publishes:
+            _publish_now(u)
         return True
     times = [_parse_iso_ts(r["time_created"]) for r in recs]
     shift = max(0.0, time.time() - min(times))       # never start in the past
@@ -1702,6 +1735,10 @@ def _schedule(items, stop_event, threat_name=None) -> bool:
             if shift:
                 r["time_created"] = _iso_ts(t + shift)
             heapq.heappush(_release_heap, (t + shift, next(_release_seq), group, threat_name, r))
+        # Session starts go out with the result's last event (see _publish_logon).
+        end = max(times) + shift
+        for u in publishes:
+            heapq.heappush(_release_heap, (end, next(_release_seq), None, None, {_PUBLISH_KEY: u}))
         _release_cond.notify_all()
     return True
 
@@ -1714,15 +1751,22 @@ def _releaser(stop_event):
         with _release_cond:
             now = time.time()
             due = []
-            while _release_heap and _release_heap[0][0] <= now:
+            while (_release_heap and _release_heap[0][0] <= now
+                   and len(due) < _RELEASE_CHUNK):
                 due.append(heapq.heappop(_release_heap))
             if not due:
                 wait = (_release_heap[0][0] - now) if _release_heap else 1.0
                 _release_cond.wait(timeout=min(1.0, max(0.01, wait)))
                 continue
             _release_cond.notify_all()                   # room for waiting schedulers
+        _reserve_missing_blocks({str(r.get("record_id", ""))[len(_RID_PENDING):]
+                                 for _t, _s, _g, _n, r in due
+                                 if str(r.get("record_id", "")).startswith(_RID_PENDING)})
         benign, threats = [], {}
         for _ts, _seq, group, name, r in due:            # release order == time order
+            if _PUBLISH_KEY in r:
+                _publish_now(r[_PUBLISH_KEY], ts=_ts)
+                continue
             rid = str(r.get("record_id", ""))
             if rid.startswith(_RID_PENDING):
                 r["record_id"] = str(_next_record_number(rid[len(_RID_PENDING):]))
@@ -1798,10 +1842,11 @@ def reset_state():
     of carrying over monotonic counters (RecordNumber, last threat time, etc.).
     """
     global last_threat_event_time, _BUILD_EVENT_OS_SUBTYPE, _orchestrator_started
-    with _STATE_LOCK:
+    with _RECORD_LOCK:
         _RECORD_NUMBERS.clear()
         _RECORD_RESERVED.clear()
         _RECORD_NUMBERS_HERMETIC.clear()
+    with _STATE_LOCK:
         _USER_SIDS.clear()
     with _release_cond:
         _release_heap.clear()           # scheduled-but-unreleased events of the last run
@@ -1841,6 +1886,10 @@ _RECORD_STATE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspat
 _RECORD_BLOCK = 10_000
 _RECORD_FIRST_SEED = 1_000_000_000
 _RECORD_RESERVED: dict[str, int] = {}      # host -> end of the block THIS process holds
+# Record numbers have their own lock. They used to share _STATE_LOCK, which every worker
+# takes for SIDs, open sessions and fail counts, so the releaser -- the one thread that
+# numbers worker events, once per event -- queued behind 265 workers for each id.
+_RECORD_LOCK = threading.Lock()
 
 
 class _StateFileLock:
@@ -1872,6 +1921,47 @@ class _StateFileLock:
             os.remove(self.path)
         except OSError:
             pass
+
+
+def _reserve_missing_blocks(hosts):
+    """Reserve blocks for every host in *hosts* that has none yet, in ONE state-file
+    write. Hosts first seen by the releaser used to reserve one by one (a lock file and
+    a JSON rewrite each), 265 of them on a fresh start."""
+    if _in_hermetic_run():
+        return
+    with _RECORD_LOCK:
+        need = [h for h in hosts if h and h not in _RECORD_RESERVED]
+        if len(need) < 2:
+            return                       # _next_record_number handles a single host
+        with _StateFileLock(_RECORD_STATE_PATH):
+            try:
+                with open(_RECORD_STATE_PATH, encoding="utf-8") as f:
+                    state = json.load(f)
+            except (OSError, ValueError):
+                state = {}
+            starts = {}
+            for host in need:
+                saved = state.get(host)
+                start = int(saved) if saved is not None else _RECORD_FIRST_SEED + random.randint(0, 50_000_000)
+                cur = _RECORD_NUMBERS.get(host)
+                if cur is not None:
+                    start = max(start, cur)
+                state[host] = start + _RECORD_BLOCK
+                starts[host] = start
+            tmp = _RECORD_STATE_PATH + f".{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            for attempt in range(40):
+                try:
+                    os.replace(tmp, _RECORD_STATE_PATH)
+                    break
+                except PermissionError:
+                    if attempt == 39:
+                        raise
+                    time.sleep(0.025)
+        for host, start in starts.items():
+            _RECORD_RESERVED[host] = start + _RECORD_BLOCK
+            _RECORD_NUMBERS[host] = start
 
 
 def _reserve_record_block(host, cur):
@@ -1925,14 +2015,14 @@ def _next_record_number(host: str) -> int:
     if _deferring():                    # worker thread: the releaser assigns it later
         return _RID_PENDING + host
     if _in_hermetic_run():
-        with _STATE_LOCK:
+        with _RECORD_LOCK:
             cur = _RECORD_NUMBERS_HERMETIC.get(host)
             if cur is None:
                 cur = random.randint(50_000, 500_000)
             cur += 1
             _RECORD_NUMBERS_HERMETIC[host] = cur
             return cur
-    with _STATE_LOCK:
+    with _RECORD_LOCK:
         cur = _RECORD_NUMBERS.get(host)
         if cur is None or cur >= _RECORD_RESERVED.get(host, -1):
             cur = _reserve_record_block(host, cur)
