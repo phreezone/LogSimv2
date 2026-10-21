@@ -495,6 +495,9 @@ Two authoring notes, learned the hard way and worth knowing if you write your ow
 - Per-card threat level dropdowns stay in sync with backend state
 
 ### Performance
+- **Batched HTTP collector and Cribl sends** — many events per request (newline-delimited / gzip NDJSON, ≤1,000 events and ≤1 MiB per request) instead of one request per event. Against a 50 ms-latency collector: HTTP 145 → ~19,000 events/s, Cribl 143 → ~9,400 events/s. One event per request also could never exceed the collector's 400 requests/s limit.
+- **Per-transport sender lanes** — HTTP and Cribl have their own queues and sender pools (`BATCH_SEND_WORKERS`), so a slow collector no longer holds syslog behind it (1,500 syslog events beside an HTTP backlog: 10.4 s → 0.2 s)
+- **Hot-path caches** — memoised identity-cohort lookups (Exchange generation 1,000 → 20,000 events/s; other Microsoft feeds 2.5–3×) and a once-per-session AWS IAM pool merge (1.5×)
 - Persistent TCP syslog connections — reuses a single socket per (host, port) instead of connect/send/close per message
 - Cached boto3 S3 client — reuses HTTPS connection pool instead of creating a new session per upload
 - Rate-aware worker loop subtracts elapsed time from sleep interval so generate + send latency doesn't inflate cycle time
