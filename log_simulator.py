@@ -155,18 +155,37 @@ def load_modules():
 # ── Persistent Syslog TCP Connection Pool ──────────────────────────────────
 # Reuses a single TCP socket per (host, port) instead of opening a new
 # connection for every log line.  Reconnects automatically on failure.
+# Each (host, port) has its own lock: one socket must not interleave two writers'
+# bytes, but modules on different ports must not wait on each other. Before
+# 2026-10-21 one global lock serialized every syslog module (~6,400 events/s total).
 _syslog_connections: dict[tuple[str, int], socket.socket] = {}
 _syslog_last_used: dict[tuple[str, int], float] = {}
-_syslog_lock = threading.Lock()
+_syslog_locks: dict[tuple[str, int], threading.Lock] = {}
+_syslog_locks_guard = threading.Lock()
 
 # A cached TCP socket idle longer than this may have been silently dropped by the
 # broker/firewall (TCP half-open). Recycle it proactively so the first sends of a
 # run — which happen hours after the previous run — don't vanish into a dead socket.
 _SYSLOG_IDLE_MAX = 60.0
 
+# Broker VM syslog over TCP uses non-transparent framing ('\n' delimiter) with a 64 KB
+# per-message cap. A batch is written as whole lines, many per sendall, up to this many
+# bytes per write; a line is never split across writes.
+_SYSLOG_CHUNK_BYTES = max(1024, int(os.getenv("SYSLOG_BATCH_MAX_BYTES", str(256 * 1024))))
+_SYSLOG_MAX_MESSAGE_BYTES = 64 * 1024
+
+
+def _syslog_lock_for(key: tuple[str, int]) -> threading.Lock:
+    lock = _syslog_locks.get(key)
+    if lock is None:
+        with _syslog_locks_guard:
+            lock = _syslog_locks.setdefault(key, threading.Lock())
+    return lock
+
 
 def _get_syslog_sock(host: str, port: int) -> socket.socket:
-    """Return a persistent TCP socket for (host, port), recycling stale/idle ones."""
+    """Return a persistent TCP socket for (host, port), recycling stale/idle ones.
+    Caller holds that (host, port)'s lock."""
     key = (host, port)
     sock = _syslog_connections.get(key)
     now = time.time()
@@ -185,7 +204,7 @@ def _get_syslog_sock(host: str, port: int) -> socket.socket:
 
 
 def _close_syslog_sock(host: str, port: int) -> None:
-    """Close and discard the cached socket for (host, port)."""
+    """Close and discard the cached socket for (host, port). Caller holds its lock."""
     key = (host, port)
     _syslog_last_used.pop(key, None)
     sock = _syslog_connections.pop(key, None)
@@ -196,34 +215,69 @@ def _close_syslog_sock(host: str, port: int) -> None:
             pass
 
 
-def send_syslog_message(message, host, port, app_name="LogSim"):
-    """Send a message over a persistent TCP syslog connection.
-
-    Retries once on a fresh socket so a stale/half-open cached connection does
-    not silently drop the triggering message (the previous behaviour lost it).
-    """
-    payload = f"{message}\n".encode('utf-8')
+def _syslog_write(payload: bytes, host: str, port: int) -> bool:
+    """Write already-framed bytes to (host, port). Retries once on a fresh socket so a
+    stale/half-open cached connection does not silently drop the data."""
+    key = (host, port)
     last_err = None
-    for attempt in (1, 2):
-        try:
-            with _syslog_lock:
+    with _syslog_lock_for(key):
+        for attempt in (1, 2):
+            try:
                 sock = _get_syslog_sock(host, port)
                 sock.sendall(payload)
-                _syslog_last_used[(host, port)] = time.time()
-            if not _quiet_sends:
-                _tprint(f"Sending Syslog for {app_name}: {host}:{port}")
-            return
-        except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, OSError) as e:
-            last_err = e
-            _close_syslog_sock(host, port)  # force a fresh connection, then retry once
-        except Exception as e:
-            last_err = e
-            _close_syslog_sock(host, port)
-            break
+                _syslog_last_used[key] = time.time()
+                return True
+            except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, OSError) as e:
+                last_err = e
+                _close_syslog_sock(host, port)  # force a fresh connection, then retry once
+            except Exception as e:
+                last_err = e
+                _close_syslog_sock(host, port)
+                break
     if isinstance(last_err, ConnectionRefusedError):
         _tprint(f"ERROR: Connection refused for Syslog. Is the Broker VM at {host}:{port} listening?")
     else:
         _tprint(f"ERROR: syslog send to {host}:{port} failed after retry ({last_err})")
+    return False
+
+
+def send_syslog_message(message, host, port, app_name="LogSim"):
+    """Send a message over a persistent TCP syslog connection."""
+    if _syslog_write(f"{message}\n".encode('utf-8'), host, port) and not _quiet_sends:
+        _tprint(f"Sending Syslog for {app_name}: {host}:{port}")
+
+
+def send_syslog_batch(messages, host, port, app_name="LogSim"):
+    """Send many messages over the persistent TCP syslog connection: newline-framed,
+    whole lines packed into one sendall per ~_SYSLOG_CHUNK_BYTES. Returns the number of
+    messages in chunks that were written."""
+    sent = 0
+    chunk: list[bytes] = []
+    size = 0
+    oversize = 0
+
+    def flush():
+        nonlocal sent, chunk, size
+        if chunk and _syslog_write(b"".join(chunk), host, port):
+            sent += len(chunk)
+        chunk, size = [], 0
+
+    for m in messages:
+        if not m:
+            continue
+        line = f"{m}\n".encode('utf-8')
+        if len(line) > _SYSLOG_MAX_MESSAGE_BYTES:
+            oversize += 1  # sent intact, as send_syslog_message would; the broker may cut it
+        if size and size + len(line) > _SYSLOG_CHUNK_BYTES:
+            flush()
+        chunk.append(line)
+        size += len(line)
+    flush()
+    if oversize:
+        _tprint(f"WARNING: {oversize} {app_name} syslog message(s) exceed 64 KB; the broker may truncate them")
+    if sent and not _quiet_sends:
+        _tprint(f"Sending Syslog for {app_name}: {host}:{port} ({sent} messages)")
+    return sent
 
 def send_http_message(message, module, config):
     """Send one event to the module's HTTP collector (see send_http_batch)."""
@@ -1288,8 +1342,9 @@ def process_and_send(log_content, module, config, event_name=None):
         syslog_host = os.getenv('SYSLOG_HOST')
         syslog_port = int(module_config.get("syslog_port", config.get('SYSLOG_PORT', '514')))
         if isinstance(log_content, list):
-            for msg in log_content:
-                send_syslog_message(msg, syslog_host, syslog_port, app_name=module.NAME)
+            # Many newline-framed lines per write, not one write per event (send_syslog_batch).
+            send_syslog_batch(log_content, syslog_host, syslog_port, app_name=module.NAME)
+            for _ in log_content:
                 _increment_throughput()
         elif isinstance(log_content, str):
             send_syslog_message(log_content, syslog_host, syslog_port, app_name=module.NAME)
