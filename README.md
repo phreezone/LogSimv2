@@ -487,7 +487,7 @@ Two authoring notes, learned the hard way and worth knowing if you write your ow
 
 ### Flask Dashboard
 - Full web UI with real-time module control, metrics, event timeline, and threat breakdown
-- Per-module and global rate sliders (logarithmic scale: 0.1/sec to 10/sec)
+- Per-module and global rate sliders (logarithmic scale: 0.1/sec to 10,000/sec)
 - Per-module and global threat level controls with live updates (no restart needed)
 - Job scheduler for timed module start/stop, rate changes, and scenario execution
 - Health check system validating all transport connections and credentials

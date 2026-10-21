@@ -447,7 +447,7 @@
     <div class="global-level" style="gap:6px;">
       <span class="label-text">Rate:</span>
       <input type="range" id="global-rate-slider" class="rate-slider" min="0" max="100"
-             step="1" value="50" style="width:90px;"
+             step="1" value="20" style="width:90px;"
              oninput="updateGlobalRateDisplay(this)"
              onchange="setGlobalRate(this.value)" />
       <span id="global-rate-display" style="min-width:58px;font-size:13px;color:var(--text-muted);">1.0 / sec</span>
@@ -812,9 +812,9 @@
 
       <div class="sched-field">
         <label>Event Rate <span id="baduser-rate-disp" style="color:var(--accent);font-weight:600;">2.0 / sec</span></label>
-        <input type="range" id="baduser-rate-slider" class="rate-slider" min="0" max="100" step="1" value="65"
+        <input type="range" id="baduser-rate-slider" class="rate-slider" min="0" max="100" step="1" value="26"
                oninput="document.getElementById('baduser-rate-disp').textContent=epsLabel(sliderToEps(this.value))" />
-        <div class="rate-ticks"><span>Slow</span><span>Normal</span><span>Fast</span></div>
+        <div class="rate-ticks"><span>0.1/s</span><span>30/s</span><span>10k/s</span></div>
       </div>
 
       <div class="sched-field">
@@ -1227,7 +1227,7 @@
                value="${epsToSlider(1 / m.event_interval)}"
                oninput="updateRateDisplay(this)"
                onchange="setRate('${escHtml(m.name)}', this.value)" />
-        <div class="rate-ticks"><span>Slow</span><span>Normal</span><span>Fast</span></div>
+        <div class="rate-ticks"><span>0.1/s</span><span>30/s</span><span>10k/s</span></div>
       </div>
       <div class="threat-breakdown-section" style="${m.total_threats > 0 ? '' : 'display:none'}">
         <button class="breakdown-toggle" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
@@ -1271,14 +1271,16 @@
 
   // ── Actions ───────────────────────────────────────────────────────────────
   // ── Rate slider helpers ───────────────────────────────────────────────────
-  // Logarithmic scale: slider 0–100, midpoint 50 = 1 event/sec
-  // Formula: eps = 10^(pos/50 - 1)  →  0.1/sec … 1/sec … 10/sec
-  function sliderToEps(pos)  { return Math.pow(10, parseFloat(pos) / 50 - 1); }
-  function epsToSlider(eps)  { return Math.round((Math.log10(Math.max(0.01, eps)) + 1) * 50); }
+  // Logarithmic scale: slider 0–100, 20 steps per decade, 20 = 1 event/sec
+  // Formula: eps = 10^(pos/20 - 1)  →  0.1/sec … 1/sec … 100/sec … 10,000/sec
+  // (was 0.1–10/sec; the API accepts event_interval down to 0.0001 s).
+  function sliderToEps(pos)  { return Math.pow(10, parseFloat(pos) / 20 - 1); }
+  function epsToSlider(eps)  { return Math.min(100, Math.max(0, Math.round((Math.log10(Math.max(0.01, eps)) + 1) * 20))); }
   function epsLabel(eps) {
     if (eps < 1) return `${eps.toFixed(2)} / sec`;
     if (eps < 10) return `${eps.toFixed(1)} / sec`;
-    return `${Math.round(eps)} / sec`;
+    if (eps < 1000) return `${Math.round(eps)} / sec`;
+    return `${(eps / 1000).toFixed(eps < 10000 ? 1 : 0)}k / sec`;
   }
 
   function updateRateDisplay(slider) {
@@ -1595,11 +1597,11 @@
         <select id="sched-level" class="sched-input">${opts}</select></div>`;
     }
     if (SCHED_RATE_TYPES.has(type)) {
-      const eps = sliderToEps(50);
+      const eps = sliderToEps(20);
       html += `<div class="sched-field"><label>Rate override <span id="sched-rate-disp" style="color:var(--accent);font-weight:600;">${epsLabel(eps)}</span></label>
-        <input type="range" id="sched-rate-slider" class="rate-slider" min="0" max="100" step="1" value="50"
+        <input type="range" id="sched-rate-slider" class="rate-slider" min="0" max="100" step="1" value="20"
           oninput="document.getElementById('sched-rate-disp').textContent=epsLabel(sliderToEps(this.value))"/>
-        <div class="rate-ticks"><span>Slow</span><span>Normal</span><span>Fast</span></div></div>`;
+        <div class="rate-ticks"><span>0.1/s</span><span>30/s</span><span>10k/s</span></div></div>`;
     }
     if (SCHED_SCENARIO_TYPES.has(type)) {
       // populated after scenarios load
