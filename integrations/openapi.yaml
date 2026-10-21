@@ -154,6 +154,24 @@ paths:
         "404":
           description: Unknown run
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /campaigns/random:
+    get:
+      summary: State of the random identity-campaign runner (enabled, rate, last/next launch)
+      responses: { "200": { description: OK } }
+    post:
+      summary: Turn random identity campaigns on or off (~1 every 12 h, >= 2 h apart by default)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        "200": { description: OK }
+        "400": { description: "body must be {\"enabled\": true|false}" }
   /modules:
     get:
       summary: List modules and their state
