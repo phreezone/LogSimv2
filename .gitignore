@@ -66,14 +66,10 @@ domain_cache/
 
 # Local validation harnesses (not part of the shipped simulator)
 #
-# Every test and validation script lives in _local_validation/ so it can be excluded
-# from a sync or release without hunting through tests/. Note what this entry does and
-# does not do: git ignores UNTRACKED paths only, so the scripts that were already
-# committed stay tracked and their changes still appear in a diff. What this stops is
-# a NEW validation script being added by accident -- which is the common case, since
-# these get written constantly while chasing a detection.
-#
-# To take an already-tracked one out of the repo as well:
+# Every test and validation script lives in _local_validation/ and stays local: none of
+# it is tracked (the 15 committed before this entry existed were untracked on
+# 2026-10-21). git ignores UNTRACKED paths only, so if a script is ever force-added
+# (git add -f), take it back out with:
 #     git rm --cached _local_validation/<name>.py
 _local_validation/
 
