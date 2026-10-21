@@ -143,8 +143,12 @@ incident. Steps go to the Graph sign-in, Graph audit and O365 feeds over Cribl, 
 Windows over WEC. The Windows steps are skipped cleanly when `WEC_BROKER_URL` /
 `WEC_PFX_PATH` aren't set.
 
-- **Opt-in:** it only runs when selected. It emits nothing in Benign Traffic Only, and
-  fires rarer than single-feed episodes: a campaign is one high-signal incident.
+- **Dashboard:** each campaign is an entry under **Threats & Scenarios → Run Attack
+  Scenario** ("Identity Campaign — …"); there is no module card. A run fails visibly if
+  the Cribl receiver rejects a batch.
+- **CLI:** still loadable as the opt-in coordinator module. It emits nothing in Benign
+  Traffic Only and fires rarer than single-feed episodes: a campaign is one high-signal
+  incident.
 - **Campaigns (21):** BEC, ransomware, OAuth app abuse, illicit OAuth consent, stale
   account reactivation, insider threat, hybrid on-prem→cloud, refresh-token→PRT
   transition, AiTM token theft, spray→compromise→persist, golden SAML federation,
