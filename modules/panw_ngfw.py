@@ -20,10 +20,15 @@
 #
 # Do NOT send product=ngfw_cef on the *derived* ingest route — that lands in
 # panw_ngfw_cef_raw with no_hit=drop and is discarded.  The NGFW_CEF product here is the
-# native Syslog-Collector custom format, parsed by `__firewall_type`, which is the
-# supported path.  An `rt=<epoch-ms>` extension is also emitted so bursts can be
-# back-dated (the broker honours CEF `rt` during generic extraction), letting the
-# detectors' 14-day activation / 30-day training windows be seeded in minutes.
+# native Syslog-Collector custom format, routed by `__firewall_type`, which is the
+# supported path.  The collector routes on that key but does not rewrite the body: every
+# key lands as a column of the same name, so keys must use the dataset's column names.
+#
+# NO BACK-DATING on this path (measured 2026-10-22): _time is always the ingestion time.
+# Neither `rt` nor `__timestamp` (epoch ms, "YYYY/MM/DD HH:MM:SS", ISO-Z, or PAN's
+# cef-formatted time) moves it; the intended time survives only in time_generated / rt.
+# So anything a detector must see on SEPARATE DAYS (recurring beacons, an SSH habit) has to
+# be emitted on real days while the module runs: see _DAILY_EVENTS and _SSH_HABIT_USERS.
 #
 # XDM field mapping (native PAN-OS traffic modeling rule)
 #   source_ip / source_port            -> xdm.source.ipv4|ipv6 / port
@@ -67,7 +72,7 @@ try:
                                         rare_internal_host, rare_known_host, new_ftp_server_host,
                                         known_internal_hosts, sweep_targets, stable_external_ip,
                                         rare_source_host, rare_domain, NONSTD_HTTPS_PORTS, exfil_destination,
-                                        correlated_or_random_user, beacon_targets, recurring_host)
+                                        correlated_or_random_user, beacon_targets, recurring_host, stable_subset)
     from modules import resolver
     from modules import threat_domains
     from modules import mgmt_plane
@@ -78,7 +83,7 @@ except ImportError:
                                 rare_internal_host, rare_known_host, new_ftp_server_host,
                                 known_internal_hosts, sweep_targets, stable_external_ip,
                                 rare_source_host, rare_domain, NONSTD_HTTPS_PORTS, exfil_destination,
-                                correlated_or_random_user, beacon_targets, recurring_host)
+                                correlated_or_random_user, beacon_targets, recurring_host, stable_subset)
     import resolver
     import threat_domains
     import mgmt_plane
@@ -330,11 +335,16 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
         "__firewall_type": fw_type or f"firewall.{log_type.lower()}",
         "__timestamp":     iso,
         "__tz":            "+00:00",
-        "log_type":        log_type,
+        # The Syslog Collector routes on __firewall_type but does NOT rename the body: each
+        # key lands as a column of that name. So the documented `subtype` is sent alongside
+        # `sub_type`, the column the dataset (and its modeling rule's FAILED-on-deny/drop
+        # outcome) actually reads, and log_type is lowercase as in the live CLCS rows.
+        "log_type":        log_type.lower(),
         "subtype":         subtype,
+        "sub_type":        subtype,
         "log_time":        iso,
         "time_generated":  iso,
-        "rt":              str(int(t * 1000)),   # epoch ms — broker honours CEF rt for _time
+        "rt":              str(int(t * 1000)),   # event time; _time is still the ingest time
         "log_source_id":   serial,
         "log_source_name": name,
         "sequence_no":     _seqno(),
@@ -448,6 +458,7 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
     f.update({
         "action":            action,
         "uri":               f"{domain}{path}",
+        "url_domain":        domain,      # no parser derives it from uri on this path
         "url_category":      cat,
         "url_category_list": f"{cat},{risk}",
         "http_method":       method or ("unknown" if f.get("app") == "ssl" else "get"),
@@ -512,8 +523,43 @@ def _benign_external(config, session_context):
     return line
 
 
+# Users with an everyday SSH habit (admins/engineers reaching their usual jump host). The
+# "Uncommon SSH session" detector judges an SSH session against the source's OWN SSH
+# history, and with no back-dating that history has to accrue on real days in the benign
+# baseline; _sim_uncommon_ssh then comes from one of these users.
+_SSH_HABIT_N = 8
+
+
+def _ssh_habit_users(session_context):
+    return stable_subset(list(session_context or {}), "panw_ssh_habit", n=_SSH_HABIT_N)
+
+
+def _usual_jump_host(config, user):
+    hosts = (mgmt_plane.conf(config).get("jump_hosts") or config.get("internal_servers")
+             or ["10.0.30.30"])
+    return hosts[int(hashlib.sha256(f"jump|{user}".encode()).hexdigest(), 16) % len(hosts)]
+
+
+def _benign_ssh_habit(config, session_context):
+    """One of the SSH-habit users opens an ordinary SSH session to their usual jump host."""
+    user = random.choice(_ssh_habit_users(session_context))
+    info = get_user_by_name(session_context, user, "workstation")
+    if not info:
+        return None
+    jump = _usual_jump_host(config, user)
+    f = _traffic_fields(config, info["ip"], jump, 22, "ssh", shost=info.get("hostname"), suser=user,
+                        dhost=resolver.internal_fqdn(config, jump), from_zone="trust", to_zone="trust",
+                        bytes_sent=random.randint(3000, 40000), bytes_received=random.randint(5000, 90000),
+                        duration_s=random.randint(60, 1800))
+    return _format_cef(config, "end", f)
+
+
 def _benign_internal(config, session_context):
     """East-west session: workstation -> internal server (AD / file / RDP baseline)."""
+    if session_context and random.random() < 0.04:
+        line = _benign_ssh_habit(config, session_context)
+        if line:
+            return line
     src_ip, user, shost = _user_src(config, session_context)
     app = random.choices([a for a, _ in _INTERNAL_APP_MIX],
                          weights=[w for _, w in _INTERNAL_APP_MIX])[0]
@@ -589,7 +635,10 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "uncommon_ssh",         "weight": 4,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established"},
     {"event": "unusual_ssh",          "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH Activity"},
     {"event": "ssh_proxy",            "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH activity that resembles SSH proxy"},
-    {"event": "rare_ssh_external",    "weight": 2,  "analytic": True,  "xsiam_alert": "Rare process created an SSH session to an uncommon external host"},
+    # "Rare process created an SSH session ..." keys on the PROCESS, which a firewall log
+    # cannot carry (docs/firewall-analytics.md §4); it has never fired in this tenant from
+    # any feed. Kept as realistic traffic, not offered on demand.
+    {"event": "rare_ssh_external",    "weight": 2,  "analytic": False, "xsiam_alert": None},
     {"event": "recurring_rare_ip",    "weight": 4,  "analytic": True,  "xsiam_alert": "Recurring access to rare IP"},
     {"event": "recurring_rare_domain","weight": 4,  "analytic": True,  "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
     {"event": "rare_domain_comm",     "weight": 3,  "analytic": True,  "xsiam_alert": "Abnormal Communication to a Rare Domain"},
@@ -884,26 +933,22 @@ def _sim_uncommon_ssh(config, session_context):
     """An SSH session to a host this source has never used SSH with.
 
     "Uncommon" is judged against the source's OWN SSH history, and a host with no SSH
-    history at all does not fire (a repeat from a host with no prior SSH stays silent). So
-    the host first gets an ordinary SSH habit -- back-dated sessions to its usual jump host
-    over the past weeks -- and only then reaches a rare internal destination."""
-    src, user, shost = _threat_actor(config, session_context)
-    usual = random.choice(mgmt_plane.conf(config).get("jump_hosts") or config.get("internal_servers")
-                          or ["10.0.30.30"])
-    out = []
-    for day in sorted(random.sample(range(3, 25), random.randint(6, 10)), reverse=True):
-        ts = time.time() - day * 86400 - random.randint(0, 6 * 3600)
-        out.append(_conn(config, src, usual, 22, "ssh", suser=user, shost=shost,
-                         dhost=resolver.internal_fqdn(config, usual), from_zone="trust", to_zone="trust",
-                         bytes_sent=random.randint(3000, 40000), bytes_received=random.randint(5000, 90000),
-                         duration_s=random.randint(60, 1800), ts=ts))
+    history does not fire. The source is therefore one of the SSH-habit users, whose
+    everyday SSH to their usual jump host the benign baseline builds on real days; today
+    they reach a rare internal destination instead."""
+    habit = _ssh_habit_users(session_context)
+    info = get_user_by_name(session_context, random.choice(habit), "workstation") if habit else None
+    if info:
+        src, user, shost = info["ip"], info["username"], info.get("hostname")
+    else:
+        src, user, shost = _threat_actor(config, session_context)
+    usual = _usual_jump_host(config, user)
     dst = rare_internal_host(config, exclude=(src, usual))
-    print(f"    - PAN NGFW simulating: uncommon SSH {src} -> rare internal {dst} (after {len(out)} days of SSH to {usual})")
-    out.append(_conn(config, src, dst, 22, "ssh", suser=user, shost=shost,
-                     dhost=resolver.internal_fqdn(config, dst), from_zone="trust", to_zone="trust",
-                     bytes_sent=random.randint(3000, 60000), bytes_received=random.randint(4000, 120000),
-                     duration_s=random.randint(30, 600)))
-    return out
+    print(f"    - PAN NGFW simulating: uncommon SSH {src} -> rare internal {dst} (usual: {usual})")
+    return [_conn(config, src, dst, 22, "ssh", suser=user, shost=shost,
+                  dhost=resolver.internal_fqdn(config, dst), from_zone="trust", to_zone="trust",
+                  bytes_sent=random.randint(3000, 60000), bytes_received=random.randint(4000, 120000),
+                  duration_s=random.randint(30, 600))]
 
 
 def _sim_unusual_ssh(config, session_context):
@@ -930,18 +975,21 @@ def _sim_unusual_ssh(config, session_context):
 
 
 def _sim_ssh_proxy(config, session_context):
-    """A host both receives and initiates SSH within a window (SSH-proxy shape)."""
+    """A host both receives and initiates SSH within a window (SSH-proxy shape).
+
+    Relay volume stays modest (1-20 MB each way): at 20-200 MB the outbound leg read as
+    exfiltration and fired Large Upload (Generic) instead (detector test, 2026-10-22)."""
     src, user, shost = _threat_actor(config, session_context)
     inbound = random_external_ip()
     dom, outbound = _rare_ext(config, f"sshproxy|{user}")
     t0 = time.time() - 600
+    mb = lambda: random.randint(1, 20) * 1024 * 1024
     return [
         _conn(config, inbound, src, 22, "ssh", duser=user, dhost=shost, from_zone="untrust",
-              to_zone="trust", bytes_sent=random.randint(20, 200) * 1024 * 1024,
-              bytes_received=random.randint(20, 200) * 1024 * 1024, duration_s=random.randint(1800, 10800), ts=t0),
+              to_zone="trust", bytes_sent=mb(), bytes_received=mb(),
+              duration_s=random.randint(1800, 10800), ts=t0),
         _conn(config, src, outbound, 22, "ssh", suser=user, shost=shost, dhost=dom,
-              bytes_sent=random.randint(20, 200) * 1024 * 1024, bytes_received=random.randint(20, 200) * 1024 * 1024,
-              duration_s=random.randint(1800, 10800), ts=t0 + 60),
+              bytes_sent=mb(), bytes_received=mb(), duration_s=random.randint(1800, 10800), ts=t0 + 60),
     ]
 
 
@@ -953,7 +1001,39 @@ def _sim_rare_ssh_external(config, session_context):
                   duration_s=random.randint(30, 1200))]
 
 
-# --- Recurring / beaconing (back-dated across days so the baseline accrues) ------------
+# --- Recurring / beaconing ------------------------------------------------------------
+# These detectors want the SAME (host, destination) pair "repeatedly over many days". With
+# no back-dating on this path (see the header), each emission is ONE day of beacons from
+# one fixed host to its persistent rare destination, and _DAILY_EVENTS makes the module
+# emit each of them once per UTC day while it runs, so the pair recurs on real days.
+_DAILY_EVENTS = ("recurring_rare_ip", "recurring_rare_domain", "ddns_access")
+_last_daily_emit = {}
+
+
+def _beacon_host(config, session_context, key):
+    """The one fixed host (same on every run) that owns the beacon for `key`."""
+    hit = recurring_host(key, n=1) if recurring_host else None
+    return hit if hit else _threat_actor(config, session_context)
+
+
+def _beacon_day(config, src, user, shost, ip, port, domain=None, url_cat="unknown"):
+    """Today's beacons: 3-6 short sessions at a jittered cadence over the last ~2 hours."""
+    n = random.randint(3, 6)
+    step = random.randint(900, 1800)
+    t = time.time() - n * step
+    out = []
+    for _ in range(n):
+        t += step + random.randint(-120, 120)
+        kw = dict(suser=user, shost=shost, bytes_sent=random.randint(400, 4000),
+                  bytes_received=random.randint(400, 4000), duration_s=random.randint(1, 30),
+                  ts=min(t, time.time()))
+        if domain:
+            out += _web(config, src, ip, port, "ssl", domain, url_cat=url_cat, **kw)
+        else:
+            out.append(_conn(config, src, ip, port, "ssl", url_cat=url_cat, **kw))
+    return out
+
+
 def _beacon_dst(config, key, src):
     """A stable rare external (ip, domain) this src beacons to — persists across restarts."""
     store = beacon_targets("panw_ngfw")
@@ -969,35 +1049,28 @@ def _beacon_dst(config, key, src):
     return ip, dom
 
 
+def _beacon_port(key, src, ports):
+    """One port per beacon, the same every day."""
+    return ports[int(hashlib.sha256(f"{key}|{src}".encode()).hexdigest(), 16) % len(ports)]
+
+
 def _sim_recurring_rare_ip(config, session_context):
-    """Same source reaches the same rare external IP on many back-dated days (C2 cadence)."""
-    hit = recurring_host("panw_rare_ip") if recurring_host else None
-    src, user, shost = hit if hit else _threat_actor(config, session_context)
+    """One fixed host -> its persistent rare IP, today's beacons (no domain: IP-only C2)."""
+    src, user, shost = _beacon_host(config, session_context, "panw_rare_ip")
     ip, _dom = _beacon_dst(config, "rare_ip", src)
-    print(f"    - PAN NGFW simulating: recurring access to rare IP {src} -> {ip}")
-    out = []
-    for day in range(random.randint(6, 12)):
-        ts = time.time() - day * 86400 - random.randint(0, 3600)
-        out.append(_conn(config, src, ip, random.choice([443, 8443, 4443]), "ssl", suser=user,
-                         shost=shost, bytes_sent=random.randint(400, 4000),
-                         bytes_received=random.randint(400, 4000), duration_s=random.randint(1, 30),
-                         ts=ts, url_cat="unknown"))
-    return out
+    port = _beacon_port("rare_ip", src, [443, 8443, 4443])
+    print(f"    - PAN NGFW simulating: daily beacon to rare IP {src} -> {ip}:{port}")
+    return _beacon_day(config, src, user, shost, ip, port)
 
 
 def _sim_recurring_rare_domain(config, session_context):
-    hit = recurring_host("panw_rare_dom") if recurring_host else None
-    src, user, shost = hit if hit else _threat_actor(config, session_context)
+    """One fixed host -> its persistent rare domain (with URL logs), today's beacons. The
+    'less common port' variation is the one that fires here from the real pa440."""
+    src, user, shost = _beacon_host(config, session_context, "panw_rare_dom")
     ip, dom = _beacon_dst(config, "rare_dom", src)
-    print(f"    - PAN NGFW simulating: recurring access to rare domain {src} -> {dom}")
-    port = random.choice([443, 8080, 8443])         # one beacon, one port, every day
-    out = []
-    for day in range(random.randint(6, 12)):
-        ts = time.time() - day * 86400 - random.randint(0, 3600)
-        out += _web(config, src, ip, port, "ssl", dom, path="/", url_cat="command-and-control",
-                    suser=user, shost=shost, bytes_sent=random.randint(400, 4000),
-                    bytes_received=random.randint(400, 4000), duration_s=random.randint(1, 30), ts=ts)
-    return out
+    port = _beacon_port("rare_dom", src, [8443, 8080, 4443])
+    print(f"    - PAN NGFW simulating: daily beacon to rare domain {src} -> {dom}:{port}")
+    return _beacon_day(config, src, user, shost, ip, port, domain=dom, url_cat="command-and-control")
 
 
 def _sim_rare_domain_comm(config, session_context):
@@ -1010,21 +1083,15 @@ def _sim_rare_domain_comm(config, session_context):
 
 
 def _sim_ddns_access(config, session_context):
-    hit = recurring_host("panw_ddns") if recurring_host else None
-    src, user, shost = hit if hit else _threat_actor(config, session_context)
+    """One fixed host -> its persistent dynamic-DNS name (with URL logs), today's beacons."""
+    src, user, shost = _beacon_host(config, session_context, "panw_ddns")
     label = rare_domain(f"ddns|{src}").split(".")[0]
-    # Suffix stable per source, so every run extends the SAME recurring (host, domain) pair.
+    # Suffix stable per source, so every day extends the SAME recurring (host, domain) pair.
     suffix = _DDNS_SUFFIXES[int(hashlib.sha256(f"ddns|{src}".encode()).hexdigest(), 16) % len(_DDNS_SUFFIXES)]
     dom = f"{label}.{suffix}"
     ip = _rare_answer(dom)
-    print(f"    - PAN NGFW simulating: recurring dynamic-DNS access {src} -> {dom}")
-    out = []
-    for day in range(random.randint(5, 10)):
-        ts = time.time() - day * 86400 - random.randint(0, 3600)
-        out += _web(config, src, ip, 443, "ssl", dom, url_cat="dynamic-dns", suser=user, shost=shost,
-                    bytes_sent=random.randint(400, 5000), bytes_received=random.randint(400, 5000),
-                    duration_s=random.randint(1, 60), ts=ts)
-    return out
+    print(f"    - PAN NGFW simulating: daily beacon to dynamic-DNS {src} -> {dom}")
+    return _beacon_day(config, src, user, shost, ip, 443, domain=dom, url_cat="dynamic-dns")
 
 
 # --- Malware-shaped application traffic ------------------------------------------------
@@ -1278,8 +1345,19 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     interval = _get_threat_interval(threat_level, config)
     now = time.time()
     if threat_level == "Insane" and random.random() < 0.8:
-        return _generate_threat_log(config, session_context)[0]
+        return _generate_threat_log(config, session_context, forced_event=_due_daily(now))[0]
     if interval > 0 and (now - last_threat_event_time) > interval:
         last_threat_event_time = now
-        return _generate_threat_log(config, session_context)[0]
+        return _generate_threat_log(config, session_context, forced_event=_due_daily(now))[0]
     return _generate_benign_log(config, session_context)
+
+
+def _due_daily(now):
+    """The first _DAILY_EVENTS entry not yet emitted this UTC day (claimed), else None so the
+    slot stays a weighted draw. Resets on restart, which at worst repeats a beacon once in a
+    day; each of these detectors dedups at >= 1 day."""
+    today = int(now // 86400)
+    due = next((e for e in _DAILY_EVENTS if _last_daily_emit.get(e) != today), None)
+    if due:
+        _last_daily_emit[due] = today
+    return due

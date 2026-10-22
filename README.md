@@ -255,7 +255,7 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | Cisco ASA Firewall | Syslog (TCP) | 6 types (office traffic, DHCP, DNS, inbound block, VPN, connections) + management plane (CLI admin sessions, nightly backup, SNMP polling) | 38 (29 on demand) | [docs/modules/cisco-asa.md](docs/modules/cisco-asa.md) |
 | Cisco Firepower | Syslog (TCP) | 14 types (web, FTP, SSH, SMB, RDP, DNS, VPN, mail, connections) + management plane | 46 (30 on demand) | [docs/modules/cisco-firepower.md](docs/modules/cisco-firepower.md) |
 | Fortinet FortiGate | Syslog (TCP) | 10 types (traffic forward, web filter, DNS, email, inbound block, VPN, connections) + management plane | 49 (32 on demand) | [docs/modules/fortinet.md](docs/modules/fortinet.md) |
-| Palo Alto Networks NGFW | Syslog (TCP, CEF) | Traffic logs (Internet egress, internal east-west, perimeter deny) → `panw_ngfw_traffic_raw` | 49 traffic-log detectors (33 on demand) | [docs/modules/panw-ngfw.md](docs/modules/panw-ngfw.md) |
+| Palo Alto Networks NGFW | Syslog (TCP, CEF) | Traffic logs (Internet egress, internal east-west, perimeter deny) → `panw_ngfw_traffic_raw`, plus URL logs → `panw_ngfw_url_raw` | 37 (32 on demand; 5 confirmed firing in-tenant) | [docs/modules/panw-ngfw.md](docs/modules/panw-ngfw.md) |
 | Zscaler Web Gateway | Syslog (TCP) | 17 types (web, DNS, email, FTP, firewall, VPN, cloud app, DLP, sandbox) | 38 (28 on demand) | [docs/modules/zscaler.md](docs/modules/zscaler.md) |
 | Apache httpd | Syslog (TCP) | 5 types | 12 attack types | [docs/modules/httpd.md](docs/modules/httpd.md) |
 | Infoblox NIOS | Syslog (TCP) | 15 types | 11 types | [docs/modules/infoblox.md](docs/modules/infoblox.md) |

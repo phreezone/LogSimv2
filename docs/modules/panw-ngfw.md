@@ -29,14 +29,25 @@ Its custom log format emits **literal key names** (`source_ip`, `dest_port`, `ap
 `NGFW_CEF` and the native parser routes the event by the `__firewall_type` discriminator plus
 `log_type`/`subtype`.
 
-> **Routing caveat.** `NGFW_CEF` here is the **native Syslog-Collector custom format** parsed
+> **Routing caveat.** `NGFW_CEF` here is the **native Syslog-Collector custom format** routed
 > by `__firewall_type`. Do **not** confuse it with the *derived* ingest route (CEF vendor
 > `panw`, product `ngfw_cef`), which lands in `panw_ngfw_cef_raw` with `no_hit=drop` and is
-> discarded. An `rt=<epoch-ms>` extension is emitted so bursts can be back-dated — the broker
-> honours CEF `rt` as `_time` during generic extraction, letting the detectors' 14-day
-> activation / 30-day training windows be seeded in minutes. **Open question for the canary:**
-> whether the native traffic-log analytics evaluate *syslog-delivered* PAN logs, or only the
-> CLCS/direct-collector path (XDM mapping is not sufficient on its own).
+> discarded.
+
+What the collector does with the body (measured in-tenant, 2026-10-22):
+
+- **Routing works:** `firewall.traffic` lands in `panw_ngfw_traffic_raw`, `firewall.url` in
+  `panw_ngfw_url_raw`, and XDR Analytics evaluate it (see *Detector coverage* below).
+- **The body is not rewritten.** The `__firewall_type` key is consumed for routing, but every
+  other key becomes a column of exactly that name (plus `cefDevice*` columns). So keys must
+  use the dataset's real column names: the module sends `sub_type` (the column the modeling
+  rule's FAILED-on-deny/drop outcome reads) alongside the documented `subtype`, sends
+  `url_domain` alongside `uri` on URL logs, and lowercases `log_type` as in the CLCS rows.
+- **No back-dating.** `_time` is always the ingestion time. Neither `rt` nor `__timestamp`
+  (tried as epoch ms, `YYYY/MM/DD HH:MM:SS`, ISO-8601 `Z`, and PAN's cef-formatted time)
+  moves it; the intended time survives only in `time_generated` / `rt`. Anything a detector
+  must see on **separate days** has to be emitted on real days while the module runs (see
+  *Daily events* below).
 
 Syslog PRI is `<14>` (facility `LOG_USER`=1×8 + notice=6), matching PAN-OS's default syslog
 facility.
@@ -74,6 +85,22 @@ lowercase. The top App-IDs are `dns-base`, `ssl`, `web-browsing` (often on 8080)
 `ldap`. DNS-enrichment fields (`dns_query_name` etc.) are **not** present on traffic rows —
 they are EAL-only. No real IPs/users/hosts are copied into the generator; only shapes are.
 
+## URL logs
+
+PAN traffic logs carry addresses only; the domain lives in the URL-filtering log. The module
+writes one for web sessions, keyed to the traffic log by `session_id`:
+
+```
+CEF:0|PANW|NGFW_CEF|<sw>|url|threat|1| __firewall_type=firewall.url log_type=threat
+    subtype=url sub_type=url action=alert uri=<host><path> url_domain=<host>
+    url_category=.. url_category_list=<cat>,<low|high>-risk http_method=unknown threat_id=9999 ..
+```
+
+Shape learned from the live `panw_ngfw_url_raw` rows (`action=alert` for an allowed, logged
+URL; `http_method=unknown` for undecrypted SSL). About 35% of benign web sessions emit one, and
+every domain-based threat does. In this tenant the rare-domain detectors have fired only from
+PANW data that names the domain, which is what these logs provide.
+
 ## Benign mix
 
 Dispatched from `_generate_benign_log`:
@@ -105,66 +132,87 @@ The module shares the simulation's identity/network model (`session_utils`, `res
 ## Threat scenarios
 
 Dispatched from `_generate_threat_log` (weighted) or forced by name via `scenario_event`.
-33 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector and
-are offered on demand; 4 further events are realistic network patterns kept for hunts /
-correlation but **not** offered on demand (their detectors need EAL-decoded fields a CEF
-traffic log cannot carry).
+32 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector and
+are offered on demand; 5 further events are realistic network patterns kept for hunts /
+correlation but **not** offered on demand (their detectors need EAL-decoded fields or process
+data a CEF traffic log cannot carry).
 
-| Event | XSIAM analytic | Shape |
-|---|---|---|
-| `port_scan` | Port Scan | one host → ~20–24 privileged ports on one server |
-| `port_sweep` | Port Sweep | one privileged port across many hosts in ≥3 subnets |
-| `failed_connections` | Failed Connections | ~120 zero-byte denies to ~40 inactive hosts |
-| `large_upload_https` | Large Upload (HTTPS) | big `bytes_sent` over 443 to a rare dest |
-| `large_upload_https_nonstd` | Large Upload (HTTPS) | same over a non-standard HTTPS port |
-| `large_upload_smtp` | Large Upload (SMTP) | big upload over 587/25 |
-| `large_upload_ftp` | Large Upload (FTP) | big upload over 21 |
-| `large_upload_generic` | Large Upload (Generic) | big upload over an uncommon port |
-| `rare_rdp` | Rare RDP session to a remote host | RDP to a rarely-seen host |
-| `abnormal_rdp_rare_host` | Abnormal RDP … from a rarely seen host | RDP from a rare source host |
-| `rdp_unmanaged` | RDP from an unmanaged endpoint … | RDP from an unmanaged src in a managed subnet |
-| `rare_smb` | Rare SMB session to a remote host | SMB to a rarely-seen host |
-| `smb_from_dc` | Suspicious SMB connection from domain controller | DC → workstation SMB |
-| `dcsync_non_dc` | Possible DCSync from a non domain controller | DRSUAPI RPC from a non-DC → DC |
-| `rare_smtp` | Rare SMTP/S Session | SMTP to a rare external server |
-| `spam_bot` | Spam Bot Traffic | one host → 40–90 external SMTP servers |
-| `uncommon_ssh` | Uncommon SSH session was established | SSH to a rare host |
-| `unusual_ssh` | Unusual SSH Activity | long, high-volume SSH |
-| `ssh_proxy` | Unusual SSH activity that resembles SSH proxy | host both receives and initiates SSH |
-| `rare_ssh_external` | Rare process created an SSH session to an uncommon external host | SSH to a rare external host |
-| `recurring_rare_ip` | Recurring access to rare IP | same src → same rare IP, back-dated over days |
-| `recurring_rare_domain` | Abnormal Recurring Communications to a Rare Domain | beacon to a rare domain over days |
-| `rare_domain_comm` | Abnormal Communication to a Rare Domain | single comm to a newly-registered domain |
-| `ddns_access` | Recurring rare domain access to dynamic DNS domain | recurring access to a dyn-DNS domain |
-| `crypto_miner` | A Possible crypto miner was detected on a host | mining-pool traffic (stratum ports) |
-| `torrent` | A Torrent client was detected on a host | BitTorrent app |
-| `p2p_upload` | Upload pattern that resembles Peer to Peer traffic | asymmetric P2P upload |
-| `p2p_download` | Download pattern that resembles Peer to Peer traffic | asymmetric P2P download |
-| `ipfs` | Possible use of IPFS was detected | IPFS node traffic |
-| `rare_appid` | Rare AppID usage to a rare destination | rare App-ID to a rare dest |
-| `new_ftp_server` | New FTP Server | first-seen internal FTP server |
-| `new_admin_behavior` | New Administrative Behavior | host does admin services to many new dests |
-| `dormant_host_conn` | Abnormal connections to a dormant host … | new endpoint → long-inactive host |
-| `kerberos_preauth_pattern` | *(non-analytic)* | Kerberos (88) burst to a DC |
-| `ntlm_relay_pattern` | *(non-analytic)* | SMB auth fan-out (relay shape) |
-| `dns_tunnel_pattern` | *(non-analytic)* | high-volume DNS to one resolver |
-| `ldap_recon` | *(non-analytic)* | LDAP (389/636) enumeration against a DC |
+**Status** is the in-tenant result of the 2026-10-22 detector test (each event fired at the
+broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag and host):
 
-All multi-event sequences end at or before the current time; back-dated recurring bursts
-carry their `rt` across the past several days so the detectors' training history accrues.
+- ✅ **fired** from this module's PAN data
+- ⏳ **pending** — rebuilt on the shape that fires for a sibling firewall here; waiting on a
+  long test window or on real days of history (no back-dating on this path)
+- ✗ **never fired in this tenant from any feed** in 30 days, though the other firewall
+  modules have targeted it for weeks: most likely not reachable here, not a PAN-shape issue
+- ? **PAN-only detector, untested beyond one round** (no other feed can drive it)
+
+| Event | XSIAM analytic | Shape | Status |
+|---|---|---|---|
+| `port_scan` | Port Scan | one host → 20–24 distinct privileged ports on one server | ✅ *Suspicious port scan* |
+| `failed_connections` | Failed Connections | ~120 zero-byte denies to ~40 inactive hosts | ✅ |
+| `large_upload_generic` | Large Upload (Generic) | one large upload on an uncommon port | ✅ |
+| `large_upload_https` | Large Upload (HTTPS) | one 300–700 MB session to the shared exfil pool (`session_utils.exfil_destination`) + URL log | ✅ |
+| `large_upload_https_nonstd` | Large Upload (HTTPS) | same on 8443/4443/9443/10443/2083 | ✅ *…to non-standard port* |
+| `large_upload_smtp` | Large Upload (SMTP) | 300–700 MB over 587 to a rare server | ⏳ 1-day test |
+| `large_upload_ftp` | Large Upload (FTP) | 300–700 MB over 21 to a rare server | ⏳ 1-day test (fired once from Firepower) |
+| `spam_bot` | Spam Bot Traffic | one host → 40–90 external SMTP servers on 25 | ⏳ 3-day test |
+| `new_admin_behavior` | New Administrative Behavior | 8–11 novel (fresh internal host, remote-admin port) pairs over 30–75 min; ports 22/23/69/161/512–514/623/992, filled with 22/69 | ⏳ 12-hour test |
+| `unusual_ssh` | Unusual SSH Activity | 2–4 sessions of 30 min–4 h, 5–80 MB each way, to one stable rare host | ⏳ 2-hour test |
+| `uncommon_ssh` | Uncommon SSH session was established | an SSH-habit user (`_SSH_HABIT_USERS`) reaches a rare internal host | ⏳ needs the habit to accrue on real days |
+| `recurring_rare_domain` | Abnormal Recurring Communications to a Rare Domain | one fixed host → its persistent rare domain on a less-common port, with URL logs; daily | ⏳ needs real days (fires here from the real pa440) |
+| `recurring_rare_ip` | Recurring access to rare IP | one fixed host → its persistent rare IP; daily | ⏳ needs real days; ✗ never fired from any feed |
+| `ddns_access` | Recurring rare domain access to dynamic DNS domain | one fixed host → its persistent dyn-DNS name, with URL logs; daily | ⏳ needs real days |
+| `port_sweep` | Port Sweep | one privileged port across many hosts in ≥3 subnets | ✗ (the only "Port Sweep" here was a Check Point vendor alert) |
+| `rare_rdp` | Rare RDP session to a remote host | RDP to a rarely-seen host | ✗ |
+| `abnormal_rdp_rare_host` | Abnormal RDP … from a rarely seen host | RDP from a stable rare source host | ✗ |
+| `rare_smb` | Rare SMB session to a remote host | SMB to a rarely-seen host | ✗ |
+| `smb_from_dc` | Suspicious SMB connection from domain controller | DC → workstation SMB | ✗ |
+| `rare_smtp` | Rare SMTP/S Session | SMTP to a rare external server | ✗ |
+| `torrent` | A Torrent client was detected on a host | BitTorrent to many peers | ✗ |
+| `rare_appid` | Rare AppID usage to a rare destination | rare App-ID to a rare dest | ✗ |
+| `new_ftp_server` | New FTP Server | first-seen internal FTP server | ✗ |
+| `rare_domain_comm` | Abnormal Communication to a Rare Domain | one session to a newly-registered domain, with URL log | ✗ |
+| `dcsync_non_dc` | Possible DCSync from a non domain controller | DRSUAPI RPC (135 + dynamic) from a non-DC → DC | ? |
+| `rdp_unmanaged` | RDP from an unmanaged endpoint … | RDP from an unmanaged source in a managed subnet | ? |
+| `dormant_host_conn` | Abnormal connections to a dormant host … | new endpoint → long-inactive host | ? |
+| `crypto_miner` | A Possible crypto miner was detected on a host | mining-pool traffic on stratum ports | ? |
+| `ipfs` | Possible use of IPFS was detected | IPFS node traffic | ? |
+| `p2p_upload` / `p2p_download` | Upload / Download pattern that resembles P2P | asymmetric P2P transfers | ? |
+| `ssh_proxy` | Unusual SSH activity that resembles SSH proxy | host receives and initiates SSH, 1–20 MB each way | ? |
+| `rare_ssh_external` | *(non-analytic)* | SSH to a rare external host (detector keys on the process) | — |
+| `kerberos_preauth_pattern` | *(non-analytic)* | Kerberos (88) burst to a DC | — |
+| `ntlm_relay_pattern` | *(non-analytic)* | SMB auth fan-out (relay shape) | — |
+| `dns_tunnel_pattern` | *(non-analytic)* | high-volume DNS to one resolver | — |
+| `ldap_recon` | *(non-analytic)* | LDAP (389/636) enumeration against a DC | — |
+
+All sequences end at or before the current time.
+
+### Daily events
+
+Detectors that want the same (host, destination) pair "repeatedly over many days" cannot be
+fed by a back-dated burst on this path. `_DAILY_EVENTS` (`recurring_rare_ip`,
+`recurring_rare_domain`, `ddns_access`) claim the first threat slots of each UTC day, as Cisco
+ASA does, so each pair — one fixed host (`recurring_host(key, n=1)`) and its destination
+persisted in the beacon map — recurs on every real day the module runs at a threat level.
+Likewise `_SSH_HABIT_USERS` (8 stable users) make everyday SSH to their usual jump host part of
+the benign mix, giving `uncommon_ssh` the per-host SSH history its detector compares against.
 
 ## Detector coverage vs. the 49 PAN NGFW traffic-log alerts
 
-**Covered (33 on demand)** — every detector above that keys on connection metadata the CEF
-traffic log carries: reconnaissance (port scan/sweep, failed connections), exfil (the four
-Large Upload detectors), rare lateral/remote-access (RDP/SMB/SMTP/SSH families, SMB-from-DC,
-DCSync-over-the-wire), beaconing (recurring rare IP/domain, dynamic-DNS), application-shape
-(crypto miner, torrent, P2P, IPFS, rare AppID), and profiling (new FTP server, new admin
-behavior, dormant-host connections).
+**Confirmed (5 detectors, 6 alert names)** from this module's data: Suspicious port scan,
+Failed Connections, Large Upload (Generic), Large Upload (HTTPS) and its non-standard-port
+variation.
 
-**Not reachable over CEF syslog** — the remaining ~14 traffic-log alerts need
-Enhanced-Application-Logging (EAL) decoded protocol fields a CEF traffic log does not carry,
-or an XDR Agent:
+**What fires in this tenant at all.** A 30-day read of the `alerts` dataset, split by data
+source, shows only these traffic-family XDR Analytics firing from *any* feed: Suspicious port
+scan, Spam Bot Traffic, New Administrative Behavior, Large Upload (HTTPS / non-std / Generic /
+FTP), Failed Connections, Unusual long SSH with tunnel characteristics, Uncommon SSH, Abnormal
+Recurring Communications to a Rare Domain (from the real pa440), and Kerberos Pre-Auth
+Failures by Host (from Windows events). The pending events above target exactly that set.
+
+**Not reachable over CEF syslog** — the remaining traffic-log alerts need
+Enhanced-Application-Logging (EAL) decoded protocol fields, process data or an XDR Agent:
 
 - **Kerberos** — Pre-Auth Failures (by Host; by User and Host), User Enumeration,
   Weakly-Encrypted / Multiple Weakly-Encrypted Kerberos Tickets, Kerberoasting without SPNs
@@ -173,13 +221,9 @@ or an XDR Agent:
   Harvesting, Rare NTLM Access By User To Host (need the NTLM `NTProofStr`).
 - **Account state** — Authentication Attempt From a Dormant Account, Failed Login For
   Locked-Out Account (need Kerberos TGS + AD account state).
-- **Agent-only** — A user accessed an uncommon AppID, Rare process created an SSH session to
-  an uncommon cloud resource (require the XDR Agent); Suspicious DNS traffic / DNS-tunnelling
-  need EAL `dns_query_name` entropy.
-
-The `kerberos_preauth_pattern`, `ntlm_relay_pattern`, `dns_tunnel_pattern` and `ldap_recon`
-events still emit the realistic network shapes for hunting and correlation-rule coverage,
-but are flagged non-analytic so they are not offered on demand.
+- **Process / agent** — A user accessed an uncommon AppID, Rare process created an SSH session
+  to an uncommon cloud resource / external host; Suspicious DNS traffic needs EAL
+  `dns_query_name` entropy.
 
 ## Config (`panw_ngfw_config`)
 
