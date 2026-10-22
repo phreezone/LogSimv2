@@ -485,8 +485,13 @@ def _benign_internal(config, session_context):
                             bytes_sent=random.randint(60, 140), bytes_received=random.randint(80, 400),
                             duration_s=0)
         return _format_cef(config, "end", f)
-    servers = config.get("internal_servers") or ["10.0.10.50"]
-    dst_ip = random.choice(servers)
+    if app in ("kerberos", "ldap", "msrpc-base") or (app == "ms-ds-smbv3" and random.random() < 0.3):
+        # AD authentication, directory lookups, RPC and SYSVOL/NETLOGON SMB go to the domain
+        # controllers. XSIAM classifies a host as a DC from exactly this traffic, which the
+        # SMB-from-DC and DCSync-from-non-DC detectors depend on.
+        dst_ip = random.choice(_dcs(config))
+    else:
+        dst_ip = random.choice(config.get("internal_servers") or ["10.0.10.50"])
     dpt = (_APP.get(app, (None,)*5)[4] or [445])[0]
     dhost = resolver.internal_fqdn(config, dst_ip)
     f = _traffic_fields(config, src_ip, dst_ip, dpt, app, shost=shost, suser=user, dhost=dhost,
