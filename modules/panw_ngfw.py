@@ -66,7 +66,7 @@ try:
                                         weighted_destination, random_external_ip, rare_external_ip,
                                         rare_internal_host, rare_known_host, new_ftp_server_host,
                                         known_internal_hosts, sweep_targets, stable_external_ip,
-                                        rare_source_host, rare_domain, to_nonstandard_https,
+                                        rare_source_host, rare_domain, NONSTD_HTTPS_PORTS, exfil_destination,
                                         correlated_or_random_user, beacon_targets, recurring_host)
     from modules import resolver
     from modules import threat_domains
@@ -77,7 +77,7 @@ except ImportError:
                                 weighted_destination, random_external_ip, rare_external_ip,
                                 rare_internal_host, rare_known_host, new_ftp_server_host,
                                 known_internal_hosts, sweep_targets, stable_external_ip,
-                                rare_source_host, rare_domain, to_nonstandard_https,
+                                rare_source_host, rare_domain, NONSTD_HTTPS_PORTS, exfil_destination,
                                 correlated_or_random_user, beacon_targets, recurring_host)
     import resolver
     import threat_domains
@@ -142,6 +142,7 @@ _APP = {
     "cryptocurrency":  ("general-internet", "internet-utility",  "peer-to-peer",    "High",          [3333, 4444, 8333]),
     "dns-over-https":  ("general-internet", "internet-utility",  "browser-based",   "Medium",        [443]),
     "tftp":            ("general-internet", "file-sharing",      "client-server",   "High",          [69]),
+    "telnet":          ("networking",       "remote-access",     "client-server",   "High",          [23]),
 }
 
 # Benign external destination-domain -> the App-ID that destination's traffic is
@@ -313,18 +314,20 @@ def _is_internal(ip):
 # ---------------------------------------------------------------------------
 # CEF builder
 # ---------------------------------------------------------------------------
-def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None):
+def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None, fw_type=None):
     """Build one PAN-OS NGFW_CEF syslog line.
 
     Header:  CEF:0|PANW|NGFW_CEF|<sw>|<subtype>|<type>|<sev>|
     Body:    literal key=value pairs (PAN custom log format), space separated.
     `ts` is the event epoch seconds (defaults to now); it drives log_time/time_generated/rt.
+    `fw_type` overrides the __firewall_type routing key: a URL log is log_type THREAT but
+    routes as firewall.url (into panw_ngfw_url_raw).
     """
     t = ts if ts is not None else time.time()
     serial, name = _serial(config), _fw_name(config)
     iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t))
     base = {
-        "__firewall_type": f"firewall.{log_type.lower()}",
+        "__firewall_type": fw_type or f"firewall.{log_type.lower()}",
         "__timestamp":     iso,
         "__tz":            "+00:00",
         "log_type":        log_type,
@@ -421,6 +424,40 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
     return f
 
 
+# Keys a URL log shares with the traffic log of the same session.
+_URL_SHARED_KEYS = ("source_ip", "source_port", "dest_ip", "dest_port", "nat_source",
+                    "nat_source_port", "nat_dest", "nat_dest_port", "protocol", "source_user",
+                    "dest_user", "app", "app_category", "app_sub_category", "technology_of_app",
+                    "risk_of_app", "rule_matched", "rule_matched_uuid", "from_zone", "to_zone",
+                    "inbound_if", "outbound_if", "session_id", "source_device_category",
+                    "source_device_host", "source_device_mac", "source_device_osfamily")
+
+
+def _url_record(config, traffic_fields, domain, path="/", category=None, action="alert",
+                ts=None, method=None):
+    """The URL-filtering log PAN-OS writes for a web session (log_type THREAT, subtype url).
+
+    Shape learned from the live panw_ngfw_url_raw feed: action=alert for an allowed,
+    logged URL; uri=<host><path> (the parser derives url_domain from it); http_method
+    'unknown' for undecrypted SSL. This is the only PAN log that names the DOMAIN — traffic
+    logs carry addresses only — so the rare-domain / dynamic-DNS detectors need it.
+    """
+    f = {k: traffic_fields[k] for k in _URL_SHARED_KEYS if traffic_fields.get(k) not in (None, "")}
+    cat = category or traffic_fields.get("url_category") or "computer-and-internet-info"
+    risk = "high-risk" if cat in _URL_CAT_RISKY else "low-risk"
+    f.update({
+        "action":            action,
+        "uri":               f"{domain}{path}",
+        "url_category":      cat,
+        "url_category_list": f"{cat},{risk}",
+        "http_method":       method or ("unknown" if f.get("app") == "ssl" else "get"),
+        "threat_id":         "9999",
+        "threat_name":       "",
+        "direction":         "client-to-server",
+    })
+    return _format_cef(config, "url", f, log_type="THREAT", severity=1, ts=ts, fw_type="firewall.url")
+
+
 # ---------------------------------------------------------------------------
 # Benign generators
 # ---------------------------------------------------------------------------
@@ -467,7 +504,12 @@ def _benign_external(config, session_context):
         return _format_cef(config, "end", f)
     f = _traffic_fields(config, src_ip, dst_ip, dpt, app, shost=shost, suser=user, dhost=domain,
                         nat_src=_bus_egress_for(user))
-    return _format_cef(config, "end", f)
+    line = _format_cef(config, "end", dict(f))
+    # Web sessions also get the URL log the URL-filtering profile writes (~1 in 6 traffic
+    # logs in the live feed), so the domain baseline exists on this firewall too.
+    if dpt in (80, 443, 8080) and random.random() < 0.35:
+        return [line, _url_record(config, f, domain, path=random.choice(["/", "/", "/api/", "/login"]))]
+    return line
 
 
 def _benign_internal(config, session_context):
@@ -591,7 +633,6 @@ def get_threat_info():
 _PRIV_PORTS = [21, 22, 23, 25, 53, 88, 110, 111, 135, 137, 139, 143, 161, 389, 443, 445,
                465, 587, 636, 873, 993, 995, 1433, 1521, 2049, 3306, 3389, 5432, 5900,
                5985, 5986]
-_ADMIN_PORTS = [22, 3389, 445, 135, 5985, 5986]
 _MINER_POOL_PORTS = [3333, 4444, 5555, 7777, 8333, 14444, 45700]
 _DDNS_SUFFIXES = ["duckdns.org", "no-ip.org", "ddns.net", "dynu.net", "hopto.org", "sytes.net"]
 
@@ -615,6 +656,17 @@ def _conn(config, src, dst, dpt, app, action="allow", *, suser=None, shost=None,
     if no_qualify:
         f["_no_user_qualify"] = True
     return _format_cef(config, subtype, f, ts=ts)
+
+
+def _web(config, src, dst, dpt, app, domain, *, path="/", url_cat=None, method=None, ts=None, **kw):
+    """[traffic:end, url] for one web session: same session_id, ports and NAT on both."""
+    f = _traffic_fields(config, src, dst, dpt, app, dhost=domain, url_cat=url_cat,
+                        **{k: v for k, v in kw.items() if k != "no_qualify"})
+    if kw.get("no_qualify"):
+        f["_no_user_qualify"] = True
+    return [_format_cef(config, "end", dict(f), ts=ts),
+            _url_record(config, f, domain, path=path, category=url_cat, method=method,
+                        ts=(ts if ts is not None else time.time()))]
 
 
 def _threat_actor(config, session_context):
@@ -676,25 +728,50 @@ def _sim_failed_connections(config, session_context):
 
 
 # --- Exfil / large uploads ------------------------------------------------------------
+def _rare_answer(domain, seed=None):
+    """Pin `domain` to an address in the RARE external pool and return it.
+
+    resolver.answer_for() alone is wrong for threat destinations: an unknown name falls back
+    to stable_external_ip(), which is the AMBIENT pool every module's normal traffic uses, so
+    the destination can never score as rare (docs/firewall-analytics.md, root cause R3).
+    Pinning keeps the Infoblox answer and the firewall destination identical."""
+    ip = rare_external_ip(seed if seed is not None else domain)
+    return resolver.pin(domain, f"{ip}/32") or ip
+
+
 def _rare_ext(config, seed=None):
     """(domain, ip) for a rare external destination."""
     dom = rare_domain(seed)
-    return dom, resolver.answer_for(dom, config)
+    return dom, _rare_answer(dom, seed)
 
 
-def _sim_large_upload(config, session_context, app, dpt, alert_port=None):
+def _sim_large_upload(config, session_context, app, dpt):
     src, user, shost = _threat_actor(config, session_context)
-    dom, dst = _rare_ext(config, f"up|{user}")
-    size = random.randint(200, 2000) * 1024 * 1024
-    print(f"    - PAN NGFW simulating: large upload ({app}) {src} -> {dom} {size//(1024*1024)}MB")
-    return [_conn(config, src, dst, alert_port or dpt, app, suser=user, shost=shost, dhost=dom,
-                  bytes_sent=size, bytes_received=random.randint(2000, 50000),
-                  duration_s=random.randint(300, 3600), url_cat="online-storage-and-backup")]
+    # One 300-700 MB session: the size of the Check Point uploads that fire Large Upload
+    # (HTTPS) in this tenant ("uploaded 347.2MB ... over 1 sessions"); 5-100 MB is under
+    # the threshold and multi-GB is not what fired.
+    size = random.randint(300, 700) * 1024 * 1024
+    kw = dict(suser=user, shost=shost, bytes_sent=size, bytes_received=random.randint(2000, 50000),
+              duration_s=random.randint(300, 1200))
+    if app == "ssl":
+        # HTTPS goes to the shared exfil pool (file-sharing services plus long-tail hosts),
+        # the destinations the firing Check Point alerts used. PAN also writes the URL log
+        # (SNI host), the only record that names the site.
+        dom, dst, url, is_tail = exfil_destination(config, "upload")
+        path = "/" + url.split("://", 1)[-1].split("/", 1)[1] if "/" in url.split("://", 1)[-1] else "/"
+        cat = "unknown" if is_tail else "online-storage-and-backup"
+        print(f"    - PAN NGFW simulating: large upload (ssl) {src} -> {dom}:{dpt} {size//(1024*1024)}MB")
+        return _web(config, src, dst, dpt, app, dom, path=path, url_cat=cat, **kw)
+    dom, dst = _rare_ext(config, f"up|{app}|{user}")
+    print(f"    - PAN NGFW simulating: large upload ({app}) {src} -> {dom}:{dpt} {size//(1024*1024)}MB")
+    return [_conn(config, src, dst, dpt, app, dhost=dom, url_cat="online-storage-and-backup", **kw)]
 
 
 def _sim_large_upload_https(config, sc):      return _sim_large_upload(config, sc, "ssl", 443)
 def _sim_large_upload_https_nonstd(config, sc):
-    return to_nonstandard_https(_sim_large_upload(config, sc, "ssl", 443))
+    # session_utils.to_nonstandard_https() rewrites the ArcSight `dpt=` key; PAN logs carry
+    # dest_port, so pick the alternate HTTPS port here instead.
+    return _sim_large_upload(config, sc, "ssl", random.choice(NONSTD_HTTPS_PORTS))
 def _sim_large_upload_smtp(config, sc):       return _sim_large_upload(config, sc, "smtp", 587)
 def _sim_large_upload_ftp(config, sc):        return _sim_large_upload(config, sc, "ftp", 21)
 def _sim_large_upload_generic(config, sc):    return _sim_large_upload(config, sc, "unknown-tcp", random.choice([4444, 9001, 8888, 6667]))
@@ -804,22 +881,52 @@ def _sim_spam_bot(config, session_context):
 
 # --- SSH -------------------------------------------------------------------------------
 def _sim_uncommon_ssh(config, session_context):
+    """An SSH session to a host this source has never used SSH with.
+
+    "Uncommon" is judged against the source's OWN SSH history, and a host with no SSH
+    history at all does not fire (a repeat from a host with no prior SSH stays silent). So
+    the host first gets an ordinary SSH habit -- back-dated sessions to its usual jump host
+    over the past weeks -- and only then reaches a rare internal destination."""
     src, user, shost = _threat_actor(config, session_context)
-    dst = rare_known_host(config, exclude=(src,))
-    return [_conn(config, src, dst, 22, "ssh", suser=user, shost=shost,
-                  dhost=resolver.internal_fqdn(config, dst), from_zone="trust", to_zone="trust",
-                  bytes_sent=random.randint(3000, 60000), bytes_received=random.randint(4000, 120000),
-                  duration_s=random.randint(30, 600))]
+    usual = random.choice(mgmt_plane.conf(config).get("jump_hosts") or config.get("internal_servers")
+                          or ["10.0.30.30"])
+    out = []
+    for day in sorted(random.sample(range(3, 25), random.randint(6, 10)), reverse=True):
+        ts = time.time() - day * 86400 - random.randint(0, 6 * 3600)
+        out.append(_conn(config, src, usual, 22, "ssh", suser=user, shost=shost,
+                         dhost=resolver.internal_fqdn(config, usual), from_zone="trust", to_zone="trust",
+                         bytes_sent=random.randint(3000, 40000), bytes_received=random.randint(5000, 90000),
+                         duration_s=random.randint(60, 1800), ts=ts))
+    dst = rare_internal_host(config, exclude=(src, usual))
+    print(f"    - PAN NGFW simulating: uncommon SSH {src} -> rare internal {dst} (after {len(out)} days of SSH to {usual})")
+    out.append(_conn(config, src, dst, 22, "ssh", suser=user, shost=shost,
+                     dhost=resolver.internal_fqdn(config, dst), from_zone="trust", to_zone="trust",
+                     bytes_sent=random.randint(3000, 60000), bytes_received=random.randint(4000, 120000),
+                     duration_s=random.randint(30, 600)))
+    return out
 
 
 def _sim_unusual_ssh(config, session_context):
-    """Long, high-volume SSH session (tunnel characteristics)."""
-    src, user, shost = _threat_actor(config, session_context)
-    dom, dst = _rare_ext(config, f"ssh|{user}")
-    return [_conn(config, src, dst, 22, "ssh", suser=user, shost=shost, dhost=dom,
-                  bytes_sent=random.randint(50, 400) * 1024 * 1024,
-                  bytes_received=random.randint(50, 400) * 1024 * 1024,
-                  duration_s=random.randint(7200, 28800))]
+    """A few long-lived SSH sessions to ONE stable rare external host (tunnel shape).
+
+    Mirrors the Check Point reverse-SSH-tunnel shape that fires "Unusual, long SSH activity
+    with tunnel characteristics" in this tenant: 2-4 sessions of 30 min - 4 h moving
+    5-80 MB each way. A single multi-hundred-MB session reads as a Large Upload instead."""
+    hit = recurring_host("panw_ssh_tunnel") if recurring_host else None
+    src, user, shost = hit if hit else _threat_actor(config, session_context)
+    dst, dom = _beacon_dst(config, "ssh_tunnel", src)
+    n = random.randint(2, 4)
+    print(f"    - PAN NGFW simulating: long SSH tunnel {src} -> {dst} ({n} sessions)")
+    out, t = [], time.time() - n * 4 * 3600
+    for _ in range(n):
+        dur = random.randint(1800, 14400)
+        t += random.randint(60, 600)
+        out.append(_conn(config, src, dst, 22, "ssh", suser=user, shost=shost, dhost=dom,
+                         bytes_sent=random.randint(5, 80) * 1024 * 1024,
+                         bytes_received=random.randint(5, 80) * 1024 * 1024,
+                         duration_s=dur, ts=min(t + dur, time.time()), end_reason="tcp-fin"))
+        t += dur
+    return out
 
 
 def _sim_ssh_proxy(config, session_context):
@@ -850,12 +957,14 @@ def _sim_rare_ssh_external(config, session_context):
 def _beacon_dst(config, key, src):
     """A stable rare external (ip, domain) this src beacons to — persists across restarts."""
     store = beacon_targets("panw_ngfw")
-    k = f"{key}|{src}"
+    # "rare|" namespace: entries written before destinations moved to the rare pool held
+    # ambient addresses; a new key space keeps them from being reused.
+    k = f"rare|{key}|{src}"
     if k in store:
         v = store[k]
         return (v[0], v[1]) if isinstance(v, (list, tuple)) else (v, None)
     dom = rare_domain(k)
-    ip = resolver.answer_for(dom, config)
+    ip = _rare_answer(dom, k)
     store[k] = [ip, dom]
     return ip, dom
 
@@ -881,37 +990,40 @@ def _sim_recurring_rare_domain(config, session_context):
     src, user, shost = hit if hit else _threat_actor(config, session_context)
     ip, dom = _beacon_dst(config, "rare_dom", src)
     print(f"    - PAN NGFW simulating: recurring access to rare domain {src} -> {dom}")
+    port = random.choice([443, 8080, 8443])         # one beacon, one port, every day
     out = []
     for day in range(random.randint(6, 12)):
         ts = time.time() - day * 86400 - random.randint(0, 3600)
-        out.append(_conn(config, src, ip, random.choice([443, 8080, 8443]), "ssl", suser=user,
-                         shost=shost, dhost=dom, bytes_sent=random.randint(400, 4000),
-                         bytes_received=random.randint(400, 4000), duration_s=random.randint(1, 30),
-                         ts=ts, url_cat="command-and-control"))
+        out += _web(config, src, ip, port, "ssl", dom, path="/", url_cat="command-and-control",
+                    suser=user, shost=shost, bytes_sent=random.randint(400, 4000),
+                    bytes_received=random.randint(400, 4000), duration_s=random.randint(1, 30), ts=ts)
     return out
 
 
 def _sim_rare_domain_comm(config, session_context):
     src, user, shost = _threat_actor(config, session_context)
     dom, dst = _rare_ext(config, f"rdc|{user}")
-    return [_conn(config, src, dst, random.choice([443, 8443, 4444]), "ssl", suser=user, shost=shost,
-                  dhost=dom, bytes_sent=random.randint(500, 20000), bytes_received=random.randint(500, 40000),
-                  duration_s=random.randint(1, 120), url_cat="newly-registered-domain")]
+    return _web(config, src, dst, random.choice([443, 8443, 4444]), "ssl", dom,
+                url_cat="newly-registered-domain", suser=user, shost=shost,
+                bytes_sent=random.randint(500, 20000), bytes_received=random.randint(500, 40000),
+                duration_s=random.randint(1, 120))
 
 
 def _sim_ddns_access(config, session_context):
     hit = recurring_host("panw_ddns") if recurring_host else None
     src, user, shost = hit if hit else _threat_actor(config, session_context)
     label = rare_domain(f"ddns|{src}").split(".")[0]
-    dom = f"{label}.{random.choice(_DDNS_SUFFIXES)}"
-    ip = resolver.answer_for(dom, config)
+    # Suffix stable per source, so every run extends the SAME recurring (host, domain) pair.
+    suffix = _DDNS_SUFFIXES[int(hashlib.sha256(f"ddns|{src}".encode()).hexdigest(), 16) % len(_DDNS_SUFFIXES)]
+    dom = f"{label}.{suffix}"
+    ip = _rare_answer(dom)
     print(f"    - PAN NGFW simulating: recurring dynamic-DNS access {src} -> {dom}")
     out = []
     for day in range(random.randint(5, 10)):
         ts = time.time() - day * 86400 - random.randint(0, 3600)
-        out.append(_conn(config, src, ip, 443, "ssl", suser=user, shost=shost, dhost=dom,
-                         bytes_sent=random.randint(400, 5000), bytes_received=random.randint(400, 5000),
-                         duration_s=random.randint(1, 60), ts=ts, url_cat="dynamic-dns"))
+        out += _web(config, src, ip, 443, "ssl", dom, url_cat="dynamic-dns", suser=user, shost=shost,
+                    bytes_sent=random.randint(400, 5000), bytes_received=random.randint(400, 5000),
+                    duration_s=random.randint(1, 60), ts=ts)
     return out
 
 
@@ -991,20 +1103,47 @@ def _sim_new_ftp_server(config, session_context):
     return out
 
 
+# Remote-administration services "New Administrative Behavior" counts, with the App-ID PAN
+# reports for each (unknown-tcp/udp where App-ID has no decoder, as real PAN does).
+_REMOTE_ADMIN = {22: "ssh", 23: "telnet", 69: "tftp", 161: "snmp-base", 512: "unknown-tcp",
+                 513: "unknown-tcp", 514: "unknown-tcp", 623: "unknown-udp", 992: "ssl"}
+# Ports confirmed (FortiGate, 2026-09) to count toward the novel-admin-action total.
+_ADMIN_FILL = (22, 69)
+
+
 def _sim_new_admin_behavior(config, session_context):
-    """A host performs new administrative actions to many internal destinations."""
+    """One established host performing many FIRST-TIME remote-administration actions.
+
+    The detector counts NOVEL (destination, admin port) pairs per source over 12 hours, so
+    breadth across both axes is the signal, not volume (shape that fires for Firepower,
+    FortiGate, Check Point and Zscaler here). Destinations are fresh internal addresses
+    (never the hot internal_servers pool); every admin port appears once and the rest of
+    the 8-11 actions use the confirmed-counted ports; actions are spread over 30-75 min."""
     src, user, shost = _threat_actor(config, session_context)
-    targets = sweep_targets(config, exclude=(src,), n_range=(12, 24), min_subnets=2)
-    print(f"    - PAN NGFW simulating: new admin behavior {src} -> {len(targets)} hosts")
-    t0 = time.time() - len(targets) * 10
+    n = random.randint(8, 11)
+    ports = random.sample(list(_REMOTE_ADMIN), random.randint(4, 6))
+    while len(ports) < n:
+        ports.append(random.choice(_ADMIN_FILL))
+    random.shuffle(ports)
+    pairs, used = [], {src}
+    for p in ports:
+        if pairs and random.random() < 0.3 and (pairs[-1][0], p) not in pairs:
+            dst = pairs[-1][0]                     # same box, another admin service
+        else:
+            dst = rare_internal_host(config, exclude=used)
+            used.add(dst)
+        pairs.append((dst, p))
+    window = random.randint(30, 75) * 60
+    offsets = sorted(random.randint(0, window) for _ in pairs)
+    now = time.time()
+    print(f"    - PAN NGFW simulating: new admin behavior {src} -> {len(used) - 1} hosts, {len(pairs)} actions")
     out = []
-    for i, dst in enumerate(targets):
-        port = random.choice(_ADMIN_PORTS)
-        out.append(_conn(config, src, dst, port, _APP_for_port(port) if port in (22, 3389, 445, 135) else "ssl",
-                         suser=user, shost=shost, from_zone="trust", to_zone="trust",
-                         dhost=resolver.internal_fqdn(config, dst), bytes_sent=random.randint(3000, 80000),
-                         bytes_received=random.randint(5000, 400000), duration_s=random.randint(5, 120),
-                         ts=t0 + i * 10))
+    for (dst, p), back in zip(pairs, reversed(offsets)):
+        out.append(_conn(config, src, dst, p, _REMOTE_ADMIN[p], suser=user, shost=shost,
+                         from_zone="trust", to_zone="trust", dhost=resolver.internal_fqdn(config, dst),
+                         bytes_sent=random.randint(800, 30000), bytes_received=random.randint(1500, 120000),
+                         duration_s=random.randint(2, 90), ts=now - back,
+                         proto="udp" if p in (69, 161, 623) else "tcp"))
     return out
 
 
