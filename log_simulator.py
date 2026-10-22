@@ -2163,6 +2163,7 @@ _FW_MODULE_NAMES = [
     "Cisco ASA Firewall",
     "Check Point Firewall",
     "Fortinet FortiGate",
+    "Palo Alto Networks NGFW",
     "Zscaler Web Gateway",
 ]
 
