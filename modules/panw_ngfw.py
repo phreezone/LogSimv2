@@ -456,6 +456,16 @@ def _benign_internal(config, session_context):
     src_ip, user, shost = _user_src(config, session_context)
     app = random.choices([a for a, _ in _INTERNAL_APP_MIX],
                          weights=[w for _, w in _INTERNAL_APP_MIX])[0]
+    if app == "dns-base":
+        # A client's DNS always goes to ITS own Infoblox grid member (same member the
+        # Infoblox feed logs the query on), never a random internal server.
+        gname, gip = resolver.dns_server_for(config, src_ip)
+        f = _traffic_fields(config, src_ip, gip, 53, "dns-base", shost=shost, suser=user,
+                            dhost=f"{gname}.{resolver.internal_domain(config)}",
+                            from_zone="trust", to_zone="trust",
+                            bytes_sent=random.randint(60, 140), bytes_received=random.randint(80, 400),
+                            duration_s=0)
+        return _format_cef(config, "end", f)
     servers = config.get("internal_servers") or ["10.0.10.50"]
     dst_ip = random.choice(servers)
     dpt = (_APP.get(app, (None,)*5)[4] or [445])[0]
