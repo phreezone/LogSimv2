@@ -248,6 +248,7 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | Office 365 Azure AD | Cribl receiver | Management Activity RecordType 15 sign-ins / 8 directory ops | 14 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
 | Office 365 Exchange Online | Cribl receiver | MailItemsAccessed, Send, Move, inbox rules, light admin | 28 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Office 365 SharePoint / OneDrive | Cribl receiver | File and sharing operations, business-hours weighted; Graph requests behind threat activity | 19 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Azure Activity | Cribl receiver | Activity log (all 8 categories) on a stable subscription estate, from Microsoft's 3,875 documented ARM operations; AKS kube-audit | 0 (benign only) | [docs/modules/azure-activity.md](docs/modules/azure-activity.md) |
 | Office 365 DLP | Cribl receiver | Low-severity notify-only rule matches | 4 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Office 365 General | Cribl receiver | Copilot interactions, Power BI views | 2 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Identity Threat Campaigns | *(coordinator — Cribl + WEC)* | *(none)* | 21 cross-feed identity kill chains, run from **Threats & Scenarios → Run Attack Scenario** (no module card) | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
@@ -261,7 +262,7 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | Proofpoint Email | HTTP Collector | 1 type (delivered email) | 11 types | [docs/modules/proofpoint.md](docs/modules/proofpoint.md) |
 | XDR Attack Orchestration | WinRM (real endpoint) + network transports | *(coordinator — real Atomic Red Team techniques on a live Cortex-agent box + synthetic network logs pinned to its identity)* | *Phase 1 — foundation validated; stories in progress* | [docs/modules/xdr-orchestration.md](docs/modules/xdr-orchestration.md) |
 
-**Totals:** 660 named threats across the 19 log-source modules, 338 of them offered on demand, plus 21 cross-feed identity campaigns.
+**Totals:** 660 named threats across the 20 log-source modules, 338 of them offered on demand, plus 21 cross-feed identity campaigns.
 
 ## Recent Changes
 
