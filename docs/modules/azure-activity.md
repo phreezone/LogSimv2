@@ -30,7 +30,11 @@ under one `correlationId`, ending at or before now.
 the built-in role definition id and principal type. `identity.claims` carries the full ARM-token
 claim set from Microsoft's sample: `objectidentifier`, the xmlsoap `name` and `upn`, `puid`,
 `tenantid`, `scope`, `appid`, `idtyp`, and `onprem_sid` when the CIE identity map supplies one.
-A canary carrying only `upn`/`name`/`appid` was attributed to the app id, not the user.
+A canary carrying only `upn`/`name`/`appid` was attributed to the app id, not the user. With
+the full set (canary 2026-10-22) the user record came back fully enriched: `identity_name` is
+the UPN, username and domain are filled, and the asset type is `AZURE_ACTIVE_DIRECTORY_USER`.
+A service principal shows as `Application` / `ServicePrincipal` by object id. Started
+normalises to `PENDING` and Succeeded to `Success`.
 
 The `msft_azure_raw` modeling rule deliberately leaves `xdm.source.user` empty for streamed
 Administrative/Policy/Alert records. The Cloud analytics read the identity from
@@ -83,6 +87,10 @@ records, plus kube-audit. The mix:
 - **AKS audit** (`modules/aks_audit.py`): controllers, the scheduler, kubelets and workloads
   reading and watching, lease renewals, node status patches, events, CI rolling deployments by
   patch, and platform engineers' read-only kubectl.
+  The same canary confirmed these reach `cloud_audit_logs`, parsed from the inner audit event:
+  `event_id` is the `auditID`, the operation is the request URI, and the identity is the
+  Kubernetes user. User agent, source IP and the cluster (as referenced resource) come through
+  too. `log_name` is empty for them.
 
 About 6% of human changes fail (authorization denied, conflict, bad request, not found,
 locked scope), with Azure's own error messages.
