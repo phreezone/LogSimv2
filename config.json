@@ -5,16 +5,20 @@
     "transport": "cribl"
   },
   "azure_ad_signin_config": {
-    "transport": "cribl"
+    "transport": "cribl",
+    "eventhub_copies": true
   },
   "azure_ad_audit_config": {
-    "transport": "cribl"
+    "transport": "cribl",
+    "eventhub_copies": true
   },
   "o365_exchange_config": {
-    "transport": "cribl"
+    "transport": "cribl",
+    "eventhub_copies": true
   },
   "o365_sharepoint_config": {
-    "transport": "cribl"
+    "transport": "cribl",
+    "eventhub_copies": true
   },
   "o365_dlp_config": {
     "transport": "cribl"
