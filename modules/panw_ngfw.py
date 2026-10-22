@@ -372,7 +372,9 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
     wan_if = forti.get("interface_wan", "ethernet1/1")
     internal_dst = _is_internal(dst_ip)
     if action in ("deny", "drop"):
-        bytes_sent, bytes_received, duration_s = random.randint(0, 74), 0, 0
+        # A blocked connection is zero-byte: PAN logs the dropped SYN with no payload, and
+        # the Failed Connections detector keys on failed, zero-byte attempts.
+        bytes_sent, bytes_received, duration_s = 0, 0, 0
         end_reason = "policy-deny" if action == "deny" else "aged-out"
     f = {
         "source_ip":        src_ip,
@@ -579,8 +581,11 @@ def get_threat_info():
              "xsiam_alert": e.get("xsiam_alert"), "weight": e["weight"]} for e in _DEFAULT_THREAT_EVENTS]
 
 
-# Privileged service ports the port-scan / admin detectors profile.
-_PRIV_PORTS = [21, 22, 23, 25, 53, 88, 110, 135, 139, 389, 443, 445, 636, 993, 1433, 3306, 3389, 5432, 5900]
+# Privileged service ports the port-scan / admin detectors profile.  Needs to be well
+# above 24 so a scan can draw 20-24 DISTINCT ports (the "Suspicious port scan" threshold).
+_PRIV_PORTS = [21, 22, 23, 25, 53, 88, 110, 111, 135, 137, 139, 143, 161, 389, 443, 445,
+               465, 587, 636, 873, 993, 995, 1433, 1521, 2049, 3306, 3389, 5432, 5900,
+               5985, 5986]
 _ADMIN_PORTS = [22, 3389, 445, 135, 5985, 5986]
 _MINER_POOL_PORTS = [3333, 4444, 5555, 7777, 8333, 14444, 45700]
 _DDNS_SUFFIXES = ["duckdns.org", "no-ip.org", "ddns.net", "dynu.net", "hopto.org", "sytes.net"]
