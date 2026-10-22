@@ -118,6 +118,15 @@ long-running sessions and through the validation harness (below).
 IP and home IP, so the ML analytics build coherent per-user profiles. Apps, resources
 and error codes are drawn from what dominates a real Entra tenant.
 
+**Egress is real-world consistent.** XSIAM geolocates IPs itself, so every block in
+`azure_common` is announced by the ISP the record names and located by GeoLite in the
+city it names. This covers the 10 office NAT pools, the home ISPs and mobile carriers in
+each office's metro, the Azure daemon pool and the hosting networks attackers come from.
+Each was checked against RIPEstat (origin ASN, MaxMind GeoLite) plus ipinfo on 2026-10-22.
+A home day or a phone sign-in stays in the user's metro and country, so it never looks
+like travel. Attacker egress comes from about 20M addresses across 13 hosting providers,
+each prefix sitting in a single country. Re-verify any block you change.
+
 **Threats (37):** brute force, password spray, account-lockout spray, impossible travel,
 high-risk sign-in, TOR sign-in, SaaS API from TOR (desktop and mobile), multi-resource SSO,
 multi-SSO through an anonymising proxy, AAD Connect sync from an unusual host, sign-in by
