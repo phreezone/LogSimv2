@@ -84,12 +84,25 @@ class CriblDirectSender:
              integration_identifier: str = "logsim:synthetic") -> Tuple[int, str, int]:
         """Send a batch of vendor records under one dedicated Source-Identifier.
 
-        Returns (http_status, response_text, num_records_sent). All records in a call must
-        belong to the same source (same Source-Identifier). Batches freely — the real
-        destination sends many NDJSON lines per POST.
+        Returns (http_status, response_text, num_records_sent). Records go under the given
+        Source-Identifier unless they name their own (ROUTE_KEY); those are posted in a
+        separate request to their destination. Batches freely — the real destination sends
+        many NDJSON lines per POST.
         """
-        records = [{k: v for k, v in r.items() if k != ROUTE_KEY}
-                   if isinstance(r, dict) and ROUTE_KEY in r else r for r in records]
+        groups = split_routes(list(records), source_identifier, integration_identifier)
+        if len(groups) > 1:
+            # Records bound for other destinations (ROUTE_KEY) go in their own requests, so a
+            # direct caller cannot misroute them; the worst status is reported.
+            results = [self._post(recs, src, integ) for (src, integ), recs in groups.items()]
+            bad = [r for r in results if r[0] not in (200, 201, 202, 204)]
+            code, text, _ = (bad or results)[0]
+            return code, text, sum(r[2] for r in results)
+        records = next(iter(groups.values()), [])
+        if groups:
+            source_identifier, integration_identifier = next(iter(groups))
+        return self._post(records, source_identifier, integration_identifier)
+
+    def _post(self, records, source_identifier, integration_identifier):
         if not records:
             return 0, "no records", 0
         now_ms = int(time.time() * 1000)
