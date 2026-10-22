@@ -1238,22 +1238,26 @@ def send_cribl_batch(records, module, config):
             _tprint(f"Warning: {module.NAME} cribl transport expects a dict record. Skipping.")
             continue
         parsed.append(record)
-        sizes.append(text if text is not None else json.dumps(record, default=str))
+    # A record may name its own destination (cribl_direct.ROUTE_KEY), e.g. a Graph sign-in's
+    # Event Hub copy bound for msft_azure_raw; each destination gets its own requests.
+    from integrations.cribl_direct import split_routes
     sent = 0
-    i = 0
-    for chunk in _chunked(sizes):          # chunk boundaries from the serialized sizes
-        batch = parsed[i:i + len(chunk)]
-        i += len(chunk)
-        try:
-            code, text, _ = _get_cribl_sender().send(batch, src, integ)
-            if code not in (200, 201, 202, 204):
-                _tprint(f"Cribl send error for {module.NAME}: HTTP {code} ({len(batch)} records) — {text[:120]}")
-            else:
-                sent += len(batch)
-                if not _quiet_sends:
-                    _tprint(f"Cribl send for {module.NAME}: {code} ({len(batch)} records, src={src[:8]}…)")
-        except Exception as exc:
-            _tprint(f"Cribl send exception for {module.NAME}: {exc}")
+    for (dst, dst_integ), group in split_routes(parsed, src, integ).items():
+        sizes = [json.dumps(r, default=str) for r in group]
+        i = 0
+        for chunk in _chunked(sizes):          # chunk boundaries from the serialized sizes
+            batch = group[i:i + len(chunk)]
+            i += len(chunk)
+            try:
+                code, text, _ = _get_cribl_sender().send(batch, dst, dst_integ)
+                if code not in (200, 201, 202, 204):
+                    _tprint(f"Cribl send error for {module.NAME}: HTTP {code} ({len(batch)} records) — {text[:120]}")
+                else:
+                    sent += len(batch)
+                    if not _quiet_sends:
+                        _tprint(f"Cribl send for {module.NAME}: {code} ({len(batch)} records, src={dst[:8]}…)")
+            except Exception as exc:
+                _tprint(f"Cribl send exception for {module.NAME}: {exc}")
     return sent
 
 

@@ -13,6 +13,7 @@ import time
 import uuid
 
 from modules import azure_common as ac
+from modules import graph_activity as ga
 
 NAME = "Azure AD Sign-ins"
 DESCRIPTION = "Simulates Microsoft Graph auditLogs/signIns events for msft_azure_ad_raw via the cribl_direct transport."
@@ -196,9 +197,23 @@ def scenario_aad_connect_sync_unusual_host(config=None, user=None):
 
 
 def generate_benign(config=None, context=None):
-    """One routine sign-in from the real-world weighted mix a live tenant produces."""
+    """One routine sign-in from the real-world weighted mix a live tenant produces, plus (when Event
+    Hub copies are on) the Graph requests its client makes once it holds the token."""
     user = ac.pick_user(config, context)
     loc = ac.egress(user)
+    recs = _benign_mix(config, user, loc)
+    if not ac.eventhub_enabled(config, CONFIG_KEY):
+        return recs
+    first = recs[0] if recs else {}
+    ok = (first.get("status") or {}).get("errorCode", 1) == 0
+    if ok and first.get("userPrincipalName") == user["upn"] and random.random() < 0.35:
+        recs = recs + ga.benign_user_calls(user, loc)
+    elif ok and "servicePrincipal" in (first.get("signInEventTypes") or []) and random.random() < 0.5:
+        recs = recs + ga.benign_app_calls(user=ac.pick_user(config, context))
+    return recs
+
+
+def _benign_mix(config, user, loc):
     r = random.random()
     if r < 0.004:  # AAD Connect sync account's periodic auth FROM ITS NORMAL HOST (baseline for the
         return [_sync_signin(_AADCONNECT_HOST_LOC)]   # 'unusual host' anomaly to measure against)
@@ -572,7 +587,12 @@ def scenario_app_access_unknown_tenant(config=None, user=None):
     rec["riskState"] = "atRisk"
     rec["riskLevelDuringSignIn"] = "high"
     rec["riskEventTypes_v2"] = ["anonymizedIPAddress"]
-    return [rec]
+    # ...and the Graph calls that app then attempts with its foreign-tenant token, refused (403):
+    # the request log is what the Graph-activity variant of the detector reads.
+    app = ga.app_identity(ac.rare_app_name(), tenant_id=tenant["tenant_id"])
+    calls = [("GET", "/v1.0/users?$top=999", 403, 312), ("GET", "/v1.0/groups", 403, 312),
+             ("GET", "/v1.0/organization", 403, 312)]
+    return [rec] + ga.burst(app, calls, ip=loc["ip"], roles="Directory.Read.All", span_s=40)
 
 
 def scenario_device_code_auth_flow(config=None, user=None):
@@ -630,6 +650,88 @@ def scenario_sp_token_remote_usage(config=None, user=None):
     return [rec]
 
 
+# ── Graph API activity scenarios (MicrosoftGraphActivityLogs only) ───────────────────
+# These detectors read Graph request logs, so the scenarios are the requests themselves; each
+# also carries the sign-in that minted the token.
+
+_ENUM_CALLS = ["/v1.0/users?$top=999", "/v1.0/groups?$top=999", "/v1.0/servicePrincipals?$top=999",
+               "/v1.0/applications", "/v1.0/directoryRoles", "/v1.0/devices?$top=999",
+               "/v1.0/organization", "/v1.0/domains", "/v1.0/identity/conditionalAccess/policies",
+               "/v1.0/roleManagement/directory/roleAssignments", "/beta/policies/authorizationPolicy",
+               "/v1.0/groups?$filter=securityEnabled eq true", "/v1.0/users?$select=id,onPremisesSamAccountName"]
+
+
+def scenario_graph_enumeration(config=None, user=None):
+    """A user token from an unfamiliar host walks the directory through Graph (users, groups, apps,
+    roles, CA policies, devices) in a few minutes, ROADtools/AzureHound style -> 'Azure
+    enumeration activity using Microsoft Graph API' (large responses also feed 'Uncommon
+    increase in Azure Microsoft Graph API request sizes')."""
+    u = user or ac.pick_user(config)
+    loc = ac.rare_asn_loc()
+    si = _signin(u, loc, interactive=True, app="Microsoft Graph Command Line Tools",
+                 resource="Microsoft Graph", client_app="Mobile Apps and Desktop clients", offset_s=-260)
+    calls = [("GET", c, 200, random.randint(60000, 900000)) for c in random.sample(_ENUM_CALLS, 11)]
+    return [si] + ga.burst(u, calls, ip=loc["ip"], scopes="Directory.Read.All User.Read.All",
+                           span_s=200, end_offset_s=-5)
+
+
+def scenario_graph_throttling_app(config=None, user=None):
+    """A daemon app hammers Graph until it is throttled (HTTP 429) -> 'An Azure application
+    reached a throttling API rate'."""
+    app = ga.app_identity(random.choice(list(ga.DAEMON_APPS)))
+    calls = ([("GET", "/v1.0/users/" + ac.user_oid(ac.pick_user(config)["username"]) + "/messages?$top=50", 200, 41000)
+              for _ in range(14)] +
+             [("GET", "/v1.0/users/" + ac.user_oid(ac.pick_user(config)["username"]) + "/messages?$top=50", 429, 180)
+              for _ in range(16)])
+    return ga.burst(app, calls, roles=ga.DAEMON_APPS[app["name"]]["roles"] + " Mail.Read", span_s=90)
+
+
+def scenario_graph_throttling_user(config=None, user=None):
+    """A user identity's script exceeds Graph's per-user limits (HTTP 429) -> 'Cloud identity reached
+    a throttling API rate'."""
+    u = user or ac.pick_user(config)
+    loc = ac.egress(u)
+    calls = ([("GET", "/v1.0/me/drive/root/children", 200, 9000) for _ in range(12)] +
+             [("GET", "/v1.0/me/drive/root/children", 429, 180) for _ in range(14)])
+    return ga.burst(u, calls, ip=loc["ip"], scopes="Files.Read.All User.Read", span_s=60)
+
+
+def scenario_graph_denied_burst(config=None, user=None):
+    """An app token is pointed at directory endpoints it holds no permission for and is refused again
+    and again (HTTP 403) -> 'An Azure identity performed multiple actions that were denied' (the
+    application variation)."""
+    app = ga.app_identity(random.choice(list(ga.DAEMON_APPS)))
+    targets = ["/v1.0/roleManagement/directory/roleAssignments", "/v1.0/applications",
+               "/v1.0/identity/conditionalAccess/policies", "/v1.0/policies/authorizationPolicy",
+               "/v1.0/directoryRoles", "/v1.0/servicePrincipals", "/v1.0/auditLogs/signIns",
+               "/v1.0/security/alerts_v2", "/v1.0/users?$select=signInActivity"]
+    calls = [("GET", random.choice(targets), 403, 312) for _ in range(14)]
+    return ga.burst(app, calls, ip=ac.rare_asn_loc()["ip"],
+                    roles=ga.DAEMON_APPS[app["name"]]["roles"], span_s=420)
+
+
+def scenario_graph_large_responses(config=None, user=None):
+    """A daemon app that normally pulls small pages suddenly downloads huge responses (full
+    directory / mailbox dumps) -> 'Uncommon increase in Azure Microsoft Graph API request sizes'."""
+    name = random.choice(list(ga.DAEMON_APPS))
+    app = ga.app_identity(name)
+    calls = [("GET", random.choice(["/v1.0/users?$top=999&$select=*", "/beta/users?$expand=memberOf",
+                                    "/v1.0/groups?$expand=members"]), 200,
+              random.randint(18_000_000, 60_000_000)) for _ in range(6)]
+    return ga.burst(app, calls, roles=ga.DAEMON_APPS[name]["roles"], span_s=300)
+
+
+def scenario_graph_privileged_app_call(config=None, user=None):
+    """An app holding a tenant-takeover app role (RoleManagement.ReadWrite.Directory) uses it to add
+    a member to a directory role -> 'Privileged role used by Azure application'."""
+    app = ga.app_identity(ac.rare_app_name())
+    loc = ac.rare_asn_loc()
+    calls = [("GET", "/v1.0/directoryRoles", 200, 7400),
+             ("POST", f"/v1.0/directoryRoles/{ac._stable_guid('role:ga')}/members/$ref", 204, 0)]
+    return ga.burst(app, calls, ip=loc["ip"], span_s=20,
+                    roles="RoleManagement.ReadWrite.Directory Directory.ReadWrite.All")
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
@@ -662,6 +764,12 @@ SCENARIOS = {
     "new_device_signin": scenario_new_device_signin,
     "new_country_signin": scenario_new_country_signin,
     "account_lockout_spray": scenario_account_lockout_spray,
+    "graph_enumeration": scenario_graph_enumeration,
+    "graph_throttling_app": scenario_graph_throttling_app,
+    "graph_throttling_user": scenario_graph_throttling_user,
+    "graph_denied_burst": scenario_graph_denied_burst,
+    "graph_large_responses": scenario_graph_large_responses,
+    "graph_privileged_app_call": scenario_graph_privileged_app_call,
 }
 
 
@@ -674,16 +782,21 @@ def get_threat_names():
     return list(SCENARIOS.keys())
 
 
+def _copies(config, records):
+    """Every signIn plus its Event Hub copy (msft_azure_raw, which the Cloud analytics read)."""
+    return ac.with_eventhub_signins(records) if ac.eventhub_enabled(config, CONFIG_KEY) else records
+
+
 def generate_log(config=None, threat_level="Realistic", benign_only=False,
                  scenario=None, scenario_event=None, context=None):
     if scenario_event:
         key = scenario_event if scenario_event in SCENARIOS else scenario_event.lower()
         if key in SCENARIOS:
-            return (SCENARIOS[key](config), key)
+            return (_copies(config, SCENARIOS[key](config)), key)
         return None
     if benign_only or threat_level == "Benign Traffic Only":
-        return generate_benign(config, context)
+        return _copies(config, generate_benign(config, context))
     if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
-        return (SCENARIOS[key](config), key)
-    return generate_benign(config, context)
+        return (_copies(config, SCENARIOS[key](config)), key)
+    return _copies(config, generate_benign(config, context))

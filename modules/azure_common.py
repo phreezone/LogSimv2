@@ -1097,3 +1097,72 @@ def egress(user, remote_prob=0.25, mobile_prob=0.08):
     ip = site["ips"][_h("deskip:" + un) % len(site["ips"])]
     return _loc(site["city"], site["state"], site["countryOrRegion"],
                 site["lat"], site["lon"], ip, site["asn"], site["isp"])
+
+
+# ── Event Hub copies (msft_azure_raw) ─────────────────────────────────────────────────
+# XSIAM's Cloud analytics read cloud_audit_logs. The Graph signIns feed (msft_azure_ad_raw)
+# never reaches it; the same objects streamed through Entra diagnostic settings to an event hub
+# do, as log_name azure_ad_signin_logs, and Graph API request logs (MicrosoftGraphActivityLogs)
+# arrive as microsoft_graph_activity_logs -- the data the "Microsoft Graph Activity Logs"
+# detectors need (verified by a canary on 2026-10-22). Modules emit those copies alongside their
+# native records; the cribl transport routes each to the Azure Event Hubs Source-Identifier
+# via the record's route key (integrations.cribl_direct.ROUTE_KEY, stripped before sending).
+EVENTHUB_SOURCE = "fce13a1d51294f84bae4a37851503060"
+EVENTHUB_INTEGRATION = "logsim:entra_eventhub"
+ROUTE_KEY = "__cribl_route__"
+EVENTHUB_RESOURCE = f"/tenants/{HOME_TENANT_ID}/providers/Microsoft.aadiam"
+
+
+def eventhub_enabled(config, config_key):
+    """Whether a module emits Event Hub copies (config[<key>]['eventhub_copies'], default on)."""
+    mc = (config or {}).get(config_key) if isinstance(config, dict) else None
+    return bool(mc.get("eventhub_copies", True)) if isinstance(mc, dict) else True
+
+
+def route_eventhub(record):
+    """Mark a record for the Azure Event Hubs Source-Identifier (msft_azure_raw)."""
+    record[ROUTE_KEY] = [EVENTHUB_SOURCE, EVENTHUB_INTEGRATION]
+    return record
+
+
+def is_eventhub_copy(record):
+    return isinstance(record, dict) and ROUTE_KEY in record
+
+
+def _signin_category(signin):
+    types = signin.get("signInEventTypes") or []
+    if "servicePrincipal" in types:
+        return "ServicePrincipalSignInLogs"
+    if "managedIdentity" in types:
+        return "ManagedIdentitySignInLogs"
+    return "SignInLogs" if signin.get("isInteractive", True) else "NonInteractiveUserSignInLogs"
+
+
+def eventhub_signin(signin):
+    """The Event Hub diagnostic-settings record for a Graph signIn object (same object as
+    properties; envelope fields follow Microsoft's sign-in log schema for event hubs)."""
+    status = signin.get("status") or {}
+    code = status.get("errorCode", 0) or 0
+    loc = signin.get("location") or {}
+    who = (signin.get("userDisplayName") or signin.get("servicePrincipalName")
+           or signin.get("appDisplayName") or "")
+    rec = {"time": signin.get("createdDateTime"), "resourceId": EVENTHUB_RESOURCE,
+           "operationName": "Sign-in activity", "operationVersion": "1.0",
+           "category": _signin_category(signin), "tenantId": HOME_TENANT_ID,
+           "resultType": str(code), "resultSignature": "None",
+           "resultDescription": "" if not code else (status.get("failureReason") or ""),
+           "durationMs": 0, "callerIpAddress": signin.get("ipAddress"),
+           "correlationId": signin.get("correlationId"), "identity": who, "Level": 4,
+           "location": loc.get("countryOrRegion", ""), "properties": signin}
+    return route_eventhub(rec)
+
+
+def with_eventhub_signins(records):
+    """records + an Event Hub copy of every Graph signIn object among them (order kept: each
+    copy follows its original)."""
+    out = []
+    for r in records or []:
+        out.append(r)
+        if isinstance(r, dict) and "signInEventTypes" in r and not is_eventhub_copy(r):
+            out.append(eventhub_signin(r))
+    return out

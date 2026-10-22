@@ -592,14 +592,16 @@ def _send_windows(win_events, source_host="logsim.examplecorp.local"):
 def fire(name, config=None, sender=None, context=None):
     """Send one sequence: cloud records via cribl_direct (grouped per source), on-prem Windows
     records via the WEC transport."""
-    from integrations.cribl_direct import CriblDirectSender
+    from integrations.cribl_direct import CriblDirectSender, split_routes
     groups = {}
     win_events = []
     for src, integ, rec in build(name, config, context):
         if src == WIN_SRC:
             win_events.append(rec)
         else:
-            groups.setdefault((src, integ), []).append(rec)
+            # a record may carry its own destination (e.g. an Event Hub copy -> msft_azure_raw)
+            for dest, recs in split_routes([rec], src, integ).items():
+                groups.setdefault(dest, []).extend(recs)
     results = []
     if groups:
         sender = sender or CriblDirectSender()
