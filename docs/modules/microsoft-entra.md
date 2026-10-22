@@ -52,6 +52,39 @@ out and the request still returns HTTP 200, but the record lands unparsed in `_r
 | `Integration-Identifier` | any non-empty string (LogSim sends `logsim:<feed>`) |
 | Body | gzip of NDJSON, one line per record: `{"data": <vendor record>, "collector_ms": <epoch ms>}` |
 
+## Event Hub copies: reaching the Cloud analytics
+
+XSIAM's Cloud analytics (the *Azure Audit Log* detectors) read `cloud_audit_logs`, not the
+native Graph datasets. A canary on 2026-10-22 showed what reaches it:
+
+| Record, posted to `msft_azure_raw` (Azure Event Hubs Source-Identifier `fce13a1d51294f84bae4a37851503060`) | `cloud_audit_logs` `log_name` |
+|---|---|
+| Entra diagnostic category `SignInLogs` / `NonInteractiveUserSignInLogs` / `ServicePrincipalSignInLogs` / `ManagedIdentitySignInLogs` | `azure_ad_signin_logs` |
+| `MicrosoftGraphActivityLogs` (one record per Graph API request) | `microsoft_graph_activity_logs` |
+| `AuditLogs` | `azure_ad_audit_logs` (same as the Graph directoryAudits feed) |
+
+The Graph signIns feed (`msft_azure_ad_raw`) never reaches `cloud_audit_logs`, and most
+Entra detectors in the *Azure Audit Log* list are tagged *Microsoft Graph Activity Logs*.
+They key on the Graph request (`POST /users`, `POST .../addPassword`, `GET .../content`),
+not the audit record. Thirty days of ~600 Add user / Add service principal / Add owner
+audit records raised none of them.
+
+So the modules also emit Event Hub copies, routed per record to the Azure Event Hubs
+Source-Identifier (`integrations.cribl_direct.ROUTE_KEY`; the cribl transport groups a
+batch by destination and strips the key before sending):
+
+- `azuread_signin`: every sign-in also goes out in the Event Hub sign-in envelope. Some
+  successful sign-ins are followed by their client's routine Graph calls (Teams, Outlook,
+  OneDrive, daemon apps).
+- Scenarios aimed at a Graph-activity detector add the Graph requests behind them. These
+  are `azuread_audit` user/group/app/CA/auth-method changes, Exchange inbox rules and
+  mailbox enumeration, and SharePoint/OneDrive downloads, uploads and enumeration.
+- The record builders live in `modules/graph_activity.py` (a helper, not a generator).
+
+Benign traffic never contains a Graph request one of those detectors raises on by
+itself, and benign directory/Exchange/SharePoint records carry no companion. To turn the
+copies off for a module, set `"eventhub_copies": false` in its `config.json` block.
+
 ## Threat model
 
 Microsoft feeds fire threats as **episodes** (one burst, sequence or session per episode)
@@ -85,14 +118,16 @@ long-running sessions and through the validation harness (below).
 IP and home IP, so the ML analytics build coherent per-user profiles. Apps, resources
 and error codes are drawn from what dominates a real Entra tenant.
 
-**Threats (31):** brute force, password spray, account-lockout spray, impossible travel,
+**Threats (37):** brute force, password spray, account-lockout spray, impossible travel,
 high-risk sign-in, TOR sign-in, SaaS API from TOR (desktop and mobile), multi-resource SSO,
 multi-SSO through an anonymising proxy, AAD Connect sync from an unusual host, sign-in by
 a disabled / dormant / honey user, suspicious-country and new-country sign-in, abnormal
 user-agent / OS, machine-account SSO, SSO spray with IP rotation, pen-test tool activity,
 first SSO to a resource / from a new ASN, unusual resource access by an app, app access
 from an unknown tenant, service-principal and managed-identity token used remotely, device
-code flow, service-account SSO, PowerShell sign-in, new-device sign-in.
+code flow, service-account SSO, PowerShell sign-in, new-device sign-in. Graph-activity only:
+directory enumeration through Graph, app and user throttling (HTTP 429), repeated denied
+requests (HTTP 403), response-size spike, privileged app role used.
 
 ## `azuread_audit` — Graph directory audit
 
@@ -105,7 +140,7 @@ maintenance, app consent, password resets, device registration. Admin actions ar
 to IT/admin role pools and follow business hours, so "unusual admin" and "unusual time"
 hold up.
 
-**Threats (38):** admin role assignment and multiple role removals, risky app consent,
+**Threats (39):** admin role assignment and multiple role removals, risky app consent,
 app credential added, app privilege escalation, application owner added/removed, app role
 assignment, application URI change, service principal created/removed, MFA fraud
 reported, security info disabled, authentication method added, temporary access pass
@@ -114,8 +149,8 @@ operation, PIM elevation request / alert disabled / member removal / role settin
 change, device registration policy change, unusual guest invitation, unlock plus password
 reset, first PowerShell operation, on-prem sync collision, account created / deleted /
 short-lived, federation change failed / federated-domain backdoor, unverified domain
-added, and the cross-tenant set: trust abuse, outbound sync, default weakened, delegated
-admin partner abuse, multi-tenant org join.
+added, security group created and deleted, and the cross-tenant set: trust abuse,
+outbound sync, default weakened, delegated admin partner abuse, multi-tenant org join.
 
 Confirmed firing in the tenant: `admin_role_add` raises *Suspicious Azure AD Administrator
 Role assignment*. `federated_domain_backdoor` raises *Rare unverified domain addition to

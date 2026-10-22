@@ -50,7 +50,7 @@ hot and cold tiers, so files are stable entities while unique paths stay unbound
 **Baseline:** routine document activity (access, modify, preview, upload, download, page
 views, folder operations), weighted to business hours.
 
-**Threats (15):**
+**Threats (19):**
 - **Exfiltration:** mass download, full-sync download.
 - **Sharing:** anonymous link created, and used externally; external sharing, including
   to an unusual domain.
@@ -59,6 +59,14 @@ views, folder operations), weighted to business hours.
 - **Destructive:** mass deletion, mass editing, mass upload (ransomware-style).
 - **Recon:** sensitive (AIP-labelled) file access, SharePoint enumeration, OneDrive
   enumeration.
+- **Graph activity only** (Microsoft Graph request logs, no SharePoint audit record):
+  OneDrive folder created through Graph, OneNote enumeration, Teams enumeration, an app
+  reading site drives for the first time.
+
+Downloads, uploads and the enumeration scenarios also emit the Graph request behind each
+audit record (`MicrosoftGraphActivityLogs`, routed to `msft_azure_raw`). Inbox-rule and
+mailbox-enumeration scenarios in `o365_exchange` do the same. See
+[Event Hub copies](microsoft-entra.md#event-hub-copies-reaching-the-cloud-analytics).
 
 ## `o365_dlp` — Data Loss Prevention
 

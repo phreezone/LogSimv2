@@ -243,11 +243,11 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | AWS CloudTrail | S3 | 69 event types across 15+ AWS services | 70 (61 on demand) | [docs/modules/aws.md](docs/modules/aws.md) |
 | GCP Cloud Audit Logs | Pub/Sub | 42 event types with @type proto annotations and LRO operation pairs | 75 (60 on demand) | [docs/modules/gcp.md](docs/modules/gcp.md) |
 | Okta SSO | HTTP Collector | 183+ event types across auth, SSO, MFA, lifecycle, policy, OAuth2, IAM, device, and zone domains | 83 (42 on demand), incl. break-glass account use | [docs/modules/okta.md](docs/modules/okta.md) |
-| Azure AD / Entra sign-ins | Cribl receiver | Graph signIns: non-interactive token refresh, interactive sign-in, routine failures | 31 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
-| Azure AD / Entra directory audit | Cribl receiver | Graph directoryAudits: user, group, app and device maintenance, admin actions in business hours | 38 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Azure AD / Entra sign-ins | Cribl receiver | Graph signIns: non-interactive token refresh, interactive sign-in, routine failures; Event Hub copies + Graph API activity to `msft_azure_raw` | 37 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Azure AD / Entra directory audit | Cribl receiver | Graph directoryAudits: user, group, app and device maintenance, admin actions in business hours; Graph requests behind threat changes | 39 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
 | Office 365 Azure AD | Cribl receiver | Management Activity RecordType 15 sign-ins / 8 directory ops | 14 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
 | Office 365 Exchange Online | Cribl receiver | MailItemsAccessed, Send, Move, inbox rules, light admin | 28 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
-| Office 365 SharePoint / OneDrive | Cribl receiver | File and sharing operations, business-hours weighted | 15 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Office 365 SharePoint / OneDrive | Cribl receiver | File and sharing operations, business-hours weighted; Graph requests behind threat activity | 19 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Office 365 DLP | Cribl receiver | Low-severity notify-only rule matches | 4 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Office 365 General | Cribl receiver | Copilot interactions, Power BI views | 2 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Identity Threat Campaigns | *(coordinator — Cribl + WEC)* | *(none)* | 21 cross-feed identity kill chains, run from **Threats & Scenarios → Run Attack Scenario** (no module card) | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
@@ -261,7 +261,7 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | Proofpoint Email | HTTP Collector | 1 type (delivered email) | 11 types | [docs/modules/proofpoint.md](docs/modules/proofpoint.md) |
 | XDR Attack Orchestration | WinRM (real endpoint) + network transports | *(coordinator — real Atomic Red Team techniques on a live Cortex-agent box + synthetic network logs pinned to its identity)* | *Phase 1 — foundation validated; stories in progress* | [docs/modules/xdr-orchestration.md](docs/modules/xdr-orchestration.md) |
 
-**Totals:** 649 named threats across the 19 log-source modules, 338 of them offered on demand, plus 21 cross-feed identity campaigns.
+**Totals:** 660 named threats across the 19 log-source modules, 338 of them offered on demand, plus 21 cross-feed identity campaigns.
 
 ## Recent Changes
 
