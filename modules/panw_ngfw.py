@@ -233,7 +233,23 @@ def _serial(config):
 
 
 def _fw_name(config):
+    """The firewall's name — user-customisable via panw_ngfw_config.hostname."""
     return _get_config(config).get("hostname", "PA-VM-01")
+
+
+def _fw_ip(config):
+    """The firewall's own management/source IP — user-customisable via
+    panw_ngfw_config.mgmt_ip (PAN stamps this in the syslog header when the device's
+    'Syslog HOSTNAME Format' is set to ipv4-address)."""
+    return _get_config(config).get("mgmt_ip", "10.0.0.1")
+
+
+def _syslog_host(config):
+    """The HOSTNAME field of the syslog header.  PAN-OS can emit either the device name
+    or its IP there (Device -> Setup -> Management -> Syslog HOSTNAME Format); honour the
+    panw_ngfw_config.syslog_hostname_format setting ('hostname' default, or 'ipv4-address')."""
+    fmt = str(_get_config(config).get("syslog_hostname_format", "hostname")).lower()
+    return _fw_ip(config) if fmt in ("ipv4-address", "ip", "ipv4", "ipv6-address") else _fw_name(config)
 
 
 def _session_id():
@@ -332,9 +348,10 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
             merged[uf] = f"EXAMPLECORP\\{uv}"
     merged.pop("_no_user_qualify", None)
     ext = " ".join(f"{k}={_cef_escape(v)}" for k, v in merged.items() if v is not None and v != "")
-    header = f"CEF:0|PANW|NGFW_CEF|{_SW_VERSION}|{subtype}|{log_type.lower()}|{severity}|"
+    sw = _get_config(config).get("sw_version", _SW_VERSION)
+    header = f"CEF:0|PANW|NGFW_CEF|{sw}|{subtype}|{log_type.lower()}|{severity}|"
     syslog_ts = time.strftime("%b %d %H:%M:%S", time.gmtime(t))
-    return f"<{_SYSLOG_PRI}>{syslog_ts} {name} {header} {ext}"
+    return f"<{_SYSLOG_PRI}>{syslog_ts} {_syslog_host(config)} {header} {ext}"
 
 
 def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
