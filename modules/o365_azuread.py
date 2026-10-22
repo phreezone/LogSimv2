@@ -185,7 +185,7 @@ def scenario_brute_force(config=None, user=None, attempts=10, src_ip=None):
 def scenario_impossible_travel(config=None, user=None):
     u = ac.pick_user(config)
     return [_signin("UserLoggedIn", u, "108.245.61.200", offset_s=-300),
-            _signin("UserLoggedIn", u, "103.21.244.12", offset_s=-60)]
+            _signin("UserLoggedIn", u, "128.199.116.12", offset_s=-60)]   # DigitalOcean SG
 
 
 def scenario_tor_signin(config=None, user=None):

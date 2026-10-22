@@ -63,7 +63,10 @@ Identities come from `config['user_profiles']` / `session_context` via
 `modules/azure_common.py` (UPN = the profile email `@examplecorp.com`, same identity used by
 every other module; device OS from the profile). Each user has a **stable public egress**:
 mostly their department's shared office NAT IP, sometimes a deterministic home IP — so the
-ML detectors build a coherent per-user IP/ASN/country baseline and anomalies read true.
+ML detectors build a coherent per-user IP/ASN/country baseline and anomalies read true. Every
+office, home, mobile and hosting block is really announced by the named ASN and geolocated to
+the named city/country (verified 2026-10-22; XSIAM enriches IPs from real data, so a mismatch
+shows up as an org-level "first ASN" or wrong-country sign-in).
 
 Weighted mix emitted by `generate_benign` (reflects real tenant volume):
 - **Sign-ins (`msft_azure_ad_raw`)**: ~70% non-interactive token refresh, ~22% interactive

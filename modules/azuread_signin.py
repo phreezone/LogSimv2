@@ -171,9 +171,11 @@ _SYNC_ACCOUNT = {"username": "sync_aadconnect01",
                  "upn": "Sync_AADCONNECT01_7f3c2b9e@examplecorp.com",
                  "display_name": "On-Premises Directory Synchronization Service Account",
                  "department": "IT", "os_type": "Windows"}
-_AADCONNECT_HOST_LOC = {"ip": "52.14.33.10", "city": "Columbus", "state": "Ohio",
-                        "countryOrRegion": "US", "geoCoordinates": {"latitude": 39.96, "longitude": -82.99},
-                        "asn": 7922, "isp": "Comcast Business"}
+_HQ = ac.OFFICES[0]   # the AAD Connect server sits behind the Columbus office NAT
+_AADCONNECT_HOST_LOC = {"ip": _HQ["ips"][0], "city": _HQ["city"], "state": _HQ["state"],
+                        "countryOrRegion": _HQ["countryOrRegion"],
+                        "geoCoordinates": {"latitude": _HQ["lat"], "longitude": _HQ["lon"]},
+                        "asn": _HQ["asn"], "isp": _HQ["isp"]}
 
 
 def _sync_signin(loc, *, risky=False, offset_s=0):
@@ -305,7 +307,7 @@ def scenario_impossible_travel(config=None, user=None):
     u = ac.pick_user(config)
     us = {"ip": "108.245.61.200", "city": "Columbus", "state": "Ohio", "countryOrRegion": "US",
           "geoCoordinates": {"latitude": 39.96, "longitude": -82.99}}
-    sg = {"ip": "103.21.244.12", "city": "Singapore", "state": "", "countryOrRegion": "SG",
+    sg = {"ip": "128.199.116.12", "city": "Singapore", "state": "", "countryOrRegion": "SG",
           "geoCoordinates": {"latitude": 1.29, "longitude": 103.85}}
     return [_signin(u, us, offset_s=-300), _signin(u, sg, offset_s=-60)]
 

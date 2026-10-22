@@ -37,7 +37,9 @@ DLP_SRC, DLP_INT = dlp.SOURCE_IDENTIFIER, dlp.INTEGRATION_IDENTIFIER
 WIN_SRC, WIN_INT = "__wec__", "logsim:windows"
 
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
-FOREIGN = {"ip": "103.21.244.12", "city": "Singapore", "state": "", "countryOrRegion": "SG",
+# A DigitalOcean Singapore block (verified origin + GeoLite location, 2026-10-22); the previous
+# 103.21.244.12 is Cloudflare anycast with no country at all.
+FOREIGN = {"ip": "128.199.116.12", "city": "Singapore", "state": "", "countryOrRegion": "SG",
            "geoCoordinates": {"latitude": 1.29, "longitude": 103.85}}
 HOME_US = {"ip": "108.245.61.200", "city": "Columbus", "state": "Ohio", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 39.96, "longitude": -82.99}}

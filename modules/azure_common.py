@@ -13,6 +13,7 @@ Research basis (Microsoft Entra sign-in / audit schema + typical tenant volume):
 """
 import functools
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -43,45 +44,75 @@ def publish_signin(user, loc=None):
 UPN_DOMAIN = "examplecorp.com"   # match LogSim's identity model (user emails are @examplecorp.com)
 HOME_TENANT_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 
+# Egress is geolocated by XSIAM against real IP data, so every block below is one the declared
+# network really announces and that GeoLite places in the declared city. Each /24 was checked on
+# 2026-10-22 against RIPEstat: origin ASN (prefix-overview) and MaxMind GeoLite city covering
+# >= 90% of the /24 (maxmind-geo-lite). The previous hand-picked blocks belonged to AWS, Microsoft,
+# a hospital network and a Luxembourg ISP, so XSIAM saw offices in the wrong organisation or
+# country. Re-run the check after changing any block.
+
 # Corporate office sites. Each site is a geo + ISP/ASN + a NAT egress pool of several public IPs,
 # so users at a site share a realistic small pool (many users behind a few office IPs) while the
-# population as a whole spreads across ~50 office IPs across ~10 sites instead of collapsing onto 3.
+# population as a whole spreads across ~60 office IPs across 10 sites instead of collapsing onto 3.
+def _pool(block, first=10, n=6):
+    base = block.rsplit(".", 1)[0]
+    return [f"{base}.{first + i}" for i in range(n)]
+
+
 OFFICES = [
-    {"city": "Columbus",  "state": "Ohio",        "countryOrRegion": "US", "lat": 39.96, "lon": -82.99, "asn": 7922,  "isp": "Comcast Business",       "ips": ["52.14.33.10", "52.14.33.11", "52.14.33.12", "52.14.33.13", "52.14.33.14", "52.14.33.15"]},
-    {"city": "Austin",    "state": "Texas",       "countryOrRegion": "US", "lat": 30.27, "lon": -97.74, "asn": 7018,  "isp": "AT&T Services",          "ips": ["20.44.12.88", "20.44.12.89", "20.44.12.90", "20.44.12.91", "20.44.12.92", "20.44.12.93"]},
-    {"city": "Seattle",   "state": "Washington",  "countryOrRegion": "US", "lat": 47.60, "lon": -122.33, "asn": 3356, "isp": "Lumen",                 "ips": ["40.112.55.3", "40.112.55.4", "40.112.55.5", "40.112.55.6", "40.112.55.7", "40.112.55.8"]},
-    {"city": "New York",  "state": "New York",    "countryOrRegion": "US", "lat": 40.71, "lon": -74.01, "asn": 701,   "isp": "Verizon Business",      "ips": ["66.108.14.20", "66.108.14.21", "66.108.14.22", "66.108.14.23", "66.108.14.24", "66.108.14.25"]},
-    {"city": "Chicago",   "state": "Illinois",    "countryOrRegion": "US", "lat": 41.88, "lon": -87.63, "asn": 174,   "isp": "Cogent Communications", "ips": ["64.69.108.40", "64.69.108.41", "64.69.108.42", "64.69.108.43", "64.69.108.44"]},
-    {"city": "San Jose",  "state": "California",  "countryOrRegion": "US", "lat": 37.34, "lon": -121.89, "asn": 7018, "isp": "AT&T Services",          "ips": ["198.51.72.60", "198.51.72.61", "198.51.72.62", "198.51.72.63", "198.51.72.64"]},
-    {"city": "Atlanta",   "state": "Georgia",     "countryOrRegion": "US", "lat": 33.75, "lon": -84.39, "asn": 6939,  "isp": "Hurricane Electric",    "ips": ["184.105.33.80", "184.105.33.81", "184.105.33.82", "184.105.33.83"]},
-    {"city": "Dublin",    "state": "Leinster",    "countryOrRegion": "IE", "lat": 53.35, "lon": -6.26,  "asn": 5466,  "isp": "Eircom",                "ips": ["185.3.44.100", "185.3.44.101", "185.3.44.102", "185.3.44.103"]},
-    {"city": "London",    "state": "England",     "countryOrRegion": "GB", "lat": 51.51, "lon": -0.13,  "asn": 2856,  "isp": "BT",                    "ips": ["194.73.21.120", "194.73.21.121", "194.73.21.122", "194.73.21.123"]},
-    {"city": "Toronto",   "state": "Ontario",     "countryOrRegion": "CA", "lat": 43.65, "lon": -79.38, "asn": 812,   "isp": "Rogers Communications", "ips": ["99.231.60.140", "99.231.60.141", "99.231.60.142", "99.231.60.143"]},
+    {"city": "Columbus", "state": "Ohio",       "countryOrRegion": "US", "lat": 39.96, "lon": -82.99,  "asn": 7018, "isp": "AT&T Services",       "ips": _pool("75.23.197.0")},
+    {"city": "Austin",   "state": "Texas",      "countryOrRegion": "US", "lat": 30.27, "lon": -97.74,  "asn": 7018, "isp": "AT&T Services",       "ips": _pool("209.30.75.0")},
+    {"city": "Seattle",  "state": "Washington", "countryOrRegion": "US", "lat": 47.60, "lon": -122.33, "asn": 209,  "isp": "Lumen (CenturyLink)", "ips": _pool("97.126.30.0")},
+    {"city": "New York", "state": "New York",   "countryOrRegion": "US", "lat": 40.71, "lon": -74.01,  "asn": 701,  "isp": "Verizon Business",    "ips": _pool("173.52.219.0")},
+    {"city": "Chicago",  "state": "Illinois",   "countryOrRegion": "US", "lat": 41.88, "lon": -87.63,  "asn": 7018, "isp": "AT&T Services",       "ips": _pool("70.241.99.0", n=5)},
+    {"city": "Fremont",  "state": "California", "countryOrRegion": "US", "lat": 37.55, "lon": -121.99, "asn": 6939, "isp": "Hurricane Electric",  "ips": _pool("74.82.60.0", n=5)},
+    {"city": "Atlanta",  "state": "Georgia",    "countryOrRegion": "US", "lat": 33.75, "lon": -84.39,  "asn": 7018, "isp": "AT&T Services",       "ips": _pool("75.46.159.0", n=4)},
+    {"city": "Dublin",   "state": "Leinster",   "countryOrRegion": "IE", "lat": 53.35, "lon": -6.26,   "asn": 5466, "isp": "Eir",                 "ips": _pool("51.171.78.0", n=4)},
+    {"city": "London",   "state": "England",    "countryOrRegion": "GB", "lat": 51.51, "lon": -0.13,   "asn": 2856, "isp": "BT",                  "ips": _pool("83.245.18.0", n=4)},
+    {"city": "Toronto",  "state": "Ontario",    "countryOrRegion": "CA", "lat": 43.65, "lon": -79.38,  "asn": 812,  "isp": "Rogers Communications", "ips": _pool("99.221.22.0", n=4)},
 ]
 # Kept for back-compat (a flat list of the primary office IPs).
 OFFICE_EGRESS = [{"ip": o["ips"][0], "city": o["city"], "state": o["state"],
                   "countryOrRegion": o["countryOrRegion"], "lat": o["lat"], "lon": o["lon"]} for o in OFFICES]
 
-# Residential ISP egress for remote/home days (stable per user).
-_HOME_PREFIXES = ["71.84.", "98.112.", "24.17.", "73.202.", "68.44.", "99.7.",
-                  "174.52.", "107.3.", "76.98.", "97.83."]
-_HOME_ISPS = [(7922, "Comcast Cable"), (20115, "Charter Spectrum"), (701, "Verizon Fios"),
-              (22773, "Cox Communications"), (209, "CenturyLink"), (11427, "Spectrum")]
-_HOME_CITIES = [
-    {"city": "Dublin",     "state": "Ohio",       "countryOrRegion": "US", "lat": 40.09, "lon": -83.11},
-    {"city": "Round Rock", "state": "Texas",      "countryOrRegion": "US", "lat": 30.50, "lon": -97.67},
-    {"city": "Redmond",    "state": "Washington", "countryOrRegion": "US", "lat": 47.67, "lon": -122.12},
-    {"city": "Naperville", "state": "Illinois",   "countryOrRegion": "US", "lat": 41.75, "lon": -88.15},
-    {"city": "Brooklyn",   "state": "New York",   "countryOrRegion": "US", "lat": 40.68, "lon": -73.94},
-    {"city": "Sunnyvale",  "state": "California", "countryOrRegion": "US", "lat": 37.37, "lon": -122.04},
-    {"city": "Marietta",   "state": "Georgia",    "countryOrRegion": "US", "lat": 33.95, "lon": -84.55},
-]
-# Mobile carrier egress (LTE/5G) — used for occasional phone sign-ins.
-_MOBILE_CARRIERS = [
-    {"prefix": "174.192.", "asn": 6167,  "isp": "Verizon Wireless"},
-    {"prefix": "172.58.",  "asn": 21928, "isp": "T-Mobile USA"},
-    {"prefix": "107.77.",  "asn": 20057, "isp": "AT&T Mobility"},
-]
+# Residential ISP egress for remote/home days, per office metro: (isp, asn, /24, city, state, lat, lon).
+# A user keeps one home block and one host in it (stable per user).
+HOME_POOLS = {
+    "Columbus": [("Spectrum", 10796, "75.185.237.0", "Hilliard", "Ohio", 40.03, -83.16),
+                 ("AT&T Internet", 7018, "76.210.127.0", "Columbus", "Ohio", 39.96, -82.99)],
+    "Austin":   [("Spectrum", 11427, "70.124.245.0", "Austin", "Texas", 30.27, -97.74),
+                 ("AT&T Internet", 7018, "76.210.162.0", "Austin", "Texas", 30.27, -97.74)],
+    "Seattle":  [("Comcast Cable", 7922, "216.122.114.0", "Seattle", "Washington", 47.60, -122.33),
+                 ("CenturyLink", 209, "71.212.187.0", "Seattle", "Washington", 47.60, -122.33)],
+    "New York": [("Spectrum", 12271, "74.71.58.0", "New York", "New York", 40.71, -74.01),
+                 ("Verizon Fios", 701, "199.222.10.0", "Brooklyn", "New York", 40.68, -73.94)],
+    "Chicago":  [("Comcast Cable", 7922, "50.73.116.0", "Chicago", "Illinois", 41.88, -87.63),
+                 ("AT&T Internet", 7018, "99.180.199.0", "Chicago", "Illinois", 41.88, -87.63)],
+    "Fremont":  [("AT&T Internet", 7018, "71.140.76.0", "San Francisco", "California", 37.77, -122.42),
+                 ("Sonic", 46375, "135.180.117.0", "Oakland", "California", 37.80, -122.27)],
+    "Atlanta":  [("Comcast Cable", 7922, "50.73.90.0", "Atlanta", "Georgia", 33.75, -84.39),
+                 ("AT&T Internet", 7018, "75.46.152.0", "Atlanta", "Georgia", 33.75, -84.39)],
+    "Dublin":   [("Virgin Media Ireland", 6830, "109.255.234.0", "Dublin", "Leinster", 53.35, -6.26)],
+    "London":   [("Virgin Media", 5089, "139.190.228.0", "London", "England", 51.51, -0.13),
+                 ("BT", 2856, "31.118.227.0", "London", "England", 51.51, -0.13)],
+    "Toronto":  [("Bell Canada", 577, "74.13.228.0", "Toronto", "Ontario", 43.65, -79.38)],
+}
+# Mobile carrier egress (LTE/5G) per office metro, for occasional phone sign-ins: (isp, asn, /24).
+# Carrier blocks geolocate to the metro, so a phone sign-in never "travels" away from the office.
+MOBILE_POOLS = {
+    "Columbus": [("T-Mobile USA", 21928, "172.59.244.0"), ("Verizon Wireless", 6167, "63.45.79.0")],
+    "Austin":   [("Verizon Wireless", 6167, "97.155.229.0")],
+    "Seattle":  [("T-Mobile USA", 21928, "162.187.202.0"), ("Verizon Wireless", 6167, "75.253.34.0"),
+                 ("AT&T Mobility", 20057, "12.72.243.0")],
+    "New York": [("Verizon Wireless", 6167, "166.145.69.0"), ("AT&T Mobility", 20057, "166.137.229.0")],
+    "Chicago":  [("T-Mobile USA", 21928, "162.186.86.0"), ("Verizon Wireless", 6167, "97.242.87.0")],
+    "Fremont":  [("T-Mobile USA", 21928, "172.59.174.0"), ("Verizon Wireless", 6167, "97.206.73.0"),
+                 ("AT&T Mobility", 20057, "12.72.210.0")],
+    "Atlanta":  [("T-Mobile USA", 21928, "172.56.69.0")],
+    "Dublin":   [("Vodafone Ireland", 15502, "109.77.255.0"), ("Three Ireland", 13280, "92.251.244.0")],
+    "London":   [("Three UK", 206067, "188.31.115.0")],
+    "Toronto":  [("Rogers Wireless", 812, "72.138.229.0"), ("Bell Mobility", 36522, "207.236.216.0")],
+}
 
 # Apps/resources that dominate real Entra sign-in telemetry.
 APPS_INTERACTIVE = ["Microsoft Office 365 Portal", "Office365 Shell WCSS-Client", "OfficeHome",
@@ -474,29 +505,79 @@ def rare_app_name(rnd=None):
     return name  # astronomically unlikely to loop out; name already carries a unique number
 
 
-# Hosting / VPS / anonymizer ASNs — sign-ins from these never occur in the benign baseline (which
-# uses corporate office / residential / mobile egress), so any is anomalous. IP is drawn across the
-# full ASN range, giving an unbounded attacker-IP space.
-_RARE_ASNS = [
-    (14061, "DigitalOcean, LLC", "165"), (16509, "Amazon.com, Inc.", "3"),
-    (14618, "Amazon.com, Inc.", "18"), (396982, "Google LLC", "35"),
-    (8075, "Microsoft Corporation", "20"), (20473, "The Constant Company (Vultr)", "45"),
-    (63949, "Akamai (Linode)", "139"), (24940, "Hetzner Online", "88"),
-    (16276, "OVH SAS", "51"), (51167, "Contabo GmbH", "161"),
-    (9009, "M247 Europe", "146"), (49505, "Selectel", "92"),
-    (200019, "Alexhost SRL", "176"), (44477, "Stark Industries Solutions", "185"),
-    (210644, "Aeza International", "194"), (401120, "Censys", "162"),
-    (60068, "Datacamp (CDN77)", "212"), (3214, "xTom", "23"),
+# Hosting / VPS / anonymizer networks -- sign-ins from these never occur in the benign baseline
+# (which uses corporate office / residential / mobile egress), so any is anomalous. Each entry is a
+# prefix the ASN really originates whose whole extent GeoLite places in one country (RIPEstat
+# announced-prefixes + prefix-overview + maxmind-geo-lite, 2026-10-22), so XSIAM's own enrichment
+# agrees with the record. ~21M addresses, drawn in proportion to block size, keep attacker IPs
+# effectively unique (an unbounded rare pool); the few /24s are providers with no large
+# single-country prefix.
+_RARE_ASNS = [  # (asn, isp, prefix, country)
+    (14061, "DigitalOcean, LLC", "188.226.128.0/17", "NL"),
+    (14061, "DigitalOcean, LLC", "107.170.0.0/17", "US"),
+    (14061, "DigitalOcean, LLC", "46.101.128.0/17", "DE"),
+    (14061, "DigitalOcean, LLC", "162.243.0.0/17", "US"),
+    (16509, "Amazon.com, Inc.", "184.192.0.0/10", "US"),
+    (16509, "Amazon.com, Inc.", "3.128.0.0/10", "US"),
+    (16509, "Amazon.com, Inc.", "44.224.0.0/11", "US"),
+    (14618, "Amazon.com, Inc.", "44.192.0.0/11", "US"),
+    (14618, "Amazon.com, Inc.", "3.224.0.0/12", "US"),
+    (14618, "Amazon.com, Inc.", "34.224.0.0/12", "US"),
+    (14618, "Amazon.com, Inc.", "34.192.0.0/12", "US"),
+    (20473, "The Constant Company (Vultr)", "44.33.0.0/16", "US"),
+    (20473, "The Constant Company (Vultr)", "167.179.64.0/18", "JP"),
+    (20473, "The Constant Company (Vultr)", "158.247.192.0/18", "KR"),
+    (20473, "The Constant Company (Vultr)", "108.61.0.0/18", "US"),
+    (63949, "Akamai Connected Cloud (Linode)", "178.79.128.0/18", "GB"),
+    (63949, "Akamai Connected Cloud (Linode)", "45.79.128.0/18", "US"),
+    (63949, "Akamai Connected Cloud (Linode)", "172.104.64.0/19", "JP"),
+    (63949, "Akamai Connected Cloud (Linode)", "172.232.32.0/19", "FR"),
+    (24940, "Hetzner Online GmbH", "78.46.0.0/15", "DE"),
+    (24940, "Hetzner Online GmbH", "178.104.0.0/15", "DE"),
+    (24940, "Hetzner Online GmbH", "91.99.0.0/16", "DE"),
+    (24940, "Hetzner Online GmbH", "2.31.0.0/16", "DE"),
+    (16276, "OVH SAS", "57.130.0.0/16", "FR"),
+    (51167, "Contabo GmbH", "169.58.128.0/17", "FR"),
+    (51167, "Contabo GmbH", "169.58.0.0/17", "FR"),
+    (51167, "Contabo GmbH", "194.163.128.0/18", "FR"),
+    (51167, "Contabo GmbH", "13.140.128.0/18", "FR"),
+    (9009, "M247 Europe SRL", "106.48.160.0/20", "IT"),
+    (9009, "M247 Europe SRL", "106.49.144.0/20", "BR"),
+    (9009, "M247 Europe SRL", "106.49.224.0/20", "DE"),
+    (9009, "M247 Europe SRL", "106.49.0.0/20", "FR"),
+    (49505, "Selectel", "95.213.128.0/17", "RU"),
+    (49505, "Selectel", "87.228.0.0/17", "RU"),
+    (49505, "Selectel", "178.72.128.0/18", "RU"),
+    (49505, "Selectel", "82.202.192.0/18", "RU"),
+    (200019, "Alexhost SRL", "80.97.128.0/20", "MD"),
+    (396982, "Google LLC", "136.110.38.0/24", "SG"),
+    (396982, "Google LLC", "35.234.92.0/24", "DE"),
+    (60068, "Datacamp Limited (CDN77)", "89.187.179.0/24", "US"),
+    (3214, "xTom", "78.142.192.0/24", "NL"),
+    (14061, "DigitalOcean, LLC", "128.199.116.0/24", "SG"),
+    (16276, "OVH SAS", "167.114.188.0/24", "CA"),
 ]
+_RARE_SIZES = [ipaddress.ip_network(p).num_addresses for _a, _i, p, _c in _RARE_ASNS]
 
 
-def rare_asn_loc(rnd=None, country="US"):
-    """Egress from a hosting/VPS/anonymizer ASN (never seen in the benign baseline). Returns the same
-    shape as egress(): {ip, city, state, countryOrRegion, geoCoordinates, asn, isp}."""
+def rare_asn_loc(rnd=None, country=None):
+    """Egress from a hosting/VPS/anonymizer network (never seen in the benign baseline). Returns the
+    same shape as egress(): {ip, city, state, countryOrRegion, geoCoordinates, asn, isp}, in the
+    country the block really sits in. `country` narrows the draw to blocks there when any exist."""
     r = rnd or random
-    asn, isp, octet = r.choice(_RARE_ASNS)
-    ip = f"{octet}.{r.randint(0, 255)}.{r.randint(0, 255)}.{r.randint(2, 254)}"
-    return {"ip": ip, "city": "", "state": "", "countryOrRegion": country,
+    idx = [i for i, x in enumerate(_RARE_ASNS) if not country or x[3] == country] or list(range(len(_RARE_ASNS)))
+    # Provider first, weighted by the square root of its space (so AWS's /10s do not crowd out the
+    # VPS hosts), then a block within it by size: diverse infrastructure, still ~99% unique IPs.
+    groups = {}
+    for i in idx:
+        groups.setdefault(_RARE_ASNS[i][1], []).append(i)
+    names = list(groups)
+    isp = r.choices(names, weights=[sum(_RARE_SIZES[i] for i in groups[n]) ** 0.5 for n in names])[0]
+    i = r.choices(groups[isp], weights=[_RARE_SIZES[j] for j in groups[isp]])[0]
+    asn, isp, prefix, cc = _RARE_ASNS[i]
+    net = ipaddress.ip_network(prefix)
+    ip = str(net.network_address + r.randrange(1, net.num_addresses - 1))
+    return {"ip": ip, "city": "", "state": "", "countryOrRegion": cc,
             "geoCoordinates": {"latitude": 0, "longitude": 0}, "asn": asn, "isp": isp}
 
 
@@ -1071,28 +1152,24 @@ def egress(user, remote_prob=0.25, mobile_prob=0.08):
 
     Returns {ip, city, state, countryOrRegion, geoCoordinates, asn, isp}. Deterministic per user
     so each user keeps a coherent IP/ASN/geo baseline (anomaly detectors judge against it), while
-    the population spreads across ~50 office IPs + per-user home + carrier IPs.
+    the population spreads across ~50 office IPs + per-user home + carrier IPs. Home and mobile
+    blocks are in the user's office metro (HOME_POOLS / MOBILE_POOLS), so a day at home or on a
+    phone never looks like travel.
     """
     un = user["username"]
     site = office_for(user)
     r = random.random()
-    if r < mobile_prob:                                   # phone on cellular (near office metro)
-        n = _h("mob:" + un); c = _MOBILE_CARRIERS[n % len(_MOBILE_CARRIERS)]
-        ip = f'{c["prefix"]}{(n >> 8) % 254 + 1}.{(n >> 16) % 254 + 1}'
-        return _loc(site["city"], site["state"], site["countryOrRegion"],
-                    site["lat"], site["lon"], ip, c["asn"], c["isp"])
-    if r < mobile_prob + remote_prob:                     # working from home (residential, same metro)
-        n = _h("home:" + un)
-        pfx = _HOME_PREFIXES[n % len(_HOME_PREFIXES)]
-        ip = f"{pfx}{(n >> 8) % 254 + 1}.{(n >> 16) % 254 + 1}"
-        asn, isp = _HOME_ISPS[(n >> 24) % len(_HOME_ISPS)]
-        # US metros use a nearby residential suburb; non-US sites stay in the office metro.
-        if site["countryOrRegion"] == "US":
-            city = _HOME_CITIES[n % len(_HOME_CITIES)]
-            return _loc(city["city"], city["state"], city["countryOrRegion"],
-                        city["lat"], city["lon"], ip, asn, isp)
+    if r < mobile_prob:                                   # phone on cellular (carrier block in the metro)
+        n = _h("mob:" + un)
+        isp, asn, block = MOBILE_POOLS[site["city"]][n % len(MOBILE_POOLS[site["city"]])]
+        ip = f'{block.rsplit(".", 1)[0]}.{(n >> 8) % 250 + 3}'
         return _loc(site["city"], site["state"], site["countryOrRegion"],
                     site["lat"], site["lon"], ip, asn, isp)
+    if r < mobile_prob + remote_prob:                     # working from home (residential, same metro)
+        n = _h("home:" + un)
+        isp, asn, block, city, state, lat, lon = HOME_POOLS[site["city"]][n % len(HOME_POOLS[site["city"]])]
+        ip = f'{block.rsplit(".", 1)[0]}.{(n >> 8) % 250 + 3}'
+        return _loc(city, state, site["countryOrRegion"], lat, lon, ip, asn, isp)
     # at the office (stable IP in the site's NAT pool)
     ip = site["ips"][_h("deskip:" + un) % len(site["ips"])]
     return _loc(site["city"], site["state"], site["countryOrRegion"],

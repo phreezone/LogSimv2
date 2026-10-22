@@ -126,10 +126,15 @@ def app_request(app, method, uri, status=200, *, roles="", ip=None, ua=_DAEMON_U
                    offset_s=offset_s, token_tenant=app.get("tenant_id"))
 
 
+# Microsoft-announced (AS8075) US blocks for cloud-hosted daemons, verified like the egress pools
+# in azure_common (RIPEstat origin + GeoLite location, 2026-10-22).
+_AZURE_BLOCKS = ("207.46.122", "23.103.103", "70.37.181", "64.4.14")
+
+
 def _azure_ip(seed):
-    """Stable Azure-datacenter egress for a cloud-hosted daemon (20.x / 40.x / 52.x)."""
+    """Stable Azure-datacenter egress for a cloud-hosted daemon."""
     n = ac._h("gaip:" + seed)
-    return f"{(20, 40, 52)[n % 3]}.{(n >> 8) % 200 + 20}.{(n >> 16) % 254 + 1}.{(n >> 24) % 250 + 2}"
+    return f"{_AZURE_BLOCKS[n % len(_AZURE_BLOCKS)]}.{(n >> 8) % 250 + 3}"
 
 
 def _fill(uri, user=None, site=None):
