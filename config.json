@@ -12,6 +12,9 @@
     "transport": "cribl",
     "eventhub_copies": true
   },
+  "azure_activity_config": {
+    "transport": "cribl"
+  },
   "o365_exchange_config": {
     "transport": "cribl",
     "eventhub_copies": true
