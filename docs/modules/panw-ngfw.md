@@ -183,11 +183,18 @@ but are flagged non-analytic so they are not offered on demand.
 
 ## Config (`panw_ngfw_config`)
 
+All firewall identity is driven from config, so the firewall's name and IP can be set to
+whatever the environment uses; every event builds its header and `log_source_*` fields off
+these values.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `syslog_port` | `514` | Broker VM Syslog Collector port |
 | `serial_number` | `007051000012345` | firewall serial (`log_source_id`) |
-| `hostname` | `PA-VM-01` | firewall name (`log_source_name` / syslog host) |
+| `hostname` | `PA-VM-01` | firewall name (`log_source_name` / `device_name`, and the syslog header host when `syslog_hostname_format=hostname`) |
+| `mgmt_ip` | `10.0.0.1` | firewall management/source IP (used as the syslog header host when `syslog_hostname_format=ipv4-address`) |
+| `syslog_hostname_format` | `hostname` | what PAN stamps in the syslog header HOSTNAME field: `hostname` or `ipv4-address` (uses `mgmt_ip`) |
+| `sw_version` | `11.1.4` | PAN-OS release in the CEF device-version slot |
 | `vsys` | `vsys1` | virtual system |
 | `interface_lan` / `interface_wan` | `ethernet1/2` / `ethernet1/1` | inbound / outbound interfaces |
 | `default_rule` | `Allow-Users-Outbound` | benign `rule_matched` |
