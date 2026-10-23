@@ -251,6 +251,7 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | Azure Activity | Cribl receiver | 140 threat scenarios across ARM, AKS kube-audit, Storage, Key Vault, and AI data-plane; all 186 Cortex Azure Audit Log entries mapped with adjacent Entra/Graph/M365 generators (three names verified in the 2026-10-23 smoke run) | 140 Azure Activity scenarios | [docs/modules/azure-activity.md](docs/modules/azure-activity.md) |
 | Office 365 DLP | Cribl receiver | Low-severity notify-only rule matches | 4 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Office 365 General | Cribl receiver | Copilot interactions, Power BI views | 2 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Azure AD Identity Protection | Cribl receiver | Entra ProvisioningLogs (SCIM/HR sync), RiskyUsers/RiskyServicePrincipals and UserRiskEvents/ServicePrincipalRiskEvents — benign identity-protection baseline | 0 (benign only) | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
 | Identity Threat Campaigns | *(coordinator — Cribl + WEC)* | *(none)* | 21 cross-feed identity kill chains, run from **Threats & Scenarios → Run Attack Scenario** (no module card) | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
 | Check Point Firewall | Syslog (TCP) | 5 types (web, DNS, VPN session, internal traffic, connection logs) + management plane (SmartConsole admin sessions, nightly backup, SNMP polling) | 45 (29 on demand) | [docs/modules/checkpoint.md](docs/modules/checkpoint.md) |
 | Cisco ASA Firewall | Syslog (TCP) | 6 types (office traffic, DHCP, DNS, inbound block, VPN, connections) + management plane (CLI admin sessions, nightly backup, SNMP polling) | 38 (29 on demand) | [docs/modules/cisco-asa.md](docs/modules/cisco-asa.md) |
@@ -262,7 +263,7 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | Proofpoint Email | HTTP Collector | 1 type (delivered email) | 11 types | [docs/modules/proofpoint.md](docs/modules/proofpoint.md) |
 | XDR Attack Orchestration | WinRM (real endpoint) + network transports | *(coordinator — real Atomic Red Team techniques on a live Cortex-agent box + synthetic network logs pinned to its identity)* | *Phase 1 — foundation validated; stories in progress* | [docs/modules/xdr-orchestration.md](docs/modules/xdr-orchestration.md) |
 
-**Totals:** 660 named threats across the 20 log-source modules, 338 of them offered on demand, plus 21 cross-feed identity campaigns.
+**Totals:** 660 named threats across the 21 log-source modules, 338 of them offered on demand, plus 21 cross-feed identity campaigns.
 
 ## Recent Changes
 

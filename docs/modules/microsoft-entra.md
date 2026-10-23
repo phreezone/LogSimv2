@@ -11,7 +11,8 @@ Okta.
 | `azuread_signin` | Microsoft Graph `auditLogs/signIns` | `msft_azure_ad_raw` | `f56dcfdf6bca43e793a4b6e9290e7b12` |
 | `azuread_audit` | Microsoft Graph `auditLogs/directoryAudits` | `msft_azure_ad_audit_raw` | `0e076d5abe864bf78e8145ea9e0d749e` |
 | `o365_azuread` | O365 Management Activity, `Audit.AzureActiveDirectory` (RecordType 15 sign-ins, 8 directory ops) | `msft_o365_azure_ad_raw` | `e1f109f886ea42fbb96be6ec0cc597a9` |
-| `azuread_campaigns` | *(coordinator — sends through the three feeds above, plus Windows over WEC)* | — | — |
+| `azuread_identity_protection` | Entra diagnostics: ProvisioningLogs, RiskyUsers/RiskyServicePrincipals, UserRiskEvents/ServicePrincipalRiskEvents | `msft_azure_raw` | `fce13a1d51294f84bae4a37851503060` |
+| `azuread_campaigns` | *(coordinator — sends through the feeds above, plus Windows over WEC)* | — | — |
 
 The Microsoft 365 workloads (Exchange, SharePoint/OneDrive, DLP, General) are on
 [microsoft-365.md](microsoft-365.md). The detection research behind both pages is in
@@ -195,6 +196,29 @@ directory activity.
 add and admin role removals, MFA disabled, privileged auth method added, atypical account
 deletion, non-standard account creation, create-then-delete user, federation change, user
 deletion, PIM role change.
+
+## `azuread_identity_protection` — provisioning & Identity Protection
+
+A standalone benign feed for three Entra diagnostic categories the `msft_azure_raw` modeling
+rule maps but no other module produced: **ProvisioningLogs** (SCIM / HR-driven app provisioning
+sync cycles), **RiskyUsers** / **RiskyServicePrincipals** (an identity's current Identity
+Protection risk state), and **UserRiskEvents** / **ServicePrincipalRiskEvents** (individual risk
+detections). Records carry the Graph resource (`provisioningObjectSummary`, `riskyUser`,
+`riskDetection`) in `properties`, in the event-hub envelope, sent under the Azure Event Hubs
+Source-Identifier. Every `properties` path is one the modeling rule reads.
+
+Benign only: provisioning sync dominates, and risk stays low/none and
+dismissed/remediated/confirmedSafe — the baseline the risk analytics learn. Genuinely risky
+sign-ins are the needle the `azuread_signin` scenarios provide.
+
+## Feed volumes
+
+A real tenant is not an equal split across feeds, so each generator declares an `EVENT_INTERVAL`
+(its default per-call interval) and the dashboard starts it at that rate. "Start all" with no
+explicit interval keeps the relative shape: sign-ins highest (~0.15 s), then Exchange and
+SharePoint, Activity and O365-AAD, then directory audit, with General, Identity Protection and
+DLP the rarest. Set a per-module rate or pass an interval to "Start all" to scale the whole stack
+up or down while keeping the proportions.
 
 ## `azuread_campaigns` — cross-feed identity campaigns
 
