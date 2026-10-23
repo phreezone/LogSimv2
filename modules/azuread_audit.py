@@ -32,6 +32,7 @@ CONFIG_KEY = "azure_ad_audit_config"
 SOURCE_IDENTIFIER = "0e076d5abe864bf78e8145ea9e0d749e"
 INTEGRATION_IDENTIFIER = "logsim:azure_ad_audit"
 DATASET = "msft_azure_ad_audit_raw"
+EVENT_INTERVAL = 1.2   # default relative benign volume: directory-audit changes are lower volume than sign-ins
 
 # Threat rate governed centrally by ac.ThreatGate / ac.THREAT_EPISODES_PER_HOUR (see _GATE below).
 
@@ -63,8 +64,8 @@ def _saas_app():
 _CA_POLICIES = [n for n, _ in ac.CA_POLICIES]
 
 
-def _ts():
-    d = datetime.datetime.now(datetime.timezone.utc)
+def _ts(offset_s=0.0):
+    d = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=min(0.0, offset_s))
     return f"{d:%Y-%m-%dT%H:%M:%S}.{d.microsecond:06d}{random.randint(0, 9)}Z"
 
 
@@ -104,13 +105,13 @@ def t_obj(kind, name, mods=None, group_type=None):
 
 
 def audit(activity, category, service, op_type, initiator, targets,
-          details=None, result="success", reason=""):
+          details=None, result="success", reason="", offset_s=0.0):
     corr = str(uuid.uuid4())
     pfx = _ID_PREFIX.get(service, "Directory")
     return {"id": f"{pfx}_{corr}_{_code()}_{random.randint(1000000, 999999999)}",
             "category": category, "correlationId": corr, "result": result,
             "resultReason": reason or activity, "activityDisplayName": activity,
-            "activityDateTime": _ts(), "loggedByService": service, "operationType": op_type,
+            "activityDateTime": _ts(offset_s), "loggedByService": service, "operationType": op_type,
             "initiatedBy": initiator, "targetResources": targets, "additionalDetails": details or []}
 
 

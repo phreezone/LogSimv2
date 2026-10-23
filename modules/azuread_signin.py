@@ -21,6 +21,7 @@ CONFIG_KEY = "azure_ad_signin_config"
 SOURCE_IDENTIFIER = "f56dcfdf6bca43e793a4b6e9290e7b12"
 INTEGRATION_IDENTIFIER = "logsim:azure_ad_signin"
 DATASET = "msft_azure_ad_raw"
+EVENT_INTERVAL = 0.15   # default relative benign volume: sign-ins are by far the highest-volume Entra feed (silent token refresh dominates)
 
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
 

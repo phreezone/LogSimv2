@@ -24,6 +24,7 @@ CONFIG_KEY = "o365_dlp_config"
 SOURCE_IDENTIFIER = "8f052782739d4b8389644cca23b994ac"
 INTEGRATION_IDENTIFIER = "logsim:o365_dlp"
 DATASET = "msft_o365_dlp_raw"
+EVENT_INTERVAL = 4.0   # default relative benign volume: DLP matches are infrequent
 ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 SP_HOST = "examplecorp.sharepoint.com"
 

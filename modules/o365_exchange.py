@@ -28,6 +28,7 @@ CONFIG_KEY = "o365_exchange_config"
 SOURCE_IDENTIFIER = "dee8e85ce7db4573a8bc21b807e1d73a"
 INTEGRATION_IDENTIFIER = "logsim:o365_exchange"
 DATASET = "msft_o365_exchange_online_raw"
+EVENT_INTERVAL = 0.3   # default relative benign volume: mailbox access (MailItemsAccessed) is very high volume
 ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 ORG_NAME = ac.UPN_DOMAIN
 
