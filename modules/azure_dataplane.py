@@ -19,6 +19,7 @@ the detectors key on -- first-time/backup access, foreign-account copy, secret d
 discovery, denial-of-wallet volume -- are left out, so routine traffic does not raise them.
 """
 import datetime
+import hashlib
 import random
 import time
 import uuid
@@ -60,7 +61,8 @@ def _blob_path(rnd, container=None, blob=None):
 
 
 def storage_record(account, sub, caller, op, category, *, ip=None, status=200, offset_s=0.0,
-                   container=None, blob=None, rnd=None, correlation_id=None, extra_properties=None):
+                   container=None, blob=None, rnd=None, correlation_id=None, extra_properties=None,
+                   authentication_type="OAuth"):
     r = rnd or random
     container, blob = _blob_path(r, container, blob)
     host = f"{account}.blob.core.windows.net"
@@ -73,11 +75,16 @@ def storage_record(account, sub, caller, op, category, *, ip=None, status=200, o
               "StorageDelete": ("delete", "Storage Blob Data Contributor", "ba92f5b4-2d11-453d-a403-e96b0029c9fe")}
     action, role, role_id = access[category]
     principal_type = "User" if caller["kind"] == "User" else "ServicePrincipal"
-    ident = {"type": "OAuth",
+    # StorageBlobLogs uses compact AuthenticationType values at the top level, while the
+    # Event Hub identity.type value is the display form documented in the event schema.
+    identity_type = {"AccountKey": "Account Key", "SAS": "SAS Key"}.get(authentication_type,
+                                                                            authentication_type)
+    ident = {"type": identity_type,
              "authorization": [{"action": f"Microsoft.Storage/storageAccounts/blobServices/containers/blobs/{action}",
                                 "result": "Granted", "reason": "Policy", "type": "RBAC",
-                                "roleAssignmentId": ae.hex32("ra:" + caller["oid"] + account),
-                                "roleDefinitionId": role_id.replace("-", ""),
+                                "roleAssignmentId": str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                    "ra:" + caller["oid"] + account)),
+                                "roleDefinitionId": role_id,
                                 "principals": [{"id": caller["oid"], "type": principal_type}]}],
              "properties": {"metricResponseType": "Success", "objectKey": f"/{account}/{container}/{blob}"},
         "requester": {"appId": caller.get("appid") or ae.CLIENTS.get(caller.get("client"))
@@ -87,17 +94,45 @@ def storage_record(account, sub, caller, op, category, *, ip=None, status=200, o
     if caller["kind"] == "User":
         ident["requester"]["upn"] = caller["upn"]
         ident["requester"]["uniqueName"] = caller["upn"]
+    if authentication_type != "OAuth":
+        # Key/SAS authenticated requests do not carry the OAuth RBAC decision details.
+        ident.pop("authorization", None)
+        ident.pop("requester", None)
+    token_digest = hashlib.sha256(
+        ("synthetic-storage-token:" + caller["oid"] + account).encode()).hexdigest().upper()
+    if authentication_type == "OAuth":
+        ident["tokenHash"] = token_digest
+    elif authentication_type == "AccountKey":
+        ident["tokenHash"] = f"key1({token_digest})"
+    elif authentication_type == "SAS":
+        sig_digest = hashlib.sha256(("synthetic-sas-signature:" + caller["oid"] + account).encode()).hexdigest().upper()
+        ident["tokenHash"] = f"key1({token_digest}),SasSignature({sig_digest})"
+    ident["properties"]["metricResponseType"] = "Success" if status < 400 else \
+        "ClientOtherError" if status < 500 else "ServerOtherError"
+    if op == "GetBlobServiceProperties":
+        request_uri = f"https://{host}/?restype=service&comp=properties"
+    elif op == "ListBlobs":
+        request_uri = f"https://{host}/{container}?restype=container&comp=list"
+    elif op == "GetContainerProperties":
+        request_uri = f"https://{host}/{container}?restype=container"
+    elif op == "GetBlockList":
+        request_uri = f"https://{host}/{container}/{blob}?comp=blocklist"
+    else:
+        request_uri = f"https://{host}/{container}/{blob}"
+    status_text = "Success" if status < 400 else ("AuthorizationPermissionMismatch" if status == 403
+                  else "BlobNotFound" if status == 404 else "ServerBusy" if status >= 500 else "Conflict")
     rec = {
         "time": _ts(offset_s), "resourceId": acct_id.upper(), "category": category,
         "operationName": op, "operationVersion": "2021-08-06", "schemaVersion": "1.0",
-        "statusCode": status, "statusText": "Success" if status < 400 else "AuthorizationPermissionMismatch",
+        "authenticationType": authentication_type,
+        "statusCode": status, "statusText": status_text,
         "durationMs": r.randint(2, 180), "callerIpAddress": f"{(caller.get('ip') or ip or '20.0.0.1')}:{r.randint(1024, 65000)}",
         "correlationId": correlation_id or str(uuid.uuid4()), "location": ae.region(sub, r),
-        "uri": f"https://{host}/{container}/{blob}", "protocol": "HTTPS",
+        "uri": request_uri, "protocol": "HTTPS",
         "identity": ident,
-        "properties": {"accountName": account, "requestUrl": f"https://{host}/{container}/{blob}",
+        "properties": {"accountName": account, "requestUrl": request_uri,
                        "userAgentHeader": ua, "clientRequestId": str(uuid.uuid4()), "serviceType": "blob",
-                       "operationCount": 1, "requestHeaderSize": r.randint(300, 1200),
+                       "operationCount": 0, "requestHeaderSize": r.randint(300, 1200),
                        "requestBodySize": r.randint(0, 65536) if category == "StorageWrite" else 0,
                        "responseHeaderSize": r.randint(150, 400),
                        "responseBodySize": r.randint(200, 4194304) if category == "StorageRead" else 0,
@@ -155,6 +190,33 @@ _KV_USE = ["KeySign", "KeyVerify", "KeyWrap", "KeyUnwrap", "KeyDecrypt", "KeyEnc
 _KV_WRITE = ["SecretSet", "KeyCreate", "CertificateCreate", "KeyRotate"]
 
 
+def _keyvault_object_path(op, object_name=None):
+    """Return the REST resource/action path corresponding to a Key Vault operation."""
+    name = object_name or "app-secret"
+    if op == "VaultGet":
+        return "", "2015-06-01", True
+    if op in ("SecretList",):
+        return "secrets", "7.4", None
+    if op in ("KeyList",):
+        return "keys", "7.4", None
+    if op in ("CertificateList",):
+        return "certificates", "7.4", None
+    if op.startswith("Secret"):
+        suffix = "/versions" if op == "SecretListVersions" else ""
+        return f"secrets/{name}{suffix}", "7.4", None
+    if op.startswith("Key"):
+        action = {"KeySign": "sign", "KeyVerify": "verify", "KeyWrap": "wrapkey",
+                  "KeyUnwrap": "unwrapkey", "KeyDecrypt": "decrypt", "KeyEncrypt": "encrypt",
+                  "KeyRotate": "rotate"}.get(op)
+        suffix = "/versions" if op == "KeyListVersions" else f"/{action}" if action else ""
+        key = object_name or "data-key"
+        return f"keys/{key}{suffix}", "7.4", None
+    if op.startswith("Certificate"):
+        suffix = "/versions" if op == "CertificateListVersions" else ""
+        return f"certificates/{name}{suffix}", "7.4", None
+    return f"secrets/{name}", "7.4", None
+
+
 def keyvault_record(vault, sub, caller, op, *, status=200, offset_s=0.0, object_name=None, rnd=None):
     r = rnd or random
     host = f"{vault}.vault.azure.net"
@@ -162,21 +224,33 @@ def keyvault_record(vault, sub, caller, op, *, status=200, offset_s=0.0, object_
              "appid": caller.get("appid") or ac.app_id("sp:" + str(caller.get("name", "")))}
     if caller["kind"] == "User":
         claim["http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn"] = caller["upn"]
-    obj = {"VaultGet": "", "SecretGet": "secrets/" + (object_name or "db-conn"), "SecretList": "secrets",
-           "KeyGet": "keys/data-key", "KeyList": "keys", "KeyRotate": "keys/data-key/rotate",
-           "KeyUpdate": "keys/data-key"}.get(
-               op, "secrets/app-secret")
+    obj, version, is_vault_control = _keyvault_object_path(op, object_name or
+        ("db-conn" if op.startswith("Secret") else "data-key" if op.startswith("Key") else "tls-cert"))
+    region = ae.region(sub, r)
+    region_code = {"eastus": "eus", "eastus2": "eus2", "centralus": "cus",
+                   "westus2": "wus2"}.get(region.lower(), "eus")
+    endpoint = f"https://control-prod-{region_code}.vaultcore.azure.net" if is_vault_control else None
+    host = f"{vault}.vault.azure.net"
+    request_uri = (f"{endpoint}/subscriptions/{sub}/resourcegroups/{ae.rg_for(sub, 'vaults')}"
+                   f"/providers/Microsoft.KeyVault/vaults/{vault}?api-version={version}" if op == "VaultGet"
+                   else f"https://{host}/{obj}?api-version={version}")
+    object_path = obj.rsplit("/", 1)[0] if op in {"KeySign", "KeyVerify", "KeyWrap", "KeyUnwrap",
+        "KeyDecrypt", "KeyEncrypt", "KeyRotate"} else obj
+    object_uri = f"https://{host}/" if op == "VaultGet" else f"https://{host}/{object_path}"
+    signature = ("OK" if status < 400 else "Unauthorized" if status == 401 else
+                 "Forbidden" if status == 403 else "Not Found" if status == 404 else
+                 "Conflict" if status == 409 else "Internal Server Error" if status >= 500 else "Bad Request")
     rec = {
         "time": _ts(offset_s),
         "resourceId": ae.rid(sub, "Microsoft.KeyVault", "vaults", vault, rg=ae.rg_for(sub, "vaults")).upper(),
-        "operationName": op, "operationVersion": "7.4", "category": "AuditEvent",
-        "resultType": "Success" if status < 400 else "Unauthorized",
-        "resultSignature": "OK" if status < 400 else "Forbidden", "resultDescription": "",
+        "operationName": op, "operationVersion": version, "category": "AuditEvent",
+        "resultType": "Success" if status < 400 else "Failure",
+        "resultSignature": signature, "resultDescription": "",
         "durationMs": str(r.randint(5, 220)), "callerIpAddress": caller.get("ip") or "20.0.0.1",
         "correlationId": str(uuid.uuid4()), "identity": {"claim": claim},
         "properties": {"clientInfo": "azsdk-python-keyvault-secrets/4.8.0" if caller["kind"] != "User"
-                       else "AzurePowerShell/12.1.0", "requestUri": f"https://{host}/{obj}?api-version=7.4",
-                       "id": f"https://{host}/{obj}", "httpStatusCode": status}}
+                       else "AzurePowerShell/12.1.0", "requestUri": request_uri,
+                       "id": object_uri, "httpStatusCode": status}}
     return ac.route_eventhub(rec)
 
 
