@@ -154,7 +154,7 @@ The module shares the simulation's identity/network model (`session_utils`, `res
 ## Threat scenarios
 
 Dispatched from `_generate_threat_log` (weighted) or forced by name via `scenario_event`.
-48 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector or
+56 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector or
 one of its traffic-only variations, and are offered on demand; 4 further events are realistic
 network patterns kept for hunts / correlation but **not** offered on demand (their detectors
 need EAL-decoded fields a CEF traffic log cannot carry).
@@ -186,7 +186,10 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 | `spam_bot` | Spam Bot Traffic | one host → 400–800 SMTP sessions to 150–300 servers over ~2 h on 25/587/465; half are MX hosts of distinct recipient domains, half unresolved IPs (the detector counts domains + unresolved IPs, not volume) | ⏳ 3-day test |
 | `new_admin_behavior` | New Administrative Behavior | 8–11 novel (fresh internal host, remote-admin port) pairs over 30–75 min; ports 22/23/69/161/512–514/623/992, filled with 22/69 | ⏳ 12-hour test |
 | `unusual_ssh` | Unusual, long SSH activity with tunnel characteristics | 2–4 sessions of 30 min–4 h, 5–80 MB each way, to one stable rare host | ⏳ 2-hour test |
+| `unusual_ssh_external` | Unusual SSH activity with tunnel characteristics to external destination | the tunnel shape at 50–200 MB each way | new |
 | `uncommon_ssh` | Uncommon SSH session was established | an SSH-habit user (`_SSH_HABIT_USERS`) reaches a rare internal host | ⏳ needs the habit to accrue on real days |
+| `uncommon_ssh_rare_internal` | Uncommon SSH session was established to a rare internal IP | SSH-habit user → never-seen internal host | new |
+| `uncommon_ssh_nonstd_port` | An Uncommon SSH session was established using a nonstandard SSH port | SSH-habit user → internal host on 2222/2022/… | new |
 | `recurring_rare_domain` | Abnormal Recurring Communications to a Rare Domain With a Less Common Port | one fixed host → its persistent rare domain on a less-common port, with URL logs; daily | ⏳ needs real days (fires here from the real pa440) |
 | `recurring_rare_ip` | Recurring access to rare IP | one fixed host → its persistent rare IP; daily | ⏳ needs real days; ✗ never fired from any feed |
 | `ddns_access` | Recurring rare domain access to dynamic DNS domain | one fixed host → its persistent dyn-DNS name, with URL logs; daily | ⏳ needs real days |
@@ -208,17 +211,22 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 | `p2p_upload` / `p2p_download` | Upload / Download pattern that resembles P2P | asymmetric P2P transfers | ? |
 | `ssh_proxy` | Unusual SSH activity that resembles SSH proxy | relay: inbound SSH, then an overlapping outbound SSH, mirrored volumes, 1–20 MB each way | ? |
 | `ssh_proxy_high_volume` | High Volume Unusual SSH activity that resembles SSH proxy | the same relay on an SSH-habit host, rare client and target, 200–600 MB each way over 2–6 h (also expected to trip Large Upload (Generic)) | new |
+| `ssh_proxy_suspicious` | Suspicious SSH activity that resembles SSH proxy | relay with both ends rare external, inbound on a non-standard port (exploratory) | new |
+| `ssh_proxy_detected` | Unusual SSH activity that resembles SSH proxy detected | plain-volume relay from a non-habit host (exploratory) | new |
 | `rare_ssh_external` | An Uncommon SSH session was established to a rare IP address | SSH-habit user → rare external IP on 22 (re-targeted from the process-based detector) | new |
 | `port_scan_aggressive` | Highly suspicious port scan | every privileged port + 60–100 high ports on one server in ~3 min | new |
 | `ipfs_peering` | Possible IPFS traffic was detected | 25–45 swarm dials on 4001 tcp+udp, ~half never complete | new |
 | `rare_domain_attack_port` | Abnormal Communication to a Rare Domain With a Port Commonly Used by Attack Platforms | rare domain on 4444/50050/31337/1337/6666/9999 + URL log | new |
 | `recurring_rare_domain_attack_port` | Abnormal Recurring Communications … Attack Platforms | a second daily beacon pair, on an attack-framework port | new (daily) |
+| `recurring_rare_domain_suspicious_as` | Abnormal Recurring Communications to a Rare Domain to a Suspicious Autonomous System (AS) | daily beacon on 443 to a rare-pool (bulletproof-hosting-style) IP | new (daily) |
 | `dormant_host_known_source` | Abnormal connections to a dormant host | established workstation → long-inactive host | new |
 | `large_upload_generic_small` | Large Upload (Generic) Lower than 100 MB | 60–95 MB on an uncommon port | new |
 | `new_ssh_admin_behavior` | New SSH Administrative Behavior | 8–11 novel SSH-only admin pairs | new |
 | `new_ftp_server_external` | New FTP Server from an external source | internet clients pulling files from a newly serving internal :21 | new |
 | `dcsync_internet_facing` | Possible DCSync from an internet-facing server | DMZ web server → DC DRSUAPI | new |
 | `dcsync_large` | Large DCSync from a non domain controller | non-DC pulls 150–600 MB from a DC | new |
+| `dcsync_non_dc_appid` | DCSync from a non domain controller | replication App-ID-identified as `ms-dc-replication` | new |
+| `dcsync_large_appid` | Large DCSync from a non domain controller by AppID | 150–600 MB pull, App-ID `ms-dc-replication` | new |
 | `rare_appid_internet_facing` | Rare AppID usage … from an internet-facing server | DMZ web server, rare App-ID, rare destination | new |
 | `spam_bot_failed` | *(non-analytic)* | 40–90 external SMTP servers, ~80% reset/unanswered; its alert (Failed Spam Bot Traffic) is Informational and never reaches the alerts table | — |
 | `ssh_suspicious_nonstd` | A suspicious SSH session was established | SSH to a rare external IP on 2222/2022/22222/8022/10022 | new |
@@ -235,7 +243,8 @@ All sequences end at or before the current time.
 
 Detectors that want the same (host, destination) pair "repeatedly over many days" cannot be
 fed by a back-dated burst on this path. `_DAILY_EVENTS` (`recurring_rare_ip`,
-`recurring_rare_domain`, `ddns_access`) claim the first threat slots of each UTC day, as Cisco
+`recurring_rare_domain`, `recurring_rare_domain_attack_port`, `recurring_rare_domain_suspicious_as`,
+`ddns_access`) claim the first threat slots of each UTC day, as Cisco
 ASA does, so each pair — one fixed host (`recurring_host(key, n=1)`) and its destination
 persisted in the beacon map — recurs on every real day the module runs at a threat level.
 Likewise `_ssh_habit_users()` (8 stable users) make everyday SSH to their usual jump host part of
