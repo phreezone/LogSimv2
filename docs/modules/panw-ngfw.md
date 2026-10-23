@@ -154,10 +154,14 @@ The module shares the simulation's identity/network model (`session_utils`, `res
 ## Threat scenarios
 
 Dispatched from `_generate_threat_log` (weighted) or forced by name via `scenario_event`.
-49 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector or
+48 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector or
 one of its traffic-only variations, and are offered on demand; 4 further events are realistic
 network patterns kept for hunts / correlation but **not** offered on demand (their detectors
 need EAL-decoded fields a CEF traffic log cannot carry).
+
+Targets name the alert the tenant actually raises. Informational alerts never reach the
+alerts table, so where a detector's base name is Informational and the shape produces a Low
+variation, the variation is the target (Port Scan fires as *Suspicious port scan*).
 
 **Status** is the in-tenant result of the 2026-10-22 detector test (each event fired at the
 broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag and host):
@@ -172,21 +176,21 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 
 | Event | XSIAM analytic | Shape | Status |
 |---|---|---|---|
-| `port_scan` | Port Scan | one host → 20–24 distinct privileged ports on one server | ✅ *Suspicious port scan* |
+| `port_scan` | Suspicious port scan | one host → 20–24 distinct privileged ports on one server | ✅ *Suspicious port scan* |
 | `failed_connections` | Failed Connections | ~120 zero-byte denies to ~40 inactive hosts | ✅ |
 | `large_upload_generic` | Large Upload (Generic) | one large upload on an uncommon port | ✅ |
 | `large_upload_https` | Large Upload (HTTPS) | one 300–700 MB session to the shared exfil pool (`session_utils.exfil_destination`) + URL log | ✅ |
 | `large_upload_https_nonstd` | Large Upload (HTTPS) | same on 8443/4443/9443/10443/2083 | ✅ *…to non-standard port* |
 | `large_upload_smtp` | Large Upload (SMTP) | 300–700 MB over 587 to a rare server | ⏳ 1-day test |
 | `large_upload_ftp` | Large Upload (FTP) | 300–700 MB over 21 to a rare server | ⏳ 1-day test (fired once from Firepower) |
-| `spam_bot` | Spam Bot Traffic | one host → 40–90 external SMTP servers on 25 | ⏳ 3-day test |
+| `spam_bot` | Spam Bot Traffic | one host → 400–800 SMTP sessions to 150–300 servers over ~2 h on 25/587/465; half are MX hosts of distinct recipient domains, half unresolved IPs (the detector counts domains + unresolved IPs, not volume) | ⏳ 3-day test |
 | `new_admin_behavior` | New Administrative Behavior | 8–11 novel (fresh internal host, remote-admin port) pairs over 30–75 min; ports 22/23/69/161/512–514/623/992, filled with 22/69 | ⏳ 12-hour test |
-| `unusual_ssh` | Unusual SSH Activity | 2–4 sessions of 30 min–4 h, 5–80 MB each way, to one stable rare host | ⏳ 2-hour test |
+| `unusual_ssh` | Unusual, long SSH activity with tunnel characteristics | 2–4 sessions of 30 min–4 h, 5–80 MB each way, to one stable rare host | ⏳ 2-hour test |
 | `uncommon_ssh` | Uncommon SSH session was established | an SSH-habit user (`_SSH_HABIT_USERS`) reaches a rare internal host | ⏳ needs the habit to accrue on real days |
-| `recurring_rare_domain` | Abnormal Recurring Communications to a Rare Domain | one fixed host → its persistent rare domain on a less-common port, with URL logs; daily | ⏳ needs real days (fires here from the real pa440) |
+| `recurring_rare_domain` | Abnormal Recurring Communications to a Rare Domain With a Less Common Port | one fixed host → its persistent rare domain on a less-common port, with URL logs; daily | ⏳ needs real days (fires here from the real pa440) |
 | `recurring_rare_ip` | Recurring access to rare IP | one fixed host → its persistent rare IP; daily | ⏳ needs real days; ✗ never fired from any feed |
 | `ddns_access` | Recurring rare domain access to dynamic DNS domain | one fixed host → its persistent dyn-DNS name, with URL logs; daily | ⏳ needs real days |
-| `port_sweep` | Port Sweep | one privileged port across many hosts in ≥3 subnets | ✗ (the only "Port Sweep" here was a Check Point vendor alert) |
+| `port_sweep` | Port Sweep to multiple subnets | one privileged port across many hosts in ≥3 subnets | ✗ (the only "Port Sweep" here was a Check Point vendor alert) |
 | `rare_rdp` | Rare RDP session to a remote host | RDP to a rarely-seen host | ✗ |
 | `abnormal_rdp_rare_host` | Abnormal RDP … from a rarely seen host | RDP from a stable rare source host | ✗ |
 | `rare_smb` | Rare SMB session to a remote host | SMB to a rarely-seen host | ✗ |
@@ -216,7 +220,7 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 | `dcsync_internet_facing` | Possible DCSync from an internet-facing server | DMZ web server → DC DRSUAPI | new |
 | `dcsync_large` | Large DCSync from a non domain controller | non-DC pulls 150–600 MB from a DC | new |
 | `rare_appid_internet_facing` | Rare AppID usage … from an internet-facing server | DMZ web server, rare App-ID, rare destination | new |
-| `spam_bot_failed` | Failed Spam Bot Traffic | 40–90 external SMTP servers, ~80% reset/unanswered | new |
+| `spam_bot_failed` | *(non-analytic)* | 40–90 external SMTP servers, ~80% reset/unanswered; its alert (Failed Spam Bot Traffic) is Informational and never reaches the alerts table | — |
 | `ssh_suspicious_nonstd` | A suspicious SSH session was established | SSH to a rare external IP on 2222/2022/22222/8022/10022 | new |
 | `ssh_high_volume` | Uncommon SSH … higher than usual volume | SSH-habit user → usual jump host, 300–900 MB | new |
 | `host_attack_chain` | Multiple network-related alerts produced by different detectors on the same host | one host: port scan → failed connections → generic upload within the hour | new |
