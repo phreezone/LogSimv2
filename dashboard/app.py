@@ -406,6 +406,23 @@ def _min_interval(module) -> float:
         return _MIN_EVENT_INTERVAL
 
 
+def _module_default_interval(module) -> float:
+    """A module's starting per-call interval (seconds). Precedence: the module's own
+    EVENT_INTERVAL attribute (used to set realistic relative volume across feeds), then an
+    event_interval in its CONFIG_KEY block, then the global base_event_interval_seconds. Clamped
+    to the module's own floor."""
+    base = CONFIG.get("base_event_interval_seconds", 1.0)
+    iv = getattr(module, "EVENT_INTERVAL", None)
+    if iv is None:
+        ck = getattr(module, "CONFIG_KEY", None)
+        iv = (CONFIG.get(ck) or {}).get("event_interval") if ck else None
+    try:
+        iv = float(iv) if iv is not None else base
+    except (TypeError, ValueError):
+        iv = base
+    return max(iv, _min_interval(module))
+
+
 def _notify_interval(state) -> None:
     """Tell a module that sets its own volume (Windows: worker threads, not calls) the
     rate it was given; modules without the hook are paced by their calls alone."""
@@ -441,7 +458,11 @@ class ModuleState:
 
         # Config
         self.threat_level = "Realistic"
-        self.event_interval: float = CONFIG.get("base_event_interval_seconds", 1.0)
+        # Default per-call interval: a module may declare its own EVENT_INTERVAL so the feeds run
+        # at realistic RELATIVE volumes when started together (a real tenant is not an equal split
+        # across feeds). Falls back to the module's config block, then the global base. "Start all"
+        # with no explicit interval keeps these per-module defaults.
+        self.event_interval: float = _module_default_interval(module)
 
         # Metrics
         self.total_logs = 0

@@ -25,6 +25,7 @@ CONFIG_KEY = "o365_sharepoint_config"
 SOURCE_IDENTIFIER = "3a37f519e9094a3f8c4185fa572cd111"
 INTEGRATION_IDENTIFIER = "logsim:o365_sharepoint"
 DATASET = "msft_o365_sharepoint_online_raw"
+EVENT_INTERVAL = 0.4   # default relative benign volume: document access/sharing is high volume
 ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 SP_HOST = "examplecorp.sharepoint.com"
 OD_HOST = "examplecorp-my.sharepoint.com"       # OneDrive personal host

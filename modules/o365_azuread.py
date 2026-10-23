@@ -31,6 +31,7 @@ CONFIG_KEY = "o365_azure_ad_config"
 SOURCE_IDENTIFIER = "e1f109f886ea42fbb96be6ec0cc597a9"
 INTEGRATION_IDENTIFIER = "logsim:o365_azure_ad"
 DATASET = "msft_o365_azure_ad_raw"
+EVENT_INTERVAL = 0.5   # default relative benign volume: O365 Management-Activity sign-ins / directory ops
 ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]

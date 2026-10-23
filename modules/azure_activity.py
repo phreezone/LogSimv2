@@ -41,6 +41,7 @@ CONFIG_KEY = "azure_activity_config"
 SOURCE_IDENTIFIER = "fce13a1d51294f84bae4a37851503060"
 INTEGRATION_IDENTIFIER = "logsim:azure_activity"
 DATASET = "msft_azure_raw"
+EVENT_INTERVAL = 0.5   # default relative benign volume: ARM + data-plane + kube control-plane activity, moderate
 
 
 def _ts(offset_s=0.0):
@@ -106,9 +107,9 @@ _RESULT_TYPE = {"Started": "Start", "Accepted": "Accept", "Succeeded": "Success"
 def _evidence(caller, sub, role):
     who = caller.get("upn") or caller.get("name")
     return {"role": role, "roleAssignmentScope": f"/subscriptions/{sub['id']}",
-            "roleAssignmentId": ae.hex32(f"ra:{who}:{role}:{sub['id']}"),
-            "roleDefinitionId": ae.ROLES.get(role, ae.ROLES["Contributor"]).replace("-", ""),
-            "principalId": caller["oid"].replace("-", ""),
+            "roleAssignmentId": ae.guid(f"ra:{who}:{role}:{sub['id']}"),
+            "roleDefinitionId": ae.ROLES.get(role, ae.ROLES["Contributor"]),
+            "principalId": caller["oid"],
             "principalType": "User" if caller["kind"] == "User" else "ServicePrincipal"}
 
 
@@ -137,7 +138,7 @@ def record(op, resource_id, caller, sub, *, status="Succeeded", code="OK", role=
         "identity": {"authorization": {"scope": resource_id, "action": op,
                                        "evidence": _evidence(caller, sub, role)},
                      "claims": caller["claims"]},
-        "level": level or ("Error" if status == "Failed" else "Information"),
+        "level": level or ("Error" if status == "Failed" else "Informational"),
         "location": "global", "properties": props}
 
 
@@ -382,7 +383,7 @@ def _b_policy(config, context):
                  "policyAssignmentId": f"/subscriptions/{sub['id']}/providers/Microsoft.Authorization/policyAssignments/{pa}/",
                  "policyAssignmentName": pa, "policyAssignmentScope": f"/subscriptions/{sub['id']}",
                  "policyAssignmentParameters": {}}]
-    level = {"audit": "Warning", "auditIfNotExists": "Warning", "deny": "Error"}.get(effect, "Information")
+    level = {"audit": "Warning", "auditIfNotExists": "Warning", "deny": "Error"}.get(effect, "Informational")
     rt = "Failure" if effect == "deny" else "Success"
     props = {"isComplianceCheck": "True" if scan else "False", "resourceLocation": ae.region(sub),
              "ancestors": ",".join(reversed(sub["mgs"])) + "," + ae.TENANT_ID,
@@ -591,6 +592,7 @@ _ARM_TARGETS = {
     "wip_nsg_rule_change": ("An Azure Network Security Group was modified", "Microsoft.Network/networkSecurityGroups/securityRules/write", "net", "Network Contributor"),
     "wip_firewall_change": ("An Azure Firewall was modified", "Microsoft.Network/azureFirewalls/write", "net", "Network Contributor"),
     "wip_firewall_policy_delete": ("An Azure Firewall policy deletion", "Microsoft.Network/firewallPolicies/delete", "net", "Network Contributor"),
+    "wip_firewall_rule_collection_delete": ("An Azure Firewall rule collection group was modified or deleted", "Microsoft.Network/firewallPolicies/ruleCollectionGroups/delete", "net", "Network Contributor"),
     "wip_firewall_rule_collection": ("An Azure Firewall rule collection group was modified or deleted", "Microsoft.Network/firewallPolicies/ruleCollectionGroups/write", "net", "Network Contributor"),
     "wip_firewall_rule_group": ("An Azure firewall rule group was modified", "Microsoft.Network/firewallPolicies/ruleCollectionGroups/write", "net", "Network Contributor"),
     "wip_dns_zone_change": ("An Azure DNS Zone was modified", "Microsoft.Network/dnsZones/write", "net", "Network Contributor"),
@@ -900,6 +902,16 @@ def _new_domain_activity(config=None):
 
 def _kube_threat(config, kind):
     cluster = random.choice(aks.CLUSTERS)
+    if kind == "denied_enumeration":
+        user, groups = aks.sa("payments", "payments-api")
+        probes = [("pods", "", "payments"), ("secrets", "", "payments"),
+                  ("deployments", "apps", "payments"), ("roles", "rbac.authorization.k8s.io", "payments"),
+                  ("nodes", "", None)]
+        return [aks.record(cluster, aks.event("list", resource, ns=namespace, user=user, groups=groups,
+                    src="10.244.12.17", ua="python-requests/2.32.3", code=403, decision="forbid",
+                    reason="RBAC: forbidden by RoleBinding", api_group=group,
+                    offset_s=-(len(probes)-i-1)*2.0))
+                for i, (resource, group, namespace) in enumerate(probes)]
     if kind == "anonymous":
         user, groups, src, ua = "system:anonymous", ["system:unauthenticated"], "198.51.100.24", "kubectl/v1.30.4"
         return [aks.record(cluster, aks.event("get", "secrets", ns="payments", name="db-credentials", user=user,
@@ -909,7 +921,7 @@ def _kube_threat(config, kind):
         user, groups = aks.sa("payments", "payments-api")
         src = "10.244.12.17"
         ua = "kubectl/v1.30.4"
-        code, decision, reason = 200, "allow", "RBAC: allowed by ClusterRoleBinding \"system:basic-user\""
+        code, decision, reason = None, "allow", ""
         if kind in ("dashboard_external", "service_account_external", "node_external"):
             src = ac.rare_asn_loc().get("ip", "45.155.205.233")
         if kind == "dashboard_external":
@@ -920,7 +932,11 @@ def _kube_threat(config, kind):
             ua = "trivy-operator/0.24.1 (kubernetes security scanner)"
         elif kind == "denied_api":
             code, decision, reason = 403, "forbid", "RBAC: forbidden by RoleBinding"
-        event = aks.event(verb, resource, ns=ns, name=name, user=user, groups=groups, src=src, ua=ua,
+        elif kind == "suspicious_secret_ua":
+            ua = "python-requests/2.32.3"
+        event = aks.event(verb, resource,
+                          ns=None if resource == "selfsubjectrulesreviews" else ns,
+                          name=name, user=user, groups=groups, src=src, ua=ua,
                           api_group=group, request_object=body, code=code, decision=decision, reason=reason)
         return [aks.record(cluster, event)]
     service_user, groups = aks.sa("payments", "payments-api")
@@ -939,11 +955,14 @@ def _kube_threat(config, kind):
         "ephemeral": ("update", "pods", "payments-api-7f94d6c8bf-x2m4p", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"payments-api-7f94d6c8bf-x2m4p","namespace":"payments"},"spec":{"ephemeralContainers":[{"name":"debugger","image":"busybox:1.36","targetContainerName":"payments-api"}]}}),
     }
     action, res, name, group, body = payloads[kind]
-    subres = "exec" if kind == "exec" else None
+    subres = "exec" if kind == "exec" else "ephemeralcontainers" if kind == "ephemeral" else None
     event = aks.event(action, res, ns=None if res in ("clusterroles", "namespaces") else "payments",
                       name=name, subresource=subres, user=service_user, groups=groups,
                       src="10.244.12.17", ua="kubectl/v1.30.4", api_group=group,
-                      request_object=body, code=200)
+                      request_object=body, code=101 if kind == "exec" else 201 if action == "create" else None,
+                      stage="ResponseStarted" if kind == "exec" else None,
+                      request_query="command=sh&container=payments-api&stdin=true&stdout=true&tty=true"
+                      if kind == "exec" else None)
     return [aks.record(cluster, event)]
 
 
@@ -963,14 +982,15 @@ _KUBE_EXTRA = {
     "host_network": ("create", "pods", "payments", "host-network-debug", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"host-network-debug","namespace":"payments"},"spec":{"hostNetwork":True,"containers":[{"name":"debug","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9"}]}}),
     "privileged_pod": ("create", "pods", "payments", "privileged-debug", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"privileged-debug","namespace":"payments"},"spec":{"containers":[{"name":"debug","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9","securityContext":{"privileged":True}}]}}),
     "admission_controller": ("create", "mutatingwebhookconfigurations", None, "simulated-mutating-webhook", "admissionregistration.k8s.io", {"apiVersion":"admissionregistration.k8s.io/v1","kind":"MutatingWebhookConfiguration","metadata":{"name":"simulated-mutating-webhook"},"webhooks":[{"name":"mutate.example.invalid","clientConfig":{"url":"https://webhook.example.invalid"},"rules":[]}] }),
-    "events_delete": ("deletecollection", "events", "payments", None, "", None),
+    "events_delete": ("delete", "events", "payments", "payments-api.2bd5", "", None),
     "enumeration": ("list", "namespaces", None, None, "", None),
-    "rbac_enumeration": ("create", "selfsubjectrulesreviews", "payments", None, "authorization.k8s.io", {"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"payments"}}),
+    "rbac_enumeration": ("create", "selfsubjectrulesreviews", None, None, "authorization.k8s.io", {"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"payments"}}),
     "secret_enumeration": ("list", "secrets", "payments", None, "", None),
     "secret_access": ("get", "secrets", "payments", "db-credentials", "", None),
     "service_account_external": ("get", "secrets", "payments", "db-credentials", "", None),
     "scan_tool": ("list", "pods", "payments", None, "", None),
     "denied_api": ("get", "secrets", "payments", "db-credentials", "", None),
+    "suspicious_secret_ua": ("get", "secrets", "payments", "db-credentials", "", None),
     "unusual_sa_api": ("create", "clusterrolebindings", None, "unusual-sa-binding", "rbac.authorization.k8s.io", {"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"unusual-sa-binding"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"ServiceAccount","name":"payments-api","namespace":"payments"}]}),
 }
 
@@ -1011,8 +1031,10 @@ _KUBE_TARGETS = {
     "wip_kube_service_account_external": ("Kubernetes service account activity outside the cluster", "service_account_external"),
     "wip_kube_scan_tool": ("Kubernetes vulnerability scanning tool usage", "scan_tool"),
     "wip_kube_denied_api": ("Denied API call by a Kubernetes service account", "denied_api"),
+    "wip_kube_denied_enumeration": ("Kubernetes API enumeration denied across resource types", "denied_enumeration"),
     "wip_kube_unusual_sa_api": ("A Kubernetes service account executed an unusual API call", "unusual_sa_api"),
     "wip_kube_secret_access": ("An identity accessed Azure Kubernetes Secrets", "secret_access"),
+    "wip_kube_secret_access_suspicious_ua": ("AKS secret access with a suspicious user agent", "suspicious_secret_ua"),
     "wip_kube_clusterrole_created": ("A Kubernetes cluster role was created", "clusterrole"),
     "wip_kube_rolebinding_create_delete": ("A Kubernetes role binding was created or deleted", "rolebinding"),
     "wip_kube_permission_enumeration": ("A Kubernetes service account has enumerated its permissions", "rbac_enumeration"),
@@ -1050,6 +1072,12 @@ def _storage_threat(config=None, *, mode="first", count=1):
         caller = ae.pick_nonstandard(config)
         return [dp.storage_record(account, sub, caller, "SetBlobMetadata", "StorageWrite", container="datasets",
                                   blob="labels/quality-review.csv")]
+    if mode in ("shared_key", "sas"):
+        caller = ae.pick_admin(config, ae.DATA_OPS)
+        auth_type = "AccountKey" if mode == "shared_key" else "SAS"
+        op = "GetBlob" if mode == "shared_key" else "ListBlobs"
+        return [dp.storage_record(account, sub, caller, op, "StorageRead", container="exports",
+                                  blob="quarterly-report.parquet", authentication_type=auth_type)]
     for i in range(count):
         container = "backups" if mode == "backup" else None
         blob = f"backup-{i:04d}.bak" if mode == "backup" else f"download-{uuid.uuid4().hex[:12]}.parquet"
@@ -1060,7 +1088,7 @@ def _storage_threat(config=None, *, mode="first", count=1):
 
 def _keyvault_threat(config=None, op="SecretList", *, count=1):
     sub = ae.pick_sub()
-    caller = ae.pick_admin(config, ae.SEC_OPS)
+    caller = ae.pick_nonstandard(config) if op == "SecretGet" and count >= 12 else ae.pick_admin(config, ae.SEC_OPS)
     vault = ae.pick_name(sub, "vaults")
     return [dp.keyvault_record(vault, sub, caller, op, object_name=f"service-{i:02d}", offset_s=-i * 3.0)
             for i in range(count)]
@@ -1096,6 +1124,8 @@ SCENARIOS.update({
     "wip_unusual_cloud_object_read": lambda config=None: _storage_threat(config, mode="object_read"),
     "wip_ai_dataset_label_modify": lambda config=None: _storage_threat(config, mode="dataset_modify"),
     "wip_storage_cross_account_copy": lambda config=None: _storage_threat(config, mode="copy"),
+    "wip_storage_shared_key_access": lambda config=None: _storage_threat(config, mode="shared_key"),
+    "wip_storage_sas_access": lambda config=None: _storage_threat(config, mode="sas"),
     "wip_ml_model_download": lambda config=None: _storage_threat(config, mode="model"),
     "wip_keyvault_key_change": lambda config=None: _keyvault_threat(config, "KeyRotate"),
     "wip_keyvault_secret_dump": lambda config=None: _keyvault_threat(config, "SecretGet", count=12),
