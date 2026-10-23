@@ -119,9 +119,10 @@ Vault); model discovery and denial-of-wallet volume (AI).
 
 Storage, Key Vault and AI records are resource logs in categories outside the Entra set, so the
 `msft_azure_raw` modeling rule maps them through its generic resource-log path (caller IP,
-resource id, operation, outcome). That they land in `cloud_audit_logs` the way the Activity log
-and kube-audit do is **not yet canary-verified** — confirm with a small send before relying on
-the storage / Key Vault / AI detectors.
+resource id, operation, outcome). A 3-record canary (2026-10-23) confirmed all three reach
+`cloud_audit_logs` as `azure_ad_audit_logs`... actually `azure_audit_logs`: Storage ->
+resource_type CloudStorage (operation GetData), Key Vault -> KMS/VAULTS, AI -> MachineLearning,
+service_type "AI/ML Audit". Caller identity and IP come through (the app's Microsoft egress).
 
 ## Threats
 
