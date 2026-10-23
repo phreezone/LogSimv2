@@ -1253,6 +1253,9 @@ def eventhub_audit(audit):
     rec = {"time": audit.get("activityDateTime"), "resourceId": EVENTHUB_RESOURCE,
            "operationName": audit.get("activityDisplayName"), "operationVersion": "1.0",
            "category": "AuditLogs", "tenantId": HOME_TENANT_ID,
+           "resultType": {"success": "Success", "failure": "Failure", "timeout": "Timeout"}.get(
+               str(audit.get("result") or "success").lower(),
+               str(audit.get("result") or "Success").capitalize()),
            "resultSignature": "None", "resultDescription": audit.get("resultReason") or "",
            "durationMs": 0, "callerIpAddress": user.get("ipAddress") or "",
            "correlationId": audit.get("correlationId"),

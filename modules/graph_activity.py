@@ -71,14 +71,16 @@ def _ts(offset_s=0.0):
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + f".{frac:07d}Z"
 
 
-def app_identity(name, tenant_id=None):
+def app_identity(name, tenant_id=None, client_auth_method=1):
     """Stable identity for an application (appId + its service principal object id)."""
     return {"name": name, "app_id": ac.app_id(name), "sp_id": ac.user_oid("sp:" + name),
-            "tenant_id": tenant_id or ac.HOME_TENANT_ID}
+            "tenant_id": tenant_id or ac.HOME_TENANT_ID,
+            "client_auth_method": client_auth_method}
 
 
 def _record(*, method, uri, status, ip, app_id, user_id="", sp_id="", scopes="", roles="",
-            wids="", ua="", size=None, offset_s=0.0, token_tenant=None, duration=None):
+            wids="", ua="", size=None, offset_s=0.0, token_tenant=None, duration=None,
+            sign_in_activity_id=None, client_auth_method=0):
     ts = _ts(offset_s)
     req = str(uuid.uuid4())
     dur = duration if duration is not None else random.randint(40, 900)
@@ -86,19 +88,20 @@ def _record(*, method, uri, status, ip, app_id, user_id="", sp_id="", scopes="",
         size = 0 if status in (204, 302) else random.randint(400, 6000)
     idp = f"https://sts.windows.net/{token_tenant or ac.HOME_TENANT_ID}/"
     path = uri if uri.startswith("http") else GRAPH + uri
+    api_version = next((part for part in path.split("/") if part in ("v1.0", "beta")), "v1.0")
     rec = {
         "time": ts, "resourceId": ac.EVENTHUB_RESOURCE, "operationName": "Microsoft Graph Activity",
-        "operationVersion": "beta", "category": "MicrosoftGraphActivityLogs",
-        "resultSignature": str(status), "durationMs": str(dur), "callerIpAddress": ip,
+        "operationVersion": api_version, "category": "MicrosoftGraphActivityLogs",
+        "resultSignature": str(status), "durationMs": dur, "callerIpAddress": ip,
         "correlationId": req, "level": "Informational", "location": "East US",
         "properties": {
             "timeGenerated": ts, "location": "East US", "requestId": req, "operationId": req,
-            "clientRequestId": str(uuid.uuid4()), "apiVersion": path.split("/")[3] if path.count("/") > 3 else "v1.0",
+            "clientRequestId": str(uuid.uuid4()), "apiVersion": api_version,
             "requestMethod": method, "responseStatusCode": status, "tenantId": ac.HOME_TENANT_ID,
             "durationMs": dur, "responseSizeBytes": size,
-            "signInActivityId": uuid.uuid4().hex[:22], "roles": roles, "tokenIssuedAt": _ts(offset_s - 600),
+            "signInActivityId": sign_in_activity_id or "", "roles": roles, "tokenIssuedAt": _ts(offset_s - 600),
             "appId": app_id, "userId": user_id, "servicePrincipalId": sp_id, "scopes": scopes,
-            "identityProvider": idp, "clientAuthMethod": 2 if sp_id and not user_id else 0,
+            "identityProvider": idp, "clientAuthMethod": client_auth_method,
             "wids": wids, "ipAddress": ip, "userAgent": ua, "requestUri": path,
             "deviceId": None, "sessionId": str(uuid.uuid4()) if user_id else "", "atContent": ""}}
     return ac.route_eventhub(rec)
@@ -106,7 +109,7 @@ def _record(*, method, uri, status, ip, app_id, user_id="", sp_id="", scopes="",
 
 def user_request(user, method, uri, status=200, *, client="Microsoft Graph Command Line Tools",
                  scopes="User.Read openid profile", wids=WID_MEMBER, ip=None, ua=None, size=None,
-                 offset_s=0.0):
+                 offset_s=0.0, sign_in_activity_id=None):
     """A delegated Graph request made by a user through a client app."""
     return _record(method=method, uri=uri, status=status,
                    ip=ip or ac.egress(user)["ip"],
@@ -114,16 +117,18 @@ def user_request(user, method, uri, status=200, *, client="Microsoft Graph Comma
                    user_id=ac.user_oid(user["username"]), scopes=scopes, wids=wids,
                    ua=ua or (_POWERSHELL_UA if client == "Microsoft Graph Command Line Tools"
                              else ac.user_agent(user)),
-                   size=size, offset_s=offset_s)
+                   size=size, offset_s=offset_s, sign_in_activity_id=sign_in_activity_id)
 
 
 def app_request(app, method, uri, status=200, *, roles="", ip=None, ua=_DAEMON_UA, size=None,
-                offset_s=0.0):
+                offset_s=0.0, sign_in_activity_id=None):
     """An app-only Graph request made by a service principal (application permissions).
     `app` is app_identity(); a foreign tenant_id there makes it a cross-tenant caller."""
     return _record(method=method, uri=uri, status=status, ip=ip or _azure_ip(app["name"]),
                    app_id=app["app_id"], sp_id=app["sp_id"], roles=roles, ua=ua, size=size,
-                   offset_s=offset_s, token_tenant=app.get("tenant_id"))
+                   offset_s=offset_s, token_tenant=app.get("tenant_id"),
+                   sign_in_activity_id=sign_in_activity_id,
+                   client_auth_method=app.get("client_auth_method", 1))
 
 
 # Microsoft-announced (AS8075) US blocks for cloud-hosted daemons, verified like the egress pools
@@ -169,7 +174,7 @@ _DELEGATED_SCOPES = {
 }
 
 
-def benign_user_calls(user, loc=None, n=None, offset_s=0.0):
+def benign_user_calls(user, loc=None, n=None, offset_s=0.0, sign_in_activity_id=None):
     """1-3 everyday Graph requests from a user's clients, from the sign-in's egress."""
     ip = (loc or {}).get("ip") or ac.egress(user)["ip"]
     out = []
@@ -177,18 +182,20 @@ def benign_user_calls(user, loc=None, n=None, offset_s=0.0):
         client, method, uri, status = random.choice(_USER_CALLS)
         out.append(_record(method=method, uri=uri, status=status, ip=ip, app_id=CLIENT_APPS[client],
                            user_id=ac.user_oid(user["username"]), scopes=_DELEGATED_SCOPES.get(client, ""),
-                           wids=WID_MEMBER, ua=ac.user_agent(user), offset_s=offset_s + i * 0.4))
+                           wids=WID_MEMBER, ua=ac.user_agent(user), offset_s=offset_s + i * 0.4,
+                           sign_in_activity_id=sign_in_activity_id))
     return out
 
 
-def benign_app_calls(name=None, user=None, offset_s=0.0):
+def benign_app_calls(name=None, user=None, offset_s=0.0, sign_in_activity_id=None):
     """One routine request from a daemon app, drawn from that app's own baseline. `user` is the
     roster identity a per-user call (drive delta, profile sync) is about."""
     name = name or random.choice(list(DAEMON_APPS))
     spec = DAEMON_APPS[name]
     method, uri, status, size = random.choice(spec["calls"])
     return [app_request(app_identity(name), method, _fill(uri, user), status, roles=spec["roles"],
-                        size=size + random.randint(0, size // 4 + 1), offset_s=offset_s)]
+                        size=size + random.randint(0, size // 4 + 1), offset_s=offset_s,
+                        sign_in_activity_id=sign_in_activity_id)]
 
 
 # ── request sequences behind scenario operations ─────────────────────────────────────
