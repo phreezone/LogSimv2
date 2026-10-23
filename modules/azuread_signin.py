@@ -69,7 +69,7 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
     app_name = app or random.choice(ac.APPS_INTERACTIVE)
     res_name = resource or random.choice(ac.RESOURCES)
     rec = {
-        "id": _g(), "createdDateTime": ts,
+        "id": _g(), "uniqueTokenIdentifier": _g(), "createdDateTime": ts,
         "userDisplayName": user["display_name"], "userPrincipalName": user["upn"],
         "userId": ac.user_oid(user["username"]),
         "appId": ac.app_id(app_name), "appDisplayName": app_name,
@@ -118,7 +118,7 @@ def _sp_signin(loc, offset_s=0):
     # it keeps the per-app resource baseline tight so 'unusual resource access by app' can fire.
     _res = ac.pick_baseline_resource("sp:" + name)
     return {
-        "id": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name), "appDisplayName": name,
+        "id": _g(), "uniqueTokenIdentifier": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name), "appDisplayName": name,
         "servicePrincipalId": ac.user_oid("sp:" + name), "servicePrincipalName": name,
         "ipAddress": loc["ip"], "correlationId": _g(), "conditionalAccessStatus": "notApplied",
         "isInteractive": False, "riskState": "none", "riskLevelDuringSignIn": "none",
@@ -140,7 +140,7 @@ def _mi_signin(loc, offset_s=0):
                           "logsim-logicapp", "logsim-datafactory"])
     msi = random.choice(["userAssigned", "systemAssigned"])
     return {
-        "id": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name),
+        "id": _g(), "uniqueTokenIdentifier": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name),
         "appDisplayName": name, "servicePrincipalId": ac.user_oid("mi:" + name),
         "servicePrincipalName": name, "ipAddress": loc["ip"], "correlationId": _g(),
         "conditionalAccessStatus": "notApplied", "isInteractive": False,
@@ -209,9 +209,11 @@ def generate_benign(config=None, context=None):
     first = recs[0] if recs else {}
     ok = (first.get("status") or {}).get("errorCode", 1) == 0
     if ok and first.get("userPrincipalName") == user["upn"] and random.random() < 0.35:
-        recs = recs + ga.benign_user_calls(user, loc)
+        recs = recs + ga.benign_user_calls(user, loc,
+                                            sign_in_activity_id=first.get("uniqueTokenIdentifier"))
     elif ok and "servicePrincipal" in (first.get("signInEventTypes") or []) and random.random() < 0.5:
-        recs = recs + ga.benign_app_calls(user=ac.pick_user(config, context))
+        recs = recs + ga.benign_app_calls(user=ac.pick_user(config, context),
+                                           sign_in_activity_id=first.get("uniqueTokenIdentifier"))
     return recs
 
 
@@ -294,12 +296,16 @@ def scenario_password_spray(config=None, victims=12, src_ip=None):
     bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
     out = []
+    sprayed = []
     for i in range(victims):
         u = ac.pick_user(config)
+        sprayed.append(u)
         out.append(_signin(u, bad, interactive=True, success=False, error_code=50126,
                            failure="Invalid username or password.", conditional="notApplied",
                            offset_s=-(60 - i)))
-    out.append(_signin(ac.pick_user(config), bad, interactive=True, offset_s=0))
+    # The compromise lands on one of the sprayed accounts, so the "many failures then a success
+    # from one IP" story resolves on a victim the spray actually touched (not a fresh identity).
+    out.append(_signin(random.choice(sprayed), bad, interactive=True, offset_s=0))
     return out
 
 
