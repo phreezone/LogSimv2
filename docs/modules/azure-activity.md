@@ -84,6 +84,16 @@ records, plus kube-audit. The mix:
   - Metric alerts activated/resolved.
   - Autoscale up/down.
   - Advisor recommendations.
+- **Data-plane resource logs** (`modules/azure_dataplane.py`), modeled on Microsoft's documented
+  event-hub schemas:
+  - **Storage blob access** (`StorageRead` / `StorageWrite` / `StorageDelete`): apps and managed
+    identities reading and writing their own blobs, a little admin access, read-heavy. OAuth only,
+    known accounts.
+  - **Key Vault** (`AuditEvent`): secret/key gets and lists, sign/wrap/unwrap, by app and managed
+    identities. No bulk enumeration of distinct secrets (the dump pattern).
+  - **Azure AI / Cognitive Services** (`RequestResponse`): model invocations
+    (`ChatCompletions_Create`, `Embeddings_Create`, ...) by application identities against known
+    deployments. No model discovery, no abnormal volume.
 - **AKS audit** (`modules/aks_audit.py`): controllers, the scheduler, kubelets and workloads
   reading and watching, lease renewals, node status patches, events, CI rolling deployments by
   patch, and platform engineers' read-only kubectl.
@@ -101,6 +111,17 @@ create/stop/delete/run-command/extensions, snapshots, role assignments, locks, d
 settings, automation runbooks, and so on) never appear in benign traffic. Kubernetes creates of
 secrets, configmaps, workloads, RBAC, namespaces and service accounts, exec, ephemeral
 containers and permission self-reviews stay out of the kube-audit baseline for the same reason.
+The data-plane baselines likewise leave out what their detectors key on: first-time or backup
+storage access, foreign-account copy, anonymous access (Storage); bulk secret enumeration (Key
+Vault); model discovery and denial-of-wallet volume (AI).
+
+## Ingestion note
+
+Storage, Key Vault and AI records are resource logs in categories outside the Entra set, so the
+`msft_azure_raw` modeling rule maps them through its generic resource-log path (caller IP,
+resource id, operation, outcome). That they land in `cloud_audit_logs` the way the Activity log
+and kube-audit do is **not yet canary-verified** — confirm with a small send before relying on
+the storage / Key Vault / AI detectors.
 
 ## Threats
 
