@@ -930,10 +930,29 @@ def _graph_companions(records):
     return out
 
 
+def _with_eventhub(records, benign):
+    """records + the Entra AuditLogs event-hub copy of each (msft_azure_raw), which is what the
+    Cloud-module "Azure Audit Log" analytics read. Benign records whose operation one of those
+    analytics raises on by itself get no copy (azure_audit_catalog.CLOUD_ALERTING_ACTIVITIES)."""
+    out = []
+    for r in records:
+        out.append(r)
+        if (isinstance(r, dict) and "activityDisplayName" in r and not ac.is_eventhub_copy(r)
+                and not (benign and cat.is_cloud_alerting(r["activityDisplayName"]))):
+            out.append(ac.eventhub_audit(r))
+    return out
+
+
 def _with_graph(config, key, records):
-    if key in _GRAPH_SCENARIOS and ac.eventhub_enabled(config, CONFIG_KEY):
-        return _graph_companions(records) + records
-    return records
+    if not ac.eventhub_enabled(config, CONFIG_KEY):
+        return records
+    companions = _graph_companions(records) if key in _GRAPH_SCENARIOS else []
+    return companions + _with_eventhub(records, benign=False)
+
+
+def _benign(config, context):
+    recs = generate_benign(config, context)
+    return _with_eventhub(recs, benign=True) if ac.eventhub_enabled(config, CONFIG_KEY) else recs
 
 
 _GATE = ac.ThreatGate(SCENARIOS)
@@ -951,8 +970,8 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
             return (_with_graph(config, key, SCENARIOS[key](config)), key)
         return None
     if benign_only or threat_level == "Benign Traffic Only":
-        return generate_benign(config, context)
+        return _benign(config, context)
     if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
         return (_with_graph(config, key, SCENARIOS[key](config)), key)
-    return generate_benign(config, context)
+    return _benign(config, context)

@@ -61,13 +61,22 @@ native Graph datasets. A canary on 2026-10-22 showed what reaches it:
 |---|---|
 | Entra diagnostic category `SignInLogs` / `NonInteractiveUserSignInLogs` / `ServicePrincipalSignInLogs` / `ManagedIdentitySignInLogs` | `azure_ad_signin_logs` |
 | `MicrosoftGraphActivityLogs` (one record per Graph API request) | `microsoft_graph_activity_logs` |
-| `AuditLogs` | `azure_ad_audit_logs` (same as the Graph directoryAudits feed) |
+| `AuditLogs` | `azure_ad_audit_logs` (same log type as the Graph directoryAudits feed, but the Event Hub data source the Cloud detectors require) |
 
 The Graph signIns feed (`msft_azure_ad_raw`) never reaches `cloud_audit_logs`, and most
 Entra detectors in the *Azure Audit Log* list are tagged *Microsoft Graph Activity Logs*.
 They key on the Graph request (`POST /users`, `POST .../addPassword`, `GET .../content`),
 not the audit record. Thirty days of ~600 Add user / Add service principal / Add owner
 audit records raised none of them.
+
+The rest (*A Service Principal was created / removed in Azure*, *Azure application removed*,
+*PIM privilege member removal*, *Azure permission delegation granted*, *Granting Access to an
+Account*, *Removal of an Azure Owner*) list **Azure Audit Log** as required data and run in
+the Cloud module. That is the Event Hub data source (`msft_azure_raw`), not the Graph feed.
+The firing Entra detectors (*Azure AD PIM alert disabled*, federation, role assignment,
+unverified domain) list **AzureAD Audit Log** and run in the Identity Threat Module. In
+`cloud_audit_logs` both kinds of audit record land as `azure_ad_audit_logs`, but the Cloud
+detectors read only what arrives through the Event Hub data source.
 
 So the modules also emit Event Hub copies, routed per record to the Azure Event Hubs
 Source-Identifier (`integrations.cribl_direct.ROUTE_KEY`; the cribl transport groups a
@@ -76,6 +85,14 @@ batch by destination and strips the key before sending):
 - `azuread_signin`: every sign-in also goes out in the Event Hub sign-in envelope. Some
   successful sign-ins are followed by their client's routine Graph calls (Teams, Outlook,
   OneDrive, daemon apps).
+- `azuread_audit`: every directory record also goes out in the Event Hub `AuditLogs`
+  envelope. The exception is benign records whose operation a Cloud detector raises on by
+  itself (`azure_audit_catalog.CLOUD_ALERTING_ACTIVITIES`: service principal/application
+  create and delete, owners, role members, consent, users, groups, guests, Conditional
+  Access, authentication methods). Scenarios are copied in full.
+- `azuread_threat_sequences` (and so the campaigns): each sign-in gets its Event Hub copy;
+  each directory change gets its AuditLogs copy, preceded by its Graph call where one is
+  mapped.
 - Scenarios aimed at a Graph-activity detector add the Graph requests behind them. These
   are `azuread_audit` user/group/app/CA/auth-method changes, Exchange inbox rules and
   mailbox enumeration, and SharePoint/OneDrive downloads, uploads and enumeration.

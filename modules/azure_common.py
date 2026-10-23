@@ -1243,3 +1243,20 @@ def with_eventhub_signins(records):
         if isinstance(r, dict) and "signInEventTypes" in r and not is_eventhub_copy(r):
             out.append(eventhub_signin(r))
     return out
+
+
+def eventhub_audit(audit):
+    """The Event Hub diagnostic-settings record (category AuditLogs) for a Graph directoryAudit
+    object (same object as properties; envelope as Entra streams it, verified by a 2026-10-22 canary)."""
+    by = audit.get("initiatedBy") or {}
+    user, app = by.get("user") or {}, by.get("app") or {}
+    rec = {"time": audit.get("activityDateTime"), "resourceId": EVENTHUB_RESOURCE,
+           "operationName": audit.get("activityDisplayName"), "operationVersion": "1.0",
+           "category": "AuditLogs", "tenantId": HOME_TENANT_ID,
+           "resultSignature": "None", "resultDescription": audit.get("resultReason") or "",
+           "durationMs": 0, "callerIpAddress": user.get("ipAddress") or "",
+           "correlationId": audit.get("correlationId"),
+           "identity": user.get("userPrincipalName") or app.get("displayName") or "",
+           "Level": 4, "properties": dict(audit, tenantId=HOME_TENANT_ID, tenantGeo="NA",
+                                          operationName=audit.get("activityDisplayName"))}
+    return route_eventhub(rec)
