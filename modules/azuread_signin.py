@@ -36,6 +36,13 @@ def _ts(offset_s=0):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + offset_s))
 
 
+def _burst_offsets(n, spacing=3, end=-3):
+    """n per-event offsets (seconds), earliest first, every one <= `end` (so <= now whatever n is)
+    and `spacing` apart. spacing is an integer >= 1 so each lands on a distinct whole second (the
+    sign-in feed stamps at second resolution), which keeps XSIAM from deduping them."""
+    return [end - spacing * (n - 1 - i) for i in range(n)]
+
+
 def _tor_ip(config):
     nodes = (config or {}).get("tor_exit_nodes") if isinstance(config, dict) else None
     if nodes:
@@ -278,31 +285,33 @@ def _benign_mix(config, user, loc):
 
 # ── attack scenarios ─────────────────────────────────────────────────────────────────
 
-def scenario_brute_force(config=None, user=None, attempts=10, src_ip=None):
+def scenario_brute_force(config=None, user=None, attempts=60, src_ip=None):
     u = ac.pick_user(config)
     loc = ac.egress(u)
     ip = src_ip or random.choice(RISKY_IPS)
     bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    offs = _burst_offsets(attempts)
     out = [_signin(u, bad, interactive=True, success=False, error_code=50126,
                    failure="Invalid username or password.", conditional="notApplied",
-                   offset_s=-(120 - i * 8)) for i in range(attempts)]
+                   offset_s=offs[i]) for i in range(attempts)]
     out.append(_signin(u, bad, interactive=True, offset_s=0))
     return out
 
 
-def scenario_password_spray(config=None, victims=12, src_ip=None):
+def scenario_password_spray(config=None, victims=50, src_ip=None):
     ip = src_ip or random.choice(RISKY_IPS)
     bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
     out = []
     sprayed = []
+    offs = _burst_offsets(victims)
     for i in range(victims):
         u = ac.pick_user(config)
         sprayed.append(u)
         out.append(_signin(u, bad, interactive=True, success=False, error_code=50126,
                            failure="Invalid username or password.", conditional="notApplied",
-                           offset_s=-(60 - i)))
+                           offset_s=offs[i]))
     # The compromise lands on one of the sprayed accounts, so the "many failures then a success
     # from one IP" story resolves on a victim the spray actually touched (not a fresh identity).
     out.append(_signin(random.choice(sprayed), bad, interactive=True, offset_s=0))
@@ -363,18 +372,19 @@ def scenario_new_country_signin(config=None, user=None):
     return [_signin(u, far, interactive=True, ca_result="success")]
 
 
-def scenario_account_lockout_spray(config=None, victims=10, src_ip=None):
+def scenario_account_lockout_spray(config=None, victims=40, src_ip=None):
     """Many distinct users hit account lockout (errorCode 50053) from one source ->
     'Multiple user accounts failed login due to account lockouts' (Low)."""
     ip = src_ip or random.choice(RISKY_IPS)
     bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
     out = []
+    offs = _burst_offsets(victims)
     for i in range(victims):
         u = ac.pick_user(config)
         out.append(_signin(u, bad, interactive=True, success=False, error_code=50053,
                            failure="Account is locked because the user tried to sign in too many times with an incorrect user ID or password.",
-                           conditional="notApplied", offset_s=-(120 - i * 8)))
+                           conditional="notApplied", offset_s=offs[i]))
     return out
 
 
@@ -513,18 +523,19 @@ def scenario_machine_account_sso(config=None, user=None):
                     risk_level="low", risk_state="atRisk")]
 
 
-def scenario_sso_spray_ip_rotation(config=None, victims=12):
+def scenario_sso_spray_ip_rotation(config=None, victims=50):
     """Password spray with ROTATING source IPs across a subnet -> 'IP Rotation Pattern in SSO
     Spray' (evades per-IP lockout)."""
     net = random.choice(["45.148", "193.218", "185.220"])
     out = []
+    offs = _burst_offsets(victims)
     for i in range(victims):
         v = ac.pick_user(config)
         ip = f"{net}.{random.randint(0, 255)}.{random.randint(2, 250)}"
         out.append(_signin(v, {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
                     "geoCoordinates": {"latitude": 0, "longitude": 0}}, interactive=True,
                     success=False, error_code=50126, failure="Invalid username or password.",
-                    conditional="notApplied", offset_s=-(180 - i * 12)))
+                    conditional="notApplied", offset_s=offs[i]))
     return out
 
 
@@ -548,13 +559,14 @@ _PENTEST_AGENTS = ["MSOLSpray/1.0", "AADInternals", "ROADtools", "o365-attack-to
                    "TeamFiltration/3.5", "python-requests/2.31 (MFASweep)", "Mantis"]
 
 
-def scenario_pentest_tool_activity(config=None, user=None, attempts=8):
+def scenario_pentest_tool_activity(config=None, user=None, attempts=30):
     """Sign-ins bearing known offensive-tool signatures in the user-agent -> 'Penetration testing
     tool activity attempt' (MSOLSpray / AADInternals / ROADtools / TeamFiltration etc.)."""
     agent = random.choice(_PENTEST_AGENTS)
     bad = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
     out = []
+    offs = _burst_offsets(attempts)
     for i in range(attempts):
         u = ac.pick_user(config)
         dev = dict(ac.device_for(u), browser=agent, isCompliant=False, isManaged=False, trustType="")
@@ -562,7 +574,7 @@ def scenario_pentest_tool_activity(config=None, user=None, attempts=8):
                            error_code=(0 if i == attempts - 1 else 50126),
                            failure="Invalid username or password.", device=dev,
                            risk_level="high", risk_state="atRisk", conditional="notApplied",
-                           offset_s=-(120 - i * 12)))
+                           offset_s=offs[i]))
     return out
 
 
