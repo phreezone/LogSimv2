@@ -60,7 +60,7 @@ def _blob_path(rnd, container=None, blob=None):
 
 
 def storage_record(account, sub, caller, op, category, *, ip=None, status=200, offset_s=0.0,
-                   container=None, blob=None, rnd=None):
+                   container=None, blob=None, rnd=None, correlation_id=None, extra_properties=None):
     r = rnd or random
     container, blob = _blob_path(r, container, blob)
     host = f"{account}.blob.core.windows.net"
@@ -92,7 +92,7 @@ def storage_record(account, sub, caller, op, category, *, ip=None, status=200, o
         "operationName": op, "operationVersion": "2021-08-06", "schemaVersion": "1.0",
         "statusCode": status, "statusText": "Success" if status < 400 else "AuthorizationPermissionMismatch",
         "durationMs": r.randint(2, 180), "callerIpAddress": f"{(caller.get('ip') or ip or '20.0.0.1')}:{r.randint(1024, 65000)}",
-        "correlationId": str(uuid.uuid4()), "location": ae.region(sub, r),
+        "correlationId": correlation_id or str(uuid.uuid4()), "location": ae.region(sub, r),
         "uri": f"https://{host}/{container}/{blob}", "protocol": "HTTPS",
         "identity": ident,
         "properties": {"accountName": account, "requestUrl": f"https://{host}/{container}/{blob}",
@@ -102,7 +102,34 @@ def storage_record(account, sub, caller, op, category, *, ip=None, status=200, o
                        "responseHeaderSize": r.randint(150, 400),
                        "responseBodySize": r.randint(200, 4194304) if category == "StorageRead" else 0,
                        "tlsVersion": "TLS 1.2", "accessTier": r.choice(["Hot", "Hot", "Cool"])}}
+    if extra_properties:
+        rec["properties"].update(extra_properties)
     return ac.route_eventhub(rec)
+
+
+def storage_copy_records(source_account, source_sub, destination_account, destination_sub, caller,
+                         *, container="exports", blob="quarterly-report.parquet", offset_s=0.0):
+    """Build correlated StorageBlobLogs-style records for a cross-account Copy Blob."""
+    corr = str(uuid.uuid4())
+    dst_container, dst_blob = "imports", f"received-{uuid.uuid4().hex[:10]}.parquet"
+    destination_uri = f"https://{destination_account}.blob.core.windows.net/{dst_container}/{dst_blob}"
+    source_uri = f"https://{source_account}.blob.core.windows.net/{container}/{blob}"
+    destination_rid = ae.rid(destination_sub, "Microsoft.Storage", "storageAccounts", destination_account,
+                             "blobServices", "default", rg=ae.rg_for(destination_sub, "storageAccounts"))
+    source_event = storage_record(source_account, source_sub, caller, "CopyBlobSource", "StorageRead",
+        container=container, blob=blob, offset_s=offset_s, correlation_id=corr,
+        extra_properties={"destinationUri": destination_uri, "copyDestinationArmId": destination_rid,
+                          "operationCount": 2})
+    source_event["destinationUri"] = destination_uri
+    source_event["copyDestinationArmId"] = destination_rid
+    source_event["DestinationUri"] = destination_uri
+    source_event["CopyDestinationArmId"] = destination_rid
+    destination_event = storage_record(destination_account, destination_sub, caller, "CopyBlob", "StorageWrite",
+        container=dst_container, blob=dst_blob, offset_s=offset_s, correlation_id=corr,
+        extra_properties={"sourceUri": source_uri, "copySource": source_uri, "operationCount": 2})
+    destination_event["sourceUri"] = source_uri
+    destination_event["SourceUri"] = source_uri
+    return [source_event, destination_event]
 
 
 def benign_storage(config, context=None):
@@ -176,24 +203,30 @@ _AI_OPS = {  # operationName -> (apiName, category)
     # Audit-category model catalog lookup. The operation name is also present in the public
     # Azure OpenAI logging sample used by the Cortex model-discovery analytic.
     "Models_List": ("Models", "Audit"),
+    "Files_List": ("Files", "Audit"),
+    "Files_GetFileContent": ("Files - Get Content", "Audit"),
 }
 _AI_DEPLOYMENTS = [("gpt-4o", "gpt-4o"), ("gpt-4o-mini", "gpt-4o-mini"), ("gpt-35-turbo", "gpt-35-turbo"),
                    ("text-embedding-3-large", "text-embedding-3-large"), ("o3-mini", "o3-mini")]
 
 
-def ai_record(account, sub, caller, op, *, status=200, offset_s=0.0, rnd=None):
+def ai_record(account, sub, caller, op, *, status=200, offset_s=0.0, rnd=None,
+              deployment=None, model=None, file_id=None):
     r = rnd or random
     api, category = _AI_OPS[op]
-    dep, model = r.choice(_AI_DEPLOYMENTS)
+    dep, model_name = (deployment, model) if deployment and model else r.choice(_AI_DEPLOYMENTS)
     request_time = _dotnet_ticks(offset_s - r.uniform(0.1, 3.0))
     duration_ms = r.randint(120, 9000)
-    props = {"apiName": f"Azure OpenAI API version {'2023-12-01-preview' if op == 'Models_List' else '2023-05-15'}",
+    version = "2023-12-01-preview" if op in ("Models_List", "Files_List", "Files_GetFileContent") else "2023-05-15"
+    props = {"apiName": f"Azure OpenAI API version {version}",
              "requestTime": request_time, "responseTime": request_time + duration_ms * 10_000,
              "statusCode": status, "objectId": caller["oid"]}
+    if op == "Files_GetFileContent":
+        props["fileId"] = file_id or f"file-{uuid.uuid4().hex[:32]}"
     if category == "RequestResponse":
         props.update({"requestLength": r.randint(200, 24000),
                       "responseLength": r.randint(100, 16000) if status < 400 else 0,
-                      "modelDeploymentName": dep, "modelName": model, "modelVersion": "2024-08-06",
+                      "modelDeploymentName": dep, "modelName": model_name, "modelVersion": "2024-08-06",
                       "streamType": r.choice(["Non-Streaming", "Streaming"]),
                       "apimRequestId": str(uuid.uuid4())})
     rec = {
