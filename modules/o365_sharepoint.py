@@ -531,6 +531,30 @@ SCENARIOS = {
     "unusual_m365_storage_access": scenario_unusual_m365_storage_access,
 }
 
+SCENARIOS.update({
+    "wip_m365_storage_exfiltration": scenario_mass_download,
+    "wip_sharepoint_enumeration": scenario_sharepoint_enumeration,
+    "wip_onedrive_enumeration": scenario_onedrive_enumeration,
+    "wip_onenote_enumeration": scenario_onenote_enumeration,
+    "wip_teams_enumeration": scenario_teams_enumeration,
+    "wip_onedrive_folder_creation": scenario_onedrive_folder_creation,
+    "wip_onedrive_file_download": scenario_full_sync_download,
+    "wip_onedrive_file_upload": scenario_mass_file_upload,
+    "wip_unusual_m365_storage_access": scenario_unusual_m365_storage_access,
+})
+
+ANALYTIC_ALERTS = {
+    "wip_m365_storage_exfiltration": "Microsoft 365 storage services exfiltration activity",
+    "wip_sharepoint_enumeration": "Microsoft SharePoint enumeration activity",
+    "wip_onedrive_enumeration": "Microsoft OneDrive enumeration activity",
+    "wip_onenote_enumeration": "Microsoft OneNote enumeration activity",
+    "wip_teams_enumeration": "Microsoft Teams enumeration activity",
+    "wip_onedrive_folder_creation": "OneDrive folder creation",
+    "wip_onedrive_file_download": "OneDrive file download",
+    "wip_onedrive_file_upload": "OneDrive file upload",
+    "wip_unusual_m365_storage_access": "Unusual access to Microsoft 365 storage services",
+}
+
 
 # ── Graph activity companions ────────────────────────────────────────────────────────
 # OneDrive download/upload, "Microsoft 365 storage services exfiltration" and the OneDrive /
@@ -564,7 +588,7 @@ def _graph_companions(key, records):
 
 def _with_graph(config, key, records):
     if ac.eventhub_enabled(config, CONFIG_KEY):
-        return _graph_companions(key, records) + records
+        return _graph_companions(key.removeprefix("wip_"), records) + records
     return records
 
 

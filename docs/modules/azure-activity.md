@@ -127,45 +127,30 @@ resource id, operation, outcome). A 3-record canary (2026-10-23) confirmed all t
 "AI/ML Audit". Caller IP comes through. Azure OpenAI Entra identity is represented by
 `properties.objectId` in published samples, rather than a top-level identity object.
 
-## Threat scenarios
+## Threat scenarios and Cortex detector coverage
 
-`azure_activity` now has 65 forced threat scenarios, each with a Cortex Azure Audit Log target
-in `ANALYTIC_ALERTS`. All scenario keys use the `wip_` prefix because the published target is
-identified but a corresponding synthetic alert has not yet been confirmed in this tenant. The
-usual threat gate controls ambient generation; a specific scenario can be forced by its key.
-Nothing in this module sends automatically to the tenant unless the simulator is configured for
-live Cribl transport.
+`modules/azure_activity.py` now exposes 139 forced scenarios covering Azure Activity ARM operations, AKS kube-audit, Storage Blob, Key Vault, and Azure AI resource logs. Related detectors that require Entra `AuditLogs`, `SignInLogs`, Microsoft Graph activity, or Microsoft 365 SharePoint/OneDrive Graph activity use their owning generators in `azuread_audit.py`, `azuread_signin.py`, and `o365_sharepoint.py`. Across those modules, 185 of the 186 Cortex Azure Audit Log index entries have a same-title scenario mapping. All are marked `wip_`: shape generation is implemented, but a matching XSIAM alert has not yet been attributed to these new scenario emissions.
 
-Coverage in this first scenario set:
+The row-by-row inventory is in [azure-audit-detector-inventory.md](azure-audit-detector-inventory.md). It records each detector's source requirements, activation and training windows, test window, severity, event family, inferred prerequisites, scenario key, and synopsis. Detector pages expose descriptions and prerequisites, not the full analytic query; same-title mappings therefore do not establish exact query compatibility. Profiling alerts also need the stated activation/training history, and multi-event alerts need all events within the detector's window.
 
-- 42 ARM control-plane targets: network and firewall changes, diagnostic/logging changes, RBAC,
-  compute lifecycle and execution, storage configuration, Event Hub, SQL export, AKS, Key Vault,
-  automation, and related operations. Mutations emit correlated `Started` plus terminal records;
-  each emits a correlated `Started` and terminal success pair.
-- 13 AKS audit targets: anonymous access, secrets/configmaps, workloads, RBAC, namespace and
-  service-account changes, job/controller creation, exec, and ephemeral containers.
-- 10 Storage, Key Vault, and Azure AI targets using the resource-log builders in
-  `modules/azure_dataplane.py`.
+Coverage spans:
 
-The Cortex Azure Audit Log index currently lists 186 alert names. This 65-scenario set is a
-partial mapping, not complete coverage. Profiling and multi-event detections still need suitable
-history or sequences; Entra directory/Graph and Microsoft 365 detections need their corresponding
-feeds; additional single-event targets need exact operation and field matching before they are
-registered. `wip_` indicates the emitted shape still needs tenant alert verification.
+- Azure Activity Log categories and ARM operations, including network/security changes, RBAC, compute, storage configuration, logging/diagnostics, automation, Event Hubs, SQL, Key Vault configuration, Azure AI safeguards, packet capture, and backup-policy changes.
+- AKS kube-audit objects and API behaviors, including RBAC, secrets, workloads, privileged pod settings, enumeration, denied requests, external service accounts, and cluster lifecycle.
+- Storage Blob access, copy, enumeration, bulk downloads, protection settings, and dataset-object changes; Key Vault AuditEvent operations; Azure AI model/file requests.
+- Entra directory and sign-in events plus Microsoft Graph request records, including identities, app permissions, unusual sign-ins, Graph enumeration, throttling, denied requests, mailbox enumeration and inbox-rule creation. M365 Graph storage events are covered by the SharePoint/OneDrive module.
+
+The only index entry without a scenario mapping is **“A New Server was Added to an Azure Active Directory Hybrid Health ADFS Environment.”** It describes Azure AD Hybrid Health/AD FS server telemetry; the current Azure Activity and Entra audit generators do not have a documented event shape for that source. The inventory marks this row as blocked rather than substituting an unrelated ARM or directory event. Other source-specific detectors such as Exchange mailbox telemetry are mapped only where the existing Graph request logs can express the operation; detector query or profile behavior may still require additional sources.
+
+No new live events were sent during this inventory/build pass. Existing prior canary records are not evidence that these scenario-specific alerts fired. A limited live verification still needs an approved canary batch, followed by read-only checks in `msft_azure_raw`, `cloud_audit_logs`, and the alerts dataset.
 
 ## Validation
 
 Earlier validation established that the module imported, scenario functions returned records,
 and representative canaries reached the tenant. It did not compare every field to an authoritative
-service sample or establish that each threat scenario fires its named analytic. The canaries
-covered representative Activity, AKS, Storage, Key Vault, and AI ingestion; they were not a
-65-scenario detector test.
+service sample or establish that each threat scenario fires its named analytic. Earlier canaries covered representative Activity, AKS, Storage, Key Vault, and AI ingestion. This review also exercised all 198 registered scenario-to-alert paths across Azure Activity, Entra Audit, Entra SignIn, and SharePoint/Graph with transport routing stubbed. That confirms local record generation only; it does not prove a 185-alert detector test.
 
-Category coverage is partial: the module generates Administrative, Policy, ServiceHealth,
-ResourceHealth, Alert, Autoscale, and Recommendation records. It does not yet generate the
-Activity Log `Security` category. Microsoft defines those as Defender for Cloud alert events whose
-`properties` vary by alert; a security-alert-specific builder and fixtures are needed before that
-category can be called covered.
+The benign Activity Log category mix now includes all eight documented categories: Administrative, Security, ServiceHealth, ResourceHealth, Alert, Autoscale, Recommendation, and Policy. The Security builder follows Microsoft’s Defender for Cloud Activity Log example fields (Security category, Activate Alert operation, active status, severity, compromised entity, and remediation steps); it is a schema fixture, not a claim that Defender generated the alert.
 
 The operation-specific threat builders also emit account-level Storage network ACL changes that
 allow public network access, a batch of five distinct VM allocations by one identity, correlated
@@ -185,7 +170,7 @@ guarantee each synthetic event matches this tenant's exact detections.
 Checks run for this review:
 
 - Python compilation and module import, including catalog assertions for benign operations.
-- All 65 forced scenario functions and alert mappings (65/65).
+- All registered scenario-to-alert generation paths in Azure Activity, Entra Audit, Entra SignIn, and SharePoint/Graph were exercised locally with transport routing stubbed (dry run).
 - Shape assertions for correlated ARM `Started`/terminal pairs, Storage OAuth principal and RBAC
   authorization fields, distinct Key Vault secret URIs, AI category fields, and AKS audit JSON.
 - Repository deterministic-training, threat-level alignment, on-demand catalog, API contract, and
@@ -210,6 +195,7 @@ Sources:
 - [Microsoft StorageBlobLogs table reference](https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/storagebloblogs)
 - [Microsoft cross-account blob copy logging](https://learn.microsoft.com/en-us/azure/storage/common/security-restrict-copy-operations)
 - [Microsoft Files - Get Content REST API](https://learn.microsoft.com/en-us/rest/api/azureopenai/files/get-content?view=rest-azureopenai-2024-10-21)
+- [Microsoft Defender for Cloud alert schema](https://learn.microsoft.com/en-us/azure/defender-for-cloud/alerts-schemas)
 - [Microsoft Key Vault logging](https://learn.microsoft.com/en-us/azure/key-vault/general/logging)
 - [Microsoft Foundry diagnostic logging](https://learn.microsoft.com/en-us/azure/foundry/how-to/diagnostic-logging)
 - [Microsoft AKS monitoring reference](https://learn.microsoft.com/en-us/azure/aks/monitor-aks-reference)

@@ -499,8 +499,39 @@ def _b_recommendation(config, context):
                       "Active", "Informational", props)]
 
 
+def _b_security(config, context):
+    """A Defender for Cloud alert using Microsoft's documented Activity Log Security shape."""
+    sub = ae.pick_sub()
+    region = ae.region(sub)
+    resource = ae.rid(sub, "Microsoft.Compute", "virtualMachines", ae.pick_name(sub, "virtualMachines"))
+    alert_id = str(uuid.uuid4())
+    alert_name = random.choice([
+        "Suspicious double extension file executed",
+        "PREVIEW - Role binding to the cluster-admin role detected",
+        "Suspicious activity detected on a virtual machine",
+    ])
+    severity = random.choice(["Low", "Medium"])
+    props = {
+        "eventName": alert_name,
+        "Severity": severity,
+        "compromisedEntity": resource.rsplit("/", 1)[-1],
+        "remediationSteps": ["Review the affected resource and validate the alert."],
+        "intent": random.choice(["Execution", "PrivilegeEscalation", "Discovery"]),
+        "description": f"Synthetic Defender for Cloud alert: {alert_name}.",
+        "eventDataId": alert_id,
+        "eventCategory": "Security",
+        "operationId": alert_id,
+    }
+    rec = _platform(sub, "Security", "Microsoft.Security/locations/alerts/activate/action",
+                    f"/subscriptions/{sub['id']}/resourceGroups/{ae.rg_for(sub, 'virtualMachines')}"
+                    f"/providers/Microsoft.Security/locations/{region}/alerts/{alert_id}",
+                    "Active", "Informational", props)
+    rec["correlationId"] = alert_id
+    return [rec]
+
+
 _PLATFORM = [(3, _b_service_health), (4, _b_resource_health), (4, _b_alert), (3, _b_autoscale),
-             (2, _b_recommendation)]
+             (2, _b_recommendation), (0.5, _b_security)]
 
 
 def _b_platform(config, context):
@@ -573,7 +604,10 @@ _ARM_TARGETS = {
     "wip_suppression_rule_create": ("An Azure Suppression Rule was created", "Microsoft.Security/alertsSuppressionRules/write", "sec", "Security Admin"),
     # IAM and persistence
     "wip_role_assignment": ("An identity was granted permissions to manage user access to Azure resources", "Microsoft.Authorization/roleAssignments/write", "sec", "User Access Administrator"),
-    "wip_group_write": ("A cloud identity created or modified a security group", "Microsoft.Network/networkSecurityGroups/securityRules/write", "net", "Network Contributor"),
+    "wip_cloud_permission_escalation": ("A cloud identity had escalated its permissions", "Microsoft.Authorization/roleAssignments/write", "sec", "User Access Administrator"),
+    "wip_iam_persistence": ("A cloud identity invoked IAM related persistence operations", "Microsoft.Authorization/roleAssignments/write", "sec", "User Access Administrator"),
+    "wip_route_table_change": ("Azure route table creation or modification", "Microsoft.Network/routeTables/write", "net", "Network Contributor"),
+    "wip_billing_role_removed": ("Billing admin role was removed", "Microsoft.Authorization/roleAssignments/delete", "sec", "User Access Administrator"),
     "wip_automation_account_create": ("Azure Automation Account Creation", "Microsoft.Automation/automationAccounts/write", "cloud", "Contributor"),
     "wip_runbook_write": ("Azure Automation Runbook Creation/Modification", "Microsoft.Automation/automationAccounts/runbooks/write", "cloud", "Automation Contributor"),
     "wip_runbook_delete": ("Azure Automation Runbook Deletion", "Microsoft.Automation/automationAccounts/runbooks/delete", "cloud", "Automation Contributor"),
@@ -581,12 +615,16 @@ _ARM_TARGETS = {
     "wip_vmss_command": ("Azure virtual machine commands execution", "Microsoft.Compute/virtualMachineScaleSets/virtualMachines/runCommand/action", "cloud", "Virtual Machine Contributor"),
     # Compute, storage, messaging and data resources
     "wip_vm_create": ("Cloud instance creation attempt", "Microsoft.Compute/virtualMachines/write", "cloud", "Virtual Machine Contributor"),
+    "wip_vm_delete": ("Cloud instance deletion attempt", "Microsoft.Compute/virtualMachines/delete", "cloud", "Virtual Machine Contributor"),
     "wip_vm_stop": ("A cloud instance was stopped", "Microsoft.Compute/virtualMachines/powerOff/action", "cloud", "Virtual Machine Contributor"),
     "wip_vm_command": ("Azure virtual machine commands execution", "Microsoft.Compute/virtualMachines/runCommand/action", "cloud", "Virtual Machine Contributor"),
     "wip_vm_extension": ("Azure VM extension abuse attempt", "Microsoft.Compute/virtualMachines/extensions/write", "cloud", "Virtual Machine Contributor"),
     "wip_snapshot_sas": ("An Azure VM snapshot SAS URL was generated", "Microsoft.Compute/snapshots/beginGetAccess/action", "cloud", "Backup Contributor"),
+    "wip_snapshot_create": ("Cloud snapshot created or modified", "Microsoft.Compute/snapshots/write", "cloud", "Backup Contributor"),
     "wip_resource_group_delete": ("Azure Resource Group Deletion", "Microsoft.Resources/subscriptions/resourceGroups/delete", "cloud", "Owner"),
     "wip_storage_config": ("A cloud storage configuration was modified", "Microsoft.Storage/storageAccounts/write", "data", "Storage Account Contributor"),
+    "wip_storage_versioning_disabled": ("Object versioning was disabled", "Microsoft.Storage/storageAccounts/blobServices/write", "data", "Storage Account Contributor"),
+    "wip_storage_soft_delete_disabled": ("Soft delete of cloud storage configuration was disabled", "Microsoft.Storage/storageAccounts/blobServices/write", "data", "Storage Account Contributor"),
     "wip_storage_public": ("Azure storage account was publicly shared", "Microsoft.Storage/storageAccounts/write", "data", "Storage Account Contributor"),
     "wip_storage_key": ("Azure Storage Account key generated", "Microsoft.Storage/storageAccounts/listKeys/action", "data", "Storage Account Contributor"),
     "wip_storage_replication": ("Azure storage account cross-tenant object replication was enabled", "Microsoft.Storage/storageAccounts/objectReplicationPolicies/write", "data", "Storage Account Contributor"),
@@ -595,12 +633,20 @@ _ARM_TARGETS = {
     "wip_eventhub_delete": ("Azure Event Hub Deletion", "Microsoft.EventHub/namespaces/eventhubs/delete", "cloud", "Contributor"),
     "wip_sql_export": ("An Azure SQL database was exported from a production subscription", "Microsoft.Sql/servers/databases/export/action", "data", "SQL DB Contributor"),
     "wip_compute_allocation": ("Allocation of multiple cloud compute resources", "Microsoft.Compute/virtualMachines/write", "cloud", "Contributor"),
+    "wip_vm_serial_console": ("Cloud compute serial console access", "Microsoft.SerialConsole/serialPorts/connect/action", "cloud", "Virtual Machine Contributor"),
+    "wip_dormant_region_compute": ("Compute activity in dormant cloud region", "Microsoft.Compute/virtualMachines/write", "cloud", "Contributor"),
+    "wip_snapshot_sas_prod": ("An Azure VM snapshot SAS URL was generated for export from a production subscription", "Microsoft.Compute/snapshots/beginGetAccess/action", "cloud", "Backup Contributor"),
     "wip_container_registry": ("A container registry was created or deleted", "Microsoft.ContainerRegistry/registries/write", "cloud", "Contributor"),
     "wip_aks_cluster_change": ("An Azure Kubernetes Cluster was created or deleted", "Microsoft.ContainerService/managedClusters/write", "cloud", "Contributor"),
     "wip_keyvault_config": ("An Azure Key Vault was modified", "Microsoft.KeyVault/vaults/write", "sec", "Key Vault Administrator"),
     "wip_cosmos_key_read": ("Uncommon Azure Cosmos DB master key read by identity", "Microsoft.DocumentDB/databaseAccounts/listKeys/action", "data", "Contributor"),
     "wip_app_gateway_change": ("Modification or Deletion of an Azure Application Gateway Detected", "Microsoft.Network/applicationGateways/write", "net", "Network Contributor"),
     "wip_network_watcher_delete": ("Azure Network Watcher Deletion", "Microsoft.Network/networkWatchers/delete", "net", "Network Contributor"),
+    "wip_ai_safeguard_delete": ("AI safeguards deletion attempt", "Microsoft.CognitiveServices/accounts/raiPolicies/delete", "data", "Cognitive Services Contributor"),
+    "wip_ai_safeguard_modify": ("AI safeguards were modified", "Microsoft.CognitiveServices/accounts/raiPolicies/write", "data", "Cognitive Services Contributor"),
+    "wip_backup_policy_change": ("Cloud storage automatic backup disabled", "Microsoft.RecoveryServices/vaults/backupPolicies/write", "data", "Backup Contributor"),
+    "wip_database_export": ("Data exfiltration from cloud database", "Microsoft.Sql/servers/databases/export/action", "data", "SQL DB Contributor"),
+    "wip_network_packet_capture": ("Network sniffing detected in Cloud environment", "Microsoft.Network/networkWatchers/packetCaptures/write", "net", "Network Contributor"),
 }
 
 
@@ -680,12 +726,184 @@ def _compute_allocation(config=None, count=5):
     return records
 
 
+def _multi_snapshot_export(config=None, count=4):
+    sub = ae.PROD
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    records = []
+    for i in range(count):
+        rid = ae.rid(sub, "Microsoft.Compute", "snapshots", f"snapshot-export-{uuid.uuid4().hex[:8]}")
+        records.extend(operation("Microsoft.Compute/snapshots/beginGetAccess/action", rid, caller, sub,
+            role="Backup Contributor", request_body={"access": "Read", "durationInSeconds": 3600},
+            offset_s=-i * 120.0))
+    return records
+
+
+def _multi_resource_deletion(config=None, count=4):
+    sub = ae.pick_sub()
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    operations = ["Microsoft.Compute/virtualMachines/delete", "Microsoft.Storage/storageAccounts/delete",
+                  "Microsoft.KeyVault/vaults/delete", "Microsoft.Network/networkInterfaces/delete"]
+    out = []
+    for i in range(count):
+        op = operations[i % len(operations)]
+        rid, _ = resource_for(op, sub)
+        rid = rid.rsplit("/", 1)[0] + f"/sim-delete-{uuid.uuid4().hex[:8]}"
+        out.extend(operation(op, rid, caller, sub, role="Contributor", offset_s=-i * 90.0))
+    return out
+
+
+def _multi_denied_actions(config=None, count=4):
+    sub = ae.pick_sub()
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    operations = ["Microsoft.Compute/virtualMachines/delete", "Microsoft.Storage/storageAccounts/listKeys/action",
+                  "Microsoft.Authorization/roleAssignments/write", "Microsoft.KeyVault/vaults/delete"]
+    out = []
+    for i in range(count):
+        op = operations[i % len(operations)]
+        rid, _ = resource_for(op, sub)
+        out.extend(denied(op, rid, caller, sub, offset_s=-i * 90.0))
+    return out
+
+
+def _heavy_compute_allocation(config=None):
+    sub = ae.pick_sub()
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    base_id, _ = resource_for("Microsoft.Compute/virtualMachines/write", sub)
+    prefix = base_id.rsplit("/", 1)[0]
+    vm_sizes = ["Standard_NC24ads_A100_v4", "Standard_NC48ads_A100_v4", "Standard_ND96amsr_A100_v4"]
+    out = []
+    for i, size in enumerate(vm_sizes):
+        name = f"gpu-batch-{uuid.uuid4().hex[:8]}"
+        out.extend(operation("Microsoft.Compute/virtualMachines/write", f"{prefix}/{name}", caller, sub,
+            role="Contributor", request_body={"location": ae.region(sub), "properties": {
+                "hardwareProfile": {"vmSize": size}, "storageProfile": {"imageReference": {
+                    "publisher": "Canonical", "offer": "0001-com-ubuntu-server-jammy",
+                    "sku": "22_04-lts-gen2", "version": "latest"}},
+                "osProfile": {"computerName": name, "adminUsername": "azureuser"},
+                "networkProfile": {"networkInterfaces": []}}, "tags": {"purpose": "simulated"}},
+            offset_s=-i * 120.0))
+    return out
+
+
+def _dormant_region_compute(config=None):
+    sub = ae.pick_sub()
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    rid, _ = resource_for("Microsoft.Compute/virtualMachines/write", sub)
+    rid = rid.rsplit("/", 1)[0] + f"/vm-dormant-{uuid.uuid4().hex[:8]}"
+    return operation("Microsoft.Compute/virtualMachines/write", rid, caller, sub, role="Contributor",
+        request_body={"location": ae.DORMANT_REGIONS[0], "properties": {
+            "hardwareProfile": {"vmSize": "Standard_D2s_v5"}, "tags": {"purpose": "simulated"}}})
+
+
+def _storage_protection_change(config=None, *, versioning=True):
+    op = "Microsoft.Storage/storageAccounts/blobServices/write"
+    team, role = _TEAM_ROLES["data"], "Storage Account Contributor"
+    sub = ae.pick_sub()
+    actor = ae.pick_admin(config, team)
+    body = {"properties": {"isVersioningEnabled": False,
+            "deleteRetentionPolicy": {"enabled": False, "days": 7},
+            "containerDeleteRetentionPolicy": {"enabled": False, "days": 7}}}
+    if versioning:
+        body["properties"].pop("deleteRetentionPolicy")
+        body["properties"].pop("containerDeleteRetentionPolicy")
+    return _arm_event(config, op, roles=team, role=role, actor=actor, sub=sub, body=body)
+
+
+def _multi_unusual_activities(config=None):
+    sub = ae.pick_sub()
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    ops = ["Microsoft.Compute/virtualMachines/write", "Microsoft.Authorization/roleAssignments/write",
+           "Microsoft.Storage/storageAccounts/write", "Microsoft.Insights/diagnosticSettings/delete"]
+    out = []
+    for i, op in enumerate(ops):
+        rid, _ = resource_for(op, sub)
+        out.extend(operation(op, rid, caller, sub, role="Contributor",
+                             request_body=_request_body(op, sub), offset_s=-i * 120.0))
+    return out
+
+
+def _cross_project_activity(config=None):
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    op = "Microsoft.Compute/virtualMachines/write"
+    out = []
+    for i, sub in enumerate(ae.SUBSCRIPTIONS[:3]):
+        rid, _ = resource_for(op, sub)
+        out.extend(operation(op, rid, caller, sub, role="Contributor",
+                             request_body={"location": ae.region(sub)}, offset_s=-i * 180.0))
+    return out
+
+
+def _multi_region_enumeration(config=None):
+    """One identity performs the same resource discovery across distinct Azure regions."""
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    op = "Microsoft.Compute/virtualMachines/read"
+    out = []
+    for i, region in enumerate(("eastus", "westus2", "northeurope", "uksouth")):
+        sub = ae.SUBSCRIPTIONS[i % len(ae.SUBSCRIPTIONS)]
+        rid, _ = resource_for(op, sub)
+        out.extend(operation(op, rid, caller, sub, role="Reader", offset_s=-i * 45.0,
+                             request_body={"location": region}))
+    return out
+
+
+def _vm_ssh_key_change(config=None):
+    sub = ae.pick_sub()
+    op = "Microsoft.Compute/virtualMachines/write"
+    rid, _ = resource_for(op, sub)
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    body = {"location": ae.region(sub), "properties": {"hardwareProfile": {"vmSize": "Standard_D2s_v5"},
+             "osProfile": {"computerName": rid.rsplit("/", 1)[-1], "adminUsername": "azureuser",
+                           "linuxConfiguration": {"disablePasswordAuthentication": True,
+                             "ssh": {"publicKeys": [{"path": "/home/azureuser/.ssh/authorized_keys",
+                                                        "keyData": "ssh-rsa AAAA...LogSimSyntheticKey"}]}}}}}
+    return operation(op, rid, caller, sub, role="Virtual Machine Contributor", request_body=body)
+
+
+def _newly_seen_resource_change(config=None):
+    sub = ae.pick_sub()
+    caller = ae.pick_nonstandard(config)
+    op = "Microsoft.Storage/storageAccounts/write"
+    return _arm_event(config, op, roles=_TEAM_ROLES["data"], role="Storage Account Contributor",
+                      actor=caller, sub=sub, body=_request_body(op, sub))
+
+
+def _new_domain_activity(config=None):
+    sub = ae.pick_sub()
+    actor = dict(ae.pick_admin(config, _TEAM_ROLES["cloud"]))
+    domain = ac.rare_domain()
+    local = actor.get("username", "cloud.operator").split("@", 1)[0]
+    actor["username"] = f"{local}@{domain}"
+    actor["upn"] = actor["username"]
+    actor["email"] = actor["username"]
+    return _arm_event(config, "Microsoft.Compute/virtualMachines/read", roles=_TEAM_ROLES["cloud"],
+                      role="Reader", actor=actor, sub=sub)
+
+
 def _kube_threat(config, kind):
     cluster = random.choice(aks.CLUSTERS)
     if kind == "anonymous":
         user, groups, src, ua = "system:anonymous", ["system:unauthenticated"], "198.51.100.24", "kubectl/v1.30.4"
         return [aks.record(cluster, aks.event("get", "secrets", ns="payments", name="db-credentials", user=user,
                     groups=groups, src=src, ua=ua, code=200, reason="RBAC: allowed by permissive binding"))]
+    if kind in _KUBE_EXTRA:
+        verb, resource, ns, name, group, body = _KUBE_EXTRA[kind]
+        user, groups = aks.sa("payments", "payments-api")
+        src = "10.244.12.17"
+        ua = "kubectl/v1.30.4"
+        code, decision, reason = 200, "allow", "RBAC: allowed by ClusterRoleBinding \"system:basic-user\""
+        if kind in ("dashboard_external", "service_account_external", "node_external"):
+            src = ac.rare_asn_loc().get("ip", "45.155.205.233")
+        if kind == "dashboard_external":
+            user, groups = "system:serviceaccount:kubernetes-dashboard:kubernetes-dashboard", ["system:serviceaccounts", "system:serviceaccounts:kubernetes-dashboard", "system:authenticated"]
+        elif kind == "node_external":
+            user, groups = f"system:node:{aks.node(cluster, 1)}", ["system:nodes", "system:authenticated"]
+        elif kind == "scan_tool":
+            ua = "trivy-operator/0.24.1 (kubernetes security scanner)"
+        elif kind == "denied_api":
+            code, decision, reason = 403, "forbid", "RBAC: forbidden by RoleBinding"
+        event = aks.event(verb, resource, ns=ns, name=name, user=user, groups=groups, src=src, ua=ua,
+                          api_group=group, request_object=body, code=code, decision=decision, reason=reason)
+        return [aks.record(cluster, event)]
     service_user, groups = aks.sa("payments", "payments-api")
     payloads = {
         "secret": ("create", "secrets", "db-credentials", "", {"apiVersion":"v1","kind":"Secret","metadata":{"name":"db-credentials","namespace":"payments"},"type":"Opaque","data":{"password":"<redacted>"}}),
@@ -710,6 +928,34 @@ def _kube_threat(config, kind):
     return [aks.record(cluster, event)]
 
 
+_KUBE_EXTRA = {
+    "clusterrolebinding": ("create", "clusterrolebindings", None, "simulated-admin-binding", "rbac.authorization.k8s.io", {"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"simulated-admin-binding"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"ServiceAccount","name":"payments-api","namespace":"payments"}]}),
+    "dashboard_external": ("get", "secrets", "kubernetes-dashboard", "dashboard-token", "", None),
+    "node_external": ("list", "pods", None, None, "", None),
+    "sidecar_pod": ("create", "pods", "payments", "metrics-sidecar", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"metrics-sidecar","namespace":"payments"},"spec":{"containers":[{"name":"app","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9"},{"name":"sidecar","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9"}]}}),
+    "pod_delete": ("delete", "pods", "payments", "payments-api-old", "", None),
+    "replicaset": ("create", "replicasets", "payments", "payments-api-rs", "apps", {"apiVersion":"apps/v1","kind":"ReplicaSet","metadata":{"name":"payments-api-rs","namespace":"payments"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"payments-api"}},"template":{"metadata":{"labels":{"app":"payments-api"}},"spec":{"containers":[{"name":"api","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9"}]}}}}),
+    "service": ("create", "services", "payments", "payments-api-public", "", {"apiVersion":"v1","kind":"Service","metadata":{"name":"payments-api-public","namespace":"payments"},"spec":{"type":"LoadBalancer","selector":{"app":"payments-api"},"ports":[{"port":443,"targetPort":8443}]}}),
+    "network_policy": ("create", "networkpolicies", "payments", "allow-all-egress", "networking.k8s.io", {"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":"allow-all-egress","namespace":"payments"},"spec":{"podSelector":{},"policyTypes":["Egress"],"egress":[{}]}}),
+    "host_ipc": ("create", "pods", "payments", "host-ipc-debug", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"host-ipc-debug","namespace":"payments"},"spec":{"hostIPC":True,"containers":[{"name":"debug","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9"}]}}),
+    "host_pid": ("create", "pods", "payments", "host-pid-debug", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"host-pid-debug","namespace":"payments"},"spec":{"hostPID":True,"containers":[{"name":"debug","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9"}]}}),
+    "sensitive_volume": ("create", "pods", "payments", "host-path-debug", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"host-path-debug","namespace":"payments"},"spec":{"containers":[{"name":"debug","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9","volumeMounts":[{"name":"host","mountPath":"/host"}]}],"volumes":[{"name":"host","hostPath":{"path":"/"}}]}}),
+    "unknown_registry": ("create", "pods", "payments", "external-image", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"external-image","namespace":"payments"},"spec":{"containers":[{"name":"app","image":"registry.example.invalid/untrusted/tool:1.0"}]}}),
+    "host_network": ("create", "pods", "payments", "host-network-debug", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"host-network-debug","namespace":"payments"},"spec":{"hostNetwork":True,"containers":[{"name":"debug","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9"}]}}),
+    "privileged_pod": ("create", "pods", "payments", "privileged-debug", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"privileged-debug","namespace":"payments"},"spec":{"containers":[{"name":"debug","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9","securityContext":{"privileged":True}}]}}),
+    "admission_controller": ("create", "mutatingwebhookconfigurations", None, "simulated-mutating-webhook", "admissionregistration.k8s.io", {"apiVersion":"admissionregistration.k8s.io/v1","kind":"MutatingWebhookConfiguration","metadata":{"name":"simulated-mutating-webhook"},"webhooks":[{"name":"mutate.example.invalid","clientConfig":{"url":"https://webhook.example.invalid"},"rules":[]}] }),
+    "events_delete": ("deletecollection", "events", "payments", None, "", None),
+    "enumeration": ("list", "namespaces", None, None, "", None),
+    "rbac_enumeration": ("create", "selfsubjectrulesreviews", "payments", None, "authorization.k8s.io", {"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"payments"}}),
+    "secret_enumeration": ("list", "secrets", "payments", None, "", None),
+    "secret_access": ("get", "secrets", "payments", "db-credentials", "", None),
+    "service_account_external": ("get", "secrets", "payments", "db-credentials", "", None),
+    "scan_tool": ("list", "pods", "payments", None, "", None),
+    "denied_api": ("get", "secrets", "payments", "db-credentials", "", None),
+    "unusual_sa_api": ("create", "clusterrolebindings", None, "unusual-sa-binding", "rbac.authorization.k8s.io", {"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"unusual-sa-binding"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"ServiceAccount","name":"payments-api","namespace":"payments"}]}),
+}
+
+
 _KUBE_TARGETS = {
     "wip_kube_anonymous": ("A Kubernetes API operation was successfully invoked by an anonymous user", "anonymous"),
     "wip_kube_secret": ("A Kubernetes secret was created or deleted", "secret"),
@@ -724,6 +970,36 @@ _KUBE_TARGETS = {
     "wip_kube_statefulset": ("A Kubernetes StatefulSet was created", "statefulset"),
     "wip_kube_exec": ("Unusual exec into a Kubernetes Pod", "exec"),
     "wip_kube_ephemeral": ("A Kubernetes ephemeral container was created", "ephemeral"),
+    "wip_kube_clusterrolebinding": ("A Kubernetes cluster role binding was created or deleted", "clusterrolebinding"),
+    "wip_kube_dashboard_external": ("A Kubernetes dashboard service account was used outside the cluster", "dashboard_external"),
+    "wip_kube_node_external": ("A Kubernetes node service account activity from external IP", "node_external"),
+    "wip_kube_sidecar_pod": ("A Kubernetes Pod was created with a sidecar container", "sidecar_pod"),
+    "wip_kube_pod_delete": ("A Kubernetes Pod was deleted", "pod_delete"),
+    "wip_kube_replicaset": ("A Kubernetes ReplicaSet was created", "replicaset"),
+    "wip_kube_service": ("A Kubernetes service was created or deleted", "service"),
+    "wip_kube_network_policy": ("Kubernetes network policy modification", "network_policy"),
+    "wip_kube_host_ipc": ("Kubernetes Pod Created with host Inter Process Communications (IPC) namespace", "host_ipc"),
+    "wip_kube_host_pid": ("Kubernetes Pod created with host process ID (PID) namespace", "host_pid"),
+    "wip_kube_sensitive_volume": ("Kubernetes Pod Created With Sensitive Volume", "sensitive_volume"),
+    "wip_kube_unknown_registry": ("Kubernetes pod creation from unknown container image registry", "unknown_registry"),
+    "wip_kube_host_network": ("Kubernetes pod creation with host network", "host_network"),
+    "wip_kube_privileged_pod": ("Kubernetes Privileged Pod Creation", "privileged_pod"),
+    "wip_kube_admission_controller": ("Kubernetes admission controller activity", "admission_controller"),
+    "wip_kube_events_delete": ("Kubernetes cluster events deletion", "events_delete"),
+    "wip_kube_enumeration": ("Kubernetes enumeration activity", "enumeration"),
+    "wip_kube_rbac_enumeration": ("Kubernetes RBAC enumeration", "rbac_enumeration"),
+    "wip_kube_secret_enumeration": ("Kubernetes secrets enumeration for the first time", "secret_enumeration"),
+    "wip_kube_service_account_external": ("Kubernetes service account activity outside the cluster", "service_account_external"),
+    "wip_kube_scan_tool": ("Kubernetes vulnerability scanning tool usage", "scan_tool"),
+    "wip_kube_denied_api": ("Denied API call by a Kubernetes service account", "denied_api"),
+    "wip_kube_unusual_sa_api": ("A Kubernetes service account executed an unusual API call", "unusual_sa_api"),
+    "wip_kube_secret_access": ("An identity accessed Azure Kubernetes Secrets", "secret_access"),
+    "wip_kube_clusterrole_created": ("A Kubernetes cluster role was created", "clusterrole"),
+    "wip_kube_rolebinding_create_delete": ("A Kubernetes role binding was created or deleted", "rolebinding"),
+    "wip_kube_permission_enumeration": ("A Kubernetes service account has enumerated its permissions", "rbac_enumeration"),
+    "wip_kube_serviceaccount_create_delete": ("A Kubernetes service account was created or deleted", "serviceaccount"),
+    "wip_kube_events_removed": ("Azure Kubernetes events were deleted", "events_delete"),
+    "wip_kube_unusual_secret_access": ("Unusual Kubernetes secret access", "secret_access"),
 }
 
 
@@ -737,6 +1013,24 @@ def _storage_threat(config=None, *, mode="first", count=1):
         dest_sub = dict(ae.PROD, id=ae.guid("foreign-storage-subscription"), name="external-archive", env="prod")
         destination = "stforeignarchive0042"
         return dp.storage_copy_records(account, sub, destination, dest_sub, caller)
+    if mode == "model":
+        caller = ae.pick_nonstandard(config)
+        return [dp.storage_record(account, sub, caller, "GetBlob", "StorageRead", container="models",
+                                  blob="vision-encoder-v3.onnx")]
+    if mode == "enumerate":
+        caller = ae.pick_admin(config, ae.DATA_OPS)
+        return [dp.storage_record(account, sub, caller, "ListBlobs", "StorageRead", container=c,
+                                  offset_s=-i * 4.0)
+                for i, c in enumerate(["exports", "datasets", "backups", "logs", "artifacts", "uploads",
+                                       "bronze", "silver", "gold", "diagnostics"])]
+    if mode == "object_read":
+        caller = ae.pick_nonstandard(config)
+        return [dp.storage_record(account, sub, caller, "GetBlob", "StorageRead", container="datasets",
+                                  blob="research-cohort.parquet")]
+    if mode == "dataset_modify":
+        caller = ae.pick_nonstandard(config)
+        return [dp.storage_record(account, sub, caller, "SetBlobMetadata", "StorageWrite", container="datasets",
+                                  blob="labels/quality-review.csv")]
     for i in range(count):
         container = "backups" if mode == "backup" else None
         blob = f"backup-{i:04d}.bak" if mode == "backup" else f"download-{uuid.uuid4().hex[:12]}.parquet"
@@ -779,31 +1073,113 @@ SCENARIOS.update({
     "wip_storage_first_access": _storage_threat,
     "wip_storage_backup_access": lambda config=None: _storage_threat(config, mode="backup"),
     "wip_storage_multiple_downloads": lambda config=None: _storage_threat(config, mode="bulk", count=16),
+    "wip_storage_enumeration": lambda config=None: _storage_threat(config, mode="enumerate"),
+    "wip_unusual_cloud_object_read": lambda config=None: _storage_threat(config, mode="object_read"),
+    "wip_ai_dataset_label_modify": lambda config=None: _storage_threat(config, mode="dataset_modify"),
     "wip_storage_cross_account_copy": lambda config=None: _storage_threat(config, mode="copy"),
+    "wip_ml_model_download": lambda config=None: _storage_threat(config, mode="model"),
     "wip_keyvault_key_change": lambda config=None: _keyvault_threat(config, "KeyRotate"),
     "wip_keyvault_secret_dump": lambda config=None: _keyvault_threat(config, "SecretGet", count=12),
     "wip_keyvault_key_management": lambda config=None: _keyvault_threat(config, "KeyRotate"),
     "wip_ai_model_discovery": lambda config=None: _ai_threat(config, count=6, op="Models_List"),
     "wip_ai_denial_of_wallet": lambda config=None: _ai_threat(config, count=24),
     "wip_ai_dataset_download": lambda config=None: _ai_threat(config, count=8, op="Files_GetFileContent"),
+    "wip_keyvault_key_modified": lambda config=None: _keyvault_threat(config, "KeyUpdate"),
+    "wip_keyvault_secret_modified": lambda config=None: _keyvault_threat(config, "SecretSet"),
+    "wip_keyvault_secret_deleted": lambda config=None: _keyvault_threat(config, "SecretDelete"),
+    "wip_keyvault_certificate_create": lambda config=None: _keyvault_threat(config, "CertificateCreate"),
+    "wip_multiple_snapshot_exports": _multi_snapshot_export,
+    "wip_multiple_resource_deletions": _multi_resource_deletion,
+    "wip_multiple_denied_actions": _multi_denied_actions,
+    "wip_heavy_compute_allocation": _heavy_compute_allocation,
+    "wip_dormant_region_compute": _dormant_region_compute,
+    "wip_multiple_unusual_activities": _multi_unusual_activities,
+    "wip_cross_project_activity": _cross_project_activity,
+    "wip_newly_seen_resource_change": _newly_seen_resource_change,
+    "wip_storage_versioning_disabled": lambda config=None: _storage_protection_change(config, versioning=True),
+    "wip_storage_soft_delete_disabled": lambda config=None: _storage_protection_change(config, versioning=False),
 })
 SCENARIOS["wip_storage_public"] = _public_storage
 SCENARIOS["wip_compute_allocation"] = _compute_allocation
+SCENARIOS["wip_kube_cluster_created_deleted"] = SCENARIOS["wip_aks_cluster_change"]
+SCENARIOS.update({
+    "wip_multi_region_enumeration": _multi_region_enumeration,
+    "wip_vm_ssh_key_modification": _vm_ssh_key_change,
+    "wip_granting_access_account": SCENARIOS["wip_role_assignment"],
+    "wip_backup_delete_protection_disabled": SCENARIOS["wip_backup_policy_change"],
+    "wip_database_export_exfiltration": SCENARIOS["wip_sql_export"],
+    "wip_new_domain_activity": lambda config=None: _new_domain_activity(config),
+    "wip_keyvault_modified_exact": SCENARIOS["wip_keyvault_config"],
+    "wip_permission_delegation_granted": SCENARIOS["wip_role_assignment"],
+    "wip_blob_anonymous_access": SCENARIOS["wip_blob_public_access"],
+    "wip_storage_suspicious_bulk_download": lambda config=None: _storage_threat(config, mode="bulk", count=16),
+    "wip_storage_multiple_objects_suspicious": lambda config=None: _storage_threat(config, mode="bulk", count=16),
+    "wip_keyvault_modification_exact": SCENARIOS["wip_keyvault_config"],
+    "wip_unusual_ai_dataset_modification": lambda config=None: _storage_threat(config, mode="dataset_modify"),
+})
 
 # Published Cortex targets. These are intentionally unconfirmed scenario mappings; the wip_
 # key makes that status visible in the on-demand catalog until a real alert validates the shape.
 ANALYTIC_ALERTS = {key: alert for key, (alert, *_rest) in {**_ARM_TARGETS, **_KUBE_TARGETS}.items()}
 ANALYTIC_ALERTS.update({
+    "wip_multi_region_enumeration": "Multi region enumeration activity",
+    "wip_vm_ssh_key_modification": "Suspicious cloud compute instance SSH keys modification attempt",
+    "wip_storage_multiple_downloads": "An identity performed a suspicious download of multiple cloud storage objects",
+    "wip_keyvault_config": "Azure Key Vault modification",
+    "wip_role_assignment": "Azure permission delegation granted",
+    "wip_blob_public_access": "Azure storage account blob anonymous access is enabled",
+    "wip_multiple_resource_deletions": "Deletion of multiple cloud resources",
+    "wip_unusual_cloud_object_read": "Suspicious identity downloaded multiple objects from a bucket",
+    "wip_keyvault_config": "An Azure Key Vault was modified",
+    "wip_role_assignment": "An identity was granted permissions to manage user access to Azure resources",
+    "wip_blob_public_access": "Azure Blob Container Access Level Modification",
+    "wip_storage_multiple_downloads": "An identity performed a suspicious download of multiple cloud storage objects",
+    "wip_vm_ssh_key_modification": "Suspicious cloud compute instance SSH keys modification attempt",
+    "wip_ai_safeguard_delete": "AI safeguards deletion attempt",
+    "wip_ai_safeguard_modify": "AI safeguards were modified",
+    "wip_backup_policy_change": "Cloud storage automatic backup disabled",
+    "wip_backup_delete_protection_disabled": "Cloud storage delete protection disabled",
+    "wip_database_export": "Data exfiltration from cloud database",
+    "wip_network_packet_capture": "Network sniffing detected in Cloud environment",
+    "wip_granting_access_account": "Granting Access to an Account",
+    "wip_database_export_exfiltration": "Data exfiltration from cloud database",
+    "wip_kube_cluster_created_deleted": "A Kubernetes cluster was created or deleted",
     "wip_storage_first_access": "An identity accessed a cloud storage for the first time",
     "wip_storage_backup_access": "An identity accessed a backup cloud storage",
     "wip_storage_multiple_downloads": "An identity initiated a download of multiple cloud objects",
+    "wip_storage_enumeration": "Storage enumeration activity",
+    "wip_unusual_cloud_object_read": "An unusual read activity of cloud object",
     "wip_storage_cross_account_copy": "A cloud storage object was copied to a foreign cloud account",
+    "wip_ml_model_download": "Suspicious ML Model Download",
     "wip_keyvault_key_change": "Unusual key management activity",
     "wip_keyvault_secret_dump": "Suspicious secrets dump activity",
     "wip_keyvault_key_management": "Unusual key management activity",
     "wip_ai_model_discovery": "AI model discovery",
     "wip_ai_denial_of_wallet": "Potential denial of wallet abusing AI services",
     "wip_ai_dataset_download": "Suspicious AI Dataset Download",
+    "wip_keyvault_key_modified": "An Azure Key Vault key was modified",
+    "wip_keyvault_secret_modified": "Azure Key Vault Secrets were modified",
+    "wip_keyvault_secret_deleted": "Unusual secret management activity",
+    "wip_keyvault_certificate_create": "Unusual certificate management activity",
+    "wip_multiple_snapshot_exports": "Multiple cloud snapshots export",
+    "wip_multiple_resource_deletions": "Deletion of multiple cloud resources",
+    "wip_multiple_denied_actions": "Cloud user performed multiple actions that were denied",
+    "wip_heavy_compute_allocation": "Suspicious heavy allocation of compute resources - possible mining activity",
+    "wip_dormant_region_compute": "Compute activity in dormant cloud region",
+    "wip_multiple_unusual_activities": "A cloud identity performed multiple unusual activities",
+    "wip_cross_project_activity": "Unusual cross projects activity",
+    "wip_newly_seen_resource_change": "Unusual resource modification by newly seen IAM user",
+    "wip_storage_versioning_disabled": "Object versioning was disabled",
+    "wip_storage_soft_delete_disabled": "Soft delete of cloud storage configuration was disabled",
+    "wip_keyvault_modified_exact": "An Azure Key Vault was modified",
+    "wip_permission_delegation_granted": "Azure permission delegation granted",
+    "wip_blob_anonymous_access": "Azure storage account blob anonymous access is enabled",
+    "wip_storage_suspicious_bulk_download": "An identity performed a suspicious download of multiple cloud storage objects",
+    "wip_storage_multiple_objects_suspicious": "Suspicious identity downloaded multiple objects from a bucket",
+    "wip_new_domain_activity": "An operation was performed by an identity from a domain that was not seen in the organization",
+    "wip_ai_dataset_label_modify": "Suspicious AI Dataset Label Modification",
+    "wip_keyvault_modification_exact": "Azure Key Vault modification",
+    "wip_unusual_ai_dataset_modification": "Unusual AI dataset modification",
 })
 
 

@@ -734,6 +734,36 @@ def scenario_graph_privileged_app_call(config=None, user=None):
                     roles="RoleManagement.ReadWrite.Directory Directory.ReadWrite.All")
 
 
+def scenario_mailbox_enumeration(config=None, user=None):
+    """App-only Graph requests enumerate users' mailbox surfaces and folders."""
+    app = ga.app_identity(random.choice(list(ga.DAEMON_APPS)))
+    users = [ac.user_oid(ac.pick_user(config)["username"]) for _ in range(5)]
+    calls = [("GET", f"/v1.0/users/{oid}/mailFolders?$top=100", 200, random.randint(9000, 42000))
+             for oid in users]
+    calls += [("GET", f"/v1.0/users/{oid}/mailboxSettings", 200, random.randint(3000, 9000))
+              for oid in users]
+    return ga.burst(app, calls, roles="Mail.ReadBasic.All User.Read.All", span_s=180)
+
+
+def scenario_mailbox_rule_create(config=None, user=None):
+    """A delegated identity creates an inbox rule through the Graph API."""
+    u = user or ac.pick_user(config)
+    oid = ac.user_oid(u["username"])
+    rule = {"displayName": "LogSim triage rule", "sequence": 1, "isEnabled": True,
+            "conditions": {"subjectContains": ["LogSim test"]},
+            "actions": {"moveToFolder": "Archive", "stopProcessingRules": True}}
+    return ga.burst(u, [("POST", f"/v1.0/users/{oid}/mailFolders/inbox/messageRules", 201, 1200)],
+                    scopes="MailboxSettings.ReadWrite", span_s=1)
+
+
+def scenario_email_service_abuse(config=None, user=None):
+    """Short, correlated Graph sendMail burst from a single app identity."""
+    app = ga.app_identity(random.choice(list(ga.DAEMON_APPS)))
+    calls = [("POST", f"/v1.0/users/{ac.user_oid(ac.pick_user(config)['username'])}/sendMail", 202, 900)
+             for _ in range(12)]
+    return ga.burst(app, calls, roles="Mail.Send User.Read.All", span_s=150)
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
@@ -772,6 +802,64 @@ SCENARIOS = {
     "graph_denied_burst": scenario_graph_denied_burst,
     "graph_large_responses": scenario_graph_large_responses,
     "graph_privileged_app_call": scenario_graph_privileged_app_call,
+}
+
+SCENARIOS.update({
+    "wip_unusual_country_api": scenario_new_country_signin,
+    "wip_high_risk_ip_activity": scenario_high_risk_signin,
+    "wip_api_call_from_tor": scenario_saas_api_from_tor,
+    "wip_multiple_failed_logins": scenario_brute_force,
+    "wip_impossible_travel_cloud": scenario_impossible_travel,
+    "wip_suspicious_device_code": scenario_device_code_auth_flow,
+    "wip_unknown_tenant_app_access": scenario_app_access_unknown_tenant,
+    "wip_remote_service_principal_token": scenario_sp_token_remote_usage,
+    "wip_remote_managed_identity_token": scenario_mi_token_remote_usage,
+    "wip_graph_enumeration_activity": scenario_graph_enumeration,
+    "wip_graph_throttling_app": scenario_graph_throttling_app,
+    "wip_graph_denied_burst": scenario_graph_denied_burst,
+    "wip_graph_response_size_spike": scenario_graph_large_responses,
+    "wip_graph_privileged_app": scenario_graph_privileged_app_call,
+    "wip_unusual_resource_by_app": scenario_unusual_resource_access_by_app,
+    "wip_cloud_identity_unusual_country": scenario_suspicious_country_signin,
+    "wip_graph_enumeration_exact": scenario_graph_enumeration,
+    "wip_graph_throttling_exact": scenario_graph_throttling_app,
+    "wip_mailbox_enumeration": scenario_mailbox_enumeration,
+    "wip_mailbox_rule_create": scenario_mailbox_rule_create,
+    "wip_cloud_email_infrastructure_enum": scenario_mailbox_enumeration,
+    "wip_cloud_email_service_abuse": scenario_email_service_abuse,
+    "wip_cloud_email_service_activity": scenario_email_service_abuse,
+    "wip_unusual_cloud_identity_user_agent": scenario_sso_abnormal_user_agent,
+    "wip_cloud_pentest_activity": scenario_pentest_tool_activity,
+    "wip_multiple_risk_indicators": scenario_high_risk_signin,
+})
+
+ANALYTIC_ALERTS = {
+    "wip_unusual_country_api": "A cloud identity executed an API call from an unusual country",
+    "wip_high_risk_ip_activity": "Cloud activity from a high-risk IP address",
+    "wip_api_call_from_tor": "Suspicious API call from a Tor exit node",
+    "wip_multiple_failed_logins": "Multiple failed logins from a single IP",
+    "wip_impossible_travel_cloud": "Impossible travel by a cloud identity",
+    "wip_suspicious_device_code": "Suspicious Entra ID Device Code Authentication Flow",
+    "wip_unknown_tenant_app_access": "Attempted Azure application access from unknown tenant",
+    "wip_remote_service_principal_token": "Remote usage of an Azure Service Principal token",
+    "wip_remote_managed_identity_token": "Remote usage of an Azure Managed Identity token",
+    "wip_graph_enumeration_activity": "Azure enumeration activity using Microsoft Graph API",
+    "wip_graph_throttling_app": "An Azure application reached a throttling API rate",
+    "wip_graph_denied_burst": "An Azure identity performed multiple actions that were denied",
+    "wip_graph_response_size_spike": "Uncommon increase in Azure Microsoft Graph API request sizes",
+    "wip_graph_privileged_app": "Privileged role used by Azure application",
+    "wip_unusual_resource_by_app": "Unusual resource access by Azure application",
+    "wip_cloud_identity_unusual_country": "A cloud identity executed an API call from an unusual country",
+    "wip_graph_enumeration_exact": "Suspicious Azure enumeration activity",
+    "wip_graph_throttling_exact": "Cloud identity reached a throttling API rate",
+    "wip_mailbox_enumeration": "Mailbox enumeration activity by Azure application",
+    "wip_mailbox_rule_create": "Azure mailbox rule creation",
+    "wip_cloud_email_infrastructure_enum": "Cloud email infrastructure enumeration activity",
+    "wip_cloud_email_service_abuse": "Suspicious activity indicating a potential abuse of a cloud-native email service",
+    "wip_cloud_email_service_activity": "Cloud email service activity",
+    "wip_unusual_cloud_identity_user_agent": "Unusual user-agent for a cloud identity",
+    "wip_cloud_pentest_activity": "Cloud penetration testing tool activity",
+    "wip_multiple_risk_indicators": "Multiple risk indicators for a cloud identity",
 }
 
 
