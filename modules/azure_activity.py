@@ -537,11 +537,192 @@ def aks_benign_quiet(config, context):
     return aks.benign(None)
 
 
-# ── LogSim module interface ──────────────────────────────────────────────────────────
-# Benign baseline only for now: no threat scenarios are registered yet, so every threat level
-# emits benign traffic and nothing is offered on demand.
-SCENARIOS = {}
-ANALYTIC_ALERTS = {}
+# ── threat events ────────────────────────────────────────────────────────────────────
+# Scenario keys are prefixed wip_ because the shapes and published Cortex targets are
+# documented, but no alert has yet been attributed to these synthetic events in the tenant.
+# On-demand callers can pass the scenario key directly; mappings expose the corresponding
+# published target while preserving that qualification in the event name.
+def _arm_event(config, op, *, roles=None, role="Contributor", actor=None, sub=None,
+               fail=False, body=None, offset_s=0.0):
+    sub = sub or ae.pick_sub()
+    caller = actor or ae.pick_admin(config, roles or ae.CLOUD_OPS)
+    rid, _rtype = resource_for(op, sub)
+    return operation(op, rid, caller, sub, role=role, request_body=body, fail=fail,
+                     offset_s=offset_s)
+
+
+def _arm_one(config, op, **kwargs):
+    return _arm_event(config, op, **kwargs)
+
+
+_ARM_TARGETS = {
+    # Network/security configuration and logging controls
+    "wip_nsg_rule_change": ("An Azure Network Security Group was modified", "Microsoft.Network/networkSecurityGroups/securityRules/write", "net", "Network Contributor"),
+    "wip_firewall_change": ("An Azure Firewall was modified", "Microsoft.Network/azureFirewalls/write", "net", "Network Contributor"),
+    "wip_firewall_policy_delete": ("An Azure Firewall policy deletion", "Microsoft.Network/firewallPolicies/delete", "net", "Network Contributor"),
+    "wip_firewall_rule_collection": ("An Azure Firewall rule collection group was modified or deleted", "Microsoft.Network/firewallPolicies/ruleCollectionGroups/write", "net", "Network Contributor"),
+    "wip_firewall_rule_group": ("An Azure firewall rule group was modified", "Microsoft.Network/azureFirewalls/write", "net", "Network Contributor"),
+    "wip_dns_zone_change": ("An Azure DNS Zone was modified", "Microsoft.Network/dnsZones/write", "net", "Network Contributor"),
+    "wip_vnet_change": ("An Azure virtual network was modified", "Microsoft.Network/virtualNetworks/write", "net", "Network Contributor"),
+    "wip_vnet_device_change": ("An Azure virtual network Device was modified", "Microsoft.Network/networkDevices/write", "net", "Network Contributor"),
+    "wip_vpn_connection_change": ("An Azure VPN Connection was modified", "Microsoft.Network/connections/write", "net", "Network Contributor"),
+    "wip_p2s_vpn_change": ("An Azure Point-to-Site VPN was modified", "Microsoft.Network/p2sVpnGateways/write", "net", "Network Contributor"),
+    "wip_diagnostic_settings_delete": ("Azure diagnostic configuration deletion", "Microsoft.Insights/diagnosticSettings/delete", "sec", "Monitoring Contributor"),
+    "wip_alert_rule_delete": ("Azure Monitor alert rule deleted", "Microsoft.Insights/metricAlerts/delete", "sec", "Monitoring Contributor"),
+    "wip_logging_disabled": ("Cloud resource logging was disabled", "Microsoft.Insights/diagnosticSettings/delete", "sec", "Monitoring Contributor"),
+    "wip_suppression_rule_create": ("An Azure Suppression Rule was created", "Microsoft.Security/alertsSuppressionRules/write", "sec", "Security Admin"),
+    # IAM and persistence
+    "wip_role_assignment": ("An identity was granted permissions to manage user access to Azure resources", "Microsoft.Authorization/roleAssignments/write", "sec", "User Access Administrator"),
+    "wip_group_write": ("A cloud identity created or modified a security group", "Microsoft.Network/networkSecurityGroups/securityRules/write", "net", "Network Contributor"),
+    "wip_automation_account_create": ("Azure Automation Account Creation", "Microsoft.Automation/automationAccounts/write", "cloud", "Contributor"),
+    "wip_runbook_write": ("Azure Automation Runbook Creation/Modification", "Microsoft.Automation/automationAccounts/runbooks/write", "cloud", "Automation Contributor"),
+    "wip_runbook_delete": ("Azure Automation Runbook Deletion", "Microsoft.Automation/automationAccounts/runbooks/delete", "cloud", "Automation Contributor"),
+    "wip_webhook_create": ("Azure Automation Webhook creation", "Microsoft.Automation/automationAccounts/webhooks/write", "cloud", "Automation Contributor"),
+    "wip_app_service_function": ("Azure virtual machine commands execution", "Microsoft.Web/sites/host/listkeys/action", "cloud", "Website Contributor"),
+    # Compute, storage, messaging and data resources
+    "wip_vm_create": ("Cloud instance creation attempt", "Microsoft.Compute/virtualMachines/write", "cloud", "Virtual Machine Contributor"),
+    "wip_vm_stop": ("A cloud instance was stopped", "Microsoft.Compute/virtualMachines/powerOff/action", "cloud", "Virtual Machine Contributor"),
+    "wip_vm_command": ("Azure virtual machine commands execution", "Microsoft.Compute/virtualMachines/runCommand/action", "cloud", "Virtual Machine Contributor"),
+    "wip_vm_extension": ("Azure VM extension abuse attempt", "Microsoft.Compute/virtualMachines/extensions/write", "cloud", "Virtual Machine Contributor"),
+    "wip_snapshot_sas": ("An Azure VM snapshot SAS URL was generated", "Microsoft.Compute/snapshots/beginGetAccess/action", "cloud", "Backup Contributor"),
+    "wip_resource_group_delete": ("Azure Resource Group Deletion", "Microsoft.Resources/subscriptions/resourceGroups/delete", "cloud", "Owner"),
+    "wip_storage_config": ("A cloud storage configuration was modified", "Microsoft.Storage/storageAccounts/write", "data", "Storage Account Contributor"),
+    "wip_storage_public": ("Azure storage account was publicly shared", "Microsoft.Storage/storageAccounts/blobServices/containers/write", "data", "Storage Account Contributor"),
+    "wip_storage_key": ("Azure Storage Account key generated", "Microsoft.Storage/storageAccounts/listKeys/action", "data", "Storage Account Contributor"),
+    "wip_storage_replication": ("Azure storage account cross-tenant object replication was enabled", "Microsoft.Storage/storageAccounts/objectReplicationPolicies/write", "data", "Storage Account Contributor"),
+    "wip_blob_public_access": ("Azure Blob Container Access Level Modification", "Microsoft.Storage/storageAccounts/blobServices/containers/write", "data", "Storage Account Contributor"),
+    "wip_eventhub_auth_rule": ("Azure Event Hub Authorization rule creation/modification", "Microsoft.EventHub/namespaces/authorizationRules/write", "cloud", "Contributor"),
+    "wip_eventhub_delete": ("Azure Event Hub Deletion", "Microsoft.EventHub/namespaces/eventhubs/delete", "cloud", "Contributor"),
+    "wip_sql_export": ("An Azure SQL database was exported from a production subscription", "Microsoft.Sql/servers/databases/export/action", "data", "SQL DB Contributor"),
+    "wip_compute_allocation": ("Allocation of multiple cloud compute resources", "Microsoft.Compute/virtualMachines/write", "cloud", "Contributor"),
+    "wip_container_registry": ("A container registry was created or deleted", "Microsoft.ContainerRegistry/registries/write", "cloud", "Contributor"),
+    "wip_aks_cluster_change": ("An Azure Kubernetes Cluster was created or deleted", "Microsoft.ContainerService/managedClusters/write", "cloud", "Contributor"),
+    "wip_keyvault_config": ("An Azure Key Vault was modified", "Microsoft.KeyVault/vaults/write", "sec", "Key Vault Administrator"),
+    "wip_keyvault_key_change": ("An Azure Key Vault key was modified", "Microsoft.KeyVault/vaults/keys/rotate/action", "sec", "Key Vault Administrator"),
+    "wip_cosmos_key_read": ("Uncommon Azure Cosmos DB master key read by identity", "Microsoft.DocumentDB/databaseAccounts/listKeys/action", "data", "Contributor"),
+    "wip_app_gateway_change": ("Modification or Deletion of an Azure Application Gateway Detected", "Microsoft.Network/applicationGateways/write", "net", "Network Contributor"),
+    "wip_network_watcher_delete": ("Azure Network Watcher Deletion", "Microsoft.Network/networkWatchers/delete", "net", "Network Contributor"),
+}
+
+
+def _make_arm_scenario(op, team, role):
+    roles = _TEAM_ROLES[team]
+    def scenario(config=None):
+        # A newly observed non-platform identity and a denied path are useful analytic variants.
+        actor = ae.pick_nonstandard(config) if random.random() < 0.18 else None
+        sub = ae.pick_sub()
+        kwargs = {"roles": roles, "role": role, "actor": actor, "sub": sub,
+                  "body": {"change": "simulated configuration update", "source": "LogSim"}}
+        if random.random() < 0.15:
+            rid, _ = resource_for(op, sub)
+            caller = actor or ae.pick_admin(config, roles)
+            return denied(op, rid, caller, sub)
+        return _arm_event(config, op, **kwargs)
+    return scenario
+
+
+def _kube_threat(config, kind):
+    cluster = random.choice(aks.CLUSTERS)
+    upn = ae.pick_admin(config, ae.CLOUD_OPS).get("upn")
+    if kind == "anonymous":
+        user, groups, src, ua = "system:anonymous", ["system:unauthenticated"], "198.51.100.24", "kubectl/v1.30.4"
+        return [aks.record(cluster, aks.event("get", "secrets", ns="payments", name="db-credentials", user=user,
+                    groups=groups, src=src, ua=ua, code=200, reason="RBAC: allowed by permissive binding"))]
+    service_user, groups = aks.sa("payments", "payments-api")
+    payloads = {
+        "secret": ("create", "secrets", "db-credentials", "", {"apiVersion":"v1","kind":"Secret","metadata":{"name":"db-credentials","namespace":"payments"},"type":"Opaque","data":{"password":"<redacted>"}}),
+        "configmap": ("create", "configmaps", "runtime-config", "", {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"runtime-config","namespace":"payments"},"data":{"LOG_LEVEL":"debug"}}),
+        "deployment": ("create", "deployments", "payments-debug", "apps", {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"payments-debug","namespace":"payments"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"debug","image":"mcr.microsoft.com/azure-cli:latest"}]}}}}),
+        "rolebinding": ("create", "rolebindings", "payments-admin", "rbac.authorization.k8s.io", {"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"payments-admin","namespace":"payments"},"roleRef":{"kind":"ClusterRole","name":"cluster-admin","apiGroup":"rbac.authorization.k8s.io"},"subjects":[{"kind":"ServiceAccount","name":"payments-api","namespace":"payments"}]}),
+        "clusterrole": ("create", "clusterroles", "node-reader", "rbac.authorization.k8s.io", {"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"node-reader"},"rules":[{"apiGroups":[""],"resources":["secrets","nodes"],"verbs":["get","list"]}]}),
+        "namespace": ("create", "namespaces", "staging-tools", "", {"apiVersion":"v1","kind":"Namespace","metadata":{"name":"staging-tools"}}),
+        "serviceaccount": ("create", "serviceaccounts", "backup-runner", "", {"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"backup-runner","namespace":"payments"}}),
+        "cronjob": ("create", "cronjobs", "nightly-export", "batch", {"apiVersion":"batch/v1","kind":"CronJob","metadata":{"name":"nightly-export","namespace":"payments"},"spec":{"schedule":"0 2 * * *","jobTemplate":{"spec":{"template":{"spec":{"containers":[{"name":"export","image":"mcr.microsoft.com/azure-cli:latest"}],"restartPolicy":"Never"}}}}}}),
+        "daemonset": ("create", "daemonsets", "node-observer", "apps", {"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"node-observer","namespace":"monitoring"},"spec":{"selector":{"matchLabels":{"app":"node-observer"}},"template":{"metadata":{"labels":{"app":"node-observer"}},"spec":{"containers":[{"name":"observer","image":"mcr.microsoft.com/oss/kubernetes/pause:3.9"}]}}}}),
+        "statefulset": ("create", "statefulsets", "cache-replica", "apps", {"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"cache-replica","namespace":"catalog"},"spec":{"serviceName":"cache","replicas":1,"selector":{"matchLabels":{"app":"cache"}},"template":{"metadata":{"labels":{"app":"cache"}},"spec":{"containers":[{"name":"cache","image":"redis:7"}]}}}}),
+        "exec": ("create", "pods", "payments-api-7f94d6c8bf-x2m4p", "", None),
+        "ephemeral": ("update", "pods", "payments-api-7f94d6c8bf-x2m4p", "", {"apiVersion":"v1","kind":"Pod","metadata":{"name":"payments-api-7f94d6c8bf-x2m4p","namespace":"payments"},"spec":{"ephemeralContainers":[{"name":"debugger","image":"busybox:1.36","targetContainerName":"payments-api"}]}}),
+    }
+    action, res, name, group, body = payloads[kind]
+    subres = "exec" if kind == "exec" else None
+    event = aks.event(action, res, ns=None if res in ("clusterroles", "namespaces") else "payments",
+                      name=name, subresource=subres, user=service_user, groups=groups,
+                      src="10.244.12.17", ua="kubectl/v1.30.4", api_group=group,
+                      request_object=body, code=200)
+    return [aks.record(cluster, event)]
+
+
+_KUBE_TARGETS = {
+    "wip_kube_anonymous": ("A Kubernetes API operation was successfully invoked by an anonymous user", "anonymous"),
+    "wip_kube_secret": ("A Kubernetes secret was created or deleted", "secret"),
+    "wip_kube_configmap": ("A Kubernetes ConfigMap was created or deleted", "configmap"),
+    "wip_kube_deployment": ("A Kubernetes deployment was created", "deployment"),
+    "wip_kube_rolebinding": ("An Azure Kubernetes Role-Binding or Cluster-Role-Binding was modified or deleted", "rolebinding"),
+    "wip_kube_clusterrole": ("An Azure Kubernetes Role or Cluster-Role was modified", "clusterrole"),
+    "wip_kube_namespace": ("A Kubernetes namespace was created or deleted", "namespace"),
+    "wip_kube_serviceaccount": ("An Azure Kubernetes Service Account was modified or deleted", "serviceaccount"),
+    "wip_kube_cronjob": ("A Kubernetes Cronjob was created", "cronjob"),
+    "wip_kube_daemonset": ("A Kubernetes DaemonSet was created", "daemonset"),
+    "wip_kube_statefulset": ("A Kubernetes StatefulSet was created", "statefulset"),
+    "wip_kube_exec": ("Unusual exec into a Kubernetes Pod", "exec"),
+    "wip_kube_ephemeral": ("A Kubernetes ephemeral container was created", "ephemeral"),
+}
+
+
+def _storage_threat(config=None):
+    sub = ae.pick_sub()
+    account = ae.pick_name(sub, "storageAccounts")
+    caller = ae.pick_admin(config, ae.DATA_OPS)
+    return [dp.storage_record(account, sub, caller, "GetBlob", "StorageRead")]
+
+
+def _keyvault_threat(config=None, op="SecretList"):
+    sub = ae.pick_sub()
+    caller = ae.pick_admin(config, ae.SEC_OPS)
+    return [dp.keyvault_record(ae.pick_name(sub, "vaults"), sub, caller, op)]
+
+
+def _ai_threat(config=None, count=1, status=200):
+    sub = ae.PROD
+    caller = ae.app_caller(random.choice(list(ae.SERVICE_PRINCIPALS)), "ServicePrincipal")
+    account = ae.pick_name(sub, "accounts")
+    return [dp.ai_record(account, sub, caller, "ChatCompletions_Create", status=status,
+                         offset_s=-i * 3.0) for i in range(count)]
+
+
+SCENARIOS = {
+    key: _make_arm_scenario(op, team, role)
+    for key, (_alert, op, team, role) in _ARM_TARGETS.items()
+}
+SCENARIOS.update({key: (lambda config=None, kind=kind: _kube_threat(config, kind))
+                  for key, (_alert, kind) in _KUBE_TARGETS.items()})
+SCENARIOS.update({
+    "wip_storage_first_access": _storage_threat,
+    "wip_storage_backup_access": _storage_threat,
+    "wip_storage_multiple_downloads": _storage_threat,
+    "wip_keyvault_secret_dump": lambda config=None: _keyvault_threat(config, "SecretList"),
+    "wip_keyvault_key_management": lambda config=None: _keyvault_threat(config, "KeyRotate"),
+    "wip_ai_model_discovery": lambda config=None: _ai_threat(config, count=6),
+    "wip_ai_denial_of_wallet": lambda config=None: _ai_threat(config, count=24),
+    "wip_ai_dataset_download": lambda config=None: _ai_threat(config, count=8),
+})
+
+# Published Cortex targets. These are intentionally unconfirmed scenario mappings; the wip_
+# key makes that status visible in the on-demand catalog until a real alert validates the shape.
+ANALYTIC_ALERTS = {key: alert for key, (alert, *_rest) in {**_ARM_TARGETS, **_KUBE_TARGETS}.items()}
+ANALYTIC_ALERTS.update({
+    "wip_storage_first_access": "An identity accessed a cloud storage for the first time",
+    "wip_storage_backup_access": "An identity accessed a backup cloud storage",
+    "wip_storage_multiple_downloads": "An identity initiated a download of multiple cloud objects",
+    "wip_keyvault_secret_dump": "Suspicious secrets dump activity",
+    "wip_keyvault_key_management": "Unusual key management activity",
+    "wip_ai_model_discovery": "AI model discovery",
+    "wip_ai_denial_of_wallet": "Potential denial of wallet abusing AI services",
+    "wip_ai_dataset_download": "Suspicious AI Dataset Download",
+})
+
+
+_GATE = ac.ThreatGate(SCENARIOS)
 
 
 def get_threat_names():
@@ -555,4 +736,9 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
         if key in SCENARIOS:
             return (SCENARIOS[key](config), key)
         return None
+    if benign_only or threat_level == "Benign Traffic Only":
+        return generate_benign(config, context)
+    if _GATE.fire(threat_level, config):
+        key = random.choice(list(SCENARIOS))
+        return (SCENARIOS[key](config), key)
     return generate_benign(config, context)

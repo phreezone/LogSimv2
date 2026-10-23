@@ -124,12 +124,31 @@ resource id, operation, outcome). A 3-record canary (2026-10-23) confirmed all t
 (operation GetData), Key Vault to KMS/VAULTS, and AI to MachineLearning with `service_type`
 "AI/ML Audit". Caller identity and IP come through (the app's Microsoft egress).
 
-## Threats
+## Threat scenarios
 
-None yet: `SCENARIOS` and `ANALYTIC_ALERTS` are empty, so every threat level emits benign
-traffic and nothing is offered on demand. The target detectors (the Cortex "Azure Audit Log"
-list) and the operations each keys on are mapped in the session notes. New scenarios should
-use the `wip_` key prefix until their analytic is seen firing.
+`azure_activity` now has 64 forced threat scenarios, each with a Cortex Azure Audit Log target
+in `ANALYTIC_ALERTS`. All scenario keys use the `wip_` prefix because the published target is
+identified but a corresponding synthetic alert has not yet been confirmed in this tenant. The
+usual threat gate controls ambient generation; a specific scenario can be forced by its key.
+Nothing in this module sends automatically to the tenant unless the simulator is configured for
+live Cribl transport.
+
+Coverage in this first scenario set:
+
+- 43 ARM control-plane targets: network and firewall changes, diagnostic/logging changes, RBAC,
+  compute lifecycle and execution, storage configuration, Event Hub, SQL export, AKS, Key Vault,
+  automation, and related operations. Mutations emit correlated `Started` plus terminal records;
+  denied variants emit the single Azure `Failed` record.
+- 13 AKS audit targets: anonymous access, secrets/configmaps, workloads, RBAC, namespace and
+  service-account changes, job/controller creation, exec, and ephemeral containers.
+- 8 Storage, Key Vault, and Azure AI targets using the resource-log builders in
+  `modules/azure_dataplane.py`.
+
+The Cortex Azure Audit Log index currently lists 186 alert names. This 64-scenario set is a
+partial mapping, not complete coverage. Profiling and multi-event detections still need suitable
+history or sequences; Entra directory/Graph and Microsoft 365 detections need their corresponding
+feeds; additional single-event targets need exact operation and field matching before they are
+registered. `wip_` indicates the emitted shape still needs tenant alert verification.
 
 ## Validation
 
