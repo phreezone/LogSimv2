@@ -52,6 +52,28 @@ What the collector does with the body (measured in-tenant, 2026-10-22):
 Syslog PRI is `<14>` (facility `LOG_USER`=1×8 + notice=6), matching PAN-OS's default syslog
 facility.
 
+### Field coverage vs. the documented format
+
+Every key of the Syslog Collector's Traffic custom format is emitted, plus the columns the
+dataset's modeling rule and the live CLCS rows carry. Checked field by field 2026-10-22:
+
+| Documented / live key | Emitted as |
+|---|---|
+| `__firewall_type` `log_type` `subtype` | `firewall.traffic` / `firewall.url`; `log_type` lowercase as in the live rows; `subtype` **and** `sub_type` (the column the modeling rule reads) |
+| `__timestamp=$start`, `__tz=$high_res_timestamp` | session start; high-res timestamp (`…ss.mmm+00:00`), also as `time_generated_high_res` |
+| `log_time`, `time_generated`, `session_start_time` | ISO-8601 (the dataset types `time_generated` as a timestamp) |
+| `log_source_id` / `log_source_name` / `sequence_no` / `vsys` / `vsys_name` | from `panw_ngfw_config` |
+| `source_ip/port`, `dest_ip/port`, `nat_source/dest(_port)`, `protocol`, `action` | as documented; NAT only toward the internet |
+| `source_user`, `dest_user`, `users` | `EXAMPLECORP\user`; `users` falls back to the source address (as the live rows do without User-ID) |
+| `app`, `app_category`, `app_sub_category` (+ live `technology_of_app`, `risk_of_app`) | from the App-ID table, cross-checked against the live feed |
+| `rule_matched`, `rule_matched_uuid`, `from_zone`, `to_zone`, `inbound_if`, `outbound_if`, `session_id` | as documented |
+| `source_device_category/profile/model/vendor/osfamily/osversion/mac` | one stable Device-ID profile per host, from the session identity's `os_type`/`os_version`/`device_type` (internet sources get none) |
+| `dest_device_category/profile/model/vendor/osfamily/osversion/mac` | for internal destinations (DCs and servers get server profiles) |
+| `bytes_sent/received`, `packets_sent/received`, `total_time_elapsed`, `session_end_reason`, `url_category` | as documented; denies/drops are zero-byte |
+| live: `log_source`, `is_nat`, `is_proxy`, `source_location`, `dest_location`, `is_non_std_dest_port`, `non_standard_dest_port`, `bytes_total` | added |
+| `xff_ip` | omitted (no proxy in front of the clients) |
+| URL format: `uri`, `url_category`, `url_category_list`, `http_method`, `threat_id`, `direction`, `user_agent`, `content_type`, `referer`, `http2_connection` | all emitted, plus live `url_domain`, `direction_of_attack`, `severity` |
+
 ## Key field → XDM mappings (native PAN-OS traffic modeling rule)
 
 | CEF key | XDM field |
@@ -132,10 +154,10 @@ The module shares the simulation's identity/network model (`session_utils`, `res
 ## Threat scenarios
 
 Dispatched from `_generate_threat_log` (weighted) or forced by name via `scenario_event`.
-32 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector and
-are offered on demand; 5 further events are realistic network patterns kept for hunts /
-correlation but **not** offered on demand (their detectors need EAL-decoded fields or process
-data a CEF traffic log cannot carry).
+48 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector or
+one of its traffic-only variations, and are offered on demand; 4 further events are realistic
+network patterns kept for hunts / correlation but **not** offered on demand (their detectors
+need EAL-decoded fields a CEF traffic log cannot carry).
 
 **Status** is the in-tenant result of the 2026-10-22 detector test (each event fired at the
 broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag and host):
@@ -146,6 +168,7 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 - ✗ **never fired in this tenant from any feed** in 30 days, though the other firewall
   modules have targeted it for weeks: most likely not reachable here, not a PAN-shape issue
 - ? **PAN-only detector, untested beyond one round** (no other feed can drive it)
+- new — added 2026-10-22 for a traffic-only variation; not yet fired at the tenant
 
 | Event | XSIAM analytic | Shape | Status |
 |---|---|---|---|
@@ -180,7 +203,22 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 | `ipfs` | Possible use of IPFS was detected | IPFS node traffic | ? |
 | `p2p_upload` / `p2p_download` | Upload / Download pattern that resembles P2P | asymmetric P2P transfers | ? |
 | `ssh_proxy` | Unusual SSH activity that resembles SSH proxy | host receives and initiates SSH, 1–20 MB each way | ? |
-| `rare_ssh_external` | *(non-analytic)* | SSH to a rare external host (detector keys on the process) | — |
+| `rare_ssh_external` | An Uncommon SSH session was established to a rare IP address | SSH-habit user → rare external IP on 22 (re-targeted from the process-based detector) | new |
+| `port_scan_aggressive` | Highly suspicious port scan | every privileged port + 60–100 high ports on one server in ~3 min | new |
+| `ipfs_peering` | Possible IPFS traffic was detected | 25–45 swarm dials on 4001 tcp+udp, ~half never complete | new |
+| `rare_domain_attack_port` | Abnormal Communication to a Rare Domain With a Port Commonly Used by Attack Platforms | rare domain on 4444/50050/31337/1337/6666/9999 + URL log | new |
+| `recurring_rare_domain_attack_port` | Abnormal Recurring Communications … Attack Platforms | a second daily beacon pair, on an attack-framework port | new (daily) |
+| `dormant_host_known_source` | Abnormal connections to a dormant host | established workstation → long-inactive host | new |
+| `large_upload_generic_small` | Large Upload (Generic) Lower than 100 MB | 60–95 MB on an uncommon port | new |
+| `new_ssh_admin_behavior` | New SSH Administrative Behavior | 8–11 novel SSH-only admin pairs | new |
+| `new_ftp_server_external` | New FTP Server from an external source | internet clients pulling files from a newly serving internal :21 | new |
+| `dcsync_internet_facing` | Possible DCSync from an internet-facing server | DMZ web server → DC DRSUAPI | new |
+| `dcsync_large` | Large DCSync from a non domain controller | non-DC pulls 150–600 MB from a DC | new |
+| `rare_appid_internet_facing` | Rare AppID usage … from an internet-facing server | DMZ web server, rare App-ID, rare destination | new |
+| `spam_bot_failed` | Failed Spam Bot Traffic | 40–90 external SMTP servers, ~80% reset/unanswered | new |
+| `ssh_suspicious_nonstd` | A suspicious SSH session was established | SSH to a rare external IP on 2222/2022/22222/8022/10022 | new |
+| `ssh_high_volume` | Uncommon SSH … higher than usual volume | SSH-habit user → usual jump host, 300–900 MB | new |
+| `host_attack_chain` | Multiple network-related alerts produced by different detectors on the same host | one host: port scan → failed connections → generic upload within the hour | new |
 | `kerberos_preauth_pattern` | *(non-analytic)* | Kerberos (88) burst to a DC | — |
 | `ntlm_relay_pattern` | *(non-analytic)* | SMB auth fan-out (relay shape) | — |
 | `dns_tunnel_pattern` | *(non-analytic)* | high-volume DNS to one resolver | — |
@@ -188,15 +226,22 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 
 All sequences end at or before the current time.
 
-### Daily events
+### Daily events and internet-facing servers
 
 Detectors that want the same (host, destination) pair "repeatedly over many days" cannot be
 fed by a back-dated burst on this path. `_DAILY_EVENTS` (`recurring_rare_ip`,
 `recurring_rare_domain`, `ddns_access`) claim the first threat slots of each UTC day, as Cisco
 ASA does, so each pair — one fixed host (`recurring_host(key, n=1)`) and its destination
 persisted in the beacon map — recurs on every real day the module runs at a threat level.
-Likewise `_SSH_HABIT_USERS` (8 stable users) make everyday SSH to their usual jump host part of
-the benign mix, giving `uncommon_ssh` the per-host SSH history its detector compares against.
+Likewise `_ssh_habit_users()` (8 stable users) make everyday SSH to their usual jump host part of
+the benign mix, giving `uncommon_ssh`, `rare_ssh_external`, `ssh_suspicious_nonstd` and
+`ssh_high_volume` the per-host SSH history their detector compares against.
+
+The internet-facing variations need hosts XSIAM knows receive internet traffic. The benign
+mix publishes the web site: internet clients (from `benign_ingress_sources`) reach the Apache
+httpd module's servers (`apache_config.server_ips`, `www.examplecorp.com`) on 443 through
+`untrust → dmz`, so the firewall and the httpd access logs describe the same servers, and
+`dcsync_internet_facing` / `rare_appid_internet_facing` originate from those servers.
 
 ## Detector coverage vs. the 49 PAN NGFW traffic-log alerts
 

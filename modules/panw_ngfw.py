@@ -28,7 +28,7 @@
 # Neither `rt` nor `__timestamp` (epoch ms, "YYYY/MM/DD HH:MM:SS", ISO-Z, or PAN's
 # cef-formatted time) moves it; the intended time survives only in time_generated / rt.
 # So anything a detector must see on SEPARATE DAYS (recurring beacons, an SSH habit) has to
-# be emitted on real days while the module runs: see _DAILY_EVENTS and _SSH_HABIT_USERS.
+# be emitted on real days while the module runs: see _DAILY_EVENTS and _ssh_habit_users().
 #
 # XDM field mapping (native PAN-OS traffic modeling rule)
 #   source_ip / source_port            -> xdm.source.ipv4|ipv6 / port
@@ -327,8 +327,12 @@ def _osfamily(os_type):
 
 def _src_device(ip, host, category="workstation"):
     """Device-ID columns for a source host (prefix 'source_device_')."""
+    if not _is_internal(ip):            # Device-ID profiles only the firewall's own networks
+        return {}
     if category == "unknown":           # unmanaged: Device-ID has no profile for it
         return {"category": "unknown"}
+    if category in ("server", "dc"):
+        return _server_device(ip, host, "Windows" if category == "dc" else None)
     info = _HOST_INFO.get(ip) or {}
     fam = _osfamily(info.get("os_type"))
     if not fam:
@@ -348,13 +352,20 @@ def _dst_device(config, ip, host):
     """Device-ID columns for an internal destination (prefix 'dest_device_')."""
     if not _is_internal(ip):
         return {}
-    if ip in set(_dcs(config)) or ip in set(config.get("internal_servers") or []):
-        fam = "Windows" if (ip in set(_dcs(config)) or _h(f"srvos|{ip}") % 3) else "Linux"
-        vendor, model = _SERVER_MODELS[_h(f"srvmodel|{ip}") % len(_SERVER_MODELS)]
-        return {"category": "server", "profile": f"{fam} Server", "model": model, "vendor": vendor,
-                "osfamily": fam, "osversion": "Server 2022" if fam == "Windows" else "22.04",
-                "mac": host_mac(host) if host else None, "host": host}
+    if ip in set(_dcs(config)):
+        return _server_device(ip, host, "Windows")
+    if ip in set(config.get("internal_servers") or []):
+        return _server_device(ip, host)
     return _src_device(ip, host)       # a workstation on the receiving end
+
+
+def _server_device(ip, host, fam=None):
+    """Device-ID columns for a server: DCs are Windows; others Windows or Linux, stable."""
+    fam = fam or ("Windows" if _h(f"srvos|{ip}") % 3 else "Linux")
+    vendor, model = _SERVER_MODELS[_h(f"srvmodel|{ip}") % len(_SERVER_MODELS)]
+    return {"category": "server", "profile": f"{fam} Server", "model": model, "vendor": vendor,
+            "osfamily": fam, "osversion": "Server 2022" if fam == "Windows" else "22.04",
+            "mac": host_mac(host) if host else None, "host": host}
 
 
 def _proto_for(app, dpt):
@@ -752,6 +763,40 @@ def _benign_internal(config, session_context):
     return _format_cef(config, "end", f)
 
 
+def _dmz_servers(config):
+    """The published web servers: the Apache httpd module's servers when configured (so the
+    firewall and the httpd access logs describe the same hosts), else a stable pair."""
+    a = config.get("apache_config") or {}
+    ips = a.get("server_ips") or ([a["server_ip"]] if a.get("server_ip") else [])
+    return ips or stable_subset(config.get("internal_servers") or ["10.0.10.50"], "panw_dmz", n=2)
+
+
+def _ingress_client(config):
+    """An internet client address from the probed benign ingress ranges."""
+    srcs = [s for s in config.get("benign_ingress_sources") or [] if s.get("ip_range")]
+    if srcs:
+        try:
+            return rand_ip_from_network(ip_network(random.choice(srcs)["ip_range"], strict=False))
+        except ValueError:
+            pass
+    return random_external_ip()
+
+
+def _benign_published_service(config):
+    """Internet client -> the published web site (untrust -> dmz, 443, allowed). It is also
+    what makes the DMZ servers "internet-facing" to XSIAM, the premise of the
+    internet-facing-server detector variations."""
+    srv = random.choice(_dmz_servers(config))
+    # The server's own grid name: a private host is named on examplecorp.local; the public
+    # site name (www.examplecorp.com) resolves to a public address, not to this one.
+    f = _traffic_fields(config, _ingress_client(config), srv, 443, "ssl",
+                        dhost=resolver.internal_fqdn(config, srv),
+                        from_zone="untrust", to_zone="dmz", rule="Allow-Inbound-Web",
+                        bytes_sent=random.randint(600, 20000), bytes_received=random.randint(3000, 600000),
+                        duration_s=random.randint(1, 120))
+    return _format_cef(config, "end", f)
+
+
 def _benign_inbound_block(config):
     """Internet noise denied at the perimeter (traffic:deny) — ambient, not an analytic."""
     ext = random_external_ip()
@@ -764,10 +809,12 @@ def _benign_inbound_block(config):
 
 def _generate_benign_log(config, session_context=None):
     r = random.random()
-    if r < 0.60:
+    if r < 0.58:
         return _benign_external(config, session_context)
-    if r < 0.90:
+    if r < 0.86:
         return _benign_internal(config, session_context)
+    if r < 0.93:
+        return _benign_published_service(config)
     return _benign_inbound_block(config)
 
 
@@ -799,10 +846,10 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "uncommon_ssh",         "weight": 4,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established"},
     {"event": "unusual_ssh",          "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH Activity"},
     {"event": "ssh_proxy",            "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH activity that resembles SSH proxy"},
-    # "Rare process created an SSH session ..." keys on the PROCESS, which a firewall log
-    # cannot carry (docs/firewall-analytics.md §4); it has never fired in this tenant from
-    # any feed. Kept as realistic traffic, not offered on demand.
-    {"event": "rare_ssh_external",    "weight": 2,  "analytic": False, "xsiam_alert": None},
+    # Re-targeted: "Rare process created an SSH session ..." keys on the PROCESS, which a
+    # firewall log cannot carry (docs/firewall-analytics.md section 4). An SSH-habit user
+    # reaching a rare external IP is the traffic-only "Uncommon SSH ... to a rare IP" variation.
+    {"event": "rare_ssh_external",    "weight": 2,  "analytic": True,  "xsiam_alert": "An Uncommon SSH session was established to a rare IP address"},
     {"event": "recurring_rare_ip",    "weight": 4,  "analytic": True,  "xsiam_alert": "Recurring access to rare IP"},
     {"event": "recurring_rare_domain","weight": 4,  "analytic": True,  "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
     {"event": "rare_domain_comm",     "weight": 3,  "analytic": True,  "xsiam_alert": "Abnormal Communication to a Rare Domain"},
@@ -816,6 +863,23 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "new_ftp_server",       "weight": 2,  "analytic": True,  "xsiam_alert": "New FTP Server"},
     {"event": "new_admin_behavior",   "weight": 3,  "analytic": True,  "xsiam_alert": "New Administrative Behavior"},
     {"event": "dormant_host_conn",    "weight": 2,  "analytic": True,  "xsiam_alert": "Abnormal connections to a dormant host from a newly seen endpoint"},
+    # Traffic-only detector VARIATIONS (2026-10-22), each targeting the variation's own alert
+    # name as Cortex lists it. HASSH / banner / process variations need EAL or the agent.
+    {"event": "port_scan_aggressive", "weight": 2,  "analytic": True,  "xsiam_alert": "Highly suspicious port scan"},
+    {"event": "ipfs_peering",         "weight": 2,  "analytic": True,  "xsiam_alert": "Possible IPFS traffic was detected"},
+    {"event": "rare_domain_attack_port", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Communication to a Rare Domain With a Port Commonly Used by Attack Platforms"},
+    {"event": "recurring_rare_domain_attack_port", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain With a Port Commonly Used by Attack Platforms"},
+    {"event": "dormant_host_known_source", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal connections to a dormant host"},
+    {"event": "large_upload_generic_small", "weight": 1, "analytic": True, "xsiam_alert": "Large Upload (Generic) Lower than 100 MB"},
+    {"event": "new_ssh_admin_behavior", "weight": 2, "analytic": True,  "xsiam_alert": "New SSH Administrative Behavior"},
+    {"event": "new_ftp_server_external", "weight": 2, "analytic": True, "xsiam_alert": "New FTP Server from an external source"},
+    {"event": "dcsync_internet_facing", "weight": 1, "analytic": True,  "xsiam_alert": "Possible DCSync from an internet-facing server"},
+    {"event": "dcsync_large",         "weight": 1,  "analytic": True,  "xsiam_alert": "Large DCSync from a non domain controller"},
+    {"event": "rare_appid_internet_facing", "weight": 2, "analytic": True, "xsiam_alert": "Rare AppID usage to a rare destination from an internet-facing server"},
+    {"event": "spam_bot_failed",      "weight": 2,  "analytic": True,  "xsiam_alert": "Failed Spam Bot Traffic"},
+    {"event": "ssh_suspicious_nonstd", "weight": 2, "analytic": True,  "xsiam_alert": "A suspicious SSH session was established"},
+    {"event": "ssh_high_volume",      "weight": 2,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established that involved a higher than usual volume"},
+    {"event": "host_attack_chain",    "weight": 2,  "analytic": True,  "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
     # Realistic network patterns whose dedicated analytic needs EAL-decoded fields the CEF
     # traffic log cannot carry — kept for hunts / correlation, NOT offered on demand.
     {"event": "kerberos_preauth_pattern", "weight": 2, "analytic": False, "xsiam_alert": None},
@@ -889,20 +953,35 @@ def _threat_actor(config, session_context):
 
 
 # --- Reconnaissance -------------------------------------------------------------------
-def _sim_port_scan(config, session_context):
-    """One host hits ~20-24 distinct privileged ports on a single internal server."""
-    src, user, shost = _threat_actor(config, session_context)
+def _scan_burst(config, src, user, shost, ports, end=None, step=2):
+    """One source probing `ports` on a single internal server, ending at `end`."""
     target = random.choice(config.get("internal_servers") or ["10.0.10.50"])
-    ports = random.sample(_PRIV_PORTS, min(len(_PRIV_PORTS), random.randint(20, 24)))
     print(f"    - PAN NGFW simulating: port scan {src} -> {target} ({len(ports)} ports)")
-    t0 = time.time() - len(ports) * 2
+    t0 = (end or time.time()) - len(ports) * step
     out = []
     for i, p in enumerate(ports):
         act = "allow" if p in (443, 445, 22) else random.choice(["deny", "drop", "allow"])
         out.append(_conn(config, src, target, p, "incomplete" if act != "allow" else _APP_for_port(p),
                          action=act, suser=user, shost=shost, from_zone="trust", to_zone="trust",
-                         dhost=resolver.internal_fqdn(config, target), ts=t0 + i * 2))
+                         dhost=resolver.internal_fqdn(config, target), ts=t0 + i * step))
     return out
+
+
+def _sim_port_scan(config, session_context):
+    """One host hits 20-24 distinct privileged ports on a single internal server."""
+    src, user, shost = _threat_actor(config, session_context)
+    return _scan_burst(config, src, user, shost,
+                       random.sample(_PRIV_PORTS, min(len(_PRIV_PORTS), random.randint(20, 24))))
+
+
+def _sim_port_scan_aggressive(config, session_context):
+    """"Highly suspicious port scan": every privileged port plus 60-100 high ports on one
+    server inside ~3 minutes -- a full-range sweep, not a 20-port service check."""
+    src, user, shost = _threat_actor(config, session_context)
+    high = random.sample(range(1024, 10000), random.randint(60, 100))
+    ports = list(dict.fromkeys(_PRIV_PORTS + high))
+    random.shuffle(ports)
+    return _scan_burst(config, src, user, shost, ports, step=1)
 
 
 def _APP_for_port(p):
@@ -926,19 +1005,24 @@ def _sim_port_sweep(config, session_context):
     return out
 
 
-def _sim_failed_connections(config, session_context):
-    """~120 zero-byte denied connections to 40 never-seen internal hosts."""
-    src, user, shost = _threat_actor(config, session_context)
+def _failed_burst(config, src, user, shost, end=None):
+    """~120 zero-byte denied connections to ~40 never-seen internal hosts, ending at `end`."""
     hosts = [rare_internal_host(config) for _ in range(random.randint(38, 44))]
     print(f"    - PAN NGFW simulating: failed connections {src} -> {len(hosts)} inactive hosts")
-    t0 = time.time() - 300
+    n = random.randint(110, 130)
+    t0 = (end or time.time()) - n * 2
     out = []
-    for i in range(random.randint(110, 130)):
+    for i in range(n):
         dst = random.choice(hosts)
         out.append(_conn(config, src, dst, random.choice([445, 139, 3389, 22, 1433]), "incomplete",
                          action="deny", suser=user, shost=shost, from_zone="trust", to_zone="trust",
                          ts=t0 + i * 2, end_reason="aged-out"))
     return out
+
+
+def _sim_failed_connections(config, session_context):
+    src, user, shost = _threat_actor(config, session_context)
+    return _failed_burst(config, src, user, shost)
 
 
 # --- Exfil / large uploads ------------------------------------------------------------
@@ -959,14 +1043,14 @@ def _rare_ext(config, seed=None):
     return dom, _rare_answer(dom, seed)
 
 
-def _sim_large_upload(config, session_context, app, dpt):
-    src, user, shost = _threat_actor(config, session_context)
+def _sim_large_upload(config, session_context, app, dpt, size_mb=(300, 700), actor=None, end=None):
+    src, user, shost = actor or _threat_actor(config, session_context)
     # One 300-700 MB session: the size of the Check Point uploads that fire Large Upload
     # (HTTPS) in this tenant ("uploaded 347.2MB ... over 1 sessions"); 5-100 MB is under
     # the threshold and multi-GB is not what fired.
-    size = random.randint(300, 700) * 1024 * 1024
+    size = random.randint(*size_mb) * 1024 * 1024
     kw = dict(suser=user, shost=shost, bytes_sent=size, bytes_received=random.randint(2000, 50000),
-              duration_s=random.randint(300, 1200))
+              duration_s=random.randint(300, 1200), ts=end)
     if app == "ssl":
         # HTTPS goes to the shared exfil pool (file-sharing services plus long-tail hosts),
         # the destinations the firing Check Point alerts used. PAN also writes the URL log
@@ -989,6 +1073,26 @@ def _sim_large_upload_https_nonstd(config, sc):
 def _sim_large_upload_smtp(config, sc):       return _sim_large_upload(config, sc, "smtp", 587)
 def _sim_large_upload_ftp(config, sc):        return _sim_large_upload(config, sc, "ftp", 21)
 def _sim_large_upload_generic(config, sc):    return _sim_large_upload(config, sc, "unknown-tcp", random.choice([4444, 9001, 8888, 6667]))
+def _sim_large_upload_generic_small(config, sc):
+    """"Large Upload (Generic) Lower than 100 MB": the same shape at 60-95 MB."""
+    return _sim_large_upload(config, sc, "unknown-tcp", random.choice([9001, 8888, 6667, 7000]), size_mb=(60, 95))
+
+
+def _sim_host_attack_chain(config, session_context):
+    """One host trips several DIFFERENT detectors within the hour -- internal port scan,
+    failed connections across the subnet, then a generic-protocol upload out -- the shape
+    XSIAM rolls up into "Multiple network-related alerts produced by different detectors on
+    the same host" (the NDR-insight case seen from the real pa440). Each stage on its own is
+    a detector this module confirmed firing; the roll-up only needs them on one host."""
+    src, user, shost = _threat_actor(config, session_context)
+    now = time.time()
+    print(f"    - PAN NGFW simulating: multi-detector attack chain on {src}")
+    return (_scan_burst(config, src, user, shost,
+                        random.sample(_PRIV_PORTS, min(len(_PRIV_PORTS), random.randint(20, 24))),
+                        end=now - 40 * 60)
+            + _failed_burst(config, src, user, shost, end=now - 20 * 60)
+            + _sim_large_upload(config, session_context, "unknown-tcp", random.choice([9001, 8888, 6667]),
+                                actor=(src, user, shost), end=now - 60))
 
 
 # --- Rare lateral / remote-access -----------------------------------------------------
@@ -1045,28 +1149,50 @@ def _sim_smb_from_dc(config, session_context):
     print(f"    - PAN NGFW simulating: DC->workstation SMB from {dc}")
     out = []
     for _ in range(random.randint(2, 4)):
-        out.append(_conn(config, dc, dst, 445, "ms-ds-smbv3", suser="SYSTEM", no_qualify=True,
+        out.append(_conn(config, dc, dst, 445, "ms-ds-smbv3", suser="SYSTEM", no_qualify=True, src_category="dc",
                          shost=resolver.internal_fqdn(config, dc), from_zone="trust", to_zone="trust",
                          bytes_sent=random.randint(5000, 50000), bytes_received=random.randint(5000, 200000),
                          duration_s=random.randint(5, 60)))
     return out
 
 
-def _sim_dcsync_non_dc(config, session_context):
-    """A NON-DC host performs AD-replication RPC (DRSUAPI) to a DC — DCSync over the wire."""
-    src, user, shost = _threat_actor(config, session_context)
+def _dcsync(config, src, user, shost, from_zone="trust", large=False, src_category="workstation"):
+    """AD-replication RPC (DRSUAPI) from a NON-DC host to a DC: the endpoint mapper on 135,
+    then the replication itself on dynamic high ports. `large` pulls the whole directory
+    (hundreds of MB), the "Large DCSync" variations."""
     dc = random.choice(_dcs(config))
-    print(f"    - PAN NGFW simulating: DCSync (DRSUAPI) {src} -> DC {dc}")
-    out = [_conn(config, src, dc, 135, "msrpc-base", suser=user, shost=shost,
-                 dhost=resolver.internal_fqdn(config, dc), from_zone="trust", to_zone="trust",
+    dcname = resolver.internal_fqdn(config, dc)
+    print(f"    - PAN NGFW simulating: DCSync{' (large)' if large else ''} {src} -> DC {dc}")
+    out = [_conn(config, src, dc, 135, "msrpc-base", suser=user, shost=shost, dhost=dcname,
+                 from_zone=from_zone, to_zone="trust", src_category=src_category,
                  bytes_sent=random.randint(2000, 9000), bytes_received=random.randint(5000, 40000),
                  duration_s=random.randint(1, 10))]
-    for _ in range(random.randint(3, 6)):     # dynamic RPC high ports carrying the replication
+    n = random.randint(3, 6)
+    for _ in range(n):
+        rcvd = (random.randint(150, 600) * 1024 * 1024 // n) if large else random.randint(200000, 8000000)
         out.append(_conn(config, src, dc, random.randint(49152, 65535), "msrpc-base", suser=user,
-                         shost=shost, dhost=resolver.internal_fqdn(config, dc), from_zone="trust",
-                         to_zone="trust", bytes_sent=random.randint(20000, 400000),
-                         bytes_received=random.randint(200000, 8000000), duration_s=random.randint(2, 40)))
+                         shost=shost, dhost=dcname, from_zone=from_zone, to_zone="trust",
+                         src_category=src_category, bytes_sent=random.randint(20000, 400000),
+                         bytes_received=rcvd, duration_s=random.randint(20, 300) if large else random.randint(2, 40)))
     return out
+
+
+def _sim_dcsync_non_dc(config, session_context):
+    src, user, shost = _threat_actor(config, session_context)
+    return _dcsync(config, src, user, shost)
+
+
+def _sim_dcsync_large(config, session_context):
+    src, user, shost = _threat_actor(config, session_context)
+    return _dcsync(config, src, user, shost, large=True)
+
+
+def _sim_dcsync_internet_facing(config, session_context):
+    """DCSync from a DMZ web server: an internet-facing host compromised and used as a rogue
+    DC ("Possible DCSync from an internet-facing server"). Runs as the service account."""
+    srv = random.choice(_dmz_servers(config))
+    return _dcsync(config, srv, "svc_web", resolver.internal_fqdn(config, srv), from_zone="dmz",
+                   src_category="server")
 
 
 # --- SMTP ------------------------------------------------------------------------------
@@ -1093,7 +1219,65 @@ def _sim_spam_bot(config, session_context):
     return out
 
 
+def _sim_spam_bot_failed(config, session_context):
+    """"Failed Spam Bot Traffic": the same fan-out to external SMTP servers, but most of them
+    refuse it (reset by the server or never answering), as blocklisted spam senders see."""
+    src, user, shost = _threat_actor(config, session_context)
+    n = random.randint(40, 90)
+    print(f"    - PAN NGFW simulating: failed spam bot {src} -> {n} external SMTP servers")
+    t0 = time.time() - n * 30
+    out = []
+    for i in range(n):
+        ok = random.random() < 0.2
+        out.append(_conn(config, src, random_external_ip(), 25, "smtp" if ok else "incomplete",
+                         suser=user, shost=shost,
+                         bytes_sent=random.randint(2000, 20000) if ok else random.randint(60, 180),
+                         bytes_received=random.randint(200, 2000) if ok else 0,
+                         duration_s=random.randint(1, 20) if ok else 0,
+                         end_reason=None if ok else random.choice(["tcp-rst-from-server", "aged-out"]),
+                         ts=t0 + i * 30))
+    return out
+
+
 # --- SSH -------------------------------------------------------------------------------
+_NONSTD_SSH_PORTS = (2222, 2022, 22222, 8022, 10022)
+
+
+def _ssh_habit_actor(config, session_context):
+    """(src, user, shost) of an SSH-habit user (has real SSH history), else any actor."""
+    habit = _ssh_habit_users(session_context)
+    info = _remember(get_user_by_name(session_context, random.choice(habit), "workstation")) if habit else None
+    if info:
+        return info["ip"], info["username"], info.get("hostname")
+    return _threat_actor(config, session_context)
+
+
+def _sim_ssh_suspicious_nonstd(config, session_context):
+    """"A suspicious SSH session was established": SSH to a globally rare external IP on a
+    non-standard SSH port (App-ID still identifies ssh on any port)."""
+    src, user, shost = _ssh_habit_actor(config, session_context)
+    dom, dst = _rare_ext(config, f"sshnonstd|{user}")
+    port = random.choice(_NONSTD_SSH_PORTS)
+    print(f"    - PAN NGFW simulating: SSH to rare external {dst}:{port} from {src}")
+    return [_conn(config, src, dst, port, "ssh", suser=user, shost=shost, dhost=dom,
+                  bytes_sent=random.randint(5000, 200000), bytes_received=random.randint(5000, 400000),
+                  duration_s=random.randint(60, 1800))]
+
+
+def _sim_ssh_high_volume(config, session_context):
+    """"Uncommon SSH session ... higher than usual volume": an SSH-habit user's ordinary SSH
+    to their usual jump host, but moving hundreds of MB instead of their usual KB."""
+    src, user, shost = _ssh_habit_actor(config, session_context)
+    jump = _usual_jump_host(config, user)
+    print(f"    - PAN NGFW simulating: high-volume SSH {src} -> usual jump host {jump}")
+    return [_conn(config, src, jump, 22, "ssh", suser=user, shost=shost,
+                  dhost=resolver.internal_fqdn(config, jump), from_zone="trust", to_zone="trust",
+                  bytes_sent=random.randint(300, 900) * 1024 * 1024,
+                  bytes_received=random.randint(5, 40) * 1024 * 1024,
+                  duration_s=random.randint(1800, 7200), end_reason="tcp-fin")]
+
+
+# --- SSH (habit users reaching rare destinations) ----------------------------------------
 def _sim_uncommon_ssh(config, session_context):
     """An SSH session to a host this source has never used SSH with.
 
@@ -1159,9 +1343,12 @@ def _sim_ssh_proxy(config, session_context):
 
 
 def _sim_rare_ssh_external(config, session_context):
-    src, user, shost = _threat_actor(config, session_context)
+    """"An Uncommon SSH session was established to a rare IP address": an SSH-habit user
+    (real per-host SSH history) reaches a rare external IP on the standard port."""
+    src, user, shost = _ssh_habit_actor(config, session_context)
     dom, dst = _rare_ext(config, f"sshext|{user}")
-    return [_conn(config, src, dst, random.choice([22, 2222]), "ssh", suser=user, shost=shost, dhost=dom,
+    print(f"    - PAN NGFW simulating: SSH to rare external IP {dst} from {src}")
+    return [_conn(config, src, dst, 22, "ssh", suser=user, shost=shost, dhost=dom,
                   bytes_sent=random.randint(5000, 200000), bytes_received=random.randint(5000, 400000),
                   duration_s=random.randint(30, 1200))]
 
@@ -1171,7 +1358,8 @@ def _sim_rare_ssh_external(config, session_context):
 # no back-dating on this path (see the header), each emission is ONE day of beacons from
 # one fixed host to its persistent rare destination, and _DAILY_EVENTS makes the module
 # emit each of them once per UTC day while it runs, so the pair recurs on real days.
-_DAILY_EVENTS = ("recurring_rare_ip", "recurring_rare_domain", "ddns_access")
+_DAILY_EVENTS = ("recurring_rare_ip", "recurring_rare_domain", "recurring_rare_domain_attack_port",
+                 "ddns_access")
 _last_daily_emit = {}
 
 
@@ -1238,13 +1426,42 @@ def _sim_recurring_rare_domain(config, session_context):
     return _beacon_day(config, src, user, shost, ip, port, domain=dom, url_cat="command-and-control")
 
 
+# Default listener ports of common attack frameworks (Metasploit 4444, Cobalt Strike team
+# server 50050, Sliver/Empire-style 31337/1337, ...): the "Port Commonly Used by Attack
+# Platforms" variations of the rare-domain detectors.
+_ATTACK_PORTS = (4444, 50050, 31337, 1337, 6666, 9999)
+
+
 def _sim_rare_domain_comm(config, session_context):
+    """One session to a newly registered rare domain on 443/8443 (+ URL log)."""
     src, user, shost = _threat_actor(config, session_context)
     dom, dst = _rare_ext(config, f"rdc|{user}")
-    return _web(config, src, dst, random.choice([443, 8443, 4444]), "ssl", dom,
+    return _web(config, src, dst, random.choice([443, 8443]), "ssl", dom,
                 url_cat="newly-registered-domain", suser=user, shost=shost,
                 bytes_sent=random.randint(500, 20000), bytes_received=random.randint(500, 40000),
                 duration_s=random.randint(1, 120))
+
+
+def _sim_rare_domain_attack_port(config, session_context):
+    """"Abnormal Communication to a Rare Domain With a Port Commonly Used by Attack
+    Platforms": a rare domain reached on an attack-framework listener port (+ URL log)."""
+    src, user, shost = _threat_actor(config, session_context)
+    dom, dst = _rare_ext(config, f"rdcatk|{user}")
+    port = random.choice(_ATTACK_PORTS)
+    print(f"    - PAN NGFW simulating: rare domain on attack-platform port {src} -> {dom}:{port}")
+    return _web(config, src, dst, port, "ssl", dom, url_cat="unknown", suser=user, shost=shost,
+                bytes_sent=random.randint(500, 20000), bytes_received=random.randint(500, 40000),
+                duration_s=random.randint(1, 120))
+
+
+def _sim_recurring_rare_domain_attack_port(config, session_context):
+    """Second daily beacon pair, on an attack-framework port: the "Abnormal Recurring
+    Communications to a Rare Domain With a Port Commonly Used by Attack Platforms" variation."""
+    src, user, shost = _beacon_host(config, session_context, "panw_rare_dom_atk")
+    ip, dom = _beacon_dst(config, "rare_dom_atk", src)
+    port = _beacon_port("rare_dom_atk", src, list(_ATTACK_PORTS))
+    print(f"    - PAN NGFW simulating: daily beacon to rare domain {src} -> {dom}:{port}")
+    return _beacon_day(config, src, user, shost, ip, port, domain=dom, url_cat="unknown")
 
 
 def _sim_ddns_access(config, session_context):
@@ -1310,15 +1527,49 @@ def _sim_ipfs(config, session_context):
     return out
 
 
-def _sim_rare_appid(config, session_context):
-    """A rarely-used App-ID to a rare destination on an unusual port."""
+def _sim_ipfs_peering(config, session_context):
+    """"Possible IPFS traffic was detected" (the host "attempted to access other nodes in an
+    IPFS manner"): a node bootstrapping its DHT dials 25-45 swarm peers on 4001 over TCP and
+    UDP/QUIC within ~15 minutes; about half the dials never complete."""
     src, user, shost = _threat_actor(config, session_context)
-    dom, dst = _rare_ext(config, f"appid|{user}")
+    n = random.randint(25, 45)
+    print(f"    - PAN NGFW simulating: IPFS swarm dialing from {src} ({n} peers)")
+    t0 = time.time() - n * 20
+    out = []
+    for i in range(n):
+        fail = random.random() < 0.5
+        out.append(_conn(config, src, random_external_ip(), 4001, "incomplete" if fail else "ipfs",
+                         suser=user, shost=shost, proto=random.choice(["tcp", "udp"]),
+                         bytes_sent=random.randint(60, 400) if fail else random.randint(2000, 60000),
+                         bytes_received=0 if fail else random.randint(2000, 90000),
+                         duration_s=0 if fail else random.randint(2, 60),
+                         end_reason="aged-out" if fail else None, ts=t0 + i * 20, url_cat="peer-to-peer"))
+    return out
+
+
+def _rare_appid(config, src, user, shost, from_zone="trust", src_category="workstation"):
+    """A rarely-used App-ID to a rare destination on its own (unusual) port."""
+    dom, dst = _rare_ext(config, f"appid|{src}")
     app = random.choice(["socks", "tor", "gnutella", "dns-over-https", "tftp"])
     port = random.choice(_APP.get(app, (None,)*5)[4] or [1080])
+    print(f"    - PAN NGFW simulating: rare App-ID {app} {src} -> {dst}:{port}")
     return [_conn(config, src, dst, port, app, suser=user, shost=shost, dhost=dom,
+                  from_zone=from_zone, src_category=src_category,
                   bytes_sent=random.randint(2000, 200000), bytes_received=random.randint(2000, 400000),
                   duration_s=random.randint(10, 600), url_cat="proxy-avoidance-and-anonymizers")]
+
+
+def _sim_rare_appid(config, session_context):
+    src, user, shost = _threat_actor(config, session_context)
+    return _rare_appid(config, src, user, shost)
+
+
+def _sim_rare_appid_internet_facing(config, session_context):
+    """The same from a published DMZ web server: "Rare AppID usage to a rare destination from
+    an internet-facing server" (a compromised web server opening a tunnel/proxy out)."""
+    srv = random.choice(_dmz_servers(config))
+    return _rare_appid(config, srv, "svc_web", resolver.internal_fqdn(config, srv), from_zone="dmz",
+                       src_category="server")
 
 
 def _sim_new_ftp_server(config, session_context):
@@ -1335,6 +1586,22 @@ def _sim_new_ftp_server(config, session_context):
     return out
 
 
+def _sim_new_ftp_server_external(config, session_context):
+    """"New FTP Server from an external source": internet clients log in to and pull files
+    from an internal host that never served FTP before (untrust -> trust, :21 allowed by a
+    stale or rogue rule) -- data staged for pickup from outside."""
+    server = new_ftp_server_host(config)
+    sname = resolver.internal_fqdn(config, server)
+    print(f"    - PAN NGFW simulating: new FTP server {server} reached from the internet")
+    out = []
+    for _ in range(random.randint(2, 5)):
+        out.append(_conn(config, _ingress_client(config), server, 21, "ftp", dhost=sname,
+                         from_zone="untrust", to_zone="trust", rule="Allow-Inbound-FTP-Legacy",
+                         bytes_sent=random.randint(500, 8000), bytes_received=random.randint(500000, 80000000),
+                         duration_s=random.randint(10, 900)))
+    return out
+
+
 # Remote-administration services "New Administrative Behavior" counts, with the App-ID PAN
 # reports for each (unknown-tcp/udp where App-ID has no decoder, as real PAN does).
 _REMOTE_ADMIN = {22: "ssh", 23: "telnet", 69: "tftp", 161: "snmp-base", 512: "unknown-tcp",
@@ -1343,20 +1610,24 @@ _REMOTE_ADMIN = {22: "ssh", 23: "telnet", 69: "tftp", 161: "snmp-base", 512: "un
 _ADMIN_FILL = (22, 69)
 
 
-def _sim_new_admin_behavior(config, session_context):
+def _sim_new_admin_behavior(config, session_context, ssh_only=False):
     """One established host performing many FIRST-TIME remote-administration actions.
 
     The detector counts NOVEL (destination, admin port) pairs per source over 12 hours, so
     breadth across both axes is the signal, not volume (shape that fires for Firepower,
     FortiGate, Check Point and Zscaler here). Destinations are fresh internal addresses
     (never the hot internal_servers pool); every admin port appears once and the rest of
-    the 8-11 actions use the confirmed-counted ports; actions are spread over 30-75 min."""
+    the 8-11 actions use the confirmed-counted ports; actions are spread over 30-75 min.
+    `ssh_only` is the "New SSH Administrative Behavior" variation: every action is SSH."""
     src, user, shost = _threat_actor(config, session_context)
     n = random.randint(8, 11)
-    ports = random.sample(list(_REMOTE_ADMIN), random.randint(4, 6))
-    while len(ports) < n:
-        ports.append(random.choice(_ADMIN_FILL))
-    random.shuffle(ports)
+    if ssh_only:
+        ports = [22] * n
+    else:
+        ports = random.sample(list(_REMOTE_ADMIN), random.randint(4, 6))
+        while len(ports) < n:
+            ports.append(random.choice(_ADMIN_FILL))
+        random.shuffle(ports)
     pairs, used = [], {src}
     for p in ports:
         if pairs and random.random() < 0.3 and (pairs[-1][0], p) not in pairs:
@@ -1379,19 +1650,30 @@ def _sim_new_admin_behavior(config, session_context):
     return out
 
 
-def _sim_dormant_host_conn(config, session_context):
-    """A newly-seen endpoint makes multiple connections to a long-inactive (dormant) host."""
-    src, shost = rare_source_host(config, "panw_dormant")
+def _dormant_conns(config, src, shost, user=None):
     dormant = rare_internal_host(config)
-    print(f"    - PAN NGFW simulating: connections to dormant host {dormant} from new endpoint {src}")
     out = []
     for _ in range(random.randint(6, 14)):
-        out.append(_conn(config, src, dormant, random.choice([445, 3389, 22, 443]), "ssl",
+        port = random.choice([445, 3389, 22, 443])
+        out.append(_conn(config, src, dormant, port, _APP_for_port(port), suser=user,
                          shost=shost, from_zone="trust", to_zone="trust",
                          dhost=resolver.internal_fqdn(config, dormant),
                          bytes_sent=random.randint(2000, 60000), bytes_received=random.randint(2000, 200000),
                          duration_s=random.randint(5, 300)))
+    print(f"    - PAN NGFW simulating: {len(out)} connections to dormant host {dormant} from {src}")
     return out
+
+
+def _sim_dormant_host_conn(config, session_context):
+    """A newly-seen endpoint makes multiple connections to a long-inactive (dormant) host."""
+    src, shost = rare_source_host(config, "panw_dormant")
+    return _dormant_conns(config, src, shost)
+
+
+def _sim_dormant_host_known_source(config, session_context):
+    """"Abnormal connections to a dormant host": the same, from an established workstation."""
+    src, user, shost = _threat_actor(config, session_context)
+    return _dormant_conns(config, src, shost, user)
 
 
 # --- Non-analytic realistic network patterns (hunts / correlation only) ---------------
@@ -1470,6 +1752,17 @@ _THREAT_DISPATCH = {
     "new_admin_behavior": _sim_new_admin_behavior, "dormant_host_conn": _sim_dormant_host_conn,
     "kerberos_preauth_pattern": _sim_kerberos_preauth_pattern, "ntlm_relay_pattern": _sim_ntlm_relay_pattern,
     "dns_tunnel_pattern": _sim_dns_tunnel_pattern, "ldap_recon": _sim_ldap_recon,
+    "port_scan_aggressive": _sim_port_scan_aggressive, "ipfs_peering": _sim_ipfs_peering,
+    "rare_domain_attack_port": _sim_rare_domain_attack_port,
+    "recurring_rare_domain_attack_port": _sim_recurring_rare_domain_attack_port,
+    "dormant_host_known_source": _sim_dormant_host_known_source,
+    "large_upload_generic_small": _sim_large_upload_generic_small,
+    "new_ssh_admin_behavior": lambda c, s: _sim_new_admin_behavior(c, s, ssh_only=True),
+    "new_ftp_server_external": _sim_new_ftp_server_external,
+    "dcsync_internet_facing": _sim_dcsync_internet_facing, "dcsync_large": _sim_dcsync_large,
+    "rare_appid_internet_facing": _sim_rare_appid_internet_facing,
+    "spam_bot_failed": _sim_spam_bot_failed, "ssh_suspicious_nonstd": _sim_ssh_suspicious_nonstd,
+    "ssh_high_volume": _sim_ssh_high_volume, "host_attack_chain": _sim_host_attack_chain,
 }
 
 
