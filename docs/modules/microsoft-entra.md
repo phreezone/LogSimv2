@@ -11,7 +11,7 @@ Okta.
 | `azuread_signin` | Microsoft Graph `auditLogs/signIns` | `msft_azure_ad_raw` | `f56dcfdf6bca43e793a4b6e9290e7b12` |
 | `azuread_audit` | Microsoft Graph `auditLogs/directoryAudits` | `msft_azure_ad_audit_raw` | `0e076d5abe864bf78e8145ea9e0d749e` |
 | `o365_azuread` | O365 Management Activity, `Audit.AzureActiveDirectory` (RecordType 15 sign-ins, 8 directory ops) | `msft_o365_azure_ad_raw` | `e1f109f886ea42fbb96be6ec0cc597a9` |
-| `azuread_identity_protection` | Entra diagnostics: ProvisioningLogs, RiskyUsers/RiskyServicePrincipals, UserRiskEvents/ServicePrincipalRiskEvents | `msft_azure_raw` | `fce13a1d51294f84bae4a37851503060` |
+| `azuread_identity_protection` | Entra diagnostics: ProvisioningLogs, UserRiskEvents/ServicePrincipalRiskEvents (risk-state categories dropped by ingestion) | `msft_azure_raw` | `fce13a1d51294f84bae4a37851503060` |
 | `azuread_campaigns` | *(coordinator — sends through the feeds above, plus Windows over WEC)* | — | — |
 
 The Microsoft 365 workloads (Exchange, SharePoint/OneDrive, DLP, General) are on
@@ -199,17 +199,23 @@ deletion, PIM role change.
 
 ## `azuread_identity_protection` — provisioning & Identity Protection
 
-A standalone benign feed for three Entra diagnostic categories the `msft_azure_raw` modeling
-rule maps but no other module produced: **ProvisioningLogs** (SCIM / HR-driven app provisioning
-sync cycles), **RiskyUsers** / **RiskyServicePrincipals** (an identity's current Identity
-Protection risk state), and **UserRiskEvents** / **ServicePrincipalRiskEvents** (individual risk
-detections). Records carry the Graph resource (`provisioningObjectSummary`, `riskyUser`,
-`riskDetection`) in `properties`, in the event-hub envelope, sent under the Azure Event Hubs
-Source-Identifier. Every `properties` path is one the modeling rule reads.
+A standalone benign feed for the Entra diagnostic categories the `msft_azure_raw` modeling rule
+maps but no other module produced: **ProvisioningLogs** (SCIM / HR-driven app provisioning sync
+cycles) and the risk-detection categories **UserRiskEvents** / **ServicePrincipalRiskEvents**.
+Records carry the Graph resource (`provisioningObjectSummary`, `riskDetection`) in `properties`,
+in the event-hub envelope, sent under the Azure Event Hubs Source-Identifier. Every `properties`
+path is one the modeling rule reads, and a 2026-10-23 canary confirmed ProvisioningLogs and
+UserRiskEvents land in `msft_azure_raw` and map to XDM.
 
-Benign only: provisioning sync dominates, and risk stays low/none and
-dismissed/remediated/confirmedSafe — the baseline the risk analytics learn. Genuinely risky
-sign-ins are the needle the `azuread_signin` scenarios provide.
+**Not emitted: the risk-*state* categories** `RiskyUsers` / `RiskyServicePrincipals`. The same
+canary showed this ingestion path accepts them at the receiver but drops them before the dataset
+(they never land, not even raw) — the source's parsing rule admits provisioning and risk-event
+categories but not risk-state, so the modeling rule's `RiskyUsers` branch never receives a row.
+Emitting them would only produce discarded sends.
+
+Benign only: provisioning sync dominates, and risk detections stay low-level and
+dismissed/remediated — the baseline the risk analytics learn. Genuinely risky sign-ins are the
+needle the `azuread_signin` scenarios provide.
 
 ## Feed volumes
 

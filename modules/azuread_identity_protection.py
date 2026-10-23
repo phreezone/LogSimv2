@@ -97,34 +97,12 @@ def _provisioning(config, context=None):
     return [rec]
 
 
-# ── RiskyUsers / RiskyServicePrincipals ───────────────────────────────────────────────
-# The current risk state of an identity. Benign tenant: risk cleared (confirmedSafe / remediated /
-# dismissed) or none, at low/none level, account still enabled.
-_RU_STATE = [("none", "none", "none"), ("remediated", "userPerformedSecuredPasswordChange", "low"),
-             ("dismissed", "adminDismissedAllRiskForUser", "low"),
-             ("confirmedSafe", "adminConfirmedUserSafe", "low"), ("none", "none", "none")]
-
-
-def _risky_user(config, context=None):
-    u = ac.pick_user(config, context)
-    state, detail, level = random.choice(_RU_STATE)
-    props = {"id": ac.user_oid(u["username"]), "userPrincipalName": u["upn"],
-             "userDisplayName": u.get("display_name"), "displayName": u.get("display_name"),
-             "riskState": state, "riskDetail": detail, "riskLevel": level,
-             "riskLastUpdatedDateTime": _ts(-random.randint(60, 86400)), "accountEnabled": True,
-             "isDeleted": False, "isProcessing": False}
-    return [_envelope("RiskyUsers", "UserRiskUpdated", props, result="Success")]
-
-
-def _risky_sp(config, context=None):
-    name = ac.baseline_saas_app()
-    props = {"id": ac.user_oid("sp:" + name), "displayName": name,
-             "appId": ac.app_id(name), "servicePrincipalType": "Application",
-             "riskState": random.choice(["dismissed", "none", "confirmedSafe"]),
-             "riskDetail": "adminDismissedAllRiskForServicePrincipal", "riskLevel": "low",
-             "riskLastUpdatedDateTime": _ts(-random.randint(60, 86400)),
-             "accountEnabled": True, "isEnabled": True, "isProcessing": False}
-    return [_envelope("RiskyServicePrincipals", "ServicePrincipalRiskUpdated", props)]
+# NOTE: the RiskyUsers / RiskyServicePrincipals categories (an identity's current risk STATE) are
+# not emitted. A 2026-10-23 canary showed this ingestion path accepts them at the receiver but
+# drops them before msft_azure_raw (they never land, not even raw) -- the source's parsing rule
+# admits ProvisioningLogs and the risk-EVENT categories but not the risk-state ones, so the
+# modeling rule's RiskyUsers branch never sees a row. Risk state would just be discarded sends.
+# The risk-detection categories below (UserRiskEvents / ServicePrincipalRiskEvents) DO land.
 
 
 # ── UserRiskEvents / ServicePrincipalRiskEvents ───────────────────────────────────────
@@ -167,9 +145,9 @@ def _sp_risk_event(config, context=None):
     return [_envelope("ServicePrincipalRiskEvents", "ServicePrincipalRiskDetection", props)]
 
 
-# Provisioning sync is high-volume; risk state/detections are far rarer in a healthy tenant.
-_BENIGN = [(70, _provisioning), (10, _risky_user), (3, _risky_sp), (14, _user_risk_event),
-           (3, _sp_risk_event)]
+# Provisioning sync is high-volume; risk detections are far rarer in a healthy tenant. (Risk-state
+# categories are omitted — this ingestion path drops them; see the note above.)
+_BENIGN = [(80, _provisioning), (17, _user_risk_event), (3, _sp_risk_event)]
 _BENIGN_FNS = [f for w, f in _BENIGN for _ in range(w)]
 
 
