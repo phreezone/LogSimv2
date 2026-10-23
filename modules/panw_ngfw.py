@@ -1951,12 +1951,16 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     global last_threat_event_time
     session_context = (context or {}).get("session_context")
 
-    # Orchestrated / dashboard-forced named threat.
+    # Orchestrated / dashboard-forced named threat. Return the (logs, display_name) tuple
+    # so the caller records WHICH threat fired; returning the bare logs (the old `[0]`) made
+    # the dashboard worker record event_name=None, so ambient threats were counted as benign
+    # and the UI showed zero threats — they only appeared via the fire/scenario path, which
+    # supplies the name itself.
     if scenario_event:
         if scenario_event in ("LARGE_EGRESS",):
-            return _sim_large_upload_https(config, session_context)
+            return _sim_large_upload_https(config, session_context), "large_upload_https"
         if scenario_event in _THREAT_DISPATCH or scenario_event.lower() in _THREAT_DISPATCH:
-            return _generate_threat_log(config, session_context, forced_event=scenario_event)[0]
+            return _generate_threat_log(config, session_context, forced_event=scenario_event)
 
     if benign_only:
         return _generate_benign_log(config, session_context)
@@ -1964,10 +1968,10 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     interval = _get_threat_interval(threat_level, config)
     now = time.time()
     if threat_level == "Insane" and random.random() < 0.8:
-        return _generate_threat_log(config, session_context, forced_event=_due_daily(now))[0]
+        return _generate_threat_log(config, session_context, forced_event=_due_daily(now))
     if interval > 0 and (now - last_threat_event_time) > interval:
         last_threat_event_time = now
-        return _generate_threat_log(config, session_context, forced_event=_due_daily(now))[0]
+        return _generate_threat_log(config, session_context, forced_event=_due_daily(now))
     return _generate_benign_log(config, session_context)
 
 
