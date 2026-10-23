@@ -131,6 +131,11 @@ _APP = {
     "kerberos":        ("business-systems", "auth-service",      "client-server",   "Low",           [88]),
     "ldap":            ("business-systems", "auth-service",      "client-server",   "Low",           [389]),
     "msrpc-base":      ("networking",       "infrastructure",    "client-server",   "Medium",        [135]),
+    # Active Directory App-IDs (names per Applipedia: active-directory-base,
+    # ms-dc-replication; the category/risk attributes here are best estimates -- the
+    # Applipedia detail API is reCAPTCHA-gated and the live feed has no AD traffic).
+    "active-directory-base": ("business-systems", "auth-service", "client-server",   "Medium",        [135, 389]),
+    "ms-dc-replication":     ("business-systems", "auth-service", "client-server",   "Medium",        []),
     "smtp":            ("collaboration",    "email",             "client-server",   "Medium",        [25, 587]),
     "ftp":             ("general-internet", "file-sharing",      "client-server",   "Critical",      [21]),
     "icmp":            ("networking",       "ip-protocol",       "network-protocol","High",          [0]),
@@ -847,7 +852,10 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "rare_smtp",            "weight": 2,  "analytic": True,  "xsiam_alert": "Rare SMTP/S Session"},
     {"event": "spam_bot",             "weight": 3,  "analytic": True,  "xsiam_alert": "Spam Bot Traffic"},
     {"event": "uncommon_ssh",         "weight": 4,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established"},
+    {"event": "uncommon_ssh_rare_internal", "weight": 2, "analytic": True, "xsiam_alert": "Uncommon SSH session was established to a rare internal IP"},
+    {"event": "uncommon_ssh_nonstd_port", "weight": 2, "analytic": True, "xsiam_alert": "An Uncommon SSH session was established using a nonstandard SSH port"},
     {"event": "unusual_ssh",          "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual, long SSH activity with tunnel characteristics"},
+    {"event": "unusual_ssh_external", "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH activity with tunnel characteristics to external destination"},
     {"event": "ssh_proxy",            "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH activity that resembles SSH proxy"},
     # Re-targeted: "Rare process created an SSH session ..." keys on the PROCESS, which a
     # firewall log cannot carry (docs/firewall-analytics.md section 4). An SSH-habit user
@@ -872,12 +880,15 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "ipfs_peering",         "weight": 2,  "analytic": True,  "xsiam_alert": "Possible IPFS traffic was detected"},
     {"event": "rare_domain_attack_port", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Communication to a Rare Domain With a Port Commonly Used by Attack Platforms"},
     {"event": "recurring_rare_domain_attack_port", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain With a Port Commonly Used by Attack Platforms"},
+    {"event": "recurring_rare_domain_suspicious_as", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain to a Suspicious Autonomous System (AS)"},
     {"event": "dormant_host_known_source", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal connections to a dormant host"},
     {"event": "large_upload_generic_small", "weight": 1, "analytic": True, "xsiam_alert": "Large Upload (Generic) Lower than 100 MB"},
     {"event": "new_ssh_admin_behavior", "weight": 2, "analytic": True,  "xsiam_alert": "New SSH Administrative Behavior"},
     {"event": "new_ftp_server_external", "weight": 2, "analytic": True, "xsiam_alert": "New FTP Server from an external source"},
+    {"event": "dcsync_non_dc_appid", "weight": 1,  "analytic": True,  "xsiam_alert": "DCSync from a non domain controller"},
     {"event": "dcsync_internet_facing", "weight": 1, "analytic": True,  "xsiam_alert": "Possible DCSync from an internet-facing server"},
     {"event": "dcsync_large",         "weight": 1,  "analytic": True,  "xsiam_alert": "Large DCSync from a non domain controller"},
+    {"event": "dcsync_large_appid",   "weight": 1,  "analytic": True,  "xsiam_alert": "Large DCSync from a non domain controller by AppID"},
     {"event": "rare_appid_internet_facing", "weight": 2, "analytic": True, "xsiam_alert": "Rare AppID usage to a rare destination from an internet-facing server"},
     # "Failed Spam Bot Traffic" is Informational: it never reaches the alerts table, so it
     # is not offered on demand. The traffic stays as background realism.
@@ -885,6 +896,8 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "ssh_suspicious_nonstd", "weight": 2, "analytic": True,  "xsiam_alert": "A suspicious SSH session was established"},
     {"event": "ssh_high_volume",      "weight": 2,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established that involved a higher than usual volume"},
     {"event": "ssh_proxy_high_volume", "weight": 1, "analytic": True,  "xsiam_alert": "High Volume Unusual SSH activity that resembles SSH proxy"},
+    {"event": "ssh_proxy_suspicious", "weight": 1,  "analytic": True,  "xsiam_alert": "Suspicious SSH activity that resembles SSH proxy"},
+    {"event": "ssh_proxy_detected",   "weight": 1,  "analytic": True,  "xsiam_alert": "Unusual SSH activity that resembles SSH proxy detected"},
     {"event": "host_attack_chain",    "weight": 2,  "analytic": True,  "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
     # Realistic network patterns whose dedicated analytic needs EAL-decoded fields the CEF
     # traffic log cannot carry — kept for hunts / correlation, NOT offered on demand.
@@ -1162,13 +1175,17 @@ def _sim_smb_from_dc(config, session_context):
     return out
 
 
-def _dcsync(config, src, user, shost, from_zone="trust", large=False, src_category="workstation"):
+def _dcsync(config, src, user, shost, from_zone="trust", large=False, src_category="workstation",
+            appid=False):
     """AD-replication RPC (DRSUAPI) from a NON-DC host to a DC: the endpoint mapper on 135,
     then the replication itself on dynamic high ports. `large` pulls the whole directory
-    (hundreds of MB), the "Large DCSync" variations."""
+    (hundreds of MB), the "Large DCSync" variations. `appid` has App-ID name the replication
+    sessions ms-dc-replication (the "... by AppID" / App-ID-identified variations) instead of
+    leaving them as generic msrpc-base."""
     dc = random.choice(_dcs(config))
     dcname = resolver.internal_fqdn(config, dc)
-    print(f"    - PAN NGFW simulating: DCSync{' (large)' if large else ''} {src} -> DC {dc}")
+    repl_app = "ms-dc-replication" if appid else "msrpc-base"
+    print(f"    - PAN NGFW simulating: DCSync{' (large)' if large else ''} {src} -> DC {dc} as {repl_app}")
     out = [_conn(config, src, dc, 135, "msrpc-base", suser=user, shost=shost, dhost=dcname,
                  from_zone=from_zone, to_zone="trust", src_category=src_category,
                  bytes_sent=random.randint(2000, 9000), bytes_received=random.randint(5000, 40000),
@@ -1176,7 +1193,7 @@ def _dcsync(config, src, user, shost, from_zone="trust", large=False, src_catego
     n = random.randint(3, 6)
     for _ in range(n):
         rcvd = (random.randint(150, 600) * 1024 * 1024 // n) if large else random.randint(200000, 8000000)
-        out.append(_conn(config, src, dc, random.randint(49152, 65535), "msrpc-base", suser=user,
+        out.append(_conn(config, src, dc, random.randint(49152, 65535), repl_app, suser=user,
                          shost=shost, dhost=dcname, from_zone=from_zone, to_zone="trust",
                          src_category=src_category, bytes_sent=random.randint(20000, 400000),
                          bytes_received=rcvd, duration_s=random.randint(20, 300) if large else random.randint(2, 40)))
@@ -1188,9 +1205,23 @@ def _sim_dcsync_non_dc(config, session_context):
     return _dcsync(config, src, user, shost)
 
 
+def _sim_dcsync_non_dc_appid(config, session_context):
+    """"DCSync from a non domain controller": replication App-ID-identified as
+    ms-dc-replication, ordinary volume."""
+    src, user, shost = _threat_actor(config, session_context)
+    return _dcsync(config, src, user, shost, appid=True)
+
+
 def _sim_dcsync_large(config, session_context):
     src, user, shost = _threat_actor(config, session_context)
     return _dcsync(config, src, user, shost, large=True)
+
+
+def _sim_dcsync_large_appid(config, session_context):
+    """"Large DCSync from a non domain controller by AppID": the whole directory pulled over
+    sessions App-ID-identified as ms-dc-replication."""
+    src, user, shost = _threat_actor(config, session_context)
+    return _dcsync(config, src, user, shost, large=True, appid=True)
 
 
 def _sim_dcsync_internet_facing(config, session_context):
@@ -1318,29 +1349,38 @@ def _sim_ssh_high_volume(config, session_context):
 
 
 # --- SSH (habit users reaching rare destinations) ----------------------------------------
-def _sim_uncommon_ssh(config, session_context):
-    """An SSH session to a host this source has never used SSH with.
-
-    "Uncommon" is judged against the source's OWN SSH history, and a host with no SSH
-    history does not fire. The source is therefore one of the SSH-habit users, whose
-    everyday SSH to their usual jump host the benign baseline builds on real days; today
-    they reach a rare internal destination instead."""
-    habit = _ssh_habit_users(session_context)
-    info = _remember(get_user_by_name(session_context, random.choice(habit), "workstation")) if habit else None
-    if info:
-        src, user, shost = info["ip"], info["username"], info.get("hostname")
+def _uncommon_ssh(config, session_context, dest="known", port=22):
+    """An SSH session from an SSH-habit user (real per-host SSH history, the baseline the
+    detector compares against) to an uncommon destination. `dest`: "known" a rarely-used but
+    previously-seen internal host; "rare_internal" a never-seen internal address."""
+    src, user, shost = _ssh_habit_actor(config, session_context)
+    if dest == "rare_internal":
+        dst = rare_internal_host(config, exclude=(src, _usual_jump_host(config, user)))
     else:
-        src, user, shost = _threat_actor(config, session_context)
-    usual = _usual_jump_host(config, user)
-    dst = rare_internal_host(config, exclude=(src, usual))
-    print(f"    - PAN NGFW simulating: uncommon SSH {src} -> rare internal {dst} (usual: {usual})")
-    return [_conn(config, src, dst, 22, "ssh", suser=user, shost=shost,
+        dst = rare_known_host(config, exclude=(src,))
+    print(f"    - PAN NGFW simulating: uncommon SSH {src} -> {dst}:{port} ({dest})")
+    return [_conn(config, src, dst, port, "ssh", suser=user, shost=shost,
                   dhost=resolver.internal_fqdn(config, dst), from_zone="trust", to_zone="trust",
                   bytes_sent=random.randint(3000, 60000), bytes_received=random.randint(4000, 120000),
                   duration_s=random.randint(30, 600))]
 
 
-def _sim_unusual_ssh(config, session_context):
+def _sim_uncommon_ssh(config, session_context):
+    """Base "Uncommon SSH session was established": a rarely-used internal host on 22."""
+    return _uncommon_ssh(config, session_context, dest="known")
+
+
+def _sim_uncommon_ssh_rare_internal(config, session_context):
+    """"Uncommon SSH session was established to a rare internal IP": a never-seen internal."""
+    return _uncommon_ssh(config, session_context, dest="rare_internal")
+
+
+def _sim_uncommon_ssh_nonstd_port(config, session_context):
+    """"An Uncommon SSH session was established using a nonstandard SSH port": internal, 22xx."""
+    return _uncommon_ssh(config, session_context, dest="known", port=random.choice(_NONSTD_SSH_PORTS))
+
+
+def _unusual_ssh(config, session_context, mb_range=(5, 80)):
     """A few long-lived SSH sessions to ONE stable rare external host (tunnel shape).
 
     Mirrors the Check Point reverse-SSH-tunnel shape that fires "Unusual, long SSH activity
@@ -1356,11 +1396,21 @@ def _sim_unusual_ssh(config, session_context):
         dur = random.randint(1800, 14400)
         t += random.randint(60, 600)
         out.append(_conn(config, src, dst, 22, "ssh", suser=user, shost=shost, dhost=dom,
-                         bytes_sent=random.randint(5, 80) * 1024 * 1024,
-                         bytes_received=random.randint(5, 80) * 1024 * 1024,
+                         bytes_sent=random.randint(*mb_range) * 1024 * 1024,
+                         bytes_received=random.randint(*mb_range) * 1024 * 1024,
                          duration_s=dur, ts=min(t + dur, time.time()), end_reason="tcp-fin"))
         t += dur
     return out
+
+
+def _sim_unusual_ssh(config, session_context):
+    return _unusual_ssh(config, session_context)
+
+
+def _sim_unusual_ssh_external(config, session_context):
+    """"Unusual SSH activity with tunnel characteristics to external destination": the same
+    tunnel shape carrying more data (50-200 MB each way), emphasising the external leg."""
+    return _unusual_ssh(config, session_context, mb_range=(50, 200))
 
 
 def _ssh_relay(config, src, user, shost, mb_range, dur_range, inbound):
@@ -1410,6 +1460,30 @@ def _sim_ssh_proxy_high_volume(config, session_context):
                       rare_external_ip(f"sshproxy-in|{src}"))
 
 
+def _sim_ssh_proxy_suspicious(config, session_context):
+    """"Suspicious SSH activity that resembles SSH proxy": the relay where BOTH ends are rare
+    external hosts and the inbound leg arrives on a non-standard SSH port -- the shape that
+    reads as a hop in a chain rather than a legitimate bastion. Criteria for this specific
+    variation are undocumented, so this is exploratory."""
+    src, user, shost = _ssh_habit_actor(config, session_context)
+    legs = _ssh_relay(config, src, user, shost, (20, 120), (3600, 14400),
+                      rare_external_ip(f"sshproxy-susp|{src}"))
+    # inbound leg on a non-standard SSH port
+    import re as _re
+    legs[0] = _re.sub(r"(?<![0-9])dest_port=22(?![0-9])",
+                      f"dest_port={random.choice(_NONSTD_SSH_PORTS)}", legs[0], count=1)
+    return legs
+
+
+def _sim_ssh_proxy_detected(config, session_context):
+    """"Unusual SSH activity that resembles SSH proxy detected": a plain-volume relay from a
+    non-habit host (an ordinary workstation suddenly relaying is itself the signal).
+    Exploratory -- the distinction from the base variation is not documented."""
+    src, user, shost = _threat_actor(config, session_context)
+    return _ssh_relay(config, src, user, shost, (5, 40), (1800, 7200),
+                      rare_external_ip(f"sshproxy-det|{src}"))
+
+
 def _sim_rare_ssh_external(config, session_context):
     """"An Uncommon SSH session was established to a rare IP address": an SSH-habit user
     (real per-host SSH history) reaches a rare external IP on the standard port."""
@@ -1427,7 +1501,7 @@ def _sim_rare_ssh_external(config, session_context):
 # one fixed host to its persistent rare destination, and _DAILY_EVENTS makes the module
 # emit each of them once per UTC day while it runs, so the pair recurs on real days.
 _DAILY_EVENTS = ("recurring_rare_ip", "recurring_rare_domain", "recurring_rare_domain_attack_port",
-                 "ddns_access")
+                 "recurring_rare_domain_suspicious_as", "ddns_access")
 _last_daily_emit = {}
 
 
@@ -1492,6 +1566,18 @@ def _sim_recurring_rare_domain(config, session_context):
     port = _beacon_port("rare_dom", src, [8443, 8080, 4443])
     print(f"    - PAN NGFW simulating: daily beacon to rare domain {src} -> {dom}:{port}")
     return _beacon_day(config, src, user, shost, ip, port, domain=dom, url_cat="command-and-control")
+
+
+def _sim_recurring_rare_domain_suspicious_as(config, session_context):
+    """"Abnormal Recurring Communications to a Rare Domain to a Suspicious Autonomous System":
+    a daily beacon on the standard 443 (no attack port, no odd suffix), so the only
+    distinguishing attribute left for XSIAM is the destination's AS. The rare pool
+    (RARE_EXTERNAL_RANGES) is bulletproof-hosting-style space, which is what the real pa440's
+    firing of this variation resolved into; the AS label is XSIAM's own enrichment, not ours."""
+    src, user, shost = _beacon_host(config, session_context, "panw_rare_dom_as")
+    ip, dom = _beacon_dst(config, "rare_dom_as", src)
+    print(f"    - PAN NGFW simulating: daily beacon to rare domain (suspicious AS) {src} -> {dom}")
+    return _beacon_day(config, src, user, shost, ip, 443, domain=dom, url_cat="command-and-control")
 
 
 # Default listener ports of common attack frameworks (Metasploit 4444, Cobalt Strike team
@@ -1832,6 +1918,12 @@ _THREAT_DISPATCH = {
     "spam_bot_failed": _sim_spam_bot_failed, "ssh_suspicious_nonstd": _sim_ssh_suspicious_nonstd,
     "ssh_high_volume": _sim_ssh_high_volume, "host_attack_chain": _sim_host_attack_chain,
     "ssh_proxy_high_volume": _sim_ssh_proxy_high_volume,
+    "uncommon_ssh_rare_internal": _sim_uncommon_ssh_rare_internal,
+    "uncommon_ssh_nonstd_port": _sim_uncommon_ssh_nonstd_port,
+    "unusual_ssh_external": _sim_unusual_ssh_external,
+    "ssh_proxy_suspicious": _sim_ssh_proxy_suspicious, "ssh_proxy_detected": _sim_ssh_proxy_detected,
+    "dcsync_non_dc_appid": _sim_dcsync_non_dc_appid, "dcsync_large_appid": _sim_dcsync_large_appid,
+    "recurring_rare_domain_suspicious_as": _sim_recurring_rare_domain_suspicious_as,
 }
 
 
