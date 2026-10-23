@@ -170,7 +170,7 @@ The module shares the simulation's identity/network model (`session_utils`, `res
 ## Threat scenarios
 
 Dispatched from `_generate_threat_log` (weighted) or forced by name via `scenario_event`.
-56 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector or
+44 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector or
 one of its traffic-only variations, and are offered on demand; 4 further events are realistic
 network patterns kept for hunts / correlation but **not** offered on demand (their detectors
 need EAL-decoded fields a CEF traffic log cannot carry).
@@ -272,6 +272,8 @@ mix publishes the web site: internet clients (from `benign_ingress_sources`) rea
 httpd module's servers (`apache_config.server_ips`, `www.examplecorp.com`) on 443 through
 `untrust → dmz`, so the firewall and the httpd access logs describe the same servers, and
 `dcsync_internet_facing` / `rare_appid_internet_facing` originate from those servers.
+
+**On-demand vs background.** An event is offered on demand only when its target alert is **Low or higher** (those are the ones that appear in the XSIAM alerts table). Events whose only reachable detector is **Informational** — Rare SMTP/S, Torrent, the P2P/IPFS patterns, Rare AppID (base), SSH-proxy (base), Abnormal Communication to a Rare Domain (base), New SSH Administrative Behavior, sub-100 MB Generic upload, dormant-host (newly-seen-endpoint base) — are generated as background traffic but **not** offered on demand, because they never surface as an alert-table row. Spam Bot Traffic is **Low** (confirmed firing in this tenant) and stays on demand; its *Failed Spam Bot Traffic* variation is Informational and is background-only.
 
 ## Detector coverage vs. the 49 PAN NGFW traffic-log alerts
 

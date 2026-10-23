@@ -872,7 +872,7 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "port_sweep",           "weight": 6,  "analytic": True,  "xsiam_alert": "Port Sweep to multiple subnets"},
     {"event": "failed_connections",   "weight": 6,  "analytic": True,  "xsiam_alert": "Failed Connections"},
     {"event": "large_upload_https",   "weight": 5,  "analytic": True,  "xsiam_alert": "Large Upload (HTTPS)"},
-    {"event": "large_upload_https_nonstd", "weight": 2, "analytic": True, "xsiam_alert": "Large Upload (HTTPS)"},
+    {"event": "large_upload_https_nonstd", "weight": 2, "analytic": True, "xsiam_alert": "Large Upload (HTTPS) to non-standard port"},
     {"event": "large_upload_smtp",    "weight": 3,  "analytic": True,  "xsiam_alert": "Large Upload (SMTP)"},
     {"event": "large_upload_ftp",     "weight": 3,  "analytic": True,  "xsiam_alert": "Large Upload (FTP)"},
     {"event": "large_upload_generic", "weight": 2,  "analytic": True,  "xsiam_alert": "Large Upload (Generic)"},
@@ -882,41 +882,41 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "rare_smb",             "weight": 4,  "analytic": True,  "xsiam_alert": "Rare SMB session to a remote host"},
     {"event": "smb_from_dc",          "weight": 3,  "analytic": True,  "xsiam_alert": "Suspicious SMB connection from domain controller"},
     {"event": "dcsync_non_dc",        "weight": 2,  "analytic": True,  "xsiam_alert": "Possible DCSync from a non domain controller"},
-    {"event": "rare_smtp",            "weight": 2,  "analytic": True,  "xsiam_alert": "Rare SMTP/S Session"},
+    {"event": "rare_smtp",            "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Rare SMTP/S Session" — never surfaces in the alerts table; background only
     {"event": "spam_bot",             "weight": 3,  "analytic": True,  "xsiam_alert": "Spam Bot Traffic"},
     {"event": "uncommon_ssh",         "weight": 4,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established"},
     {"event": "uncommon_ssh_rare_internal", "weight": 2, "analytic": True, "xsiam_alert": "Uncommon SSH session was established to a rare internal IP"},
     {"event": "uncommon_ssh_nonstd_port", "weight": 2, "analytic": True, "xsiam_alert": "An Uncommon SSH session was established using a nonstandard SSH port"},
     {"event": "unusual_ssh",          "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual, long SSH activity with tunnel characteristics"},
     {"event": "unusual_ssh_external", "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH activity with tunnel characteristics to external destination"},
-    {"event": "ssh_proxy",            "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH activity that resembles SSH proxy"},
+    {"event": "ssh_proxy",            "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Unusual SSH activity that resembles SSH proxy" — never surfaces in the alerts table; background only
     # Re-targeted: "Rare process created an SSH session ..." keys on the PROCESS, which a
     # firewall log cannot carry (docs/firewall-analytics.md section 4). An SSH-habit user
     # reaching a rare external IP is the traffic-only "Uncommon SSH ... to a rare IP" variation.
     {"event": "rare_ssh_external",    "weight": 2,  "analytic": True,  "xsiam_alert": "An Uncommon SSH session was established to a rare IP address"},
     {"event": "recurring_rare_ip",    "weight": 4,  "analytic": True,  "xsiam_alert": "Recurring access to rare IP"},
     {"event": "recurring_rare_domain","weight": 4,  "analytic": True,  "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain With a Less Common Port"},
-    {"event": "rare_domain_comm",     "weight": 3,  "analytic": True,  "xsiam_alert": "Abnormal Communication to a Rare Domain"},
+    {"event": "rare_domain_comm",     "weight": 3,  "analytic": False, "xsiam_alert": None},  # Informational: "Abnormal Communication to a Rare Domain" — never surfaces in the alerts table; background only
     {"event": "ddns_access",          "weight": 2,  "analytic": True,  "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
     {"event": "crypto_miner",         "weight": 3,  "analytic": True,  "xsiam_alert": "A Possible crypto miner was detected on a host"},
-    {"event": "torrent",              "weight": 3,  "analytic": True,  "xsiam_alert": "A Torrent client was detected on a host"},
-    {"event": "p2p_upload",           "weight": 2,  "analytic": True,  "xsiam_alert": "Upload pattern that resembles Peer to Peer traffic"},
-    {"event": "p2p_download",         "weight": 2,  "analytic": True,  "xsiam_alert": "Download pattern that resembles Peer to Peer traffic"},
-    {"event": "ipfs",                 "weight": 2,  "analytic": True,  "xsiam_alert": "Possible use of IPFS was detected"},
-    {"event": "rare_appid",           "weight": 3,  "analytic": True,  "xsiam_alert": "Rare AppID usage to a rare destination"},
+    {"event": "torrent",              "weight": 3,  "analytic": False, "xsiam_alert": None},  # Informational: "A Torrent client was detected on a host" — never surfaces in the alerts table; background only
+    {"event": "p2p_upload",           "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Upload pattern that resembles Peer to Peer traffic" — never surfaces in the alerts table; background only
+    {"event": "p2p_download",         "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Download pattern that resembles Peer to Peer traffic" — never surfaces in the alerts table; background only
+    {"event": "ipfs",                 "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Possible use of IPFS was detected" — never surfaces in the alerts table; background only
+    {"event": "rare_appid",           "weight": 3,  "analytic": False, "xsiam_alert": None},  # Informational: "Rare AppID usage to a rare destination" — never surfaces in the alerts table; background only
     {"event": "new_ftp_server",       "weight": 2,  "analytic": True,  "xsiam_alert": "New FTP Server"},
     {"event": "new_admin_behavior",   "weight": 3,  "analytic": True,  "xsiam_alert": "New Administrative Behavior"},
-    {"event": "dormant_host_conn",    "weight": 2,  "analytic": True,  "xsiam_alert": "Abnormal connections to a dormant host from a newly seen endpoint"},
+    {"event": "dormant_host_conn",    "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Abnormal connections to a dormant host from a newly seen endpoint" — never surfaces in the alerts table; background only
     # Traffic-only detector VARIATIONS (2026-10-22), each targeting the variation's own alert
     # name as Cortex lists it. HASSH / banner / process variations need EAL or the agent.
     {"event": "port_scan_aggressive", "weight": 2,  "analytic": True,  "xsiam_alert": "Highly suspicious port scan"},
-    {"event": "ipfs_peering",         "weight": 2,  "analytic": True,  "xsiam_alert": "Possible IPFS traffic was detected"},
+    {"event": "ipfs_peering",         "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Possible IPFS traffic was detected" — never surfaces in the alerts table; background only
     {"event": "rare_domain_attack_port", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Communication to a Rare Domain With a Port Commonly Used by Attack Platforms"},
     {"event": "recurring_rare_domain_attack_port", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain With a Port Commonly Used by Attack Platforms"},
     {"event": "recurring_rare_domain_suspicious_as", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain to a Suspicious Autonomous System (AS)"},
     {"event": "dormant_host_known_source", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal connections to a dormant host"},
-    {"event": "large_upload_generic_small", "weight": 1, "analytic": True, "xsiam_alert": "Large Upload (Generic) Lower than 100 MB"},
-    {"event": "new_ssh_admin_behavior", "weight": 2, "analytic": True,  "xsiam_alert": "New SSH Administrative Behavior"},
+    {"event": "large_upload_generic_small", "weight": 1, "analytic": False, "xsiam_alert": None},  # Informational: "Large Upload (Generic) Lower than 100 MB" — never surfaces in the alerts table; background only
+    {"event": "new_ssh_admin_behavior", "weight": 2, "analytic": False, "xsiam_alert": None},  # Informational: "New SSH Administrative Behavior" — never surfaces in the alerts table; background only
     {"event": "new_ftp_server_external", "weight": 2, "analytic": True, "xsiam_alert": "New FTP Server from an external source"},
     {"event": "dcsync_non_dc_appid", "weight": 1,  "analytic": True,  "xsiam_alert": "DCSync from a non domain controller"},
     {"event": "dcsync_internet_facing", "weight": 1, "analytic": True,  "xsiam_alert": "Possible DCSync from an internet-facing server"},
@@ -1837,8 +1837,18 @@ def _sim_new_admin_behavior(config, session_context, ssh_only=False):
     return out
 
 
+def _dormant_host(config):
+    """A PREVIOUSLY-SEEN internal host that is now quiet — the detector profiles a
+    'relatively inactive endpoint', so it must be an address XSIAM already knows, not a
+    never-seen one. Drawn from a small stable set of live, rarely-contacted hosts so the same
+    hosts recur as the dormant targets across runs (a never-seen address is not equivalent
+    evidence)."""
+    pool = stable_subset(known_internal_hosts(config), "panw_dormant_hosts", n=6)
+    return random.choice(pool) if pool else rare_known_host(config)
+
+
 def _dormant_conns(config, src, shost, user=None):
-    dormant = rare_internal_host(config)
+    dormant = _dormant_host(config)
     out = []
     for _ in range(random.randint(6, 14)):
         port = random.choice([445, 3389, 22, 443])
