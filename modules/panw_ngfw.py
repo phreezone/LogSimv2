@@ -411,6 +411,21 @@ def _is_internal(ip):
     return any(a in ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
 
+_UNTRUST_ZONES = ("untrust", "internet", "external", "wan")
+_DMZ_ZONES = ("dmz",)
+
+
+def _zone_if(forti, zone):
+    """The firewall interface that faces `zone`: WAN for untrust, the DMZ interface for the
+    DMZ, the LAN interface for trust/internal zones."""
+    z = str(zone or "").lower()
+    if z in _UNTRUST_ZONES:
+        return forti.get("interface_wan", "ethernet1/1")
+    if z in _DMZ_ZONES:
+        return forti.get("interface_dmz", "ethernet1/3")
+    return forti.get("interface_lan", "ethernet1/2")
+
+
 # ---------------------------------------------------------------------------
 # CEF builder
 # ---------------------------------------------------------------------------
@@ -488,14 +503,19 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
     bytes_sent = bytes_sent if bytes_sent is not None else random.randint(300, 40000)
     bytes_received = bytes_received if bytes_received is not None else random.randint(400, 300000)
     duration_s = duration_s if duration_s is not None else random.randint(1, 600)
-    lan_if = forti.get("interface_lan", "ethernet1/2")
-    wan_if = forti.get("interface_wan", "ethernet1/1")
-    internal_dst = _is_internal(dst_ip)
-    if action in ("deny", "drop"):
-        # A blocked connection is zero-byte: PAN logs the dropped SYN with no payload, and
-        # the Failed Connections detector keys on failed, zero-byte attempts.
+    # Ingress/egress interfaces follow the ZONES the session crossed, not the destination:
+    # an outbound session enters on the LAN and leaves on the WAN; an inbound one (untrust ->
+    # dmz/trust, e.g. a published service) enters on the WAN and leaves on the LAN/DMZ.
+    src_internal, internal_dst = _is_internal(src_ip), _is_internal(dst_ip)
+    outbound = src_internal and not internal_dst
+    in_if = _zone_if(forti, from_zone)
+    out_if = _zone_if(forti, to_zone)
+    denied = action in ("deny", "drop")
+    if denied:
+        # A blocked connection is the client's SYN with no response: zero bytes, the one
+        # outbound packet, nothing back. Both deny and drop carry the policy-block end reason.
         bytes_sent, bytes_received, duration_s = 0, 0, 0
-        end_reason = "policy-deny" if action == "deny" else "aged-out"
+        end_reason = "policy-deny"
     f = {
         "source_ip":        src_ip,
         "source_port":      spt,
@@ -510,16 +530,18 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
         "risk_of_app":      meta[3],
         "from_zone":        from_zone,
         "to_zone":          to_zone,
-        "inbound_if":       lan_if,
-        "outbound_if":      lan_if if internal_dst else wan_if,
+        "inbound_if":       in_if,
+        "outbound_if":      out_if,
         "session_id":       _session_id(),
         "rule_matched":     rule or forti.get("default_rule", "Allow-Users-Outbound"),
         "rule_matched_uuid":str(uuid.uuid4()),
         "bytes_sent":       bytes_sent,
         "bytes_received":   bytes_received,
         "bytes_total":      bytes_sent + bytes_received,
-        "packets_sent":     max(1, bytes_sent // 600),
-        "packets_received": max(1, bytes_received // 1200),
+        # A packet count is 0 when that direction carried no bytes (a blocked SYN gets one
+        # sent packet and no reply), else at least one.
+        "packets_sent":     (1 if denied else (max(1, bytes_sent // 600) if bytes_sent else 0)),
+        "packets_received": (0 if denied else (max(1, bytes_received // 1200) if bytes_received else 0)),
         "total_time_elapsed": duration_s,
         "session_end_reason": end_reason,
         "source_user":      suser,
@@ -531,7 +553,9 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
         # Columns the traffic modeling rule reads (phantom data_source.yaml) and the live rows
         # carry; not in the documented custom format, so sent under their column names.
         "log_source":       "firewall",
-        "is_nat":           "false" if internal_dst else "true",
+        # Source NAT is applied to outbound Internet sessions; east-west and inbound sessions
+        # are not NATed here (no DNAT/VIP map is modelled, and the real TAP feed shows none).
+        "is_nat":           "true" if outbound else "false",
         "is_proxy":         "false",
         "source_location":  _location(src_ip, config),
         "dest_location":    _location(dst_ip, config),
@@ -547,12 +571,11 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
     # dest_device_host also names EXTERNAL destinations (the resolved FQDN): the modeling
     # rule maps it to xdm.target.host.hostname, the only hostname a traffic log can carry.
     f["dest_device_host"] = dhost
-    # NAT only when the destination is external.
-    if not internal_dst:
+    # Source NAT on outbound Internet egress only (the client's private address is translated
+    # to the firewall's public pool); the destination is not NATed.
+    if outbound:
         f["nat_source"]      = nat_src or _nat_for(src_ip, config)
         f["nat_source_port"] = random.randint(20000, 65000)
-        f["nat_dest"]        = dst_ip
-        f["nat_dest_port"]   = nat_dpt or dpt
     return f
 
 
@@ -623,7 +646,12 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
     f = {k: traffic_fields[k] for k in _URL_SHARED_KEYS if traffic_fields.get(k) not in (None, "")}
     cat = category or traffic_fields.get("url_category") or "computer-and-internet-info"
     risk = "high-risk" if cat in _URL_CAT_RISKY else "low-risk"
-    clear = f.get("app") != "ssl"          # undecrypted SSL exposes the SNI host only
+    # Cleartext HTTP exposes the request to PAN-OS; undecrypted TLS (app "ssl", or an explicit
+    # https scheme) exposes only the SNI host. Without decryption PAN cannot see the HTTP
+    # method, User-Agent, referer or content type, so those are emitted ONLY for cleartext.
+    # (This is why case 68482's User-Agent/HTTP-Server evidence needs decrypted HTTP or EAL,
+    # not an encrypted session.)
+    clear = f.get("app") in ("web-browsing", "http", "http-proxy", "http-video", "soap")
     info = _HOST_INFO.get(f.get("source_ip")) or {}
     f.update({
         "action":            action,
@@ -631,20 +659,25 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
         "url_domain":        domain,      # no parser derives it from uri on this path
         "url_category":      cat,
         "url_category_list": f"{cat},{risk}",
-        "http_method":       method or ("get" if clear else "unknown"),
         "threat_id":         "9999",
         "threat_name":       "",
         "direction":         "client-to-server",
         "direction_of_attack": "client to server",   # the live column (doc key: direction)
         "severity":          "Informational",          # the live column's value
-        # The user's own browser (one stable UA per user/device), or the caller's override
-        # (scripted / non-browser clients).
-        "user_agent":        user_agent or _browser_ua(f.get("source_device_osfamily"),
-                                                       info.get("user_agent"), f.get("source_ip")),
-        "content_type":      ("text/html" if clear else None),
         "http2_connection":  0,
-        "referer":           (f"https://{domain}/" if clear and path not in ("/", "") else None),
     })
+    if clear:
+        f["http_method"] = method or "get"
+        f["user_agent"] = user_agent or _browser_ua(f.get("source_device_osfamily"),
+                                                     info.get("user_agent"), f.get("source_ip"))
+        f["content_type"] = "text/html"
+        if path not in ("/", ""):
+            f["referer"] = f"http://{domain}/"
+    else:
+        # Undecrypted: method is logged as unknown; no UA/referer/content type are available.
+        f["http_method"] = "unknown"
+        if user_agent:                 # caller explicitly supplied one (decrypted/inspected)
+            f["user_agent"] = user_agent
     return _format_cef(config, "url", f, log_type="THREAT", severity=1, ts=ts, fw_type="firewall.url")
 
 
