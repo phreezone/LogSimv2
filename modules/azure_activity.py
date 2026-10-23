@@ -706,6 +706,25 @@ def _make_arm_scenario(op, team, role):
     return scenario
 
 
+def _adfs_health_server_added(config=None):
+    """Azure AD Hybrid Health AD FS server registration Activity Log event.
+
+    The detector's public companion rule keys on this exact Administrative operation and a
+    resourceId containing AdFederationService. Keep that resource name explicit; the generic
+    resource inventory cannot express the service-name predicate.
+    """
+    sub = ae.pick_sub()
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    service = "AdFederationService-sts.examplecorp.com"
+    member = f"adfs-{random.randint(2, 9):02d}.examplecorp.com"
+    resource_id = (f"/subscriptions/{sub['id']}/providers/Microsoft.ADHybridHealthService/"
+                   f"services/{service}/servicemembers/{member}")
+    return operation("Microsoft.ADHybridHealthService/services/servicemembers/action",
+                     resource_id, caller, sub, role="Contributor",
+                     request_body={"properties": {"machineName": member,
+                                   "serviceName": service, "machineRole": "AdfsServer"}})
+
+
 def _compute_allocation(config=None, count=5):
     """Several distinct VM allocations by one actor/subscription in a short window."""
     sub = ae.pick_sub()
@@ -1099,6 +1118,7 @@ SCENARIOS.update({
     "wip_storage_versioning_disabled": lambda config=None: _storage_protection_change(config, versioning=True),
     "wip_storage_soft_delete_disabled": lambda config=None: _storage_protection_change(config, versioning=False),
 })
+SCENARIOS["wip_adfs_health_server_added"] = _adfs_health_server_added
 SCENARIOS["wip_storage_public"] = _public_storage
 SCENARIOS["wip_compute_allocation"] = _compute_allocation
 SCENARIOS["wip_kube_cluster_created_deleted"] = SCENARIOS["wip_aks_cluster_change"]
@@ -1122,6 +1142,7 @@ SCENARIOS.update({
 # key makes that status visible in the on-demand catalog until a real alert validates the shape.
 ANALYTIC_ALERTS = {key: alert for key, (alert, *_rest) in {**_ARM_TARGETS, **_KUBE_TARGETS}.items()}
 ANALYTIC_ALERTS.update({
+    "wip_adfs_health_server_added": "A New Server was Added to an Azure Active Directory Hybrid Health ADFS Environment",
     "wip_multi_region_enumeration": "Multi region enumeration activity",
     "wip_vm_ssh_key_modification": "Suspicious cloud compute instance SSH keys modification attempt",
     "wip_storage_multiple_downloads": "An identity performed a suspicious download of multiple cloud storage objects",
