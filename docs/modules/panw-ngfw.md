@@ -154,7 +154,7 @@ The module shares the simulation's identity/network model (`session_utils`, `res
 ## Threat scenarios
 
 Dispatched from `_generate_threat_log` (weighted) or forced by name via `scenario_event`.
-48 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector or
+49 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector or
 one of its traffic-only variations, and are offered on demand; 4 further events are realistic
 network patterns kept for hunts / correlation but **not** offered on demand (their detectors
 need EAL-decoded fields a CEF traffic log cannot carry).
@@ -202,7 +202,8 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 | `crypto_miner` | A Possible crypto miner was detected on a host | mining-pool traffic on stratum ports | ? |
 | `ipfs` | Possible use of IPFS was detected | IPFS node traffic | ? |
 | `p2p_upload` / `p2p_download` | Upload / Download pattern that resembles P2P | asymmetric P2P transfers | ? |
-| `ssh_proxy` | Unusual SSH activity that resembles SSH proxy | host receives and initiates SSH, 1–20 MB each way | ? |
+| `ssh_proxy` | Unusual SSH activity that resembles SSH proxy | relay: inbound SSH, then an overlapping outbound SSH, mirrored volumes, 1–20 MB each way | ? |
+| `ssh_proxy_high_volume` | High Volume Unusual SSH activity that resembles SSH proxy | the same relay on an SSH-habit host, rare client and target, 200–600 MB each way over 2–6 h (also expected to trip Large Upload (Generic)) | new |
 | `rare_ssh_external` | An Uncommon SSH session was established to a rare IP address | SSH-habit user → rare external IP on 22 (re-targeted from the process-based detector) | new |
 | `port_scan_aggressive` | Highly suspicious port scan | every privileged port + 60–100 high ports on one server in ~3 min | new |
 | `ipfs_peering` | Possible IPFS traffic was detected | 25–45 swarm dials on 4001 tcp+udp, ~half never complete | new |
