@@ -93,7 +93,8 @@ records, plus kube-audit. The mix:
     identities. No bulk enumeration of distinct secrets (the dump pattern).
   - **Azure AI / Cognitive Services** (`RequestResponse`): model invocations
     (`ChatCompletions_Create`, `Embeddings_Create`, ...) by application identities against known
-    deployments. No model discovery, no abnormal volume.
+    deployments. No model discovery, no abnormal volume. `Models_List` is the documented Azure
+    OpenAI model-enumeration operation and is emitted under the `Audit` category.
 - **AKS audit** (`modules/aks_audit.py`): controllers, the scheduler, kubelets and workloads
   reading and watching, lease renewals, node status patches, events, CI rolling deployments by
   patch, and platform engineers' read-only kubectl.
@@ -102,8 +103,9 @@ records, plus kube-audit. The mix:
   Kubernetes user. User agent, source IP and the cluster (as referenced resource) come through
   too. `log_name` is empty for them.
 
-About 6% of human changes fail (authorization denied, conflict, bad request, not found,
-locked scope), with Azure's own error messages.
+About 6% of benign human changes fail (authorization denied, conflict, bad request, not found,
+locked scope), with Azure-style error messages. Forced ARM threat scenarios are successful
+mutations and emit `Started` plus a correlated terminal success record.
 
 Operations an XSIAM analytic raises on by itself (`azure_activity_catalog.ALERTING_PREFIXES`:
 NSG/firewall/VNet/VPN/DNS-zone changes, Key Vault, storage account settings, VM
@@ -122,7 +124,8 @@ Storage, Key Vault and AI records are resource logs in categories outside the En
 resource id, operation, outcome). A 3-record canary (2026-10-23) confirmed all three reach
 `cloud_audit_logs` as `azure_audit_logs`: Storage normalises to `resource_type` CloudStorage
 (operation GetData), Key Vault to KMS/VAULTS, and AI to MachineLearning with `service_type`
-"AI/ML Audit". Caller identity and IP come through (the app's Microsoft egress).
+"AI/ML Audit". Caller IP comes through. Azure OpenAI Entra identity is represented by
+`properties.objectId` in published samples, rather than a top-level identity object.
 
 ## Threat scenarios
 
@@ -135,13 +138,13 @@ live Cribl transport.
 
 Coverage in this first scenario set:
 
-- 43 ARM control-plane targets: network and firewall changes, diagnostic/logging changes, RBAC,
+- 42 ARM control-plane targets: network and firewall changes, diagnostic/logging changes, RBAC,
   compute lifecycle and execution, storage configuration, Event Hub, SQL export, AKS, Key Vault,
   automation, and related operations. Mutations emit correlated `Started` plus terminal records;
-  denied variants emit the single Azure `Failed` record.
+  each emits a correlated `Started` and terminal success pair.
 - 13 AKS audit targets: anonymous access, secrets/configmaps, workloads, RBAC, namespace and
   service-account changes, job/controller creation, exec, and ephemeral containers.
-- 8 Storage, Key Vault, and Azure AI targets using the resource-log builders in
+- 9 Storage, Key Vault, and Azure AI targets using the resource-log builders in
   `modules/azure_dataplane.py`.
 
 The Cortex Azure Audit Log index currently lists 186 alert names. This 64-scenario set is a
@@ -152,6 +155,55 @@ registered. `wip_` indicates the emitted shape still needs tenant alert verifica
 
 ## Validation
 
-`python -c "from modules import azure_activity"` asserts at import that every curated and
-automation operation exists in the catalog and is not an alerting operation. The standard
-`_local_validation` suite covers the module through the module loader.
+Earlier validation established that the module imported, scenario functions returned records,
+and representative canaries reached the tenant. It did not compare every field to an authoritative
+service sample or establish that each threat scenario fires its named analytic. The canaries
+covered representative Activity, AKS, Storage, Key Vault, and AI ingestion; they were not a
+64-scenario detector test.
+
+Category coverage is partial: the module generates Administrative, Policy, ServiceHealth,
+ResourceHealth, Alert, Autoscale, and Recommendation records. It does not yet generate the
+Activity Log `Security` category. Microsoft defines those as Defender for Cloud alert events whose
+`properties` vary by alert; a security-alert-specific builder and fixtures are needed before that
+category can be called covered.
+
+This source review cross-checks the Event Hub envelope and key service-specific fields against
+Microsoft's resource-log schema, Activity Log schema, Storage Blob log reference, Key Vault
+AuditEvent example, Foundry diagnostic logging guide, and AKS monitoring reference. Elastic's
+Activity Logs integration independently documents Event Hub ingestion and parses authorization
+evidence and claims. Splunk's Azure ingestion documentation corroborates the streamed Activity
+fields and search mappings. Vendor parsers establish broad compatibility expectations, but do not
+guarantee each synthetic event matches this tenant's exact detections.
+
+Checks run for this review:
+
+- Python compilation and module import, including catalog assertions for benign operations.
+- All 64 forced scenario functions and alert mappings (64/64).
+- Shape assertions for correlated ARM `Started`/terminal pairs, Storage OAuth principal and RBAC
+  authorization fields, distinct Key Vault secret URIs, AI category fields, and AKS audit JSON.
+- Repository deterministic-training, threat-level alignment, on-demand catalog, API contract, and
+  cardinality-pool validators.
+
+Limitations: Activity `durationMs=0` and the streamed Administrative envelope follow Microsoft's
+Activity Log mapping. Storage uses the documented `identity.authorization.principals` shape and
+data-plane Blob roles. Key Vault uses documented ObjectVerb operations and the sample's identity,
+URI, and property structure. AI `Audit` and `RequestResponse` categories and common resource-log
+fields are documented. A public Azure OpenAI example confirms `Models_List`, result signature,
+caller IP, `properties.objectId`, API version, model deployment/name/version, and request/response
+length and times. The generator now follows those fields. The example is a Log Analytics view of
+the event and does not prove every Event Hub raw-field detail or XSIAM mapping. This review did not
+measure XSIAM analytic firings for threat scenarios. `wip_` marks detector-level matching as
+unconfirmed.
+
+Sources:
+
+- [Microsoft Azure Activity Log event schema](https://learn.microsoft.com/en-us/azure/azure-monitor/fundamentals/activity-log-schema)
+- [Microsoft Azure resource logs schema](https://learn.microsoft.com/en-us/azure/azure-monitor/platform/resource-logs-schema)
+- [Microsoft Storage Blob monitoring reference](https://learn.microsoft.com/en-us/azure/storage/blobs/monitor-blob-storage-reference)
+- [Microsoft Key Vault logging](https://learn.microsoft.com/en-us/azure/key-vault/general/logging)
+- [Microsoft Foundry diagnostic logging](https://learn.microsoft.com/en-us/azure/foundry/how-to/diagnostic-logging)
+- [Microsoft AKS monitoring reference](https://learn.microsoft.com/en-us/azure/aks/monitor-aks-reference)
+- [Zscaler: monitoring Azure OpenAI abuse (example events and detector queries)](https://www.zscaler.com/blogs/cybersecurity-best-practices/azure-openai-abuse)
+- [Elastic Azure OpenAI integration](https://www.elastic.co/docs/reference/integrations/azure_openai)
+- [Elastic Azure Activity Logs integration](https://www.elastic.co/docs/reference/integrations/azure/activitylogs)
+- [Splunk Azure source types and sample events](https://help.splunk.com/en/data-management/ingest-data-from-cloud-sources/use-data-inputs/1.17/getting-data-in-gdi/overview-of-source-types-for-data-inputs)
