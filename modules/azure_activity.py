@@ -587,7 +587,7 @@ _ARM_TARGETS = {
     "wip_snapshot_sas": ("An Azure VM snapshot SAS URL was generated", "Microsoft.Compute/snapshots/beginGetAccess/action", "cloud", "Backup Contributor"),
     "wip_resource_group_delete": ("Azure Resource Group Deletion", "Microsoft.Resources/subscriptions/resourceGroups/delete", "cloud", "Owner"),
     "wip_storage_config": ("A cloud storage configuration was modified", "Microsoft.Storage/storageAccounts/write", "data", "Storage Account Contributor"),
-    "wip_storage_public": ("Azure storage account was publicly shared", "Microsoft.Storage/storageAccounts/blobServices/containers/write", "data", "Storage Account Contributor"),
+    "wip_storage_public": ("Azure storage account was publicly shared", "Microsoft.Storage/storageAccounts/write", "data", "Storage Account Contributor"),
     "wip_storage_key": ("Azure Storage Account key generated", "Microsoft.Storage/storageAccounts/listKeys/action", "data", "Storage Account Contributor"),
     "wip_storage_replication": ("Azure storage account cross-tenant object replication was enabled", "Microsoft.Storage/storageAccounts/objectReplicationPolicies/write", "data", "Storage Account Contributor"),
     "wip_blob_public_access": ("Azure Blob Container Access Level Modification", "Microsoft.Storage/storageAccounts/blobServices/containers/write", "data", "Storage Account Contributor"),
@@ -627,6 +627,10 @@ def _request_body(op, sub):
                 "description": "Simulated role assignment"}}
     if "containers/write" in op_l and "microsoft.storage" in op_l:
         return {"properties": {"publicAccess": "Blob"}}
+    if "microsoft.storage/storageaccounts/write" in op_l:
+        return {"properties": {"publicNetworkAccess": "Enabled",
+                "networkAcls": {"defaultAction": "Allow", "bypass": "None",
+                                "ipRules": [], "virtualNetworkRules": []}}}
     if "objectreplicationpolicies/write" in op_l:
         return {"properties": {"sourceAccount": "stdataprod85403", "destinationAccount": "starchiveprod30211",
                 "rules": [{"ruleId": "replication-policy-01", "sourceContainer": "exports",
@@ -654,6 +658,26 @@ def _make_arm_scenario(op, team, role):
                   "body": _request_body(op, sub)}
         return _arm_event(config, op, **kwargs)
     return scenario
+
+
+def _compute_allocation(config=None, count=5):
+    """Several distinct VM allocations by one actor/subscription in a short window."""
+    sub = ae.pick_sub()
+    caller = ae.pick_admin(config, _TEAM_ROLES["cloud"])
+    base_id, _ = resource_for("Microsoft.Compute/virtualMachines/write", sub)
+    prefix = base_id.rsplit("/", 1)[0]
+    records = []
+    for i in range(count):
+        rid = f"{prefix}/vm-batch-{uuid.uuid4().hex[:8]}"
+        records.extend(operation("Microsoft.Compute/virtualMachines/write", rid, caller, sub,
+            role="Contributor", request_body={"location": ae.region(sub), "properties": {
+                "hardwareProfile": {"vmSize": random.choice(["Standard_D2s_v5", "Standard_D4s_v5", "Standard_E4s_v5"])},
+                "storageProfile": {"imageReference": {"publisher": "Canonical", "offer": "0001-com-ubuntu-server-jammy",
+                                  "sku": "22_04-lts-gen2", "version": "latest"}},
+                "osProfile": {"computerName": rid.rsplit("/", 1)[-1], "adminUsername": "azureuser"},
+                "networkProfile": {"networkInterfaces": []}}, "tags": {"environment": "simulated"}},
+            offset_s=-i * 90.0))
+    return records
 
 
 def _kube_threat(config, kind):
@@ -708,6 +732,11 @@ def _storage_threat(config=None, *, mode="first", count=1):
     account = ae.pick_name(sub, "storageAccounts")
     caller = ae.pick_nonstandard(config) if mode == "first" else ae.pick_admin(config, ae.DATA_OPS)
     out = []
+    if mode == "copy":
+        # Stable external subscription/account: the detector describes an unmonitored destination.
+        dest_sub = dict(ae.PROD, id=ae.guid("foreign-storage-subscription"), name="external-archive", env="prod")
+        destination = "stforeignarchive0042"
+        return dp.storage_copy_records(account, sub, destination, dest_sub, caller)
     for i in range(count):
         container = "backups" if mode == "backup" else None
         blob = f"backup-{i:04d}.bak" if mode == "backup" else f"download-{uuid.uuid4().hex[:12]}.parquet"
@@ -728,8 +757,16 @@ def _ai_threat(config=None, count=1, status=200, op="ChatCompletions_Create"):
     sub = ae.PROD
     caller = ae.app_caller(random.choice(list(ae.SERVICE_PRINCIPALS)), "ServicePrincipal")
     account = ae.pick_name(sub, "accounts")
+    deployment, model = random.choice(dp._AI_DEPLOYMENTS)
     return [dp.ai_record(account, sub, caller, op, status=status,
-                         offset_s=-i * 3.0) for i in range(count)]
+                         offset_s=-i * 3.0, deployment=deployment, model=model,
+                         file_id=f"file-{uuid.uuid4().hex[:32]}" if op == "Files_GetFileContent" else None)
+            for i in range(count)]
+
+
+def _public_storage(config=None):
+    return _make_arm_scenario("Microsoft.Storage/storageAccounts/write", "data",
+                              "Storage Account Contributor")(config)
 
 
 SCENARIOS = {
@@ -742,13 +779,16 @@ SCENARIOS.update({
     "wip_storage_first_access": _storage_threat,
     "wip_storage_backup_access": lambda config=None: _storage_threat(config, mode="backup"),
     "wip_storage_multiple_downloads": lambda config=None: _storage_threat(config, mode="bulk", count=16),
+    "wip_storage_cross_account_copy": lambda config=None: _storage_threat(config, mode="copy"),
     "wip_keyvault_key_change": lambda config=None: _keyvault_threat(config, "KeyRotate"),
     "wip_keyvault_secret_dump": lambda config=None: _keyvault_threat(config, "SecretGet", count=12),
     "wip_keyvault_key_management": lambda config=None: _keyvault_threat(config, "KeyRotate"),
     "wip_ai_model_discovery": lambda config=None: _ai_threat(config, count=6, op="Models_List"),
     "wip_ai_denial_of_wallet": lambda config=None: _ai_threat(config, count=24),
-    "wip_ai_dataset_download": lambda config=None: _ai_threat(config, count=8),
+    "wip_ai_dataset_download": lambda config=None: _ai_threat(config, count=8, op="Files_GetFileContent"),
 })
+SCENARIOS["wip_storage_public"] = _public_storage
+SCENARIOS["wip_compute_allocation"] = _compute_allocation
 
 # Published Cortex targets. These are intentionally unconfirmed scenario mappings; the wip_
 # key makes that status visible in the on-demand catalog until a real alert validates the shape.
@@ -757,6 +797,7 @@ ANALYTIC_ALERTS.update({
     "wip_storage_first_access": "An identity accessed a cloud storage for the first time",
     "wip_storage_backup_access": "An identity accessed a backup cloud storage",
     "wip_storage_multiple_downloads": "An identity initiated a download of multiple cloud objects",
+    "wip_storage_cross_account_copy": "A cloud storage object was copied to a foreign cloud account",
     "wip_keyvault_key_change": "Unusual key management activity",
     "wip_keyvault_secret_dump": "Suspicious secrets dump activity",
     "wip_keyvault_key_management": "Unusual key management activity",

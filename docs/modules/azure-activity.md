@@ -129,7 +129,7 @@ resource id, operation, outcome). A 3-record canary (2026-10-23) confirmed all t
 
 ## Threat scenarios
 
-`azure_activity` now has 64 forced threat scenarios, each with a Cortex Azure Audit Log target
+`azure_activity` now has 65 forced threat scenarios, each with a Cortex Azure Audit Log target
 in `ANALYTIC_ALERTS`. All scenario keys use the `wip_` prefix because the published target is
 identified but a corresponding synthetic alert has not yet been confirmed in this tenant. The
 usual threat gate controls ambient generation; a specific scenario can be forced by its key.
@@ -144,10 +144,10 @@ Coverage in this first scenario set:
   each emits a correlated `Started` and terminal success pair.
 - 13 AKS audit targets: anonymous access, secrets/configmaps, workloads, RBAC, namespace and
   service-account changes, job/controller creation, exec, and ephemeral containers.
-- 9 Storage, Key Vault, and Azure AI targets using the resource-log builders in
+- 10 Storage, Key Vault, and Azure AI targets using the resource-log builders in
   `modules/azure_dataplane.py`.
 
-The Cortex Azure Audit Log index currently lists 186 alert names. This 64-scenario set is a
+The Cortex Azure Audit Log index currently lists 186 alert names. This 65-scenario set is a
 partial mapping, not complete coverage. Profiling and multi-event detections still need suitable
 history or sequences; Entra directory/Graph and Microsoft 365 detections need their corresponding
 feeds; additional single-event targets need exact operation and field matching before they are
@@ -159,13 +159,20 @@ Earlier validation established that the module imported, scenario functions retu
 and representative canaries reached the tenant. It did not compare every field to an authoritative
 service sample or establish that each threat scenario fires its named analytic. The canaries
 covered representative Activity, AKS, Storage, Key Vault, and AI ingestion; they were not a
-64-scenario detector test.
+65-scenario detector test.
 
 Category coverage is partial: the module generates Administrative, Policy, ServiceHealth,
 ResourceHealth, Alert, Autoscale, and Recommendation records. It does not yet generate the
 Activity Log `Security` category. Microsoft defines those as Defender for Cloud alert events whose
 `properties` vary by alert; a security-alert-specific builder and fixtures are needed before that
 category can be called covered.
+
+The operation-specific threat builders also emit account-level Storage network ACL changes that
+allow public network access, a batch of five distinct VM allocations by one identity, correlated
+cross-subscription blob-copy records (`CopyBlobSource` and `CopyBlob`), and AI file-content downloads
+using `Files_GetFileContent`. AI request-spike records now hold the account, caller, and deployment
+constant across the burst. These shapes match the documented operation and fields; detector firing
+remains unverified without a tenant-side alert and profile history.
 
 This source review cross-checks the Event Hub envelope and key service-specific fields against
 Microsoft's resource-log schema, Activity Log schema, Storage Blob log reference, Key Vault
@@ -178,7 +185,7 @@ guarantee each synthetic event matches this tenant's exact detections.
 Checks run for this review:
 
 - Python compilation and module import, including catalog assertions for benign operations.
-- All 64 forced scenario functions and alert mappings (64/64).
+- All 65 forced scenario functions and alert mappings (65/65).
 - Shape assertions for correlated ARM `Started`/terminal pairs, Storage OAuth principal and RBAC
   authorization fields, distinct Key Vault secret URIs, AI category fields, and AKS audit JSON.
 - Repository deterministic-training, threat-level alignment, on-demand catalog, API contract, and
@@ -200,6 +207,9 @@ Sources:
 - [Microsoft Azure Activity Log event schema](https://learn.microsoft.com/en-us/azure/azure-monitor/fundamentals/activity-log-schema)
 - [Microsoft Azure resource logs schema](https://learn.microsoft.com/en-us/azure/azure-monitor/platform/resource-logs-schema)
 - [Microsoft Storage Blob monitoring reference](https://learn.microsoft.com/en-us/azure/storage/blobs/monitor-blob-storage-reference)
+- [Microsoft StorageBlobLogs table reference](https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/storagebloblogs)
+- [Microsoft cross-account blob copy logging](https://learn.microsoft.com/en-us/azure/storage/common/security-restrict-copy-operations)
+- [Microsoft Files - Get Content REST API](https://learn.microsoft.com/en-us/rest/api/azureopenai/files/get-content?view=rest-azureopenai-2024-10-21)
 - [Microsoft Key Vault logging](https://learn.microsoft.com/en-us/azure/key-vault/general/logging)
 - [Microsoft Foundry diagnostic logging](https://learn.microsoft.com/en-us/azure/foundry/how-to/diagnostic-logging)
 - [Microsoft AKS monitoring reference](https://learn.microsoft.com/en-us/azure/aks/monitor-aks-reference)
