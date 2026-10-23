@@ -561,10 +561,10 @@ _ARM_TARGETS = {
     "wip_firewall_change": ("An Azure Firewall was modified", "Microsoft.Network/azureFirewalls/write", "net", "Network Contributor"),
     "wip_firewall_policy_delete": ("An Azure Firewall policy deletion", "Microsoft.Network/firewallPolicies/delete", "net", "Network Contributor"),
     "wip_firewall_rule_collection": ("An Azure Firewall rule collection group was modified or deleted", "Microsoft.Network/firewallPolicies/ruleCollectionGroups/write", "net", "Network Contributor"),
-    "wip_firewall_rule_group": ("An Azure firewall rule group was modified", "Microsoft.Network/azureFirewalls/write", "net", "Network Contributor"),
+    "wip_firewall_rule_group": ("An Azure firewall rule group was modified", "Microsoft.Network/firewallPolicies/ruleCollectionGroups/write", "net", "Network Contributor"),
     "wip_dns_zone_change": ("An Azure DNS Zone was modified", "Microsoft.Network/dnsZones/write", "net", "Network Contributor"),
     "wip_vnet_change": ("An Azure virtual network was modified", "Microsoft.Network/virtualNetworks/write", "net", "Network Contributor"),
-    "wip_vnet_device_change": ("An Azure virtual network Device was modified", "Microsoft.Network/networkDevices/write", "net", "Network Contributor"),
+    "wip_vnet_device_change": ("An Azure virtual network Device was modified", "Microsoft.Network/networkVirtualAppliances/write", "net", "Network Contributor"),
     "wip_vpn_connection_change": ("An Azure VPN Connection was modified", "Microsoft.Network/connections/write", "net", "Network Contributor"),
     "wip_p2s_vpn_change": ("An Azure Point-to-Site VPN was modified", "Microsoft.Network/p2sVpnGateways/write", "net", "Network Contributor"),
     "wip_diagnostic_settings_delete": ("Azure diagnostic configuration deletion", "Microsoft.Insights/diagnosticSettings/delete", "sec", "Monitoring Contributor"),
@@ -578,7 +578,7 @@ _ARM_TARGETS = {
     "wip_runbook_write": ("Azure Automation Runbook Creation/Modification", "Microsoft.Automation/automationAccounts/runbooks/write", "cloud", "Automation Contributor"),
     "wip_runbook_delete": ("Azure Automation Runbook Deletion", "Microsoft.Automation/automationAccounts/runbooks/delete", "cloud", "Automation Contributor"),
     "wip_webhook_create": ("Azure Automation Webhook creation", "Microsoft.Automation/automationAccounts/webhooks/write", "cloud", "Automation Contributor"),
-    "wip_app_service_function": ("Azure virtual machine commands execution", "Microsoft.Web/sites/host/listkeys/action", "cloud", "Website Contributor"),
+    "wip_vmss_command": ("Azure virtual machine commands execution", "Microsoft.Compute/virtualMachineScaleSets/virtualMachines/runCommand/action", "cloud", "Virtual Machine Contributor"),
     # Compute, storage, messaging and data resources
     "wip_vm_create": ("Cloud instance creation attempt", "Microsoft.Compute/virtualMachines/write", "cloud", "Virtual Machine Contributor"),
     "wip_vm_stop": ("A cloud instance was stopped", "Microsoft.Compute/virtualMachines/powerOff/action", "cloud", "Virtual Machine Contributor"),
@@ -598,11 +598,50 @@ _ARM_TARGETS = {
     "wip_container_registry": ("A container registry was created or deleted", "Microsoft.ContainerRegistry/registries/write", "cloud", "Contributor"),
     "wip_aks_cluster_change": ("An Azure Kubernetes Cluster was created or deleted", "Microsoft.ContainerService/managedClusters/write", "cloud", "Contributor"),
     "wip_keyvault_config": ("An Azure Key Vault was modified", "Microsoft.KeyVault/vaults/write", "sec", "Key Vault Administrator"),
-    "wip_keyvault_key_change": ("An Azure Key Vault key was modified", "Microsoft.KeyVault/vaults/keys/rotate/action", "sec", "Key Vault Administrator"),
     "wip_cosmos_key_read": ("Uncommon Azure Cosmos DB master key read by identity", "Microsoft.DocumentDB/databaseAccounts/listKeys/action", "data", "Contributor"),
     "wip_app_gateway_change": ("Modification or Deletion of an Azure Application Gateway Detected", "Microsoft.Network/applicationGateways/write", "net", "Network Contributor"),
     "wip_network_watcher_delete": ("Azure Network Watcher Deletion", "Microsoft.Network/networkWatchers/delete", "net", "Network Contributor"),
 }
+
+
+def _request_body(op, sub):
+    """Operation-specific ARM request content for operations whose details matter to triage."""
+    op_l = op.lower()
+    if "networksecuritygroups/securityrules/" in op_l:
+        return {"properties": {"protocol": "Tcp", "sourcePortRange": "*", "destinationPortRange": "443",
+                "sourceAddressPrefix": "10.20.0.0/16", "destinationAddressPrefix": "10.30.0.0/16",
+                "access": "Allow", "priority": 4096, "direction": "Inbound", "description": "LogSim test rule"}}
+    if "virtualmachines/runcommand/action" in op_l:
+        return {"commandId": "RunPowerShellScript", "script": ["Get-Date"], "parameters": []}
+    if "virtualmachinescalesets/virtualmachines/runcommand/action" in op_l:
+        return {"commandId": "RunShellScript", "script": ["date"], "parameters": []}
+    if "virtualmachines/extensions/write" in op_l:
+        return {"location": ae.region(sub), "properties": {"publisher": "Microsoft.Compute",
+                "type": "CustomScriptExtension", "typeHandlerVersion": "1.10",
+                "settings": {"commandToExecute": "echo LogSim"}}}
+    if "roleassignments/write" in op_l:
+        principal = ae.app_caller(random.choice(list(ae.SERVICE_PRINCIPALS)))
+        return {"properties": {"principalId": principal["oid"], "principalType": "ServicePrincipal",
+                "roleDefinitionId": ae.sub_rid(sub, "Microsoft.Authorization", "roleDefinitions",
+                                                ae.ROLES["Contributor"]),
+                "description": "Simulated role assignment"}}
+    if "containers/write" in op_l and "microsoft.storage" in op_l:
+        return {"properties": {"publicAccess": "Blob"}}
+    if "objectreplicationpolicies/write" in op_l:
+        return {"properties": {"sourceAccount": "stdataprod85403", "destinationAccount": "starchiveprod30211",
+                "rules": [{"ruleId": "replication-policy-01", "sourceContainer": "exports",
+                           "destinationContainer": "archive"}]}}
+    if "snapshots/begingetaccess/action" in op_l:
+        return {"access": "Read", "durationInSeconds": 3600}
+    if "runbooks/" in op_l:
+        return {"properties": {"runbookType": "PowerShell", "description": "Routine maintenance runbook",
+                                "logProgress": True, "logVerbose": False}}
+    if "webhooks/write" in op_l:
+        return {"properties": {"runbook": {"name": "maintenance-check"}, "isEnabled": True}}
+    if "databases/export/action" in op_l:
+        return {"storageKeyType": "SharedAccessKey", "administratorLogin": "sql-export",
+                "authenticationType": "Sql"}
+    return {"change": "simulated configuration update", "source": "LogSim"}
 
 
 def _make_arm_scenario(op, team, role):
@@ -612,18 +651,13 @@ def _make_arm_scenario(op, team, role):
         actor = ae.pick_nonstandard(config) if random.random() < 0.18 else None
         sub = ae.pick_sub()
         kwargs = {"roles": roles, "role": role, "actor": actor, "sub": sub,
-                  "body": {"change": "simulated configuration update", "source": "LogSim"}}
-        if random.random() < 0.15:
-            rid, _ = resource_for(op, sub)
-            caller = actor or ae.pick_admin(config, roles)
-            return denied(op, rid, caller, sub)
+                  "body": _request_body(op, sub)}
         return _arm_event(config, op, **kwargs)
     return scenario
 
 
 def _kube_threat(config, kind):
     cluster = random.choice(aks.CLUSTERS)
-    upn = ae.pick_admin(config, ae.CLOUD_OPS).get("upn")
     if kind == "anonymous":
         user, groups, src, ua = "system:anonymous", ["system:unauthenticated"], "198.51.100.24", "kubectl/v1.30.4"
         return [aks.record(cluster, aks.event("get", "secrets", ns="payments", name="db-credentials", user=user,
@@ -669,24 +703,32 @@ _KUBE_TARGETS = {
 }
 
 
-def _storage_threat(config=None):
+def _storage_threat(config=None, *, mode="first", count=1):
     sub = ae.pick_sub()
     account = ae.pick_name(sub, "storageAccounts")
-    caller = ae.pick_admin(config, ae.DATA_OPS)
-    return [dp.storage_record(account, sub, caller, "GetBlob", "StorageRead")]
+    caller = ae.pick_nonstandard(config) if mode == "first" else ae.pick_admin(config, ae.DATA_OPS)
+    out = []
+    for i in range(count):
+        container = "backups" if mode == "backup" else None
+        blob = f"backup-{i:04d}.bak" if mode == "backup" else f"download-{uuid.uuid4().hex[:12]}.parquet"
+        out.append(dp.storage_record(account, sub, caller, "GetBlob", "StorageRead", container=container,
+                                     blob=blob, offset_s=-i * 2.0))
+    return out
 
 
-def _keyvault_threat(config=None, op="SecretList"):
+def _keyvault_threat(config=None, op="SecretList", *, count=1):
     sub = ae.pick_sub()
     caller = ae.pick_admin(config, ae.SEC_OPS)
-    return [dp.keyvault_record(ae.pick_name(sub, "vaults"), sub, caller, op)]
+    vault = ae.pick_name(sub, "vaults")
+    return [dp.keyvault_record(vault, sub, caller, op, object_name=f"service-{i:02d}", offset_s=-i * 3.0)
+            for i in range(count)]
 
 
-def _ai_threat(config=None, count=1, status=200):
+def _ai_threat(config=None, count=1, status=200, op="ChatCompletions_Create"):
     sub = ae.PROD
     caller = ae.app_caller(random.choice(list(ae.SERVICE_PRINCIPALS)), "ServicePrincipal")
     account = ae.pick_name(sub, "accounts")
-    return [dp.ai_record(account, sub, caller, "ChatCompletions_Create", status=status,
+    return [dp.ai_record(account, sub, caller, op, status=status,
                          offset_s=-i * 3.0) for i in range(count)]
 
 
@@ -698,11 +740,12 @@ SCENARIOS.update({key: (lambda config=None, kind=kind: _kube_threat(config, kind
                   for key, (_alert, kind) in _KUBE_TARGETS.items()})
 SCENARIOS.update({
     "wip_storage_first_access": _storage_threat,
-    "wip_storage_backup_access": _storage_threat,
-    "wip_storage_multiple_downloads": _storage_threat,
-    "wip_keyvault_secret_dump": lambda config=None: _keyvault_threat(config, "SecretList"),
+    "wip_storage_backup_access": lambda config=None: _storage_threat(config, mode="backup"),
+    "wip_storage_multiple_downloads": lambda config=None: _storage_threat(config, mode="bulk", count=16),
+    "wip_keyvault_key_change": lambda config=None: _keyvault_threat(config, "KeyRotate"),
+    "wip_keyvault_secret_dump": lambda config=None: _keyvault_threat(config, "SecretGet", count=12),
     "wip_keyvault_key_management": lambda config=None: _keyvault_threat(config, "KeyRotate"),
-    "wip_ai_model_discovery": lambda config=None: _ai_threat(config, count=6),
+    "wip_ai_model_discovery": lambda config=None: _ai_threat(config, count=6, op="Models_List"),
     "wip_ai_denial_of_wallet": lambda config=None: _ai_threat(config, count=24),
     "wip_ai_dataset_download": lambda config=None: _ai_threat(config, count=8),
 })
@@ -714,6 +757,7 @@ ANALYTIC_ALERTS.update({
     "wip_storage_first_access": "An identity accessed a cloud storage for the first time",
     "wip_storage_backup_access": "An identity accessed a backup cloud storage",
     "wip_storage_multiple_downloads": "An identity initiated a download of multiple cloud objects",
+    "wip_keyvault_key_change": "Unusual key management activity",
     "wip_keyvault_secret_dump": "Suspicious secrets dump activity",
     "wip_keyvault_key_management": "Unusual key management activity",
     "wip_ai_model_discovery": "AI model discovery",
