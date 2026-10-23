@@ -163,7 +163,8 @@ def keyvault_record(vault, sub, caller, op, *, status=200, offset_s=0.0, object_
     if caller["kind"] == "User":
         claim["http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn"] = caller["upn"]
     obj = {"VaultGet": "", "SecretGet": "secrets/" + (object_name or "db-conn"), "SecretList": "secrets",
-           "KeyGet": "keys/data-key", "KeyList": "keys", "KeyRotate": "keys/data-key/rotate"}.get(
+           "KeyGet": "keys/data-key", "KeyList": "keys", "KeyRotate": "keys/data-key/rotate",
+           "KeyUpdate": "keys/data-key"}.get(
                op, "secrets/app-secret")
     rec = {
         "time": _ts(offset_s),

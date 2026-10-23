@@ -853,7 +853,29 @@ SCENARIOS = {
     "auth_method_added": scenario_auth_method_added,
     "unverified_domain_added": scenario_unverified_domain_added,
     "group_created_deleted": scenario_group_created_deleted,
+    "wip_cloud_group_change": scenario_group_created_deleted,
 }
+
+# Additional Azure Audit Log targets use the same Graph directory-audit records and Event Hub
+# copies as their original generator. They are explicitly WIP until the Cortex alert is observed.
+SCENARIOS.update({
+    "wip_azure_group_create_delete": scenario_group_created_deleted,
+    "wip_app_credential_added": scenario_app_credential_added,
+    "wip_app_owner_added": scenario_owner_added_to_application,
+    "wip_app_owner_removed": scenario_owner_removed_from_application,
+    "wip_service_principal_created": scenario_sp_created,
+    "wip_service_principal_removed": scenario_sp_removed,
+    "wip_auth_method_added": scenario_auth_method_added,
+    "wip_conditional_access_change": scenario_ca_operation_unusual,
+    "wip_user_created": scenario_user_account_created,
+    "wip_user_deleted": scenario_user_account_deleted,
+    "wip_user_password_reset": scenario_account_unlock_password_reset,
+    "wip_external_guest_invitation": scenario_unusual_guest_invitation,
+    "wip_pim_member_removal": scenario_pim_member_removal,
+    "wip_application_removed": scenario_sp_removed,
+    "wip_service_principal_application_created": scenario_sp_created,
+    "wip_azure_domain_verification": scenario_unverified_domain_added,
+})
 
 # On-demand threats (threat_catalog): only scenarios whose analytic has been SEEN firing
 # in the tenant on this feed's synthetic data -- alerts attributed to examplecorp
@@ -871,6 +893,23 @@ ANALYTIC_ALERTS = {
     "unverified_domain_added":  "Rare unverified domain addition to Azure AD",
     "federated_domain_backdoor": "A successful Azure domain federation settings modification",
     "failed_federation_change": "Azure domain federation settings modification attempt",
+    "wip_cloud_group_change": "A cloud identity created or modified a security group",
+    "wip_azure_group_create_delete": "Azure group creation/deletion",
+    "wip_app_credential_added": "Credentials were added to Azure application",
+    "wip_app_owner_added": "Owner was added to Azure application",
+    "wip_app_owner_removed": "Removal of an Azure Owner from an Application or Service Principal",
+    "wip_service_principal_created": "A Service Principal was created in Azure",
+    "wip_service_principal_removed": "A Service Principal was removed from Azure",
+    "wip_auth_method_added": "Authentication method was added to Azure account",
+    "wip_conditional_access_change": "Azure conditional access policy creation or modification",
+    "wip_user_created": "Azure user creation/deletion",
+    "wip_user_deleted": "Azure user creation/deletion",
+    "wip_user_password_reset": "Azure user password reset",
+    "wip_external_guest_invitation": "External user invitation to Azure tenant",
+    "wip_pim_member_removal": "PIM privilege member removal",
+    "wip_application_removed": "Azure application removed",
+    "wip_service_principal_application_created": "Azure Service principal/Application creation",
+    "wip_azure_domain_verification": "A new Azure email domain verification was requested",
 }
 
 
@@ -906,7 +945,13 @@ _GRAPH_SCENARIOS = {"user_account_created", "user_account_deleted", "short_lived
                     "account_unlock_password_reset", "unusual_guest_invitation", "ca_operation_unusual",
                     "ca_policy_removed", "app_credential_added", "owner_added_to_application",
                     "owner_removed_from_application", "auth_method_added", "tap_registered", "sp_created",
-                    "sp_removed", "admin_role_add", "group_created_deleted"}
+                    "sp_removed", "admin_role_add", "group_created_deleted", "wip_cloud_group_change",
+                    "wip_app_credential_added", "wip_app_owner_added", "wip_app_owner_removed",
+                    "wip_service_principal_created", "wip_service_principal_removed", "wip_auth_method_added",
+                    "wip_conditional_access_change", "wip_user_created", "wip_user_deleted",
+                    "wip_user_password_reset", "wip_external_guest_invitation", "wip_pim_member_removal",
+                    "wip_application_removed", "wip_service_principal_application_created",
+                    "wip_azure_domain_verification"}
 
 
 def _graph_companions(records):
