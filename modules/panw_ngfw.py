@@ -859,11 +859,10 @@ def _generate_benign_log(config, session_context=None):
 # ---------------------------------------------------------------------------
 # Threat catalog
 # ---------------------------------------------------------------------------
-# analytic: True  -> built to fire a native PAN NGFW traffic-log analytic (offered on demand)
-# analytic: False -> realistic traffic for hunts / correlation, but no traffic-log analytic
-#                    will fire (Kerberos/NTLM/dormant-account detectors need EAL-decoded
-#                    protocol fields a CEF traffic log does not carry; uncommon-AppID and the
-#                    SSH-to-cloud/process variations additionally require the XDR Agent).
+# analytic: True  -> traffic pattern maps to a documented detector and is selectable on
+#                    demand, including informational variants that may not appear in alerts.
+# analytic: False -> realistic traffic for hunts / correlation, but CEF traffic alone cannot
+#                    represent the detector's required evidence.
 # Targets name the alert the tenant actually raises: where a detector's base name is
 # Informational (never shown in the alerts table) and the shape produces a Low variation,
 # the variation is the target (e.g. Port Scan fires as "Suspicious port scan").
@@ -882,50 +881,57 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "rare_smb",             "weight": 4,  "analytic": True,  "xsiam_alert": "Rare SMB session to a remote host"},
     {"event": "smb_from_dc",          "weight": 3,  "analytic": True,  "xsiam_alert": "Suspicious SMB connection from domain controller"},
     {"event": "dcsync_non_dc",        "weight": 2,  "analytic": True,  "xsiam_alert": "Possible DCSync from a non domain controller"},
-    {"event": "rare_smtp",            "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Rare SMTP/S Session" — never surfaces in the alerts table; background only
+    {"event": "rare_smtp",            "weight": 2,  "analytic": True,  "xsiam_alert": "Rare SMTP/S Session"},
     {"event": "spam_bot",             "weight": 3,  "analytic": True,  "xsiam_alert": "Spam Bot Traffic"},
     {"event": "uncommon_ssh",         "weight": 4,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established"},
     {"event": "uncommon_ssh_rare_internal", "weight": 2, "analytic": True, "xsiam_alert": "Uncommon SSH session was established to a rare internal IP"},
     {"event": "uncommon_ssh_nonstd_port", "weight": 2, "analytic": True, "xsiam_alert": "An Uncommon SSH session was established using a nonstandard SSH port"},
     {"event": "unusual_ssh",          "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual, long SSH activity with tunnel characteristics"},
     {"event": "unusual_ssh_external", "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH activity with tunnel characteristics to external destination"},
-    {"event": "ssh_proxy",            "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Unusual SSH activity that resembles SSH proxy" — never surfaces in the alerts table; background only
+    {"event": "ssh_proxy",            "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH activity that resembles SSH proxy"},
     # Re-targeted: "Rare process created an SSH session ..." keys on the PROCESS, which a
     # firewall log cannot carry (docs/firewall-analytics.md section 4). An SSH-habit user
     # reaching a rare external IP is the traffic-only "Uncommon SSH ... to a rare IP" variation.
     {"event": "rare_ssh_external",    "weight": 2,  "analytic": True,  "xsiam_alert": "An Uncommon SSH session was established to a rare IP address"},
     {"event": "recurring_rare_ip",    "weight": 4,  "analytic": True,  "xsiam_alert": "Recurring access to rare IP"},
     {"event": "recurring_rare_domain","weight": 4,  "analytic": True,  "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain With a Less Common Port"},
-    {"event": "rare_domain_comm",     "weight": 3,  "analytic": False, "xsiam_alert": None},  # Informational: "Abnormal Communication to a Rare Domain" — never surfaces in the alerts table; background only
+    {"event": "rare_domain_comm",     "weight": 3,  "analytic": True,  "xsiam_alert": "Abnormal Communication to a Rare Domain"},
     {"event": "ddns_access",          "weight": 2,  "analytic": True,  "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
     {"event": "crypto_miner",         "weight": 3,  "analytic": True,  "xsiam_alert": "A Possible crypto miner was detected on a host"},
-    {"event": "torrent",              "weight": 3,  "analytic": False, "xsiam_alert": None},  # Informational: "A Torrent client was detected on a host" — never surfaces in the alerts table; background only
-    {"event": "p2p_upload",           "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Upload pattern that resembles Peer to Peer traffic" — never surfaces in the alerts table; background only
-    {"event": "p2p_download",         "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Download pattern that resembles Peer to Peer traffic" — never surfaces in the alerts table; background only
-    {"event": "ipfs",                 "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Possible use of IPFS was detected" — never surfaces in the alerts table; background only
+    {"event": "torrent",              "weight": 3,  "analytic": True,  "xsiam_alert": "A Torrent client was detected on a host"},
+    {"event": "p2p_upload",           "weight": 2,  "analytic": True,  "xsiam_alert": "Upload pattern that resembles Peer to Peer traffic"},
+    {"event": "p2p_download",         "weight": 2,  "analytic": True,  "xsiam_alert": "Download pattern that resembles Peer to Peer traffic"},
+    {"event": "ipfs",                 "weight": 2,  "analytic": True,  "xsiam_alert": "Possible use of IPFS was detected"},
     {"event": "rare_appid",           "weight": 3,  "analytic": False, "xsiam_alert": None},  # Informational: "Rare AppID usage to a rare destination" — never surfaces in the alerts table; background only
     {"event": "new_ftp_server",       "weight": 2,  "analytic": True,  "xsiam_alert": "New FTP Server"},
     {"event": "new_admin_behavior",   "weight": 3,  "analytic": True,  "xsiam_alert": "New Administrative Behavior"},
-    {"event": "dormant_host_conn",    "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Abnormal connections to a dormant host from a newly seen endpoint" — never surfaces in the alerts table; background only
+    {"event": "dormant_host_conn",    "weight": 2,  "analytic": True,  "xsiam_alert": "Abnormal connections to a dormant host from a newly seen endpoint"},
     # Traffic-only detector VARIATIONS (2026-10-22), each targeting the variation's own alert
     # name as Cortex lists it. HASSH / banner / process variations need EAL or the agent.
     {"event": "port_scan_aggressive", "weight": 2,  "analytic": True,  "xsiam_alert": "Highly suspicious port scan"},
-    {"event": "ipfs_peering",         "weight": 2,  "analytic": False, "xsiam_alert": None},  # Informational: "Possible IPFS traffic was detected" — never surfaces in the alerts table; background only
+    {"event": "ipfs_peering",         "weight": 2,  "analytic": True,  "xsiam_alert": "Possible IPFS traffic was detected"},
     {"event": "rare_domain_attack_port", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Communication to a Rare Domain With a Port Commonly Used by Attack Platforms"},
     {"event": "recurring_rare_domain_attack_port", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain With a Port Commonly Used by Attack Platforms"},
     {"event": "recurring_rare_domain_suspicious_as", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain to a Suspicious Autonomous System (AS)"},
+    {"event": "rare_domain_less_common_port", "weight": 1, "analytic": True, "xsiam_alert": "Abnormal Communication to a Rare Domain With a Less Common Port"},
+    {"event": "rare_domain_suspicious_as", "weight": 1, "analytic": True, "xsiam_alert": "Abnormal Communication to a Rare Domain to a Suspicious Autonomous System (AS)"},
+    {"event": "recurring_rare_domain_abnormal_suffix", "weight": 1, "analytic": True, "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain With an Abnormal Domain Suffix"},
+    {"event": "large_upload_generic_popular_target", "weight": 1, "analytic": True, "xsiam_alert": "Large Upload (Generic) to a Frequently Used Upload Target"},
+    {"event": "new_ftp_server_port_scan", "weight": 1, "analytic": True, "xsiam_alert": "New FTP Server Accessed Via a Port Scan"},
+    {"event": "uncommon_ssh_internal", "weight": 1, "analytic": True, "xsiam_alert": "Uncommon SSH session was established to an internal IP"},
+    {"event": "rdp_unmanaged_dense_subnet", "weight": 1, "analytic": True, "xsiam_alert": "RDP from an unmanaged endpoint in a typically managed subnet with a significantly higher number of managed endpoints in the subnet"},
     {"event": "dormant_host_known_source", "weight": 2, "analytic": True, "xsiam_alert": "Abnormal connections to a dormant host"},
-    {"event": "large_upload_generic_small", "weight": 1, "analytic": False, "xsiam_alert": None},  # Informational: "Large Upload (Generic) Lower than 100 MB" — never surfaces in the alerts table; background only
-    {"event": "new_ssh_admin_behavior", "weight": 2, "analytic": False, "xsiam_alert": None},  # Informational: "New SSH Administrative Behavior" — never surfaces in the alerts table; background only
+    {"event": "large_upload_generic_small", "weight": 1, "analytic": True, "xsiam_alert": "Large Upload (Generic) Lower than 100 MB"},
+    {"event": "new_ssh_admin_behavior", "weight": 2, "analytic": True, "xsiam_alert": "New SSH Administrative Behavior"},
     {"event": "new_ftp_server_external", "weight": 2, "analytic": True, "xsiam_alert": "New FTP Server from an external source"},
     {"event": "dcsync_non_dc_appid", "weight": 1,  "analytic": True,  "xsiam_alert": "DCSync from a non domain controller"},
     {"event": "dcsync_internet_facing", "weight": 1, "analytic": True,  "xsiam_alert": "Possible DCSync from an internet-facing server"},
     {"event": "dcsync_large",         "weight": 1,  "analytic": True,  "xsiam_alert": "Large DCSync from a non domain controller"},
     {"event": "dcsync_large_appid",   "weight": 1,  "analytic": True,  "xsiam_alert": "Large DCSync from a non domain controller by AppID"},
     {"event": "rare_appid_internet_facing", "weight": 2, "analytic": True, "xsiam_alert": "Rare AppID usage to a rare destination from an internet-facing server"},
-    # "Failed Spam Bot Traffic" is Informational: it never reaches the alerts table, so it
-    # is not offered on demand. The traffic stays as background realism.
-    {"event": "spam_bot_failed",      "weight": 2,  "analytic": False, "xsiam_alert": None},
+    # "Failed Spam Bot Traffic" is Informational; it remains selectable for raw-event and
+    # analytics validation even though it may not produce an alerts-table row.
+    {"event": "spam_bot_failed",      "weight": 2,  "analytic": True,  "xsiam_alert": "Failed Spam Bot Traffic"},
     {"event": "ssh_suspicious_nonstd", "weight": 2, "analytic": True,  "xsiam_alert": "A suspicious SSH session was established"},
     {"event": "ssh_high_volume",      "weight": 2,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established that involved a higher than usual volume"},
     {"event": "ssh_proxy_high_volume", "weight": 1, "analytic": True,  "xsiam_alert": "High Volume Unusual SSH activity that resembles SSH proxy"},
@@ -1005,9 +1011,9 @@ def _threat_actor(config, session_context):
 
 
 # --- Reconnaissance -------------------------------------------------------------------
-def _scan_burst(config, src, user, shost, ports, end=None, step=2):
+def _scan_burst(config, src, user, shost, ports, end=None, step=2, target=None):
     """One source probing `ports` on a single internal server, ending at `end`."""
-    target = random.choice(config.get("internal_servers") or ["10.0.10.50"])
+    target = target or random.choice(config.get("internal_servers") or ["10.0.10.50"])
     print(f"    - PAN NGFW simulating: port scan {src} -> {target} ({len(ports)} ports)")
     t0 = (end or time.time()) - len(ports) * step
     out = []
@@ -1130,6 +1136,25 @@ def _sim_large_upload_generic_small(config, sc):
     return _sim_large_upload(config, sc, "unknown-tcp", random.choice([9001, 8888, 6667, 7000]), size_mb=(60, 95))
 
 
+def _sim_large_upload_generic_popular_target(config, session_context):
+    """Large generic-protocol upload to a popular target also present in benign egress.
+
+    GitHub is configured as a commonly reached benign destination with SSH/22 support;
+    a large push over SSH is generic (not HTTP/S, FTP, or SMTP) and stays coherent with
+    the benign destination/App-ID model.
+    """
+    src, user, shost = _threat_actor(config, session_context)
+    targets = config.get("benign_egress_destinations") or []
+    dest = next((d for d in targets if d.get("domain", "").lower() == "github.com"),
+                {"domain": "github.com", "ports": [22]})
+    domain, dst = resolver.benign_target(config, dest)
+    size = random.randint(300, 700) * 1024 * 1024
+    print(f"    - PAN NGFW simulating: large generic upload to common SSH target {src} -> {domain}")
+    return [_conn(config, src, dst, 22, "ssh", suser=user, shost=shost, dhost=domain,
+                  bytes_sent=size, bytes_received=random.randint(2000, 50000),
+                  duration_s=random.randint(300, 1200), url_cat="computer-and-internet-info")]
+
+
 def _sim_host_attack_chain(config, session_context):
     """One host trips several DIFFERENT detectors within the hour -- internal port scan,
     failed connections across the subnet, then a generic-protocol upload out -- the shape
@@ -1179,6 +1204,37 @@ def _sim_rdp_unmanaged(config, session_context):
                   dhost=resolver.internal_fqdn(config, dst), from_zone="trust", to_zone="trust",
                   bytes_sent=random.randint(30000, 300000), bytes_received=random.randint(150000, 2000000),
                   duration_s=random.randint(120, 2400))]
+
+
+def _sim_rdp_unmanaged_dense_subnet(config, session_context):
+    """Seed many managed-looking peers in a subnet, then RDP from an unknown endpoint.
+
+    PAN traffic can represent the source subnet and endpoint distinction, but whether XSIAM
+    counts the peers as managed is tenant enrichment; the generated neighbors are evidence
+    for the variation, not a guarantee of its inventory predicate.
+    """
+    servers = config.get("internal_servers") or ["10.0.10.50"]
+    server = random.choice(servers)
+    subnet = server.rsplit(".", 1)[0]
+    managed_peers = random.sample(range(20, 180), random.randint(15, 25))
+    baseline = []
+    for host_octet in managed_peers:
+        peer = f"{subnet}.{host_octet}"
+        dst = random.choice(servers)
+        port = random.choice([443, 445, 389])
+        baseline.append(_conn(config, peer, dst, port, _APP_for_port(port), src_category="workstation",
+                              shost=resolver.internal_fqdn(config, peer),
+                              dhost=resolver.internal_fqdn(config, dst), from_zone="trust", to_zone="trust",
+                              bytes_sent=random.randint(1000, 30000), bytes_received=random.randint(2000, 80000),
+                              duration_s=random.randint(2, 45)))
+    src = f"{subnet}.{random.randint(220, 250)}"
+    print(f"    - PAN NGFW simulating: unmanaged RDP source {src} in subnet with {len(managed_peers)} managed peers")
+    baseline.append(_conn(config, src, server, 3389, "ms-rdp", src_category="unknown",
+                          shost=f"unknown-{src.replace('.', '-')}",
+                          dhost=resolver.internal_fqdn(config, server), from_zone="trust", to_zone="trust",
+                          bytes_sent=random.randint(30000, 300000), bytes_received=random.randint(150000, 2000000),
+                          duration_s=random.randint(120, 2400)))
+    return baseline
 
 
 def _sim_rare_smb(config, session_context):
@@ -1325,21 +1381,37 @@ def _sim_spam_bot(config, session_context):
 
 def _sim_spam_bot_failed(config, session_context):
     """"Failed Spam Bot Traffic": the same fan-out to external SMTP servers, but most of them
-    refuse it (reset by the server or never answering), as blocklisted spam senders see."""
+    refuse it (reset by the server or never answering), as blocklisted spam senders see.
+    Preserve the detector's named-domain plus unresolved-IP signal; volume itself is not
+    the Spam Bot criterion. The event is Informational, but remains selectable for testing."""
     src, user, shost = _threat_actor(config, session_context)
-    n = random.randint(40, 90)
-    print(f"    - PAN NGFW simulating: failed spam bot {src} -> {n} external SMTP servers")
-    t0 = time.time() - n * 30
+    servers, domains = [], set()
+    for i in range(random.randint(150, 300)):
+        if random.random() < 0.5:
+            domain = _recipient_domain(i)
+            domains.add(domain)
+            mx = f"{random.choice(['mx', 'mx1', 'mail', 'smtp'])}.{domain}"
+            servers.append((resolver.answer_for(mx, config), mx))
+        else:
+            servers.append((random_external_ip(), None))
+    n = random.randint(max(400, len(servers)), 800)
+    picks = servers + [random.choice(servers) for _ in range(n - len(servers))]
+    random.shuffle(picks)
+    span = random.randint(5400, 7200)
+    t0 = time.time() - span
+    print(f"    - PAN NGFW simulating: failed spam bot {src} -> {n} SMTP sessions to {len(servers)} servers "
+          f"({len(domains)} recipient domains, {len(servers) - len(domains)} unresolved IPs)")
     out = []
-    for i in range(n):
+    for i, (dst, dhost) in enumerate(picks):
         ok = random.random() < 0.2
-        out.append(_conn(config, src, random_external_ip(), 25, "smtp" if ok else "incomplete",
-                         suser=user, shost=shost,
+        port = random.choices([25, 587, 465], weights=[70, 20, 10])[0]
+        received = random.randint(200, 2000) if ok else (random.randint(40, 160) if random.random() < 0.55 else 0)
+        reason = None if ok else ("tcp-rst-from-server" if received else "aged-out")
+        out.append(_conn(config, src, dst, port, "ssl" if port == 465 else "smtp", suser=user,
+                         shost=shost, dhost=dhost,
                          bytes_sent=random.randint(2000, 20000) if ok else random.randint(60, 180),
-                         bytes_received=random.randint(200, 2000) if ok else 0,
-                         duration_s=random.randint(1, 20) if ok else 0,
-                         end_reason=None if ok else random.choice(["tcp-rst-from-server", "aged-out"]),
-                         ts=t0 + i * 30))
+                         bytes_received=received, duration_s=random.randint(1, 20) if ok else random.randint(0, 3),
+                         end_reason=reason, ts=t0 + span * i / n))
     return out
 
 
@@ -1411,6 +1483,18 @@ def _sim_uncommon_ssh_rare_internal(config, session_context):
 def _sim_uncommon_ssh_nonstd_port(config, session_context):
     """"An Uncommon SSH session was established using a nonstandard SSH port": internal, 22xx."""
     return _uncommon_ssh(config, session_context, dest="known", port=random.choice(_NONSTD_SSH_PORTS))
+
+
+def _sim_uncommon_ssh_internal(config, session_context):
+    """Uncommon SSH to an internal destination, without requiring the destination to be rare."""
+    src, user, shost = _ssh_habit_actor(config, session_context)
+    servers = config.get("internal_servers") or ["10.0.10.50"]
+    dst = random.choice([h for h in servers if h != src] or servers)
+    print(f"    - PAN NGFW simulating: uncommon SSH to internal IP {src} -> {dst}:22")
+    return [_conn(config, src, dst, 22, "ssh", suser=user, shost=shost,
+                  dhost=resolver.internal_fqdn(config, dst), from_zone="trust", to_zone="trust",
+                  bytes_sent=random.randint(3000, 60000), bytes_received=random.randint(4000, 120000),
+                  duration_s=random.randint(30, 600))]
 
 
 def _unusual_ssh(config, session_context, mb_range=(5, 80)):
@@ -1534,7 +1618,8 @@ def _sim_rare_ssh_external(config, session_context):
 # one fixed host to its persistent rare destination, and _DAILY_EVENTS makes the module
 # emit each of them once per UTC day while it runs, so the pair recurs on real days.
 _DAILY_EVENTS = ("recurring_rare_ip", "recurring_rare_domain", "recurring_rare_domain_attack_port",
-                 "recurring_rare_domain_suspicious_as", "ddns_access")
+                 "recurring_rare_domain_suspicious_as", "recurring_rare_domain_abnormal_suffix",
+                 "ddns_access")
 _last_daily_emit = {}
 
 
@@ -1613,6 +1698,33 @@ def _sim_recurring_rare_domain_suspicious_as(config, session_context):
     return _beacon_day(config, src, user, shost, ip, 443, domain=dom, url_cat="command-and-control")
 
 
+_ABNORMAL_DOMAIN_SUFFIXES = ("zip", "click", "top", "xyz")
+
+
+def _beacon_dst_abnormal_suffix(config, src):
+    """Stable rare destination with an uncommon suffix for the recurring-domain variation."""
+    store = beacon_targets("panw_ngfw")
+    key = f"rare|rare_dom_suffix|{src}"
+    if key in store:
+        value = store[key]
+        return (value[0], value[1]) if isinstance(value, (list, tuple)) else (value, None)
+    label = rare_domain(key).split(".", 1)[0]
+    suffix_index = int(hashlib.sha256(key.encode()).hexdigest(), 16) % len(_ABNORMAL_DOMAIN_SUFFIXES)
+    domain = f"{label}.{_ABNORMAL_DOMAIN_SUFFIXES[suffix_index]}"
+    ip = _rare_answer(domain, key)
+    store[key] = [ip, domain]
+    return ip, domain
+
+
+def _sim_recurring_rare_domain_abnormal_suffix(config, session_context):
+    """Daily beacon to one stable rare domain with a less common TLD."""
+    src, user, shost = _beacon_host(config, session_context, "panw_rare_dom_suffix")
+    ip, domain = _beacon_dst_abnormal_suffix(config, src)
+    print(f"    - PAN NGFW simulating: daily rare-domain beacon with unusual suffix {src} -> {domain}")
+    return _beacon_day(config, src, user, shost, ip, 443, domain=domain,
+                       url_cat="newly-registered-domain")
+
+
 # Default listener ports of common attack frameworks (Metasploit 4444, Cobalt Strike team
 # server 50050, Sliver/Empire-style 31337/1337, ...): the "Port Commonly Used by Attack
 # Platforms" variations of the rare-domain detectors.
@@ -1627,6 +1739,27 @@ def _sim_rare_domain_comm(config, session_context):
                 url_cat="newly-registered-domain", suser=user, shost=shost,
                 bytes_sent=random.randint(500, 20000), bytes_received=random.randint(500, 40000),
                 duration_s=random.randint(1, 120))
+
+
+def _sim_rare_domain_less_common_port(config, session_context):
+    """One rare-domain connection on an uncommon service port (informational variation)."""
+    src, user, shost = _threat_actor(config, session_context)
+    dom, dst = _rare_ext(config, f"rdclp|{user}")
+    port = random.choice([8080, 8081, 8443, 8888, 9443])
+    print(f"    - PAN NGFW simulating: rare domain on less-common port {src} -> {dom}:{port}")
+    return _web(config, src, dst, port, "ssl", dom, url_cat="unknown", suser=user, shost=shost,
+                bytes_sent=random.randint(500, 12000), bytes_received=random.randint(1000, 30000),
+                duration_s=random.randint(1, 90))
+
+
+def _sim_rare_domain_suspicious_as(config, session_context):
+    """One rare-domain connection; destination AS reputation is XSIAM-enriched."""
+    src, user, shost = _threat_actor(config, session_context)
+    dom, dst = _rare_ext(config, f"rdcas|{user}")
+    print(f"    - PAN NGFW simulating: rare domain (AS-enrichment candidate) {src} -> {dom}")
+    return _web(config, src, dst, 443, "ssl", dom, url_cat="command-and-control", suser=user, shost=shost,
+                bytes_sent=random.randint(500, 12000), bytes_received=random.randint(1000, 30000),
+                duration_s=random.randint(1, 90))
 
 
 def _sim_rare_domain_attack_port(config, session_context):
@@ -1789,6 +1922,23 @@ def _sim_new_ftp_server_external(config, session_context):
     return out
 
 
+def _sim_new_ftp_server_port_scan(config, session_context):
+    """Probe a new FTP server across privileged ports, then establish FTP to that host."""
+    src, user, shost = _threat_actor(config, session_context)
+    server = new_ftp_server_host(config)
+    other_ports = [p for p in _PRIV_PORTS if p != 21]
+    ports = [21] + random.sample(other_ports, min(len(other_ports), random.randint(19, 23)))
+    random.shuffle(ports)
+    now = time.time()
+    print(f"    - PAN NGFW simulating: port scan then new FTP service {src} -> {server}:21")
+    out = _scan_burst(config, src, user, shost, ports, end=now - 1, step=2, target=server)
+    out.append(_conn(config, src, server, 21, "ftp", suser=user, shost=shost,
+                     dhost=resolver.internal_fqdn(config, server), from_zone="trust", to_zone="trust",
+                     bytes_sent=random.randint(2000, 20000), bytes_received=random.randint(50000, 3000000),
+                     duration_s=random.randint(10, 180), ts=now))
+    return out
+
+
 # Remote-administration services "New Administrative Behavior" counts, with the App-ID PAN
 # reports for each (unknown-tcp/udp where App-ID has no decoder, as real PAN does).
 _REMOTE_ADMIN = {22: "ssh", 23: "telnet", 69: "tftp", 161: "snmp-base", 512: "unknown-tcp",
@@ -1937,12 +2087,16 @@ _THREAT_DISPATCH = {
     "large_upload_https_nonstd": _sim_large_upload_https_nonstd,
     "large_upload_smtp": _sim_large_upload_smtp, "large_upload_ftp": _sim_large_upload_ftp,
     "large_upload_generic": _sim_large_upload_generic,
+    "large_upload_generic_popular_target": _sim_large_upload_generic_popular_target,
     "rare_rdp": _sim_rare_rdp, "abnormal_rdp_rare_host": _sim_abnormal_rdp_rare_host,
-    "rdp_unmanaged": _sim_rdp_unmanaged, "rare_smb": _sim_rare_smb, "smb_from_dc": _sim_smb_from_dc,
+    "rdp_unmanaged": _sim_rdp_unmanaged, "rdp_unmanaged_dense_subnet": _sim_rdp_unmanaged_dense_subnet,
+    "rare_smb": _sim_rare_smb, "smb_from_dc": _sim_smb_from_dc,
     "dcsync_non_dc": _sim_dcsync_non_dc, "rare_smtp": _sim_rare_smtp, "spam_bot": _sim_spam_bot,
     "uncommon_ssh": _sim_uncommon_ssh, "unusual_ssh": _sim_unusual_ssh, "ssh_proxy": _sim_ssh_proxy,
     "rare_ssh_external": _sim_rare_ssh_external, "recurring_rare_ip": _sim_recurring_rare_ip,
     "recurring_rare_domain": _sim_recurring_rare_domain, "rare_domain_comm": _sim_rare_domain_comm,
+    "rare_domain_less_common_port": _sim_rare_domain_less_common_port,
+    "rare_domain_suspicious_as": _sim_rare_domain_suspicious_as,
     "ddns_access": _sim_ddns_access, "crypto_miner": _sim_crypto_miner, "torrent": _sim_torrent,
     "p2p_upload": lambda c, s: _sim_p2p(c, s, True), "p2p_download": lambda c, s: _sim_p2p(c, s, False),
     "ipfs": _sim_ipfs, "rare_appid": _sim_rare_appid, "new_ftp_server": _sim_new_ftp_server,
@@ -1956,6 +2110,7 @@ _THREAT_DISPATCH = {
     "large_upload_generic_small": _sim_large_upload_generic_small,
     "new_ssh_admin_behavior": lambda c, s: _sim_new_admin_behavior(c, s, ssh_only=True),
     "new_ftp_server_external": _sim_new_ftp_server_external,
+    "new_ftp_server_port_scan": _sim_new_ftp_server_port_scan,
     "dcsync_internet_facing": _sim_dcsync_internet_facing, "dcsync_large": _sim_dcsync_large,
     "rare_appid_internet_facing": _sim_rare_appid_internet_facing,
     "spam_bot_failed": _sim_spam_bot_failed, "ssh_suspicious_nonstd": _sim_ssh_suspicious_nonstd,
@@ -1963,10 +2118,12 @@ _THREAT_DISPATCH = {
     "ssh_proxy_high_volume": _sim_ssh_proxy_high_volume,
     "uncommon_ssh_rare_internal": _sim_uncommon_ssh_rare_internal,
     "uncommon_ssh_nonstd_port": _sim_uncommon_ssh_nonstd_port,
+    "uncommon_ssh_internal": _sim_uncommon_ssh_internal,
     "unusual_ssh_external": _sim_unusual_ssh_external,
     "ssh_proxy_suspicious": _sim_ssh_proxy_suspicious, "ssh_proxy_detected": _sim_ssh_proxy_detected,
     "dcsync_non_dc_appid": _sim_dcsync_non_dc_appid, "dcsync_large_appid": _sim_dcsync_large_appid,
     "recurring_rare_domain_suspicious_as": _sim_recurring_rare_domain_suspicious_as,
+    "recurring_rare_domain_abnormal_suffix": _sim_recurring_rare_domain_abnormal_suffix,
 }
 
 

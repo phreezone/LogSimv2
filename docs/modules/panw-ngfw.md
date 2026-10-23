@@ -170,10 +170,10 @@ The module shares the simulation's identity/network model (`session_utils`, `res
 ## Threat scenarios
 
 Dispatched from `_generate_threat_log` (weighted) or forced by name via `scenario_event`.
-44 analytic events are built to satisfy a specific native PAN NGFW traffic-log detector or
-one of its traffic-only variations, and are offered on demand; 4 further events are realistic
-network patterns kept for hunts / correlation but **not** offered on demand (their detectors
-need EAL-decoded fields a CEF traffic log cannot carry).
+Traffic-shaped scenarios are offered on demand when CEF traffic can represent the documented
+detector evidence. This includes informational variants for controlled validation; they may
+not appear in the alerts table. Protocol-decoded, endpoint-process, or account-state patterns
+that CEF cannot represent remain hunt/correlation-only.
 
 Targets name the alert the tenant actually raises. Informational alerts never reach the
 alerts table, so where a detector's base name is Informational and the shape produces a Low
@@ -219,8 +219,12 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 | `rare_appid` | Rare AppID usage to a rare destination | rare App-ID to a rare dest | ✗ |
 | `new_ftp_server` | New FTP Server | first-seen internal FTP server | ✗ |
 | `rare_domain_comm` | Abnormal Communication to a Rare Domain | one session to a newly-registered domain, with URL log | ✗ |
+| `rare_domain_less_common_port` | Abnormal Communication to a Rare Domain With a Less Common Port | rare domain over SSL on an uncommon port, with URL log | new (informational) |
+| `rare_domain_suspicious_as` | Abnormal Communication to a Rare Domain to a Suspicious Autonomous System (AS) | single rare-domain session on 443; XSIAM supplies AS reputation | new (informational; enrichment-dependent) |
+| `recurring_rare_domain_abnormal_suffix` | Abnormal Recurring Communications to a Rare Domain With an Abnormal Domain Suffix | daily beacons to a stable rare domain with an uncommon suffix | new (informational; daily) |
 | `dcsync_non_dc` | Possible DCSync from a non domain controller | DRSUAPI RPC (135 + dynamic) from a non-DC → DC | ? |
 | `rdp_unmanaged` | RDP from an unmanaged endpoint … | RDP from an unmanaged source in a managed subnet | ? |
+| `rdp_unmanaged_dense_subnet` | RDP from an unmanaged endpoint in a typically managed subnet with a significantly higher number of managed endpoints in the subnet | seeds 15–25 workstation-category peers in the same subnet before an unmanaged RDP source; XSIAM must classify peers as managed | new (inventory-dependent) |
 | `dormant_host_conn` | Abnormal connections to a dormant host … | new endpoint → long-inactive host | ? |
 | `crypto_miner` | A Possible crypto miner was detected on a host | mining-pool traffic on stratum ports | ? |
 | `ipfs` | Possible use of IPFS was detected | IPFS node traffic | ? |
@@ -237,14 +241,17 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 | `recurring_rare_domain_suspicious_as` | Abnormal Recurring Communications to a Rare Domain to a Suspicious Autonomous System (AS) | daily beacon on 443 to a rare-pool (bulletproof-hosting-style) IP | new (daily) |
 | `dormant_host_known_source` | Abnormal connections to a dormant host | established workstation → long-inactive host | new |
 | `large_upload_generic_small` | Large Upload (Generic) Lower than 100 MB | 60–95 MB on an uncommon port | new |
+| `large_upload_generic_popular_target` | Large Upload (Generic) to a Frequently Used Upload Target | 300–700 MB SSH push to configured, commonly used GitHub destination | new (informational; depends on destination baseline) |
 | `new_ssh_admin_behavior` | New SSH Administrative Behavior | 8–11 novel SSH-only admin pairs | new |
 | `new_ftp_server_external` | New FTP Server from an external source | internet clients pulling files from a newly serving internal :21 | new |
+| `new_ftp_server_port_scan` | New FTP Server Accessed Via a Port Scan | privileged-port scan followed by successful FTP to the same newly observed server | new (informational) |
 | `dcsync_internet_facing` | Possible DCSync from an internet-facing server | DMZ web server → DC DRSUAPI | new |
 | `dcsync_large` | Large DCSync from a non domain controller | non-DC pulls 150–600 MB from a DC | new |
 | `dcsync_non_dc_appid` | DCSync from a non domain controller | replication App-ID-identified as `ms-dc-replication` | new |
 | `dcsync_large_appid` | Large DCSync from a non domain controller by AppID | 150–600 MB pull, App-ID `ms-dc-replication` | new |
 | `rare_appid_internet_facing` | Rare AppID usage … from an internet-facing server | DMZ web server, rare App-ID, rare destination | new |
-| `spam_bot_failed` | *(non-analytic)* | 40–90 external SMTP servers, ~80% reset/unanswered; its alert (Failed Spam Bot Traffic) is Informational and never reaches the alerts table | — |
+| `uncommon_ssh_internal` | Uncommon SSH session was established to an internal IP | SSH-habit user connects to an internal server over port 22 | new (informational) |
+| `spam_bot_failed` | Failed Spam Bot Traffic | 400–800 SMTP sessions to 150–300 servers, with named MX domains plus unresolved IPs and ~80% reset/unanswered | new (informational) |
 | `ssh_suspicious_nonstd` | A suspicious SSH session was established | SSH to a rare external IP on 2222/2022/22222/8022/10022 | new |
 | `ssh_high_volume` | Uncommon SSH … higher than usual volume | SSH-habit user → usual jump host, 300–900 MB | new |
 | `host_attack_chain` | Multiple network-related alerts produced by different detectors on the same host | one host: port scan → failed connections → generic upload within the hour | new |
@@ -260,7 +267,7 @@ All sequences end at or before the current time.
 Detectors that want the same (host, destination) pair "repeatedly over many days" cannot be
 fed by a back-dated burst on this path. `_DAILY_EVENTS` (`recurring_rare_ip`,
 `recurring_rare_domain`, `recurring_rare_domain_attack_port`, `recurring_rare_domain_suspicious_as`,
-`ddns_access`) claim the first threat slots of each UTC day, as Cisco
+`recurring_rare_domain_abnormal_suffix`, `ddns_access`) claim the first threat slots of each UTC day, as Cisco
 ASA does, so each pair — one fixed host (`recurring_host(key, n=1)`) and its destination
 persisted in the beacon map — recurs on every real day the module runs at a threat level.
 Likewise `_ssh_habit_users()` (8 stable users) make everyday SSH to their usual jump host part of
@@ -273,7 +280,7 @@ httpd module's servers (`apache_config.server_ips`, `www.examplecorp.com`) on 44
 `untrust → dmz`, so the firewall and the httpd access logs describe the same servers, and
 `dcsync_internet_facing` / `rare_appid_internet_facing` originate from those servers.
 
-**On-demand vs background.** An event is offered on demand only when its target alert is **Low or higher** (those are the ones that appear in the XSIAM alerts table). Events whose only reachable detector is **Informational** — Rare SMTP/S, Torrent, the P2P/IPFS patterns, Rare AppID (base), SSH-proxy (base), Abnormal Communication to a Rare Domain (base), New SSH Administrative Behavior, sub-100 MB Generic upload, dormant-host (newly-seen-endpoint base) — are generated as background traffic but **not** offered on demand, because they never surface as an alert-table row. Spam Bot Traffic is **Low** (confirmed firing in this tenant) and stays on demand; its *Failed Spam Bot Traffic* variation is Informational and is background-only.
+**Informational variants.** Traffic-shaped informational scenarios are selectable for explicit generation so their ingestion and analytic behavior can be checked. Informational severity means they may not produce an alerts-table row; verify their raw events or analytics output separately. Variants requiring process causality, DNS query contents, Kerberos/NTLM protocol results, account state, or an XDR Agent remain excluded from the traffic-only catalog.
 
 ## Detector coverage vs. the 49 PAN NGFW traffic-log alerts
 
