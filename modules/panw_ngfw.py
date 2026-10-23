@@ -879,6 +879,7 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "spam_bot_failed",      "weight": 2,  "analytic": True,  "xsiam_alert": "Failed Spam Bot Traffic"},
     {"event": "ssh_suspicious_nonstd", "weight": 2, "analytic": True,  "xsiam_alert": "A suspicious SSH session was established"},
     {"event": "ssh_high_volume",      "weight": 2,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established that involved a higher than usual volume"},
+    {"event": "ssh_proxy_high_volume", "weight": 1, "analytic": True,  "xsiam_alert": "High Volume Unusual SSH activity that resembles SSH proxy"},
     {"event": "host_attack_chain",    "weight": 2,  "analytic": True,  "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
     # Realistic network patterns whose dedicated analytic needs EAL-decoded fields the CEF
     # traffic log cannot carry — kept for hunts / correlation, NOT offered on demand.
@@ -1323,23 +1324,51 @@ def _sim_unusual_ssh(config, session_context):
     return out
 
 
+def _ssh_relay(config, src, user, shost, mb_range, dur_range, inbound):
+    """A host relaying SSH: an inbound SSH session and an outbound one it opens 30-120 s
+    later, overlapping in time, with the bytes of one leg passing through the other.
+
+    Volumes mirror (+-5%) because a relay forwards what it receives: client->relay equals
+    relay->target, and target->relay equals relay->client. Both logs are written at session
+    end and both ends fall before now."""
+    dom, outbound = _rare_ext(config, f"sshproxy|{user or src}")
+    up = random.randint(*mb_range) * 1024 * 1024           # flowing client -> target
+    down = random.randint(*mb_range) * 1024 * 1024         # flowing target -> client
+    jitter = lambda b: int(b * random.uniform(0.95, 1.05))
+    dur_in = random.randint(*dur_range)
+    lag = random.randint(30, 120)
+    dur_out = max(60, dur_in - lag - random.randint(10, 60))
+    start = time.time() - dur_in - 30
+    print(f"    - PAN NGFW simulating: SSH relay on {src}: {inbound} -> {src} -> {outbound} "
+          f"({up // 2**20} MB / {down // 2**20} MB)")
+    return [
+        _conn(config, inbound, src, 22, "ssh", duser=user, dhost=shost, from_zone="untrust",
+              to_zone="trust", bytes_sent=up, bytes_received=jitter(down),
+              duration_s=dur_in, ts=start + dur_in, end_reason="tcp-fin"),
+        _conn(config, src, outbound, 22, "ssh", suser=user, shost=shost, dhost=dom,
+              bytes_sent=jitter(up), bytes_received=down,
+              duration_s=dur_out, ts=start + lag + dur_out, end_reason="tcp-fin"),
+    ]
+
+
 def _sim_ssh_proxy(config, session_context):
     """A host both receives and initiates SSH within a window (SSH-proxy shape).
 
     Relay volume stays modest (1-20 MB each way): at 20-200 MB the outbound leg read as
     exfiltration and fired Large Upload (Generic) instead (detector test, 2026-10-22)."""
     src, user, shost = _threat_actor(config, session_context)
-    inbound = random_external_ip()
-    dom, outbound = _rare_ext(config, f"sshproxy|{user}")
-    t0 = time.time() - 600
-    mb = lambda: random.randint(1, 20) * 1024 * 1024
-    return [
-        _conn(config, inbound, src, 22, "ssh", duser=user, dhost=shost, from_zone="untrust",
-              to_zone="trust", bytes_sent=mb(), bytes_received=mb(),
-              duration_s=random.randint(1800, 10800), ts=t0),
-        _conn(config, src, outbound, 22, "ssh", suser=user, shost=shost, dhost=dom,
-              bytes_sent=mb(), bytes_received=mb(), duration_s=random.randint(1800, 10800), ts=t0 + 60),
-    ]
+    return _ssh_relay(config, src, user, shost, (1, 20), (1800, 10800), random_external_ip())
+
+
+def _sim_ssh_proxy_high_volume(config, session_context):
+    """"High Volume Unusual SSH activity that resembles SSH proxy": the relay moving hundreds
+    of MB each way for 2-6 hours. The relay is an SSH-habit user's host (real per-host SSH
+    history to deviate from) and the inbound client is a rare external host, not ambient
+    internet noise. Expect Large Upload (Generic) alongside it: the outbound leg is a big
+    transfer to a rare external host, which a real relay of this size also is."""
+    src, user, shost = _ssh_habit_actor(config, session_context)
+    return _ssh_relay(config, src, user, shost, (200, 600), (7200, 21600),
+                      rare_external_ip(f"sshproxy-in|{src}"))
 
 
 def _sim_rare_ssh_external(config, session_context):
@@ -1763,6 +1792,7 @@ _THREAT_DISPATCH = {
     "rare_appid_internet_facing": _sim_rare_appid_internet_facing,
     "spam_bot_failed": _sim_spam_bot_failed, "ssh_suspicious_nonstd": _sim_ssh_suspicious_nonstd,
     "ssh_high_volume": _sim_ssh_high_volume, "host_attack_chain": _sim_host_attack_chain,
+    "ssh_proxy_high_volume": _sim_ssh_proxy_high_volume,
 }
 
 
