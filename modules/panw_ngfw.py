@@ -826,9 +826,12 @@ def _generate_benign_log(config, session_context=None):
 #                    will fire (Kerberos/NTLM/dormant-account detectors need EAL-decoded
 #                    protocol fields a CEF traffic log does not carry; uncommon-AppID and the
 #                    SSH-to-cloud/process variations additionally require the XDR Agent).
+# Targets name the alert the tenant actually raises: where a detector's base name is
+# Informational (never shown in the alerts table) and the shape produces a Low variation,
+# the variation is the target (e.g. Port Scan fires as "Suspicious port scan").
 _DEFAULT_THREAT_EVENTS = [
-    {"event": "port_scan",            "weight": 8,  "analytic": True,  "xsiam_alert": "Port Scan"},
-    {"event": "port_sweep",           "weight": 6,  "analytic": True,  "xsiam_alert": "Port Sweep"},
+    {"event": "port_scan",            "weight": 8,  "analytic": True,  "xsiam_alert": "Suspicious port scan"},
+    {"event": "port_sweep",           "weight": 6,  "analytic": True,  "xsiam_alert": "Port Sweep to multiple subnets"},
     {"event": "failed_connections",   "weight": 6,  "analytic": True,  "xsiam_alert": "Failed Connections"},
     {"event": "large_upload_https",   "weight": 5,  "analytic": True,  "xsiam_alert": "Large Upload (HTTPS)"},
     {"event": "large_upload_https_nonstd", "weight": 2, "analytic": True, "xsiam_alert": "Large Upload (HTTPS)"},
@@ -844,14 +847,14 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "rare_smtp",            "weight": 2,  "analytic": True,  "xsiam_alert": "Rare SMTP/S Session"},
     {"event": "spam_bot",             "weight": 3,  "analytic": True,  "xsiam_alert": "Spam Bot Traffic"},
     {"event": "uncommon_ssh",         "weight": 4,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established"},
-    {"event": "unusual_ssh",          "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH Activity"},
+    {"event": "unusual_ssh",          "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual, long SSH activity with tunnel characteristics"},
     {"event": "ssh_proxy",            "weight": 2,  "analytic": True,  "xsiam_alert": "Unusual SSH activity that resembles SSH proxy"},
     # Re-targeted: "Rare process created an SSH session ..." keys on the PROCESS, which a
     # firewall log cannot carry (docs/firewall-analytics.md section 4). An SSH-habit user
     # reaching a rare external IP is the traffic-only "Uncommon SSH ... to a rare IP" variation.
     {"event": "rare_ssh_external",    "weight": 2,  "analytic": True,  "xsiam_alert": "An Uncommon SSH session was established to a rare IP address"},
     {"event": "recurring_rare_ip",    "weight": 4,  "analytic": True,  "xsiam_alert": "Recurring access to rare IP"},
-    {"event": "recurring_rare_domain","weight": 4,  "analytic": True,  "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
+    {"event": "recurring_rare_domain","weight": 4,  "analytic": True,  "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain With a Less Common Port"},
     {"event": "rare_domain_comm",     "weight": 3,  "analytic": True,  "xsiam_alert": "Abnormal Communication to a Rare Domain"},
     {"event": "ddns_access",          "weight": 2,  "analytic": True,  "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
     {"event": "crypto_miner",         "weight": 3,  "analytic": True,  "xsiam_alert": "A Possible crypto miner was detected on a host"},
@@ -876,7 +879,9 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "dcsync_internet_facing", "weight": 1, "analytic": True,  "xsiam_alert": "Possible DCSync from an internet-facing server"},
     {"event": "dcsync_large",         "weight": 1,  "analytic": True,  "xsiam_alert": "Large DCSync from a non domain controller"},
     {"event": "rare_appid_internet_facing", "weight": 2, "analytic": True, "xsiam_alert": "Rare AppID usage to a rare destination from an internet-facing server"},
-    {"event": "spam_bot_failed",      "weight": 2,  "analytic": True,  "xsiam_alert": "Failed Spam Bot Traffic"},
+    # "Failed Spam Bot Traffic" is Informational: it never reaches the alerts table, so it
+    # is not offered on demand. The traffic stays as background realism.
+    {"event": "spam_bot_failed",      "weight": 2,  "analytic": False, "xsiam_alert": None},
     {"event": "ssh_suspicious_nonstd", "weight": 2, "analytic": True,  "xsiam_alert": "A suspicious SSH session was established"},
     {"event": "ssh_high_volume",      "weight": 2,  "analytic": True,  "xsiam_alert": "Uncommon SSH session was established that involved a higher than usual volume"},
     {"event": "ssh_proxy_high_volume", "weight": 1, "analytic": True,  "xsiam_alert": "High Volume Unusual SSH activity that resembles SSH proxy"},
@@ -1205,18 +1210,52 @@ def _sim_rare_smtp(config, session_context):
                   duration_s=random.randint(1, 30))]
 
 
+def _recipient_domain(i):
+    """A recipient mail domain: a real long-tail registrable domain when the corpus is
+    loaded, else a synthetic one."""
+    try:
+        from modules import domain_corpus
+    except ImportError:
+        import domain_corpus
+    d = domain_corpus.tail_domain("web") if domain_corpus.available() else None
+    return d or rare_domain(f"rcpt|{i}|{random.random()}")
+
+
 def _sim_spam_bot(config, session_context):
-    """One host connects to an excessive number of external SMTP servers (port 25)."""
+    """One host talking SMTP straight to an excessive number of external mail servers.
+
+    Per the detector: "the volume of traffic is not considered. A count is performed based
+    on the number of domains being contacted, as well as the number of unresolved IP
+    addresses." So about half the servers are the MX hosts of distinct recipient domains
+    (named, resolver-consistent) and the rest are bare, never-resolved IPs, on 25 / 587 /
+    465. The Spam Bot alerts that fire here (Check Point, Firepower, FortiGate) read
+    "connected to 13-48 SMTP servers in the last 3 days" with app_id ip,tcp,smtp."""
     src, user, shost = _threat_actor(config, session_context)
-    n = random.randint(40, 90)
-    print(f"    - PAN NGFW simulating: spam bot {src} -> {n} external SMTP servers")
-    t0 = time.time() - n * 30
+    # A spam run: 150-300 distinct mail servers, 400-800 SMTP sessions (some servers take
+    # several deliveries), spread over the last ~2 hours.
+    servers, domains = [], set()
+    for i in range(random.randint(150, 300)):
+        if random.random() < 0.5:
+            dom = _recipient_domain(i)
+            domains.add(dom)
+            mx = f"{random.choice(['mx', 'mx1', 'mail', 'smtp'])}.{dom}"
+            servers.append((resolver.answer_for(mx, config), mx))
+        else:
+            servers.append((random_external_ip(), None))      # unresolved: no DNS behind it
+    n = random.randint(max(400, len(servers)), 800)
+    picks = servers + [random.choice(servers) for _ in range(n - len(servers))]
+    random.shuffle(picks)
+    span = random.randint(5400, 7200)
+    t0 = time.time() - span
     out = []
-    for i in range(n):
-        dst = random_external_ip()
-        out.append(_conn(config, src, dst, 25, "smtp", suser=user, shost=shost,
-                         bytes_sent=random.randint(2000, 40000), bytes_received=random.randint(200, 2000),
-                         duration_s=random.randint(1, 20), ts=t0 + i * 30))
+    for i, (dst, dhost) in enumerate(picks):
+        port = random.choices([25, 587, 465], weights=[70, 20, 10])[0]
+        out.append(_conn(config, src, dst, port, "ssl" if port == 465 else "smtp", suser=user,
+                         shost=shost, dhost=dhost, bytes_sent=random.randint(2000, 40000),
+                         bytes_received=random.randint(200, 2000), duration_s=random.randint(1, 20),
+                         ts=t0 + span * i / n))
+    print(f"    - PAN NGFW simulating: spam bot {src} -> {n} SMTP sessions to {len(servers)} servers "
+          f"({len(domains)} recipient domains, {len(servers) - len(domains)} unresolved IPs)")
     return out
 
 
