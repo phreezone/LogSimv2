@@ -411,3 +411,36 @@ def is_alerting(activity):
 
 # What benign traffic may draw: the full catalog minus ALERTING_ACTIVITIES.
 BENIGN_ACTIVITIES = [a for a in AUDIT_ACTIVITIES if not is_alerting(a[0])]
+
+
+# Directory operations the Cloud-module "Azure Audit Log" analytics raise on by themselves. Those
+# analytics read the Entra AuditLogs category streamed through an event hub (msft_azure_raw), not
+# the Graph directoryAudits feed: 30 days of ~600 benign Add service principal / Add owner / Add
+# user records on the Graph feed raised none of them. azuread_audit therefore sends an event-hub
+# copy of every benign record EXCEPT these (routine directory work would otherwise trip them all
+# day); threat scenarios are copied in full.
+CLOUD_ALERTING_ACTIVITIES = frozenset(a.lower() for a in (
+    # service principals / applications
+    "Add service principal", "Add application", "Delete service principal", "Remove service principal",
+    "Hard delete service principal", "Delete application", "Hard Delete application",
+    "Add service principal credentials", "Update application - Certificates and secrets management",
+    "Add owner to application", "Add owner to service principal",
+    "Remove owner from application", "Remove owner from service principal",
+    # role / app-role grants and consent
+    "Add app role assignment to service principal", "Add app role assignment grant to user",
+    "Consent to application", "Grant contextual consent to application", "Add delegated permission grant",
+    # users, guests, groups
+    "Add user", "Delete user", "Hard Delete user", "Reset password", "Reset user password",
+    "Change user password", "Set force change user password", "Invite external user",
+    "Invite external user with reset invitation status", "Add group", "Delete group", "Hard Delete group",
+    # Conditional Access and authentication methods
+    "Add Conditional Access policy", "Update Conditional Access policy", "Delete Conditional Access policy",
+    "Admin registered security info", "User registered security info",
+    "User registered all required security info", "Add passwordless phone sign-in credential",
+))
+_ROLE_MEMBER_MARKERS = ("member to role", "member from role")   # incl. the PIM / scoped variants
+
+
+def is_cloud_alerting(activity):
+    a = (activity or "").rstrip(".").strip().lower()
+    return a in CLOUD_ALERTING_ACTIVITIES or any(m in a for m in _ROLE_MEMBER_MARKERS)

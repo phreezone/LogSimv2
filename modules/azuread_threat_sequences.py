@@ -572,8 +572,31 @@ def build(name, config=None, context=None):
     argument carrying session_context; single-plane sequences take only config."""
     fn = SEQUENCES[name]
     if len(inspect.signature(fn).parameters) >= 2:
-        return fn(config or {}, context)
-    return fn(config or {})
+        steps = fn(config or {}, context)
+    else:
+        steps = fn(config or {})
+    return _with_eventhub(steps, config)
+
+
+EH = (ac.EVENTHUB_SOURCE, ac.EVENTHUB_INTEGRATION)
+
+
+def _with_eventhub(steps, config):
+    """Each step plus its event-hub counterparts (msft_azure_raw, the input of the Cloud analytics):
+    a Graph sign-in's SignInLogs copy; a directory change's AuditLogs copy, preceded by the Graph
+    API call that made it. Order is kept, so the chain still reads in sequence."""
+    if not ac.eventhub_enabled(config, aad.CONFIG_KEY):
+        return steps
+    out = []
+    for src, integ, rec in steps:
+        if src == AUD_SRC and isinstance(rec, dict) and "activityDisplayName" in rec:
+            out += [(EH[0], EH[1], g) for g in aaud._graph_companions([rec])]
+        out.append((src, integ, rec))
+        if src == AAD_SRC and isinstance(rec, dict) and "signInEventTypes" in rec:
+            out.append((EH[0], EH[1], ac.eventhub_signin(rec)))
+        elif src == AUD_SRC and isinstance(rec, dict) and "activityDisplayName" in rec:
+            out.append((EH[0], EH[1], ac.eventhub_audit(rec)))
+    return out
 
 
 def _send_windows(win_events, source_host="logsim.examplecorp.local"):
