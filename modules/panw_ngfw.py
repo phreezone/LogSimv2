@@ -72,7 +72,8 @@ try:
                                         rare_internal_host, rare_known_host, new_ftp_server_host,
                                         known_internal_hosts, sweep_targets, stable_external_ip,
                                         rare_source_host, rare_domain, NONSTD_HTTPS_PORTS, exfil_destination,
-                                        correlated_or_random_user, beacon_targets, recurring_host, stable_subset)
+                                        correlated_or_random_user, beacon_targets, recurring_host, stable_subset,
+                                        ip_country, get_user_agent)
     from modules import resolver
     from modules import threat_domains
     from modules import mgmt_plane
@@ -83,7 +84,8 @@ except ImportError:
                                 rare_internal_host, rare_known_host, new_ftp_server_host,
                                 known_internal_hosts, sweep_targets, stable_external_ip,
                                 rare_source_host, rare_domain, NONSTD_HTTPS_PORTS, exfil_destination,
-                                correlated_or_random_user, beacon_targets, recurring_host, stable_subset)
+                                correlated_or_random_user, beacon_targets, recurring_host, stable_subset,
+                                        ip_country, get_user_agent)
     import resolver
     import threat_domains
     import mgmt_plane
@@ -273,9 +275,86 @@ def _random_mac(host=None):
     return f"{random.choice(ouis)}:{random.randint(0,255):02x}:{random.randint(0,255):02x}:{random.randint(0,255):02x}"
 
 
-def _src_osfamily():
-    names, w = zip(*_SRC_OSFAMILY)
-    return random.choices(names, weights=w)[0]
+# --- Device-ID: one stable profile per host ---------------------------------------------
+# PAN Device-ID fields (source_/dest_device_category, profile, model, vendor, osfamily,
+# osversion, mac) are documented columns of the traffic format. They are stable properties
+# of a machine, so they come from the session identity (os_type/os_version/device_type)
+# when the host is a known user device, else from a hash of the host: never a per-event
+# draw, which used to flip a host's OS family between consecutive logs.
+_HOST_INFO = {}          # source ip -> session user info, filled as identities are picked
+
+_DEVICE_MODELS = {
+    "Windows": [("Dell Inc.", "Latitude 7440"), ("Lenovo", "ThinkPad T14 Gen 4"),
+                ("HP", "EliteBook 840 G10")],
+    "Mac":     [("Apple", "MacBookPro18,3"), ("Apple", "MacBookAir10,1")],
+    "Linux":   [("Dell Inc.", "Precision 3660"), ("Lenovo", "ThinkPad P1 Gen 6")],
+    "iOS":     [("Apple", "iPhone15,2"), ("Apple", "iPad13,1")],
+    "Android": [("Samsung", "SM-S911B"), ("Google", "Pixel 8")],
+}
+_SERVER_MODELS = [("Dell Inc.", "PowerEdge R750"), ("VMware, Inc.", "VMware Virtual Platform"),
+                  ("HPE", "ProLiant DL380 Gen10")]
+_OS_VERSIONS = {"Windows": ["11", "10"], "Mac": ["14.5", "13.6"], "Linux": ["22.04", "24.04"],
+                "iOS": ["17.5"], "Android": ["14"]}
+_PROFILES = {"Windows": "Windows Workstation", "Mac": "Apple Mac", "Linux": "Linux Workstation",
+             "iOS": "Apple iPhone", "Android": "Android Phone"}
+
+
+def _h(s):
+    return int(hashlib.sha256(str(s).encode()).hexdigest(), 16)
+
+
+def _remember(info):
+    """Record a picked identity so every log for its address carries the same device."""
+    if info and info.get("ip"):
+        _HOST_INFO[info["ip"]] = info
+    return info
+
+
+def _osfamily(os_type):
+    o = str(os_type or "").lower()
+    if "win" in o:
+        return "Windows"
+    if "mac" in o or "darwin" in o or "os x" in o:
+        return "Mac"
+    if "ios" in o or "iphone" in o or "ipad" in o:
+        return "iOS"
+    if "android" in o:
+        return "Android"
+    if "linux" in o or "ubuntu" in o:
+        return "Linux"
+    return None
+
+
+def _src_device(ip, host, category="workstation"):
+    """Device-ID columns for a source host (prefix 'source_device_')."""
+    if category == "unknown":           # unmanaged: Device-ID has no profile for it
+        return {"category": "unknown"}
+    info = _HOST_INFO.get(ip) or {}
+    fam = _osfamily(info.get("os_type"))
+    if not fam:
+        names, w = zip(*_SRC_OSFAMILY)
+        fam = random.Random(_h(f"fam|{host or ip}")).choices(names, weights=w)[0]
+    if str(info.get("device_type", "")).lower() in ("mobile", "phone", "tablet") and fam in ("Windows", "Mac", "Linux"):
+        fam = "iOS" if fam == "Mac" else "Android"
+    vendor, model = _DEVICE_MODELS[fam][_h(f"model|{host or ip}") % len(_DEVICE_MODELS[fam])]
+    osver = str(info.get("os_version") or _OS_VERSIONS[fam][_h(f"osv|{host or ip}") % len(_OS_VERSIONS[fam])])
+    return {"category": "mobile" if fam in ("iOS", "Android") else category,
+            "profile": _PROFILES[fam], "model": model, "vendor": vendor,
+            "osfamily": fam, "osversion": osver, "mac": host_mac(host) if host else None,
+            "host": host}
+
+
+def _dst_device(config, ip, host):
+    """Device-ID columns for an internal destination (prefix 'dest_device_')."""
+    if not _is_internal(ip):
+        return {}
+    if ip in set(_dcs(config)) or ip in set(config.get("internal_servers") or []):
+        fam = "Windows" if (ip in set(_dcs(config)) or _h(f"srvos|{ip}") % 3) else "Linux"
+        vendor, model = _SERVER_MODELS[_h(f"srvmodel|{ip}") % len(_SERVER_MODELS)]
+        return {"category": "server", "profile": f"{fam} Server", "model": model, "vendor": vendor,
+                "osfamily": fam, "osversion": "Server 2022" if fam == "Windows" else "22.04",
+                "mac": host_mac(host) if host else None, "host": host}
+    return _src_device(ip, host)       # a workstation on the receiving end
 
 
 def _proto_for(app, dpt):
@@ -331,10 +410,18 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
     t = ts if ts is not None else time.time()
     serial, name = _serial(config), _fw_name(config)
     iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t))
+    # The documented __timestamp is $start (session START) and __tz is $high_res_timestamp;
+    # time_generated is when the log was written, i.e. the session end.
+    try:
+        start = t - float(fields.get("total_time_elapsed") or 0)
+    except (TypeError, ValueError):
+        start = t
+    start_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(start))
+    hires = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + f".{int((t % 1) * 1000):03d}+00:00"
     base = {
         "__firewall_type": fw_type or f"firewall.{log_type.lower()}",
-        "__timestamp":     iso,
-        "__tz":            "+00:00",
+        "__timestamp":     start_iso,
+        "__tz":            hires,
         # The Syslog Collector routes on __firewall_type but does NOT rename the body: each
         # key lands as a column of that name. So the documented `subtype` is sent alongside
         # `sub_type`, the column the dataset (and its modeling rule's FAILED-on-deny/drop
@@ -345,6 +432,8 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
         "log_time":        iso,
         "time_generated":  iso,
         "rt":              str(int(t * 1000)),   # event time; _time is still the ingest time
+        "time_generated_high_res": hires,
+        "session_start_time": start_iso,
         "log_source_id":   serial,
         "log_source_name": name,
         "sequence_no":     _seqno(),
@@ -355,11 +444,13 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
     }
     merged = {**base, **fields}
     # AD-qualify bare usernames so XSIAM Identity stitches firewall users with cloud users.
-    for uf in ("source_user", "dest_user"):
+    keep_bare = merged.pop("_no_user_qualify", False)
+    for uf in ("source_user", "dest_user", "users"):
         uv = merged.get(uf)
-        if uv and "\\" not in str(uv) and "@" not in str(uv) and not merged.pop("_no_user_qualify", False):
+        if uf == "users" and uv == merged.get("source_ip"):
+            continue                    # no User-ID: the column holds the address
+        if uv and "\\" not in str(uv) and "@" not in str(uv) and not keep_bare:
             merged[uf] = f"EXAMPLECORP\\{uv}"
-    merged.pop("_no_user_qualify", None)
     ext = " ".join(f"{k}={_cef_escape(v)}" for k, v in merged.items() if v is not None and v != "")
     sw = _get_config(config).get("sw_version", _SW_VERSION)
     header = f"CEF:0|PANW|NGFW_CEF|{sw}|{subtype}|{log_type.lower()}|{severity}|"
@@ -371,7 +462,7 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
                     shost=None, suser=None, dhost=None, duser=None, proto=None,
                     from_zone="trust", to_zone="untrust", bytes_sent=None, bytes_received=None,
                     duration_s=None, end_reason=None, url_cat=None, nat_src=None, nat_dpt=None,
-                    spt=None, src_osfamily=None, src_category="workstation", rule=None):
+                    spt=None, src_category="workstation", rule=None):
     """Common extension dict for a traffic:end session (or deny/drop)."""
     forti = _get_config(config)
     meta = _APP.get(app, _APP["incomplete"])
@@ -417,14 +508,29 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
         "session_end_reason": end_reason,
         "source_user":      suser,
         "dest_user":        duser,
-        "source_device_category": src_category,
-        "source_device_host":     shost,
-        "source_device_osfamily": src_osfamily or _src_osfamily(),
-        "dest_device_host":       dhost,
+        # Real column: the User-ID user when known, else the source address (as in the
+        # live CLCS rows, which have no User-ID and show the IP).
+        "users":            suser or src_ip,
         "url_category":     url_cat or (random.choice(_URL_CAT_BENIGN) if meta[2] == "browser-based" else ""),
+        # Columns the traffic modeling rule reads (phantom data_source.yaml) and the live rows
+        # carry; not in the documented custom format, so sent under their column names.
+        "log_source":       "firewall",
+        "is_nat":           "false" if internal_dst else "true",
+        "is_proxy":         "false",
+        "source_location":  _location(src_ip, config),
+        "dest_location":    _location(dst_ip, config),
     }
-    if shost:
-        f["source_device_mac"] = _random_mac(shost)
+    defaults = meta[4]
+    nonstd = bool(defaults) and dpt not in defaults and app not in ("incomplete", "insufficient-data")
+    f["is_non_std_dest_port"] = 1 if nonstd else 0
+    f["non_standard_dest_port"] = dpt if nonstd else 0
+    for k, v in _src_device(src_ip, shost, src_category).items():
+        f[f"source_device_{k}"] = v
+    for k, v in _dst_device(config, dst_ip, dhost).items():
+        f[f"dest_device_{k}"] = v
+    # dest_device_host also names EXTERNAL destinations (the resolved FQDN): the modeling
+    # rule maps it to xdm.target.host.hostname, the only hostname a traffic log can carry.
+    f["dest_device_host"] = dhost
     # NAT only when the destination is external.
     if not internal_dst:
         f["nat_source"]      = nat_src or _nat_for(src_ip, config)
@@ -434,17 +540,63 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
     return f
 
 
+_PRIVATE_RANGES = (("10.0.0.0/8", "10.0.0.0-10.255.255.255"),
+                   ("172.16.0.0/12", "172.16.0.0-172.31.255.255"),
+                   ("192.168.0.0/16", "192.168.0.0-192.168.255.255"))
+
+
+def _location(ip, config):
+    """source_/dest_location as the live rows show it: the RFC1918 range for private
+    addresses, the two-letter country for public ones when the address comes from a
+    probed pool, else omitted (XSIAM geolocates the address itself)."""
+    try:
+        a = ip_address(ip)
+    except ValueError:
+        return None
+    for net, label in _PRIVATE_RANGES:
+        if a in ip_network(net):
+            return label
+    code, _name = ip_country(ip, config)
+    return code
+
+
 # Keys a URL log shares with the traffic log of the same session.
 _URL_SHARED_KEYS = ("source_ip", "source_port", "dest_ip", "dest_port", "nat_source",
                     "nat_source_port", "nat_dest", "nat_dest_port", "protocol", "source_user",
-                    "dest_user", "app", "app_category", "app_sub_category", "technology_of_app",
-                    "risk_of_app", "rule_matched", "rule_matched_uuid", "from_zone", "to_zone",
-                    "inbound_if", "outbound_if", "session_id", "source_device_category",
-                    "source_device_host", "source_device_mac", "source_device_osfamily")
+                    "dest_user", "users", "app", "app_category", "app_sub_category",
+                    "technology_of_app", "risk_of_app", "rule_matched", "rule_matched_uuid",
+                    "from_zone", "to_zone", "inbound_if", "outbound_if", "session_id",
+                    "log_source", "is_nat", "is_proxy", "source_location", "dest_location",
+                    "source_device_category", "source_device_profile", "source_device_model",
+                    "source_device_vendor", "source_device_osfamily", "source_device_osversion",
+                    "source_device_mac", "source_device_host")
+
+
+_UA_TOKEN = {"Windows": "Windows NT", "Mac": "Macintosh", "Linux": "X11; Linux",
+             "iOS": "iPhone", "Android": "Android"}
+_BROWSER_UAS = {
+    "Windows": ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"],
+    "Mac":     ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"],
+    "Linux":   ["Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0"],
+    "iOS":     ["Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"],
+    "Android": ["Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36"],
+}
+
+
+def _browser_ua(fam, session_ua, key):
+    """The host's browser User-Agent: its session identity's UA when that matches the
+    device's OS family, else a stable one for the family (the session pool does not
+    always agree with os_type, and a Linux UA on a Windows device is a tell)."""
+    fam = fam if fam in _BROWSER_UAS else "Windows"
+    if session_ua and _UA_TOKEN[fam] in session_ua:
+        return session_ua
+    pool = _BROWSER_UAS[fam]
+    return pool[_h(f"ua|{key}") % len(pool)]
 
 
 def _url_record(config, traffic_fields, domain, path="/", category=None, action="alert",
-                ts=None, method=None):
+                ts=None, method=None, user_agent=None):
     """The URL-filtering log PAN-OS writes for a web session (log_type THREAT, subtype url).
 
     Shape learned from the live panw_ngfw_url_raw feed: action=alert for an allowed,
@@ -455,16 +607,27 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
     f = {k: traffic_fields[k] for k in _URL_SHARED_KEYS if traffic_fields.get(k) not in (None, "")}
     cat = category or traffic_fields.get("url_category") or "computer-and-internet-info"
     risk = "high-risk" if cat in _URL_CAT_RISKY else "low-risk"
+    clear = f.get("app") != "ssl"          # undecrypted SSL exposes the SNI host only
+    info = _HOST_INFO.get(f.get("source_ip")) or {}
     f.update({
         "action":            action,
         "uri":               f"{domain}{path}",
         "url_domain":        domain,      # no parser derives it from uri on this path
         "url_category":      cat,
         "url_category_list": f"{cat},{risk}",
-        "http_method":       method or ("unknown" if f.get("app") == "ssl" else "get"),
+        "http_method":       method or ("get" if clear else "unknown"),
         "threat_id":         "9999",
         "threat_name":       "",
         "direction":         "client-to-server",
+        "direction_of_attack": "client to server",   # the live column (doc key: direction)
+        "severity":          "Informational",          # the live column's value
+        # The user's own browser (one stable UA per user/device), or the caller's override
+        # (scripted / non-browser clients).
+        "user_agent":        user_agent or _browser_ua(f.get("source_device_osfamily"),
+                                                       info.get("user_agent"), f.get("source_ip")),
+        "content_type":      ("text/html" if clear else None),
+        "http2_connection":  0,
+        "referer":           (f"https://{domain}/" if clear and path not in ("/", "") else None),
     })
     return _format_cef(config, "url", f, log_type="THREAT", severity=1, ts=ts, fw_type="firewall.url")
 
@@ -478,6 +641,7 @@ def _user_src(config, session_context, prefer_active=True):
         info = (correlated_or_random_user(session_context, preferred_device_type="workstation")
                 if prefer_active else get_random_user(session_context, preferred_device_type="workstation"))
         if info:
+            _remember(info)
             return info["ip"], info["username"], info.get("hostname")
     umap = config.get("shared_user_ip_map", {})
     if umap:
@@ -543,7 +707,7 @@ def _usual_jump_host(config, user):
 def _benign_ssh_habit(config, session_context):
     """One of the SSH-habit users opens an ordinary SSH session to their usual jump host."""
     user = random.choice(_ssh_habit_users(session_context))
-    info = get_user_by_name(session_context, user, "workstation")
+    info = _remember(get_user_by_name(session_context, user, "workstation"))
     if not info:
         return None
     jump = _usual_jump_host(config, user)
@@ -707,7 +871,8 @@ def _conn(config, src, dst, dpt, app, action="allow", *, suser=None, shost=None,
     return _format_cef(config, subtype, f, ts=ts)
 
 
-def _web(config, src, dst, dpt, app, domain, *, path="/", url_cat=None, method=None, ts=None, **kw):
+def _web(config, src, dst, dpt, app, domain, *, path="/", url_cat=None, method=None, ts=None,
+         user_agent=None, **kw):
     """[traffic:end, url] for one web session: same session_id, ports and NAT on both."""
     f = _traffic_fields(config, src, dst, dpt, app, dhost=domain, url_cat=url_cat,
                         **{k: v for k, v in kw.items() if k != "no_qualify"})
@@ -715,7 +880,7 @@ def _web(config, src, dst, dpt, app, domain, *, path="/", url_cat=None, method=N
         f["_no_user_qualify"] = True
     return [_format_cef(config, "end", dict(f), ts=ts),
             _url_record(config, f, domain, path=path, category=url_cat, method=method,
-                        ts=(ts if ts is not None else time.time()))]
+                        ts=(ts if ts is not None else time.time()), user_agent=user_agent)]
 
 
 def _threat_actor(config, session_context):
@@ -937,7 +1102,7 @@ def _sim_uncommon_ssh(config, session_context):
     everyday SSH to their usual jump host the benign baseline builds on real days; today
     they reach a rare internal destination instead."""
     habit = _ssh_habit_users(session_context)
-    info = get_user_by_name(session_context, random.choice(habit), "workstation") if habit else None
+    info = _remember(get_user_by_name(session_context, random.choice(habit), "workstation")) if habit else None
     if info:
         src, user, shost = info["ip"], info["username"], info.get("hostname")
     else:
