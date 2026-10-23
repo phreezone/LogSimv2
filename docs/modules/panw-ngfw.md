@@ -123,6 +123,22 @@ URL; `http_method=unknown` for undecrypted SSL). About 35% of benign web session
 every domain-based threat does. In this tenant the rare-domain detectors have fired only from
 PANW data that names the domain, which is what these logs provide.
 
+**Interfaces, NAT and direction.** Ingress/egress interfaces follow the zones a session
+crosses, not the destination: outbound (trust → untrust) enters on `interface_lan` and
+leaves on `interface_wan`; inbound (untrust → dmz/trust, e.g. the published web service)
+enters on `interface_wan` and leaves on `interface_dmz`/`interface_lan`; east-west stays on
+the LAN. Source NAT (`is_nat=true`, `nat_source`) is applied only to outbound Internet
+egress; east-west and inbound sessions are not NATed (no DNAT/VIP map is modelled, and the
+real TAP feed carries none). A denied/dropped session is the client's SYN with no reply:
+zero bytes, `packets_sent=1`, `packets_received=0`, `session_end_reason=policy-deny`.
+
+**Encrypted vs cleartext URL logs.** A URL log for cleartext HTTP (`app=web-browsing`/`http`)
+carries `http_method`, `user_agent`, `referer` and `content_type`; an undecrypted TLS
+session (`app=ssl`) exposes only the SNI host, so its URL log carries `url_domain` with
+`http_method=unknown` and **no** User-Agent, referer or content type — PAN-OS cannot see
+those without decryption. Reproducing case 68482's rare-User-Agent/HTTP-Server evidence
+therefore needs cleartext or decrypted HTTP (or the EAL logs), not an encrypted session.
+
 ## Benign mix
 
 Dispatched from `_generate_benign_log`:
