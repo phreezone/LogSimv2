@@ -31,6 +31,7 @@ import uuid
 from modules import azure_common as ac
 from modules import aks_audit as aks
 from modules import azure_activity_catalog as cat
+from modules import azure_dataplane as dp
 from modules import azure_estate as ae
 
 NAME = "Azure Activity"
@@ -511,15 +512,23 @@ def _b_kube(config, context):
     return aks.benign(admin)
 
 
+# Data-plane resource logs (Storage access, Key Vault, AI). High-volume machine traffic that runs
+# around the clock, so it is part of both the off-hours and business-hours mix.
+def _b_dataplane(config, context):
+    return random.choices([dp.benign_storage, dp.benign_keyvault, dp.benign_ai],
+                          weights=[6, 3, 2])[0](config, context)
+
+
 def generate_benign(config=None, context=None):
-    """One routine Activity event (or Started/Succeeded pair), or an AKS audit record. Off hours,
-    automation, policy, platform events and the clusters' own chatter continue; human changes
-    follow the business day."""
+    """One routine Activity event (or Started/Succeeded pair), an AKS audit record, or a data-plane
+    resource log. Off hours, automation, policy, platform events, cluster chatter and data-plane
+    traffic continue; human changes follow the business day."""
     if random.random() > ac.activity_weight():
-        f = random.choices([_b_automation, _b_policy, _b_platform, aks_benign_quiet], weights=[45, 17, 20, 18])[0]
+        f = random.choices([_b_automation, _b_policy, _b_platform, aks_benign_quiet, _b_dataplane],
+                           weights=[38, 14, 16, 14, 18])[0]
         return f(config, context)
-    f = random.choices([_b_curated, _b_tail, _b_automation, _b_policy, _b_platform, _b_kube],
-                       weights=[40, 16, 15, 10, 7, 12])[0]
+    f = random.choices([_b_curated, _b_tail, _b_automation, _b_policy, _b_platform, _b_kube, _b_dataplane],
+                       weights=[34, 14, 13, 9, 6, 10, 14])[0]
     return f(config, context)
 
 
