@@ -75,3 +75,20 @@ _local_validation/
 
 # Persistent simulator state (beacon destinations etc.); delete to reset
 state/
+
+# Secrets and key material: never commit (live values belong in .env)
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Terraform: state and tfvars hold live project IDs and SA private keys;
+# apply_and_configure.sh writes the SA keys next to the .tf files
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+terraform/**/*-key.json

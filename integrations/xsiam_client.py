@@ -52,12 +52,12 @@ _TRANSPORT_BACKOFF = 3.0 # seconds, multiplied by attempt number
 # fired log, and Vulnerability Policy alone is ~90% of this tenant's alert volume.
 ANALYTICS_SOURCES = ("XDR Analytics", "XDR Analytics BIOC", "Correlation")
 
-# microsoft_windows_raw is SHARED with a live WEC feed from a real lab DC
-# (a real lab DC). LogSim's synthetic events are in
-# examplecorp.local. Every ingest check and alert attribution MUST scope to the LogSim
-# domain, or real DC activity will be misread as a passing test.
+# microsoft_windows_raw may be SHARED with a live WEC feed from a real lab DC. LogSim's
+# synthetic events are in examplecorp.local. Every ingest check and alert attribution
+# MUST scope to the LogSim domain, or real DC activity will be misread as a passing test.
+# The real hosts on that feed come from XSIAM_FOREIGN_HOSTS (comma-separated) in .env.
 LOGSIM_DOMAIN = "examplecorp.local"
-FOREIGN_HOSTS = ()
+FOREIGN_HOSTS = tuple(h.strip() for h in os.environ.get("XSIAM_FOREIGN_HOSTS", "").split(",") if h.strip())
 
 # Alerts carry a `tags` list describing provenance, e.g. for a Windows identity detection:
 #   ['R:Domain Controllers', 'DT:Identity Analytics', 'DS:Microsoft/Windows', 'DOM:Security']
