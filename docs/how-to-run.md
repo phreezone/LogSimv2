@@ -131,7 +131,8 @@ Every module in `modules/` with a `NAME` is auto-discovered and offered in Mode 
 | Okta SSO | HTTP Collector | [okta.md](modules/okta.md) |
 | Proofpoint Email Gateway | HTTP Collector | [proofpoint.md](modules/proofpoint.md) |
 | Azure AD Sign-ins, Azure AD Audit, Office 365 Azure AD | Cribl receiver | [microsoft-entra.md](modules/microsoft-entra.md) |
+| Azure Activity | Cribl receiver | [azure-activity.md](modules/azure-activity.md) |
 | Office 365 Exchange Online, SharePoint Online, DLP, General | Cribl receiver | [microsoft-365.md](modules/microsoft-365.md) |
-| Identity Threat Campaigns *(opt-in coordinator)* | Cribl receiver + WEC | [microsoft-entra.md](modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
+| Identity Threat Campaigns *(Threats & Scenarios → Run Attack Scenario)* | Cribl receiver + WEC | [microsoft-entra.md](modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
 | Cisco ASA, Cisco Firepower, Check Point, Fortinet FortiGate | Syslog (TCP) | [firewall-analytics.md](firewall-analytics.md), [firewall-management-plane.md](firewall-management-plane.md) |
 | Zscaler Web Gateway, Apache httpd, Infoblox NIOS | Syslog (TCP) | [zscaler.md](modules/zscaler.md), [httpd.md](modules/httpd.md), [infoblox.md](modules/infoblox.md) |

@@ -128,11 +128,12 @@ DESCRIPTION = "Simulates Windows Security channel events (4624/4625/4634/4647/46
 XSIAM_VENDOR  = "Microsoft"
 XSIAM_PRODUCT = "Windows"
 CONFIG_KEY    = "windows_events_config"
-# generate_log() only DRAINS what the per-host workers buffered; Windows volume is set by
-# wks/dc_interval_multiplier, not by the dashboard rate. Draining faster than this adds
-# nothing, and at the dashboard's 10,000 calls/s the drain loop (each call walks the
-# whole roster in _get_windows_users) held the GIL so the workers and the releaser
-# starved: 0 events in 30 s (measured 2026-10-21). The dashboard honours this floor.
+# generate_log() only DRAINS what the per-host workers buffered; the dashboard rate sets
+# Windows VOLUME through set_event_interval() below, not through how often it calls.
+# Draining faster than this adds nothing, and at the dashboard's 10,000 calls/s the drain
+# loop (each call walks the whole roster in _get_windows_users) held the GIL so the
+# workers and the releaser starved: 0 events in 30 s (measured 2026-10-21). The dashboard
+# polls no faster than this floor.
 MIN_EVENT_INTERVAL = 0.05
 
 # Module-level pacing state
@@ -9291,6 +9292,107 @@ _WKS_BENIGN_GENS = {
 }
 
 
+class _BenignRate:
+    """Caps the COMBINED benign output of the DC and workstation workers at a total
+    events/s -- the dashboard's rate for this module (set_event_interval). Until
+    2026-10-21 the dashboard rate only set how often generate_log() drained the workers,
+    so Windows ran at its config pacing (~480 events/s from 265 hosts) whatever the
+    slider said: 0.1/s on the card was ~425 events/s on the wire.
+
+    A worker builds its result first and then takes one token per event (a sequence may
+    run the bucket into debt, so the average holds); it waits while the bucket is empty.
+    rate None = no cap: config pacing only (CLI, training, direct callers). Threats are
+    not capped -- the threat level times them, as in every other module."""
+
+    def __init__(self):
+        self.rate = None
+        self._tokens = 0.0
+        self._t = time.monotonic()
+        self._cond = threading.Condition()
+
+    def _refill(self, now):
+        if self.rate:
+            self._tokens = min(max(1.0, self.rate), self._tokens + (now - self._t) * self.rate)
+        self._t = now
+
+    def set_rate(self, rate):
+        with self._cond:
+            self._refill(time.monotonic())
+            old = self.rate
+            self.rate = rate if rate and rate > 0 else None
+            self._tokens = min(self._tokens, max(1.0, self.rate or 1.0))
+            self._cond.notify_all()
+        if self.rate is not None and (old is None or self.rate < old / 2):
+            _drop_scheduled_benign()
+
+    def acquire(self, n, stop_event) -> bool:
+        """Take *n* tokens, waiting while the bucket is empty, then wait while the release
+        is running more than _MAX_RELEASE_LAG_S late. Without that bound a rate the
+        process could not keep up with piled up due events that kept going out after the
+        slider was lowered (10,000/s -> 0.5/s still emitted ~1,870/s). Lateness, not heap
+        size: the heap also holds the not-yet-due tails of sequences, which are fine.
+        False only when stopping."""
+        if not self._take(n, stop_event):
+            return False
+        if self.rate is None:
+            return True
+        with _release_cond:
+            while (_release_heap and _release_heap[0][0] < time.time() - _MAX_RELEASE_LAG_S
+                   and not stop_event.is_set()):
+                _release_cond.wait(timeout=0.5)
+        return not stop_event.is_set()
+
+    def _take(self, n, stop_event) -> bool:
+        with self._cond:
+            while not stop_event.is_set():
+                if self.rate is None:
+                    return True
+                self._refill(time.monotonic())
+                if self._tokens >= 1.0 or self._tokens >= n:
+                    self._tokens -= n
+                    return True
+                self._cond.wait(timeout=min(1.0, (min(n, 1.0) - self._tokens) / self.rate))
+        return False
+
+    def pace(self, interval, n_workers):
+        """A worker's sleep between draws: its config interval, shortened when the cap
+        asks for more than n_workers draws per interval can make."""
+        rate = self.rate
+        if rate is None:
+            return interval
+        # 2x headroom: some draws produce nothing (a logoff with no open session).
+        return min(interval, max(0.001, n_workers / (2 * rate)))
+
+
+def _drop_scheduled_benign():
+    """Discard benign events scheduled but not yet released. Sequences are released at
+    their own timestamps, minutes ahead for some, so after a sharp rate cut the old rate
+    kept going out (~3,800 scheduled events, ~7/s for minutes after 10,000/s -> 0.5/s).
+    Threat events and activity-bus publishes are kept."""
+    with _release_cond:
+        kept = [e for e in _release_heap if e[2] is not None or _PUBLISH_KEY in e[4]]
+        dropped = len(_release_heap) - len(kept)
+        _release_heap[:] = kept
+        heapq.heapify(_release_heap)
+        _release_cond.notify_all()
+    return dropped
+
+
+_MAX_RELEASE_LAG_S = 2.0
+_BENIGN_RATE = _BenignRate()
+_N_BENIGN_WORKERS = 1        # DC + one per workstation, set by _ensure_orchestrator
+
+
+def set_event_interval(interval):
+    """Dashboard hook: this module's event_interval (seconds per event) becomes the cap
+    on total Windows benign events per second. None or <= 0 removes the cap."""
+    try:
+        interval = float(interval)
+    except (TypeError, ValueError):
+        interval = 0.0
+    _BENIGN_RATE.set_rate(1.0 / interval if interval > 0 else None)
+
+
 def _dc_worker(config, session_context, interval, stop_event):
     """Background thread generating DC-specific benign events."""
     _DEFER_IDS.on = True
@@ -9304,13 +9406,15 @@ def _dc_worker(config, session_context, interval, stop_event):
             result = fn(config, session_context)
             if result:
                 items = result if isinstance(result, list) else [result]
+                if not _BENIGN_RATE.acquire(len(items), stop_event):
+                    return
                 if not _schedule(items, stop_event):
                     return
                 stats["events_generated"] += len(items)
                 stats["last_event_time"] = time.time()
         except Exception as exc:
             _note_worker_error("dc", exc)
-        stop_event.wait(timeout=interval)
+        stop_event.wait(timeout=_BENIGN_RATE.pace(interval, _N_BENIGN_WORKERS))
 
 
 def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
@@ -9325,16 +9429,18 @@ def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
             fn = _BENIGN_GENERATORS[choice]
             result = fn(config, scoped_ctx)
             if result is None:
-                stop_event.wait(timeout=interval)
+                stop_event.wait(timeout=_BENIGN_RATE.pace(interval, _N_BENIGN_WORKERS))
                 continue
             items = result if isinstance(result, list) else [result]
+            if not _BENIGN_RATE.acquire(len(items), stop_event):
+                return
             if not _schedule(items, stop_event):
                 return
             stats["events_generated"] += len(items)
             stats["last_event_time"] = time.time()
         except Exception as exc:
             _note_worker_error(f"wks:{hostname}", exc)
-        stop_event.wait(timeout=interval)
+        stop_event.wait(timeout=_BENIGN_RATE.pace(interval, _N_BENIGN_WORKERS))
 
 
 def _threat_worker(config, session_context, threat_level, interval, stop_event):
@@ -9390,6 +9496,7 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
 def _ensure_orchestrator(config, session_context, threat_level, benign_only):
     """Start worker threads on first call. Subsequent calls are no-ops."""
     global _orchestrator_started, _BUILD_EVENT_OS_SUBTYPE, _output_queue, _threat_queue
+    global _N_BENIGN_WORKERS
     with _orchestrator_lock:
         if _orchestrator_started:
             return
@@ -9417,6 +9524,7 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
     # Initialize per-worker stats
     _worker_stats["dc"] = {"events_generated": 0, "last_event_time": 0}
     _worker_stats["threats"] = {"events_generated": 0, "last_event_time": 0, "last_fired": None}
+    _N_BENIGN_WORKERS = 1 + len(hosts)
     for hostname in hosts:
         _worker_stats[hostname] = {"events_generated": 0, "last_event_time": 0}
 

@@ -243,25 +243,28 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | AWS CloudTrail | S3 | 69 event types across 15+ AWS services | 70 (61 on demand) | [docs/modules/aws.md](docs/modules/aws.md) |
 | GCP Cloud Audit Logs | Pub/Sub | 42 event types with @type proto annotations and LRO operation pairs | 75 (60 on demand) | [docs/modules/gcp.md](docs/modules/gcp.md) |
 | Okta SSO | HTTP Collector | 183+ event types across auth, SSO, MFA, lifecycle, policy, OAuth2, IAM, device, and zone domains | 83 (42 on demand), incl. break-glass account use | [docs/modules/okta.md](docs/modules/okta.md) |
-| Azure AD / Entra sign-ins | Cribl receiver | Graph signIns: non-interactive token refresh, interactive sign-in, routine failures | 31 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
-| Azure AD / Entra directory audit | Cribl receiver | Graph directoryAudits: user, group, app and device maintenance, admin actions in business hours | 38 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Azure AD / Entra sign-ins | Cribl receiver | Graph signIns: non-interactive token refresh, interactive sign-in, routine failures; Event Hub copies + Graph API activity to `msft_azure_raw` | 37 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Azure AD / Entra directory audit | Cribl receiver | Graph directoryAudits: user, group, app and device maintenance, admin actions in business hours; Graph requests behind threat changes | 39 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
 | Office 365 Azure AD | Cribl receiver | Management Activity RecordType 15 sign-ins / 8 directory ops | 14 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
 | Office 365 Exchange Online | Cribl receiver | MailItemsAccessed, Send, Move, inbox rules, light admin | 28 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
-| Office 365 SharePoint / OneDrive | Cribl receiver | File and sharing operations, business-hours weighted | 15 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Office 365 SharePoint / OneDrive | Cribl receiver | File and sharing operations, business-hours weighted; Graph requests behind threat activity | 19 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Azure Activity | Cribl receiver | 140 threat scenarios across ARM, AKS kube-audit, Storage, Key Vault, and AI data-plane; all 186 Cortex Azure Audit Log entries mapped with adjacent Entra/Graph/M365 generators (three names verified in the 2026-10-23 smoke run) | 140 Azure Activity scenarios | [docs/modules/azure-activity.md](docs/modules/azure-activity.md) |
 | Office 365 DLP | Cribl receiver | Low-severity notify-only rule matches | 4 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Office 365 General | Cribl receiver | Copilot interactions, Power BI views | 2 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
-| Identity Threat Campaigns | *(coordinator — Cribl + WEC)* | *(none — opt-in)* | 21 cross-feed identity kill chains | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
+| Azure AD Identity Protection | Cribl receiver | Entra ProvisioningLogs (SCIM/HR sync) and UserRiskEvents/ServicePrincipalRiskEvents — benign identity-protection baseline | 0 (benign only) | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Identity Threat Campaigns | *(coordinator — Cribl + WEC)* | *(none)* | 21 cross-feed identity kill chains, run from **Threats & Scenarios → Run Attack Scenario** (no module card) | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#azuread_campaigns--cross-feed-identity-campaigns) |
 | Check Point Firewall | Syslog (TCP) | 5 types (web, DNS, VPN session, internal traffic, connection logs) + management plane (SmartConsole admin sessions, nightly backup, SNMP polling) | 45 (29 on demand) | [docs/modules/checkpoint.md](docs/modules/checkpoint.md) |
 | Cisco ASA Firewall | Syslog (TCP) | 6 types (office traffic, DHCP, DNS, inbound block, VPN, connections) + management plane (CLI admin sessions, nightly backup, SNMP polling) | 38 (29 on demand) | [docs/modules/cisco-asa.md](docs/modules/cisco-asa.md) |
 | Cisco Firepower | Syslog (TCP) | 14 types (web, FTP, SSH, SMB, RDP, DNS, VPN, mail, connections) + management plane | 46 (30 on demand) | [docs/modules/cisco-firepower.md](docs/modules/cisco-firepower.md) |
 | Fortinet FortiGate | Syslog (TCP) | 10 types (traffic forward, web filter, DNS, email, inbound block, VPN, connections) + management plane | 49 (32 on demand) | [docs/modules/fortinet.md](docs/modules/fortinet.md) |
+| Palo Alto Networks NGFW | Syslog (TCP, CEF) | Traffic logs (Internet egress, internal east-west, perimeter deny) → `panw_ngfw_traffic_raw`, plus URL logs → `panw_ngfw_url_raw` | 61 (44 on demand, Low+ only; 7 confirmed firing in-tenant) | [docs/modules/panw-ngfw.md](docs/modules/panw-ngfw.md) |
 | Zscaler Web Gateway | Syslog (TCP) | 17 types (web, DNS, email, FTP, firewall, VPN, cloud app, DLP, sandbox) | 38 (28 on demand) | [docs/modules/zscaler.md](docs/modules/zscaler.md) |
 | Apache httpd | Syslog (TCP) | 5 types | 12 attack types | [docs/modules/httpd.md](docs/modules/httpd.md) |
 | Infoblox NIOS | Syslog (TCP) | 15 types | 11 types | [docs/modules/infoblox.md](docs/modules/infoblox.md) |
 | Proofpoint Email | HTTP Collector | 1 type (delivered email) | 11 types | [docs/modules/proofpoint.md](docs/modules/proofpoint.md) |
 | XDR Attack Orchestration | WinRM (real endpoint) + network transports | *(coordinator — real Atomic Red Team techniques on a live Cortex-agent box + synthetic network logs pinned to its identity)* | *Phase 1 — foundation validated; stories in progress* | [docs/modules/xdr-orchestration.md](docs/modules/xdr-orchestration.md) |
 
-**Totals:** 649 named threats across the 19 log-source modules, 338 of them offered on demand, plus 21 cross-feed identity campaigns.
+**Totals:** 946 named threats across the 23 log-source modules, 481 of them offered on demand, plus 21 cross-feed identity campaigns.
 
 ## Recent Changes
 
@@ -284,7 +287,7 @@ belong to the same person. Details: [Entra](docs/modules/microsoft-entra.md) and
   `.env.example`).
 - **Episode-based threat rate.** Microsoft threats fire as wall-clock Poisson episodes
   after a benign warmup, so rate doesn't depend on poll frequency or burst size.
-- **Identity Threat Campaigns** (opt-in): 21 cross-feed kill chains (BEC, ransomware,
+- **Identity Threat Campaigns** (Threats & Scenarios → Run Attack Scenario): 21 cross-feed kill chains (BEC, ransomware,
   OAuth abuse, golden SAML, AiTM token theft, hybrid on-prem→cloud, and more) that span
   the Graph, O365 and Windows datasets. They're sent over Cribl and WEC together.
 - **Validation:** `_local_validation/threat_harness.py` fires a threat, confirms

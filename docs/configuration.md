@@ -282,7 +282,7 @@ is **counted** in the health check rather than lost silently.
 
 | Setting | Where | Default | What it controls |
 |---|---|---|---|
-| `wks_interval_multiplier` | `windows_events_config` | `1.0` | **Windows volume.** Seconds between batches per workstation, as a multiple of `base_event_interval_seconds`. At 1.0 (production pacing) the 265 workstations send ~484 events/s (~42 M/day); lower values send proportionally more. |
+| `wks_interval_multiplier` | `windows_events_config` | `1.0` | **Windows pacing without a cap.** Seconds between batches per workstation, as a multiple of `base_event_interval_seconds`. At 1.0 the 265 workstations send ~484 events/s (~42 M/day); lower values send proportionally more. In the **dashboard** the Windows card's rate caps the TOTAL benign Windows events/s instead (0.1/s = one event every 10 s across all hosts; threats keep their threat-level timing) and the workers speed up when the cap asks for more; the multipliers apply as-is only in the CLI and direct callers. |
 | `dc_interval_multiplier` | `windows_events_config` | `0.5` | Domain-controller pacing (~7 events/s). |
 | `output_queue_size` / `threat_queue_size` | `windows_events_config` | `20000` / `100` | Memory buffers between Windows workers and delivery. Workers wait when full. Drained once per interval, so `output_queue_size` must exceed events per interval or it becomes a ceiling (at 1000 it held 4x pacing to exactly 1,000/s). |
 | `wec_batch_size` / `wec_sender_threads` | `windows_events_config` | `100` / `4` | Events per WEC POST and concurrent POSTs. Measured broker latency is ~28 ms per POST almost regardless of size, so size matters more than threads: 100 per POST is ~3,600 events/s per thread. |

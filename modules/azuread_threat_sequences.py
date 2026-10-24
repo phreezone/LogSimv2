@@ -37,7 +37,9 @@ DLP_SRC, DLP_INT = dlp.SOURCE_IDENTIFIER, dlp.INTEGRATION_IDENTIFIER
 WIN_SRC, WIN_INT = "__wec__", "logsim:windows"
 
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
-FOREIGN = {"ip": "103.21.244.12", "city": "Singapore", "state": "", "countryOrRegion": "SG",
+# A DigitalOcean Singapore block (verified origin + GeoLite location, 2026-10-22); the previous
+# 103.21.244.12 is Cloudflare anycast with no country at all.
+FOREIGN = {"ip": "128.199.116.12", "city": "Singapore", "state": "", "countryOrRegion": "SG",
            "geoCoordinates": {"latitude": 1.29, "longitude": 103.85}}
 HOME_US = {"ip": "108.245.61.200", "city": "Columbus", "state": "Ohio", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 39.96, "longitude": -82.99}}
@@ -570,8 +572,31 @@ def build(name, config=None, context=None):
     argument carrying session_context; single-plane sequences take only config."""
     fn = SEQUENCES[name]
     if len(inspect.signature(fn).parameters) >= 2:
-        return fn(config or {}, context)
-    return fn(config or {})
+        steps = fn(config or {}, context)
+    else:
+        steps = fn(config or {})
+    return _with_eventhub(steps, config)
+
+
+EH = (ac.EVENTHUB_SOURCE, ac.EVENTHUB_INTEGRATION)
+
+
+def _with_eventhub(steps, config):
+    """Each step plus its event-hub counterparts (msft_azure_raw, the input of the Cloud analytics):
+    a Graph sign-in's SignInLogs copy; a directory change's AuditLogs copy, preceded by the Graph
+    API call that made it. Order is kept, so the chain still reads in sequence."""
+    if not ac.eventhub_enabled(config, aad.CONFIG_KEY):
+        return steps
+    out = []
+    for src, integ, rec in steps:
+        if src == AUD_SRC and isinstance(rec, dict) and "activityDisplayName" in rec:
+            out += [(EH[0], EH[1], g) for g in aaud._graph_companions([rec])]
+        out.append((src, integ, rec))
+        if src == AAD_SRC and isinstance(rec, dict) and "signInEventTypes" in rec:
+            out.append((EH[0], EH[1], ac.eventhub_signin(rec)))
+        elif src == AUD_SRC and isinstance(rec, dict) and "activityDisplayName" in rec:
+            out.append((EH[0], EH[1], ac.eventhub_audit(rec)))
+    return out
 
 
 def _send_windows(win_events, source_host="logsim.examplecorp.local"):
@@ -592,14 +617,16 @@ def _send_windows(win_events, source_host="logsim.examplecorp.local"):
 def fire(name, config=None, sender=None, context=None):
     """Send one sequence: cloud records via cribl_direct (grouped per source), on-prem Windows
     records via the WEC transport."""
-    from integrations.cribl_direct import CriblDirectSender
+    from integrations.cribl_direct import CriblDirectSender, split_routes
     groups = {}
     win_events = []
     for src, integ, rec in build(name, config, context):
         if src == WIN_SRC:
             win_events.append(rec)
         else:
-            groups.setdefault((src, integ), []).append(rec)
+            # a record may carry its own destination (e.g. an Event Hub copy -> msft_azure_raw)
+            for dest, recs in split_routes([rec], src, integ).items():
+                groups.setdefault(dest, []).extend(recs)
     results = []
     if groups:
         sender = sender or CriblDirectSender()

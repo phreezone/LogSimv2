@@ -24,6 +24,7 @@ import uuid
 
 from modules import azure_common as ac
 from modules import azure_audit_catalog as cat
+from modules import graph_activity as ga
 
 NAME = "Azure AD Audit"
 DESCRIPTION = "Simulates Microsoft Graph directoryAudits events for msft_azure_ad_audit_raw via the cribl_direct transport."
@@ -31,6 +32,7 @@ CONFIG_KEY = "azure_ad_audit_config"
 SOURCE_IDENTIFIER = "0e076d5abe864bf78e8145ea9e0d749e"
 INTEGRATION_IDENTIFIER = "logsim:azure_ad_audit"
 DATASET = "msft_azure_ad_audit_raw"
+EVENT_INTERVAL = 1.2   # default relative benign volume: directory-audit changes are lower volume than sign-ins
 
 # Threat rate governed centrally by ac.ThreatGate / ac.THREAT_EPISODES_PER_HOUR (see _GATE below).
 
@@ -62,8 +64,8 @@ def _saas_app():
 _CA_POLICIES = [n for n, _ in ac.CA_POLICIES]
 
 
-def _ts():
-    d = datetime.datetime.now(datetime.timezone.utc)
+def _ts(offset_s=0.0):
+    d = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=min(0.0, offset_s))
     return f"{d:%Y-%m-%dT%H:%M:%S}.{d.microsecond:06d}{random.randint(0, 9)}Z"
 
 
@@ -103,13 +105,13 @@ def t_obj(kind, name, mods=None, group_type=None):
 
 
 def audit(activity, category, service, op_type, initiator, targets,
-          details=None, result="success", reason=""):
+          details=None, result="success", reason="", offset_s=0.0):
     corr = str(uuid.uuid4())
     pfx = _ID_PREFIX.get(service, "Directory")
     return {"id": f"{pfx}_{corr}_{_code()}_{random.randint(1000000, 999999999)}",
             "category": category, "correlationId": corr, "result": result,
             "resultReason": reason or activity, "activityDisplayName": activity,
-            "activityDateTime": _ts(), "loggedByService": service, "operationType": op_type,
+            "activityDateTime": _ts(offset_s), "loggedByService": service, "operationType": op_type,
             "initiatedBy": initiator, "targetResources": targets, "additionalDetails": details or []}
 
 
@@ -799,6 +801,19 @@ def scenario_unverified_domain_added(config=None):
                    [mp("Capability", None, "Email"), mp("IsVerified", None, "False")])], [_ua(admin)])]
 
 
+def scenario_group_created_deleted(config=None):
+    """A security group is created and, minutes later, deleted by an identity that does not normally
+    manage groups -> 'Azure group creation/deletion' (persistence via a throwaway group)."""
+    actor = ac.pick_nonstandard_actor(config)
+    g = f"SG-{random.choice(['Ops','Data','Finance','Admins'])}-{random.randint(100, 999)}"
+    add = audit("Add group", "GroupManagement", "Core Directory", "Add", by_user(actor),
+                [t_obj("Group", g, [mp("DisplayName", None, g), mp("SecurityEnabled", None, "True")])],
+                [_ua(actor)])
+    rem = audit("Delete group", "GroupManagement", "Core Directory", "Delete", by_user(actor),
+                [t_obj("Group", g)], [_ua(actor)])
+    return [add, rem]
+
+
 SCENARIOS = {
     "admin_role_add": scenario_admin_role_add,
     "consent_risky_app": scenario_consent_risky_app,
@@ -838,7 +853,30 @@ SCENARIOS = {
     "sp_removed": scenario_sp_removed,
     "auth_method_added": scenario_auth_method_added,
     "unverified_domain_added": scenario_unverified_domain_added,
+    "group_created_deleted": scenario_group_created_deleted,
+    "wip_cloud_group_change": scenario_group_created_deleted,
 }
+
+# Additional Azure Audit Log targets use the same Graph directory-audit records and Event Hub
+# copies as their original generator. They are explicitly WIP until the Cortex alert is observed.
+SCENARIOS.update({
+    "wip_azure_group_create_delete": scenario_group_created_deleted,
+    "wip_app_credential_added": scenario_app_credential_added,
+    "wip_app_owner_added": scenario_owner_added_to_application,
+    "wip_app_owner_removed": scenario_owner_removed_from_application,
+    "wip_service_principal_created": scenario_sp_created,
+    "wip_service_principal_removed": scenario_sp_removed,
+    "wip_auth_method_added": scenario_auth_method_added,
+    "wip_conditional_access_change": scenario_ca_operation_unusual,
+    "wip_user_created": scenario_user_account_created,
+    "wip_user_deleted": scenario_user_account_deleted,
+    "wip_user_password_reset": scenario_account_unlock_password_reset,
+    "wip_external_guest_invitation": scenario_unusual_guest_invitation,
+    "wip_pim_member_removal": scenario_pim_member_removal,
+    "wip_application_removed": scenario_sp_removed,
+    "wip_service_principal_application_created": scenario_sp_created,
+    "wip_azure_domain_verification": scenario_unverified_domain_added,
+})
 
 # On-demand threats (threat_catalog): only scenarios whose analytic has been SEEN firing
 # in the tenant on this feed's synthetic data -- alerts attributed to examplecorp
@@ -856,7 +894,111 @@ ANALYTIC_ALERTS = {
     "unverified_domain_added":  "Rare unverified domain addition to Azure AD",
     "federated_domain_backdoor": "A successful Azure domain federation settings modification",
     "failed_federation_change": "Azure domain federation settings modification attempt",
+    "wip_cloud_group_change": "A cloud identity created or modified a security group",
+    "wip_azure_group_create_delete": "Azure group creation/deletion",
+    "wip_app_credential_added": "Credentials were added to Azure application",
+    "wip_app_owner_added": "Owner was added to Azure application",
+    "wip_app_owner_removed": "Removal of an Azure Owner from an Application or Service Principal",
+    "wip_service_principal_created": "A Service Principal was created in Azure",
+    "wip_service_principal_removed": "A Service Principal was removed from Azure",
+    "wip_auth_method_added": "Authentication method was added to Azure account",
+    "wip_conditional_access_change": "Azure conditional access policy creation or modification",
+    "wip_user_created": "Azure user creation/deletion",
+    "wip_user_deleted": "Azure user creation/deletion",
+    "wip_user_password_reset": "Azure user password reset",
+    "wip_external_guest_invitation": "External user invitation to Azure tenant",
+    "wip_pim_member_removal": "PIM privilege member removal",
+    "wip_application_removed": "Azure application removed",
+    "wip_service_principal_application_created": "Azure Service principal/Application creation",
+    "wip_azure_domain_verification": "A new Azure email domain verification was requested",
 }
+
+
+# ── Graph activity companions ────────────────────────────────────────────────────────
+# The "Microsoft Graph Activity Logs" detectors read the API request behind a directory change,
+# not the audit record, so each scenario below also emits the Graph call its initiator made
+# (MicrosoftGraphActivityLogs, routed to msft_azure_raw). Built from the audit record itself:
+# same admin, IP and target ids, two seconds before the change is recorded. Benign audit
+# traffic carries no companion, so routine directory work never raises these detectors.
+_PWD_METHOD = "28c10230-6103-485e-b985-444c60001490"   # the well-known password authentication method id
+# activityDisplayName -> (method, uri template, status, wids)
+_GRAPH_CALLS = {
+    "Add user": ("POST", "/v1.0/users", 201, ga.WID_USER_ADMIN),
+    "Delete user": ("DELETE", "/v1.0/users/{t}", 204, ga.WID_USER_ADMIN),
+    "Reset user password": ("POST", "/v1.0/users/{t}/authentication/methods/" + _PWD_METHOD + "/resetPassword", 202, ga.WID_USER_ADMIN),
+    "Unlock user account": ("PATCH", "/v1.0/users/{t}", 204, ga.WID_USER_ADMIN),
+    "Change user password": ("POST", "/v1.0/users/{t}/authentication/methods/" + _PWD_METHOD + "/resetPassword", 202, ga.WID_USER_ADMIN),
+    "Invite external user": ("POST", "/v1.0/invitations", 201, ga.WID_MEMBER),
+    "Update conditional access policy": ("PATCH", "/v1.0/identity/conditionalAccess/policies/{t}", 204, ga.WID_SECURITY_ADMIN),
+    "Delete conditional access policy": ("DELETE", "/v1.0/identity/conditionalAccess/policies/{t}", 204, ga.WID_SECURITY_ADMIN),
+    "Update application - Certificates and secrets management": ("POST", "/v1.0/applications/{t}/addPassword", 200, ga.WID_APP_ADMIN),
+    "Add owner to application": ("POST", "/v1.0/applications/{t}/owners/$ref", 204, ga.WID_APP_ADMIN),
+    "Remove owner from application": ("DELETE", "/v1.0/applications/{t}/owners/{t2}/$ref", 204, ga.WID_APP_ADMIN),
+    "Admin registered security info": ("POST", "/v1.0/users/{t}/authentication/phoneMethods", 201, ga.WID_USER_ADMIN),
+    "Add service principal": ("POST", "/v1.0/servicePrincipals", 201, ga.WID_APP_ADMIN),
+    "Delete service principal": ("DELETE", "/v1.0/servicePrincipals/{t}", 204, ga.WID_APP_ADMIN),
+    "Add member to role": ("POST", "/v1.0/roleManagement/directory/roleAssignments", 201, ga.WID_GLOBAL_ADMIN),
+    "Add group": ("POST", "/v1.0/groups", 201, ga.WID_MEMBER),
+    "Delete group": ("DELETE", "/v1.0/groups/{t}", 204, ga.WID_MEMBER),
+}
+# Scenarios whose Graph-activity detector is a target; the rest stay audit-only.
+_GRAPH_SCENARIOS = {"user_account_created", "user_account_deleted", "short_lived_account",
+                    "account_unlock_password_reset", "unusual_guest_invitation", "ca_operation_unusual",
+                    "ca_policy_removed", "app_credential_added", "owner_added_to_application",
+                    "owner_removed_from_application", "auth_method_added", "tap_registered", "sp_created",
+                    "sp_removed", "admin_role_add", "group_created_deleted", "wip_cloud_group_change",
+                    "wip_app_credential_added", "wip_app_owner_added", "wip_app_owner_removed",
+                    "wip_service_principal_created", "wip_service_principal_removed", "wip_auth_method_added",
+                    "wip_conditional_access_change", "wip_user_created", "wip_user_deleted",
+                    "wip_user_password_reset", "wip_external_guest_invitation", "wip_pim_member_removal",
+                    "wip_application_removed", "wip_service_principal_application_created",
+                    "wip_azure_domain_verification"}
+
+
+def _graph_companions(records):
+    out = []
+    for rec in records:
+        spec = _GRAPH_CALLS.get(rec.get("activityDisplayName"))
+        u = ((rec.get("initiatedBy") or {}).get("user") or {})
+        if not spec or not u.get("userPrincipalName"):
+            continue
+        method, uri, status, wids = spec
+        tgts = rec.get("targetResources") or [{}]
+        uri = uri.replace("{t}", tgts[0].get("id") or "").replace(
+            "{t2}", (tgts[1] if len(tgts) > 1 else {}).get("id") or "")
+        if "TemporaryAccessPass" in json.dumps(tgts[0].get("modifiedProperties") or []):
+            uri = uri.replace("/phoneMethods", "/temporaryAccessPassMethods")
+        admin = {"username": u["userPrincipalName"].split("@")[0], "upn": u["userPrincipalName"]}
+        if rec.get("activityDisplayName") == "Add service principal":   # app registration first
+            out += ga.admin_change(admin, "POST", "/v1.0/applications", 201, wids=wids,
+                                   ip=u.get("ipAddress"), offset_s=-4.0)
+        out += ga.admin_change(admin, method, uri, status, wids=wids, ip=u.get("ipAddress"))
+    return out
+
+
+def _with_eventhub(records, benign):
+    """records + the Entra AuditLogs event-hub copy of each (msft_azure_raw), which is what the
+    Cloud-module "Azure Audit Log" analytics read. Benign records whose operation one of those
+    analytics raises on by itself get no copy (azure_audit_catalog.CLOUD_ALERTING_ACTIVITIES)."""
+    out = []
+    for r in records:
+        out.append(r)
+        if (isinstance(r, dict) and "activityDisplayName" in r and not ac.is_eventhub_copy(r)
+                and not (benign and cat.is_cloud_alerting(r["activityDisplayName"]))):
+            out.append(ac.eventhub_audit(r))
+    return out
+
+
+def _with_graph(config, key, records):
+    if not ac.eventhub_enabled(config, CONFIG_KEY):
+        return records
+    companions = _graph_companions(records) if key in _GRAPH_SCENARIOS else []
+    return companions + _with_eventhub(records, benign=False)
+
+
+def _benign(config, context):
+    recs = generate_benign(config, context)
+    return _with_eventhub(recs, benign=True) if ac.eventhub_enabled(config, CONFIG_KEY) else recs
 
 
 _GATE = ac.ThreatGate(SCENARIOS)
@@ -871,11 +1013,11 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
     if scenario_event:
         key = scenario_event if scenario_event in SCENARIOS else scenario_event.lower()
         if key in SCENARIOS:
-            return (SCENARIOS[key](config), key)
+            return (_with_graph(config, key, SCENARIOS[key](config)), key)
         return None
     if benign_only or threat_level == "Benign Traffic Only":
-        return generate_benign(config, context)
+        return _benign(config, context)
     if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
-        return (SCENARIOS[key](config), key)
-    return generate_benign(config, context)
+        return (_with_graph(config, key, SCENARIOS[key](config)), key)
+    return _benign(config, context)

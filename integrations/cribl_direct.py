@@ -41,7 +41,30 @@ except ImportError:  # pragma: no cover
 DEDICATED_UUIDS = {
     "o365_azure_ad":   "e1f109f886ea42fbb96be6ec0cc597a9",  # -> msft_o365_azure_ad_raw
     "azure_ad_signin": "f56dcfdf6bca43e793a4b6e9290e7b12",  # -> msft_azure_ad_raw
+    "azure_event_hub": "fce13a1d51294f84bae4a37851503060",  # -> msft_azure_raw (Event Hub diagnostics)
 }
+
+# A record may name a different destination than the module that produced it, e.g. the
+# Event Hub copy of a Graph sign-in (msft_azure_raw rather than msft_azure_ad_raw):
+# record[ROUTE_KEY] = [source_identifier, integration_identifier]. split_routes() groups a
+# batch by destination; the key never goes on the wire.
+ROUTE_KEY = "__cribl_route__"
+
+
+def split_routes(records: Sequence[Any], source_identifier: str,
+                 integration_identifier: str) -> Dict[Tuple[str, str], List[Any]]:
+    """{(source_identifier, integration_identifier): [records]} with ROUTE_KEY removed.
+    Records without a route go to the given defaults; insertion order is kept."""
+    groups: Dict[Tuple[str, str], List[Any]] = {}
+    for r in records:
+        dest = (source_identifier, integration_identifier)
+        if isinstance(r, dict) and ROUTE_KEY in r:
+            r = dict(r)
+            route = r.pop(ROUTE_KEY) or ()
+            dest = (route[0] if len(route) > 0 and route[0] else source_identifier,
+                    route[1] if len(route) > 1 and route[1] else integration_identifier)
+        groups.setdefault(dest, []).append(r)
+    return groups
 
 
 class CriblDirectSender:
@@ -61,11 +84,25 @@ class CriblDirectSender:
              integration_identifier: str = "logsim:synthetic") -> Tuple[int, str, int]:
         """Send a batch of vendor records under one dedicated Source-Identifier.
 
-        Returns (http_status, response_text, num_records_sent). All records in a call must
-        belong to the same source (same Source-Identifier). Batches freely — the real
-        destination sends many NDJSON lines per POST.
+        Returns (http_status, response_text, num_records_sent). Records go under the given
+        Source-Identifier unless they name their own (ROUTE_KEY); those are posted in a
+        separate request to their destination. Batches freely — the real destination sends
+        many NDJSON lines per POST.
         """
-        records = list(records)
+        groups = split_routes(list(records), source_identifier, integration_identifier)
+        if len(groups) > 1:
+            # Records bound for other destinations (ROUTE_KEY) go in their own requests, so a
+            # direct caller cannot misroute them; the worst status is reported.
+            results = [self._post(recs, src, integ) for (src, integ), recs in groups.items()]
+            bad = [r for r in results if r[0] not in (200, 201, 202, 204)]
+            code, text, _ = (bad or results)[0]
+            return code, text, sum(r[2] for r in results)
+        records = next(iter(groups.values()), [])
+        if groups:
+            source_identifier, integration_identifier = next(iter(groups))
+        return self._post(records, source_identifier, integration_identifier)
+
+    def _post(self, records, source_identifier, integration_identifier):
         if not records:
             return 0, "no records", 0
         now_ms = int(time.time() * 1000)

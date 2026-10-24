@@ -31,6 +31,7 @@ CONFIG_KEY = "o365_azure_ad_config"
 SOURCE_IDENTIFIER = "e1f109f886ea42fbb96be6ec0cc597a9"
 INTEGRATION_IDENTIFIER = "logsim:o365_azure_ad"
 DATASET = "msft_o365_azure_ad_raw"
+EVENT_INTERVAL = 0.5   # default relative benign volume: O365 Management-Activity sign-ins / directory ops
 ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
@@ -185,7 +186,7 @@ def scenario_brute_force(config=None, user=None, attempts=10, src_ip=None):
 def scenario_impossible_travel(config=None, user=None):
     u = ac.pick_user(config)
     return [_signin("UserLoggedIn", u, "108.245.61.200", offset_s=-300),
-            _signin("UserLoggedIn", u, "103.21.244.12", offset_s=-60)]
+            _signin("UserLoggedIn", u, "128.199.116.12", offset_s=-60)]   # DigitalOcean SG
 
 
 def scenario_tor_signin(config=None, user=None):

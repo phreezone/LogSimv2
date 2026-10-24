@@ -20,6 +20,7 @@ CONFIG_KEY = "o365_general_config"
 SOURCE_IDENTIFIER = "c7655e83805b4a058e66043a6715156c"
 INTEGRATION_IDENTIFIER = "logsim:o365_general"
 DATASET = "msft_o365_general_raw"
+EVENT_INTERVAL = 2.0   # default relative benign volume: Copilot / Power BI usage, human-driven and lighter
 ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 
 _COPILOT_HOSTS = ["Microsoft Teams", "Word", "Outlook", "Excel", "PowerPoint", "Microsoft365Chat"]

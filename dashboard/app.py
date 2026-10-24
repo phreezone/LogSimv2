@@ -16,6 +16,7 @@ import time
 import json
 import copy
 import ctypes
+import random
 import uuid as _uuid
 from collections import deque
 
@@ -405,6 +406,34 @@ def _min_interval(module) -> float:
         return _MIN_EVENT_INTERVAL
 
 
+def _module_default_interval(module) -> float:
+    """A module's starting per-call interval (seconds). Precedence: the module's own
+    EVENT_INTERVAL attribute (used to set realistic relative volume across feeds), then an
+    event_interval in its CONFIG_KEY block, then the global base_event_interval_seconds. Clamped
+    to the module's own floor."""
+    base = CONFIG.get("base_event_interval_seconds", 1.0)
+    iv = getattr(module, "EVENT_INTERVAL", None)
+    if iv is None:
+        ck = getattr(module, "CONFIG_KEY", None)
+        iv = (CONFIG.get(ck) or {}).get("event_interval") if ck else None
+    try:
+        iv = float(iv) if iv is not None else base
+    except (TypeError, ValueError):
+        iv = base
+    return max(iv, _min_interval(module))
+
+
+def _notify_interval(state) -> None:
+    """Tell a module that sets its own volume (Windows: worker threads, not calls) the
+    rate it was given; modules without the hook are paced by their calls alone."""
+    hook = getattr(state.module, "set_event_interval", None)
+    if callable(hook):
+        try:
+            hook(state.event_interval)
+        except Exception as exc:
+            print(f"[{state.name}] set_event_interval failed: {exc}")
+
+
 # Seconds of per-second event counts each module keeps (the timeline shows 120 s).
 _RATE_HISTORY_S = 130
 # A worker more than this far behind its schedule (generation slower than the requested
@@ -429,13 +458,17 @@ class ModuleState:
 
         # Config
         self.threat_level = "Realistic"
-        self.event_interval: float = CONFIG.get("base_event_interval_seconds", 1.0)
+        # Default per-call interval: a module may declare its own EVENT_INTERVAL so the feeds run
+        # at realistic RELATIVE volumes when started together (a real tenant is not an equal split
+        # across feeds). Falls back to the module's config block, then the global base. "Start all"
+        # with no explicit interval keeps these per-module defaults.
+        self.event_interval: float = _module_default_interval(module)
 
         # Metrics
         self.total_logs = 0
         self.total_threats = 0
         self.last_threat: str = ""
-        # [epoch_second, events, benign events] per second, newest last. These were
+        # [epoch_second, events, benign events, log lines] per second, newest last. These were
         # deques of the last 600 event timestamps until 2026-10-21, which capped the
         # reported 10 s rate (and the timeline) at 60 events/s.
         self._sec_counts: deque = deque(maxlen=_RATE_HISTORY_S)
@@ -469,9 +502,10 @@ class ModuleState:
             self.total_logs += log_count
             counts = self._sec_counts
             if not counts or counts[-1][0] != sec:
-                counts.append([sec, 0, 0])
+                counts.append([sec, 0, 0, 0])
             bucket = counts[-1]
             bucket[1] += 1                        # one per event, not per log line
+            bucket[3] += log_count
             if event_name and event_name in self.threat_names:
                 self.total_threats += 1           # one threat per event, not per log line
                 self._threat_timestamps.append(now)
@@ -482,10 +516,13 @@ class ModuleState:
                 bucket[2] += 1
 
     def get_rate(self, window: int = 10) -> float:
-        """Events/s over the last *window* complete seconds."""
+        """Log lines/s over the last *window* complete seconds -- what total_logs counts.
+        It counted generate_log calls until 2026-10-21, so a module that returns many
+        lines per call (Windows drains its workers) showed its poll rate: 0.1/s on the
+        card while ~425 events/s went out."""
         end = int(time.time())
         with self._lock:
-            recent = sum(c[1] for c in self._sec_counts if end - window <= c[0] < end)
+            recent = sum(c[3] for c in self._sec_counts if end - window <= c[0] < end)
         return round(recent / window, 2)
 
     def reset_metrics(self):
@@ -518,8 +555,11 @@ class ModuleState:
 
 
 # Instantiate states for every loaded module
+# A module with DASHBOARD_MODULE = False gets no card; Identity Threat Campaigns is
+# offered as one Run Attack Scenario entry per campaign instead (_get_scenarios).
 MODULE_STATES: dict[str, ModuleState] = {
     name: ModuleState(mod) for name, mod in MODULES.items()
+    if getattr(mod, "DASHBOARD_MODULE", True)
 }
 
 
@@ -1041,7 +1081,8 @@ def _start_module_state(state: ModuleState, threat_level: str,
     if threat_level in THREAT_LEVELS:
         state.threat_level = threat_level
     if event_interval is not None and event_interval >= _MIN_EVENT_INTERVAL:
-        state.event_interval = max(event_interval, _min_interval(state.module))
+        state.event_interval = event_interval
+    _notify_interval(state)
     state._stop_event.clear()
     state.error_msg = ""
     if _session_start is None:
@@ -1165,7 +1206,8 @@ def api_set_interval(name: str):
             raise ValueError
     except (ValueError, TypeError):
         return jsonify({"error": f"event_interval must be a number >= {_MIN_EVENT_INTERVAL}"}), 400
-    state.event_interval = max(iv, _min_interval(state.module))
+    state.event_interval = iv
+    _notify_interval(state)
     return jsonify(state.to_dict())
 
 
@@ -1271,7 +1313,26 @@ def _get_scenarios():
     except Exception as e:
         print(f"[dashboard] Could not load scenarios from log_simulator: {e}")
         _SCENARIOS = []
+    _SCENARIOS += _campaign_scenarios()
     return _SCENARIOS
+
+
+def _campaign_scenarios():
+    """One Run Attack Scenario entry per Identity Threat Campaign. Dashboard-only: they
+    self-send (Cribl + WEC), so they stay out of log_simulator.get_scenarios(), which the
+    hermetic training engine also resolves."""
+    camp = next((m for m in MODULES.values()
+                 if callable(getattr(m, "run_campaign", None))), None)
+    if camp is None:
+        return []
+
+    def runner(name):
+        return lambda _modules, cfg: camp.run_campaign(
+            name, cfg, context={"session_context": SESSION_CONTEXT})
+
+    return [{"id": f"campaign-{name}", "name": f"Identity Campaign — {title}",
+             "func": runner(name)}
+            for name, title in camp.CAMPAIGN_TITLES.items()]
 
 
 @app.get("/api/scenarios")
@@ -1314,6 +1375,92 @@ def api_get_run(run_id: str):
     if not view:
         return jsonify({"error": f"Run '{run_id}' not found"}), 404
     return jsonify(view)
+
+
+# ── Random identity campaigns (Threats & Scenarios toggle) ─────────────────────
+# When enabled, launches one random Identity Threat Campaign at a deliberately LOW
+# rate: a campaign is a whole multi-feed incident, so a realistic tenant sees a
+# couple a day, not a stream. Waits are exponential (Poisson arrivals) with mean
+# random_mean_hours, never shorter than random_min_gap_hours. Each launch goes
+# through the same run registry as a manual Run, so it shows in /api/scenarios/runs.
+# Off on every start; nothing is persisted.
+_RANDOM_CAMPAIGNS = {"enabled": False, "fired": 0, "last_name": None, "last_ts": None,
+                     "next_ts": None, "last_run_id": None, "stop": None}
+_RANDOM_CAMPAIGNS_LOCK = threading.Lock()
+
+
+def _random_campaign_cfg():
+    conf = (CONFIG.get("azuread_campaigns_config") or {})
+    mean_h = max(0.5, float(conf.get("random_mean_hours", 12)))
+    gap_h = max(0.0, min(mean_h, float(conf.get("random_min_gap_hours", 2))))
+    return mean_h * 3600, gap_h * 3600
+
+
+def _random_campaign_wait():
+    mean_s, gap_s = _random_campaign_cfg()
+    return max(gap_s, random.expovariate(1.0 / mean_s))
+
+
+def _random_campaign_worker(stop, wait):
+    while True:
+        if stop.wait(timeout=wait):
+            return
+        camps = [s for s in _get_scenarios() if s["id"].startswith("campaign-")]
+        if not camps:
+            continue
+        s = random.choice(camps)
+        run_id = _new_run(s["id"], s["name"])
+        modules = {name: st.module for name, st in MODULE_STATES.items()}
+        print(f"[random-campaigns] launching {s['name']}")
+        with _RANDOM_CAMPAIGNS_LOCK:
+            _RANDOM_CAMPAIGNS.update(fired=_RANDOM_CAMPAIGNS["fired"] + 1, last_name=s["name"],
+                                     last_ts=time.time(), last_run_id=run_id)
+        try:
+            _run_scenario_and_flush(s["func"], modules, copy.deepcopy(CONFIG), run_id)
+        except Exception as exc:
+            print(f"[random-campaigns] {s['id']} failed: {type(exc).__name__}: {exc}")
+        wait = _random_campaign_wait()
+        with _RANDOM_CAMPAIGNS_LOCK:
+            if not stop.is_set():
+                _RANDOM_CAMPAIGNS["next_ts"] = time.time() + wait
+
+
+def _random_campaigns_view():
+    mean_s, gap_s = _random_campaign_cfg()
+    with _RANDOM_CAMPAIGNS_LOCK:
+        view = {k: v for k, v in _RANDOM_CAMPAIGNS.items() if k != "stop"}
+    view["mean_hours"] = mean_s / 3600
+    view["min_gap_hours"] = gap_s / 3600
+    if view["last_run_id"]:
+        with _RUNS_LOCK:
+            rec = _RUNS.get(view["last_run_id"])
+            view["last_status"] = rec["status"] if rec else None
+            view["last_error"] = rec["error"] if rec else None
+    if not view["enabled"]:
+        view["next_ts"] = None
+    return view
+
+
+@app.route("/api/campaigns/random", methods=["GET", "POST"])
+def api_random_campaigns():
+    """GET: the random-campaign runner's state. POST {"enabled": bool}: turn it on/off."""
+    if request.method == "GET":
+        return jsonify(_random_campaigns_view())
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body.get("enabled"), bool):
+        return jsonify({"error": "body must be {\"enabled\": true|false}"}), 400
+    with _RANDOM_CAMPAIGNS_LOCK:
+        running = _RANDOM_CAMPAIGNS["enabled"]
+        if body["enabled"] and not running:
+            stop = threading.Event()
+            wait = _random_campaign_wait()
+            _RANDOM_CAMPAIGNS.update(enabled=True, stop=stop, next_ts=time.time() + wait)
+            threading.Thread(target=_random_campaign_worker, args=(stop, wait), daemon=True,
+                             name="random-campaigns").start()
+        elif not body["enabled"] and running:
+            _RANDOM_CAMPAIGNS["stop"].set()
+            _RANDOM_CAMPAIGNS.update(enabled=False, stop=None, next_ts=None)
+    return jsonify(_random_campaigns_view())
 
 
 # ── XDR attack orchestration (dedicated console tab) ──────────────────────────
@@ -1690,7 +1837,8 @@ def _execute_job(job: dict) -> None:
                 try:
                     iv = float(p["event_interval"])
                     if iv >= _MIN_EVENT_INTERVAL:
-                        state.event_interval = max(iv, _min_interval(state.module))
+                        state.event_interval = iv
+                        _notify_interval(state)
                 except (KeyError, TypeError, ValueError):
                     pass
         with _schedule_lock:
@@ -2413,7 +2561,7 @@ def api_timeline():
         threats      = [0] * BUCKETS
         threat_names = [[] for _ in range(BUCKETS)]
         with state._lock:
-            for sec, _events, n_benign in state._sec_counts:
+            for sec, _events, n_benign, _lines in state._sec_counts:
                 age = now - sec
                 if 0 <= age < window:
                     idx = BUCKETS - 1 - int(age / BUCKET_SEC)
@@ -2548,6 +2696,7 @@ def _register_v1_aliases():
         ("/api/v1/scenarios/<scenario_id>/run", "api_run_scenario",  ["POST"]),
         ("/api/v1/scenarios/runs",            "api_list_runs",       ["GET"]),
         ("/api/v1/scenarios/runs/<run_id>",   "api_get_run",         ["GET"]),
+        ("/api/v1/campaigns/random",          "api_random_campaigns", ["GET", "POST"]),
         ("/api/v1/modules",                   "api_get_modules",     ["GET"]),
         ("/api/v1/modules/<name>/start",      "api_start_module",    ["POST"]),
         ("/api/v1/modules/<name>/stop",       "api_stop_module",     ["POST"]),

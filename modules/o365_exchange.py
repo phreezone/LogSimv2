@@ -20,6 +20,7 @@ import time
 import uuid
 
 from modules import azure_common as ac
+from modules import graph_activity as ga
 
 NAME = "Office 365 Exchange Online"
 DESCRIPTION = "Simulates Office 365 Exchange Online mailbox/admin audit records for msft_o365_exchange_online_raw via the cribl_direct transport."
@@ -27,6 +28,7 @@ CONFIG_KEY = "o365_exchange_config"
 SOURCE_IDENTIFIER = "dee8e85ce7db4573a8bc21b807e1d73a"
 INTEGRATION_IDENTIFIER = "logsim:o365_exchange"
 DATASET = "msft_o365_exchange_online_raw"
+EVENT_INTERVAL = 0.3   # default relative benign volume: mailbox access (MailItemsAccessed) is very high volume
 ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 ORG_NAME = ac.UPN_DOMAIN
 
@@ -520,6 +522,43 @@ SCENARIOS = {
 }
 
 
+# ── Graph activity companions ────────────────────────────────────────────────────────
+# "Azure mailbox rule creation" and "Mailbox enumeration activity by Azure application" read Graph
+# API request logs (MicrosoftGraphActivityLogs, routed to msft_azure_raw), so these scenarios also
+# emit the Graph calls behind their Exchange records. Benign Exchange traffic carries none.
+_RULE_SCENARIOS = {"inbox_forwarding_rule", "inbox_forwarding_delegate", "inbox_forwarding_suspicious",
+                   "email_hiding_rule", "catch_all_hiding_rule"}
+
+
+def _graph_companions(key, records):
+    if key in _RULE_SCENARIOS:
+        out = []
+        for r in records:
+            upn = r.get("UserId") or ""
+            actor = {"username": upn.split("@")[0], "upn": upn}
+            if r.get("ExternalAccess"):        # a delegate writing into another user's mailbox
+                uri = (f"/v1.0/users/{ac._stable_guid('mbx:' + str(r.get('ObjectId')))}"
+                       "/mailFolders/inbox/messageRules")
+            else:
+                uri = "/v1.0/me/mailFolders/inbox/messageRules"
+            out.append(ga.user_request(actor, "POST", uri, 201, client="Microsoft Graph Command Line Tools",
+                                       scopes="MailboxSettings.ReadWrite Mail.ReadWrite",
+                                       ip=r.get("ClientIP"), offset_s=-2.0))
+        return out
+    if key == "mailbox_enumeration":
+        app = ga.app_identity(ac.rare_app_name())
+        calls = [("GET", f"/v1.0/users/{ac.user_oid((r.get('MailboxOwnerUPN') or 'x').split('@')[0])}"
+                         "/messages?$top=50", 200, random.randint(30000, 90000)) for r in records]
+        return ga.burst(app, calls, ip=ac.rare_asn_loc()["ip"], roles="Mail.Read", span_s=60)
+    return []
+
+
+def _with_graph(config, key, records):
+    if ac.eventhub_enabled(config, CONFIG_KEY):
+        return _graph_companions(key, records) + records
+    return records
+
+
 _GATE = ac.ThreatGate(SCENARIOS)
 
 
@@ -532,11 +571,11 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
     if scenario_event:
         key = scenario_event if scenario_event in SCENARIOS else scenario_event.lower()
         if key in SCENARIOS:
-            return (SCENARIOS[key](config), key)
+            return (_with_graph(config, key, SCENARIOS[key](config)), key)
         return None
     if benign_only or threat_level == "Benign Traffic Only":
         return generate_benign(config, context)
     if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
-        return (SCENARIOS[key](config), key)
+        return (_with_graph(config, key, SCENARIOS[key](config)), key)
     return generate_benign(config, context)

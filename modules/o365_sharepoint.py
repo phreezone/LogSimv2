@@ -13,9 +13,11 @@ creation, and external sharing invitations.
 """
 import random
 import time
+import urllib.parse
 import uuid
 
 from modules import azure_common as ac
+from modules import graph_activity as ga
 
 NAME = "Office 365 SharePoint Online"
 DESCRIPTION = "Simulates Office 365 SharePoint/OneDrive audit records for msft_o365_sharepoint_online_raw via the cribl_direct transport."
@@ -23,6 +25,7 @@ CONFIG_KEY = "o365_sharepoint_config"
 SOURCE_IDENTIFIER = "3a37f519e9094a3f8c4185fa572cd111"
 INTEGRATION_IDENTIFIER = "logsim:o365_sharepoint"
 DATASET = "msft_o365_sharepoint_online_raw"
+EVENT_INTERVAL = 0.4   # default relative benign volume: document access/sharing is high volume
 ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 SP_HOST = "examplecorp.sharepoint.com"
 OD_HOST = "examplecorp-my.sharepoint.com"       # OneDrive personal host
@@ -462,6 +465,51 @@ def scenario_onedrive_enumeration(config=None, count=40):
     return out
 
 
+# ── Graph-only storage scenarios (MicrosoftGraphActivityLogs) ────────────────────────
+
+def _graph_actor(config):
+    return ac.pick_user(config), ac.rare_asn_loc()
+
+
+def scenario_onedrive_folder_creation(config=None):
+    """A folder is created in a user's OneDrive through the Graph API from an unfamiliar host
+    (staging area for collected data) -> 'OneDrive folder creation'."""
+    u, loc = _graph_actor(config)
+    return ga.burst(u, [("POST", "/v1.0/me/drive/root/children", 201, 1400)], ip=loc["ip"],
+                    scopes="Files.ReadWrite.All", span_s=1)
+
+
+def scenario_onenote_enumeration(config=None):
+    """One identity lists the OneNote notebooks of many users in minutes -> 'Microsoft OneNote
+    enumeration activity'."""
+    u, loc = _graph_actor(config)
+    calls = [("GET", f"/v1.0/users/{ac.user_oid(ac.pick_user(config)['username'])}/onenote/notebooks", 200,
+              random.randint(2000, 9000)) for _ in range(15)]
+    return ga.burst(u, calls, ip=loc["ip"], scopes="Notes.Read.All", span_s=240)
+
+
+def scenario_teams_enumeration(config=None):
+    """One identity walks teams, channels and chats through Graph -> 'Microsoft Teams enumeration
+    activity'."""
+    u, loc = _graph_actor(config)
+    calls = [("GET", "/v1.0/teams", 200, 48000)]
+    for _ in range(12):
+        tid = ac._stable_guid("team:" + str(random.randint(1, 60)))
+        calls.append(("GET", random.choice([f"/v1.0/teams/{tid}/channels", f"/v1.0/teams/{tid}/members",
+                                            f"/beta/teams/{tid}/channels/getAllMessages"]), 200,
+                      random.randint(4000, 60000)))
+    return ga.burst(u, calls, ip=loc["ip"], scopes="Team.ReadBasic.All ChannelMessage.Read.All", span_s=240)
+
+
+def scenario_unusual_m365_storage_access(config=None):
+    """An application that has never touched SharePoint/OneDrive starts reading site drives ->
+    'Unusual access to Microsoft 365 storage services'."""
+    app = ga.app_identity(ac.rare_app_name())
+    calls = [("GET", f"/v1.0/sites/{ac._stable_guid('site:' + str(random.randint(1, 40)))}/drive/root/children",
+              200, random.randint(3000, 20000)) for _ in range(6)]
+    return ga.burst(app, calls, ip=ac.rare_asn_loc()["ip"], roles="Sites.Read.All Files.Read.All", span_s=120)
+
+
 SCENARIOS = {
     "mass_download": scenario_mass_download,
     "full_sync_download": scenario_full_sync_download,
@@ -478,7 +526,71 @@ SCENARIOS = {
     "aip_sensitive_file_access": scenario_aip_sensitive_file_access,
     "sharepoint_enumeration": scenario_sharepoint_enumeration,
     "onedrive_enumeration": scenario_onedrive_enumeration,
+    "onedrive_folder_creation": scenario_onedrive_folder_creation,
+    "onenote_enumeration": scenario_onenote_enumeration,
+    "teams_enumeration": scenario_teams_enumeration,
+    "unusual_m365_storage_access": scenario_unusual_m365_storage_access,
 }
+
+SCENARIOS.update({
+    "wip_m365_storage_exfiltration": scenario_mass_download,
+    "wip_sharepoint_enumeration": scenario_sharepoint_enumeration,
+    "wip_onedrive_enumeration": scenario_onedrive_enumeration,
+    "wip_onenote_enumeration": scenario_onenote_enumeration,
+    "wip_teams_enumeration": scenario_teams_enumeration,
+    "wip_onedrive_folder_creation": scenario_onedrive_folder_creation,
+    "wip_onedrive_file_download": scenario_full_sync_download,
+    "wip_onedrive_file_upload": scenario_mass_file_upload,
+    "wip_unusual_m365_storage_access": scenario_unusual_m365_storage_access,
+})
+
+ANALYTIC_ALERTS = {
+    "wip_m365_storage_exfiltration": "Microsoft 365 storage services exfiltration activity",
+    "wip_sharepoint_enumeration": "Microsoft SharePoint enumeration activity",
+    "wip_onedrive_enumeration": "Microsoft OneDrive enumeration activity",
+    "wip_onenote_enumeration": "Microsoft OneNote enumeration activity",
+    "wip_teams_enumeration": "Microsoft Teams enumeration activity",
+    "wip_onedrive_folder_creation": "OneDrive folder creation",
+    "wip_onedrive_file_download": "OneDrive file download",
+    "wip_onedrive_file_upload": "OneDrive file upload",
+    "wip_unusual_m365_storage_access": "Unusual access to Microsoft 365 storage services",
+}
+
+
+# ── Graph activity companions ────────────────────────────────────────────────────────
+# OneDrive download/upload, "Microsoft 365 storage services exfiltration" and the OneDrive /
+# SharePoint enumeration detectors read Graph API request logs (MicrosoftGraphActivityLogs,
+# routed to msft_azure_raw). These scenarios emit the Graph request behind each audit record
+# (same user, IP and item); benign SharePoint traffic carries none.
+def _graph_call(key, r):
+    item = f"/v1.0/drives/{r.get('ListId')}/items/{r.get('ListItemUniqueId')}"
+    if key in ("mass_download", "full_sync_download"):
+        return ("GET", item + "/content", 302, 0)
+    if key == "mass_file_upload":
+        name = urllib.parse.quote(r.get("SourceFileName") or "upload.bin")
+        return ("PUT", f"/v1.0/me/drive/root:/{name}:/content", 201, 1200)
+    if key == "sharepoint_enumeration":
+        return ("GET", f"/v1.0/sites/{r.get('Site')}/drive/root/children", 200, random.randint(3000, 25000))
+    if key == "onedrive_enumeration":
+        return ("GET", f"/v1.0/users/{r.get('UserKey')}/drive/root/children", 200, random.randint(3000, 25000))
+    return None
+
+
+def _graph_companions(key, records):
+    calls = [c for c in (_graph_call(key, r) for r in records) if c]
+    if not calls:
+        return []
+    upn = records[0].get("UserId") or ""
+    actor = {"username": upn.split("@")[0], "upn": upn}
+    client = "OneDrive SyncEngine" if key == "full_sync_download" else "Microsoft Graph Command Line Tools"
+    return ga.burst(actor, calls, ip=records[0].get("ClientIP"), client=client,
+                    scopes="Files.ReadWrite.All Sites.Read.All", span_s=min(600, 6 * len(calls)))
+
+
+def _with_graph(config, key, records):
+    if ac.eventhub_enabled(config, CONFIG_KEY):
+        return _graph_companions(key.removeprefix("wip_"), records) + records
+    return records
 
 
 _GATE = ac.ThreatGate(SCENARIOS)
@@ -493,11 +605,11 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
     if scenario_event:
         key = scenario_event if scenario_event in SCENARIOS else scenario_event.lower()
         if key in SCENARIOS:
-            return (SCENARIOS[key](config), key)
+            return (_with_graph(config, key, SCENARIOS[key](config)), key)
         return None
     if benign_only or threat_level == "Benign Traffic Only":
         return generate_benign(config, context)
     if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
-        return (SCENARIOS[key](config), key)
+        return (_with_graph(config, key, SCENARIOS[key](config)), key)
     return generate_benign(config, context)

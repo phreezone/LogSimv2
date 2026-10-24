@@ -13,6 +13,7 @@ import time
 import uuid
 
 from modules import azure_common as ac
+from modules import graph_activity as ga
 
 NAME = "Azure AD Sign-ins"
 DESCRIPTION = "Simulates Microsoft Graph auditLogs/signIns events for msft_azure_ad_raw via the cribl_direct transport."
@@ -20,6 +21,7 @@ CONFIG_KEY = "azure_ad_signin_config"
 SOURCE_IDENTIFIER = "f56dcfdf6bca43e793a4b6e9290e7b12"
 INTEGRATION_IDENTIFIER = "logsim:azure_ad_signin"
 DATASET = "msft_azure_ad_raw"
+EVENT_INTERVAL = 0.15   # default relative benign volume: sign-ins are by far the highest-volume Entra feed (silent token refresh dominates)
 
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
 
@@ -33,6 +35,13 @@ def _g():
 
 def _ts(offset_s=0):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + offset_s))
+
+
+def _burst_offsets(n, spacing=3, end=-3):
+    """n per-event offsets (seconds), earliest first, every one <= `end` (so <= now whatever n is)
+    and `spacing` apart. spacing is an integer >= 1 so each lands on a distinct whole second (the
+    sign-in feed stamps at second resolution), which keeps XSIAM from deduping them."""
+    return [end - spacing * (n - 1 - i) for i in range(n)]
 
 
 def _tor_ip(config):
@@ -68,7 +77,7 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
     app_name = app or random.choice(ac.APPS_INTERACTIVE)
     res_name = resource or random.choice(ac.RESOURCES)
     rec = {
-        "id": _g(), "createdDateTime": ts,
+        "id": _g(), "uniqueTokenIdentifier": _g(), "createdDateTime": ts,
         "userDisplayName": user["display_name"], "userPrincipalName": user["upn"],
         "userId": ac.user_oid(user["username"]),
         "appId": ac.app_id(app_name), "appDisplayName": app_name,
@@ -117,7 +126,7 @@ def _sp_signin(loc, offset_s=0):
     # it keeps the per-app resource baseline tight so 'unusual resource access by app' can fire.
     _res = ac.pick_baseline_resource("sp:" + name)
     return {
-        "id": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name), "appDisplayName": name,
+        "id": _g(), "uniqueTokenIdentifier": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name), "appDisplayName": name,
         "servicePrincipalId": ac.user_oid("sp:" + name), "servicePrincipalName": name,
         "ipAddress": loc["ip"], "correlationId": _g(), "conditionalAccessStatus": "notApplied",
         "isInteractive": False, "riskState": "none", "riskLevelDuringSignIn": "none",
@@ -139,7 +148,7 @@ def _mi_signin(loc, offset_s=0):
                           "logsim-logicapp", "logsim-datafactory"])
     msi = random.choice(["userAssigned", "systemAssigned"])
     return {
-        "id": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name),
+        "id": _g(), "uniqueTokenIdentifier": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name),
         "appDisplayName": name, "servicePrincipalId": ac.user_oid("mi:" + name),
         "servicePrincipalName": name, "ipAddress": loc["ip"], "correlationId": _g(),
         "conditionalAccessStatus": "notApplied", "isInteractive": False,
@@ -170,9 +179,11 @@ _SYNC_ACCOUNT = {"username": "sync_aadconnect01",
                  "upn": "Sync_AADCONNECT01_7f3c2b9e@examplecorp.com",
                  "display_name": "On-Premises Directory Synchronization Service Account",
                  "department": "IT", "os_type": "Windows"}
-_AADCONNECT_HOST_LOC = {"ip": "52.14.33.10", "city": "Columbus", "state": "Ohio",
-                        "countryOrRegion": "US", "geoCoordinates": {"latitude": 39.96, "longitude": -82.99},
-                        "asn": 7922, "isp": "Comcast Business"}
+_HQ = ac.OFFICES[0]   # the AAD Connect server sits behind the Columbus office NAT
+_AADCONNECT_HOST_LOC = {"ip": _HQ["ips"][0], "city": _HQ["city"], "state": _HQ["state"],
+                        "countryOrRegion": _HQ["countryOrRegion"],
+                        "geoCoordinates": {"latitude": _HQ["lat"], "longitude": _HQ["lon"]},
+                        "asn": _HQ["asn"], "isp": _HQ["isp"]}
 
 
 def _sync_signin(loc, *, risky=False, offset_s=0):
@@ -196,9 +207,25 @@ def scenario_aad_connect_sync_unusual_host(config=None, user=None):
 
 
 def generate_benign(config=None, context=None):
-    """One routine sign-in from the real-world weighted mix a live tenant produces."""
+    """One routine sign-in from the real-world weighted mix a live tenant produces, plus (when Event
+    Hub copies are on) the Graph requests its client makes once it holds the token."""
     user = ac.pick_user(config, context)
     loc = ac.egress(user)
+    recs = _benign_mix(config, user, loc)
+    if not ac.eventhub_enabled(config, CONFIG_KEY):
+        return recs
+    first = recs[0] if recs else {}
+    ok = (first.get("status") or {}).get("errorCode", 1) == 0
+    if ok and first.get("userPrincipalName") == user["upn"] and random.random() < 0.35:
+        recs = recs + ga.benign_user_calls(user, loc,
+                                            sign_in_activity_id=first.get("uniqueTokenIdentifier"))
+    elif ok and "servicePrincipal" in (first.get("signInEventTypes") or []) and random.random() < 0.5:
+        recs = recs + ga.benign_app_calls(user=ac.pick_user(config, context),
+                                           sign_in_activity_id=first.get("uniqueTokenIdentifier"))
+    return recs
+
+
+def _benign_mix(config, user, loc):
     r = random.random()
     if r < 0.004:  # AAD Connect sync account's periodic auth FROM ITS NORMAL HOST (baseline for the
         return [_sync_signin(_AADCONNECT_HOST_LOC)]   # 'unusual host' anomaly to measure against)
@@ -259,30 +286,36 @@ def generate_benign(config=None, context=None):
 
 # ── attack scenarios ─────────────────────────────────────────────────────────────────
 
-def scenario_brute_force(config=None, user=None, attempts=10, src_ip=None):
+def scenario_brute_force(config=None, user=None, attempts=60, src_ip=None):
     u = ac.pick_user(config)
     loc = ac.egress(u)
     ip = src_ip or random.choice(RISKY_IPS)
     bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    offs = _burst_offsets(attempts)
     out = [_signin(u, bad, interactive=True, success=False, error_code=50126,
                    failure="Invalid username or password.", conditional="notApplied",
-                   offset_s=-(120 - i * 8)) for i in range(attempts)]
+                   offset_s=offs[i]) for i in range(attempts)]
     out.append(_signin(u, bad, interactive=True, offset_s=0))
     return out
 
 
-def scenario_password_spray(config=None, victims=12, src_ip=None):
+def scenario_password_spray(config=None, victims=50, src_ip=None):
     ip = src_ip or random.choice(RISKY_IPS)
     bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
     out = []
+    sprayed = []
+    offs = _burst_offsets(victims)
     for i in range(victims):
         u = ac.pick_user(config)
+        sprayed.append(u)
         out.append(_signin(u, bad, interactive=True, success=False, error_code=50126,
                            failure="Invalid username or password.", conditional="notApplied",
-                           offset_s=-(60 - i)))
-    out.append(_signin(ac.pick_user(config), bad, interactive=True, offset_s=0))
+                           offset_s=offs[i]))
+    # The compromise lands on one of the sprayed accounts, so the "many failures then a success
+    # from one IP" story resolves on a victim the spray actually touched (not a fresh identity).
+    out.append(_signin(random.choice(sprayed), bad, interactive=True, offset_s=0))
     return out
 
 
@@ -290,7 +323,7 @@ def scenario_impossible_travel(config=None, user=None):
     u = ac.pick_user(config)
     us = {"ip": "108.245.61.200", "city": "Columbus", "state": "Ohio", "countryOrRegion": "US",
           "geoCoordinates": {"latitude": 39.96, "longitude": -82.99}}
-    sg = {"ip": "103.21.244.12", "city": "Singapore", "state": "", "countryOrRegion": "SG",
+    sg = {"ip": "128.199.116.12", "city": "Singapore", "state": "", "countryOrRegion": "SG",
           "geoCoordinates": {"latitude": 1.29, "longitude": 103.85}}
     return [_signin(u, us, offset_s=-300), _signin(u, sg, offset_s=-60)]
 
@@ -340,18 +373,19 @@ def scenario_new_country_signin(config=None, user=None):
     return [_signin(u, far, interactive=True, ca_result="success")]
 
 
-def scenario_account_lockout_spray(config=None, victims=10, src_ip=None):
+def scenario_account_lockout_spray(config=None, victims=40, src_ip=None):
     """Many distinct users hit account lockout (errorCode 50053) from one source ->
     'Multiple user accounts failed login due to account lockouts' (Low)."""
     ip = src_ip or random.choice(RISKY_IPS)
     bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
     out = []
+    offs = _burst_offsets(victims)
     for i in range(victims):
         u = ac.pick_user(config)
         out.append(_signin(u, bad, interactive=True, success=False, error_code=50053,
                            failure="Account is locked because the user tried to sign in too many times with an incorrect user ID or password.",
-                           conditional="notApplied", offset_s=-(120 - i * 8)))
+                           conditional="notApplied", offset_s=offs[i]))
     return out
 
 
@@ -490,18 +524,19 @@ def scenario_machine_account_sso(config=None, user=None):
                     risk_level="low", risk_state="atRisk")]
 
 
-def scenario_sso_spray_ip_rotation(config=None, victims=12):
+def scenario_sso_spray_ip_rotation(config=None, victims=50):
     """Password spray with ROTATING source IPs across a subnet -> 'IP Rotation Pattern in SSO
     Spray' (evades per-IP lockout)."""
     net = random.choice(["45.148", "193.218", "185.220"])
     out = []
+    offs = _burst_offsets(victims)
     for i in range(victims):
         v = ac.pick_user(config)
         ip = f"{net}.{random.randint(0, 255)}.{random.randint(2, 250)}"
         out.append(_signin(v, {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
                     "geoCoordinates": {"latitude": 0, "longitude": 0}}, interactive=True,
                     success=False, error_code=50126, failure="Invalid username or password.",
-                    conditional="notApplied", offset_s=-(180 - i * 12)))
+                    conditional="notApplied", offset_s=offs[i]))
     return out
 
 
@@ -525,13 +560,14 @@ _PENTEST_AGENTS = ["MSOLSpray/1.0", "AADInternals", "ROADtools", "o365-attack-to
                    "TeamFiltration/3.5", "python-requests/2.31 (MFASweep)", "Mantis"]
 
 
-def scenario_pentest_tool_activity(config=None, user=None, attempts=8):
+def scenario_pentest_tool_activity(config=None, user=None, attempts=30):
     """Sign-ins bearing known offensive-tool signatures in the user-agent -> 'Penetration testing
     tool activity attempt' (MSOLSpray / AADInternals / ROADtools / TeamFiltration etc.)."""
     agent = random.choice(_PENTEST_AGENTS)
     bad = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
     out = []
+    offs = _burst_offsets(attempts)
     for i in range(attempts):
         u = ac.pick_user(config)
         dev = dict(ac.device_for(u), browser=agent, isCompliant=False, isManaged=False, trustType="")
@@ -539,7 +575,7 @@ def scenario_pentest_tool_activity(config=None, user=None, attempts=8):
                            error_code=(0 if i == attempts - 1 else 50126),
                            failure="Invalid username or password.", device=dev,
                            risk_level="high", risk_state="atRisk", conditional="notApplied",
-                           offset_s=-(120 - i * 12)))
+                           offset_s=offs[i]))
     return out
 
 
@@ -572,7 +608,12 @@ def scenario_app_access_unknown_tenant(config=None, user=None):
     rec["riskState"] = "atRisk"
     rec["riskLevelDuringSignIn"] = "high"
     rec["riskEventTypes_v2"] = ["anonymizedIPAddress"]
-    return [rec]
+    # ...and the Graph calls that app then attempts with its foreign-tenant token, refused (403):
+    # the request log is what the Graph-activity variant of the detector reads.
+    app = ga.app_identity(ac.rare_app_name(), tenant_id=tenant["tenant_id"])
+    calls = [("GET", "/v1.0/users?$top=999", 403, 312), ("GET", "/v1.0/groups", 403, 312),
+             ("GET", "/v1.0/organization", 403, 312)]
+    return [rec] + ga.burst(app, calls, ip=loc["ip"], roles="Directory.Read.All", span_s=40)
 
 
 def scenario_device_code_auth_flow(config=None, user=None):
@@ -630,6 +671,118 @@ def scenario_sp_token_remote_usage(config=None, user=None):
     return [rec]
 
 
+# ── Graph API activity scenarios (MicrosoftGraphActivityLogs only) ───────────────────
+# These detectors read Graph request logs, so the scenarios are the requests themselves; each
+# also carries the sign-in that minted the token.
+
+_ENUM_CALLS = ["/v1.0/users?$top=999", "/v1.0/groups?$top=999", "/v1.0/servicePrincipals?$top=999",
+               "/v1.0/applications", "/v1.0/directoryRoles", "/v1.0/devices?$top=999",
+               "/v1.0/organization", "/v1.0/domains", "/v1.0/identity/conditionalAccess/policies",
+               "/v1.0/roleManagement/directory/roleAssignments", "/beta/policies/authorizationPolicy",
+               "/v1.0/groups?$filter=securityEnabled eq true", "/v1.0/users?$select=id,onPremisesSamAccountName"]
+
+
+def scenario_graph_enumeration(config=None, user=None):
+    """A user token from an unfamiliar host walks the directory through Graph (users, groups, apps,
+    roles, CA policies, devices) in a few minutes, ROADtools/AzureHound style -> 'Azure
+    enumeration activity using Microsoft Graph API' (large responses also feed 'Uncommon
+    increase in Azure Microsoft Graph API request sizes')."""
+    u = user or ac.pick_user(config)
+    loc = ac.rare_asn_loc()
+    si = _signin(u, loc, interactive=True, app="Microsoft Graph Command Line Tools",
+                 resource="Microsoft Graph", client_app="Mobile Apps and Desktop clients", offset_s=-260)
+    calls = [("GET", c, 200, random.randint(60000, 900000)) for c in random.sample(_ENUM_CALLS, 11)]
+    return [si] + ga.burst(u, calls, ip=loc["ip"], scopes="Directory.Read.All User.Read.All",
+                           span_s=200, end_offset_s=-5)
+
+
+def scenario_graph_throttling_app(config=None, user=None):
+    """A daemon app hammers Graph until it is throttled (HTTP 429) -> 'An Azure application
+    reached a throttling API rate'."""
+    app = ga.app_identity(random.choice(list(ga.DAEMON_APPS)))
+    calls = ([("GET", "/v1.0/users/" + ac.user_oid(ac.pick_user(config)["username"]) + "/messages?$top=50", 200, 41000)
+              for _ in range(14)] +
+             [("GET", "/v1.0/users/" + ac.user_oid(ac.pick_user(config)["username"]) + "/messages?$top=50", 429, 180)
+              for _ in range(16)])
+    return ga.burst(app, calls, roles=ga.DAEMON_APPS[app["name"]]["roles"] + " Mail.Read", span_s=90)
+
+
+def scenario_graph_throttling_user(config=None, user=None):
+    """A user identity's script exceeds Graph's per-user limits (HTTP 429) -> 'Cloud identity reached
+    a throttling API rate'."""
+    u = user or ac.pick_user(config)
+    loc = ac.egress(u)
+    calls = ([("GET", "/v1.0/me/drive/root/children", 200, 9000) for _ in range(12)] +
+             [("GET", "/v1.0/me/drive/root/children", 429, 180) for _ in range(14)])
+    return ga.burst(u, calls, ip=loc["ip"], scopes="Files.Read.All User.Read", span_s=60)
+
+
+def scenario_graph_denied_burst(config=None, user=None):
+    """An app token is pointed at directory endpoints it holds no permission for and is refused again
+    and again (HTTP 403) -> 'An Azure identity performed multiple actions that were denied' (the
+    application variation)."""
+    app = ga.app_identity(random.choice(list(ga.DAEMON_APPS)))
+    targets = ["/v1.0/roleManagement/directory/roleAssignments", "/v1.0/applications",
+               "/v1.0/identity/conditionalAccess/policies", "/v1.0/policies/authorizationPolicy",
+               "/v1.0/directoryRoles", "/v1.0/servicePrincipals", "/v1.0/auditLogs/signIns",
+               "/v1.0/security/alerts_v2", "/v1.0/users?$select=signInActivity"]
+    calls = [("GET", random.choice(targets), 403, 312) for _ in range(14)]
+    return ga.burst(app, calls, ip=ac.rare_asn_loc()["ip"],
+                    roles=ga.DAEMON_APPS[app["name"]]["roles"], span_s=420)
+
+
+def scenario_graph_large_responses(config=None, user=None):
+    """A daemon app that normally pulls small pages suddenly downloads huge responses (full
+    directory / mailbox dumps) -> 'Uncommon increase in Azure Microsoft Graph API request sizes'."""
+    name = random.choice(list(ga.DAEMON_APPS))
+    app = ga.app_identity(name)
+    calls = [("GET", random.choice(["/v1.0/users?$top=999&$select=*", "/beta/users?$expand=memberOf",
+                                    "/v1.0/groups?$expand=members"]), 200,
+              random.randint(18_000_000, 60_000_000)) for _ in range(6)]
+    return ga.burst(app, calls, roles=ga.DAEMON_APPS[name]["roles"], span_s=300)
+
+
+def scenario_graph_privileged_app_call(config=None, user=None):
+    """An app holding a tenant-takeover app role (RoleManagement.ReadWrite.Directory) uses it to add
+    a member to a directory role -> 'Privileged role used by Azure application'."""
+    app = ga.app_identity(ac.rare_app_name())
+    loc = ac.rare_asn_loc()
+    calls = [("GET", "/v1.0/directoryRoles", 200, 7400),
+             ("POST", f"/v1.0/directoryRoles/{ac._stable_guid('role:ga')}/members/$ref", 204, 0)]
+    return ga.burst(app, calls, ip=loc["ip"], span_s=20,
+                    roles="RoleManagement.ReadWrite.Directory Directory.ReadWrite.All")
+
+
+def scenario_mailbox_enumeration(config=None, user=None):
+    """App-only Graph requests enumerate users' mailbox surfaces and folders."""
+    app = ga.app_identity(random.choice(list(ga.DAEMON_APPS)))
+    users = [ac.user_oid(ac.pick_user(config)["username"]) for _ in range(5)]
+    calls = [("GET", f"/v1.0/users/{oid}/mailFolders?$top=100", 200, random.randint(9000, 42000))
+             for oid in users]
+    calls += [("GET", f"/v1.0/users/{oid}/mailboxSettings", 200, random.randint(3000, 9000))
+              for oid in users]
+    return ga.burst(app, calls, roles="Mail.ReadBasic.All User.Read.All", span_s=180)
+
+
+def scenario_mailbox_rule_create(config=None, user=None):
+    """A delegated identity creates an inbox rule through the Graph API."""
+    u = user or ac.pick_user(config)
+    oid = ac.user_oid(u["username"])
+    rule = {"displayName": "LogSim triage rule", "sequence": 1, "isEnabled": True,
+            "conditions": {"subjectContains": ["LogSim test"]},
+            "actions": {"moveToFolder": "Archive", "stopProcessingRules": True}}
+    return ga.burst(u, [("POST", f"/v1.0/users/{oid}/mailFolders/inbox/messageRules", 201, 1200)],
+                    scopes="MailboxSettings.ReadWrite", span_s=1)
+
+
+def scenario_email_service_abuse(config=None, user=None):
+    """Short, correlated Graph sendMail burst from a single app identity."""
+    app = ga.app_identity(random.choice(list(ga.DAEMON_APPS)))
+    calls = [("POST", f"/v1.0/users/{ac.user_oid(ac.pick_user(config)['username'])}/sendMail", 202, 900)
+             for _ in range(12)]
+    return ga.burst(app, calls, roles="Mail.Send User.Read.All", span_s=150)
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
@@ -662,6 +815,70 @@ SCENARIOS = {
     "new_device_signin": scenario_new_device_signin,
     "new_country_signin": scenario_new_country_signin,
     "account_lockout_spray": scenario_account_lockout_spray,
+    "graph_enumeration": scenario_graph_enumeration,
+    "graph_throttling_app": scenario_graph_throttling_app,
+    "graph_throttling_user": scenario_graph_throttling_user,
+    "graph_denied_burst": scenario_graph_denied_burst,
+    "graph_large_responses": scenario_graph_large_responses,
+    "graph_privileged_app_call": scenario_graph_privileged_app_call,
+}
+
+SCENARIOS.update({
+    "wip_unusual_country_api": scenario_new_country_signin,
+    "wip_high_risk_ip_activity": scenario_high_risk_signin,
+    "wip_api_call_from_tor": scenario_saas_api_from_tor,
+    "wip_multiple_failed_logins": scenario_brute_force,
+    "wip_impossible_travel_cloud": scenario_impossible_travel,
+    "wip_suspicious_device_code": scenario_device_code_auth_flow,
+    "wip_unknown_tenant_app_access": scenario_app_access_unknown_tenant,
+    "wip_remote_service_principal_token": scenario_sp_token_remote_usage,
+    "wip_remote_managed_identity_token": scenario_mi_token_remote_usage,
+    "wip_graph_enumeration_activity": scenario_graph_enumeration,
+    "wip_graph_throttling_app": scenario_graph_throttling_app,
+    "wip_graph_denied_burst": scenario_graph_denied_burst,
+    "wip_graph_response_size_spike": scenario_graph_large_responses,
+    "wip_graph_privileged_app": scenario_graph_privileged_app_call,
+    "wip_unusual_resource_by_app": scenario_unusual_resource_access_by_app,
+    "wip_cloud_identity_unusual_country": scenario_suspicious_country_signin,
+    "wip_graph_enumeration_exact": scenario_graph_enumeration,
+    "wip_graph_throttling_exact": scenario_graph_throttling_app,
+    "wip_mailbox_enumeration": scenario_mailbox_enumeration,
+    "wip_mailbox_rule_create": scenario_mailbox_rule_create,
+    "wip_cloud_email_infrastructure_enum": scenario_mailbox_enumeration,
+    "wip_cloud_email_service_abuse": scenario_email_service_abuse,
+    "wip_cloud_email_service_activity": scenario_email_service_abuse,
+    "wip_unusual_cloud_identity_user_agent": scenario_sso_abnormal_user_agent,
+    "wip_cloud_pentest_activity": scenario_pentest_tool_activity,
+    "wip_multiple_risk_indicators": scenario_high_risk_signin,
+})
+
+ANALYTIC_ALERTS = {
+    "wip_unusual_country_api": "A cloud identity executed an API call from an unusual country",
+    "wip_high_risk_ip_activity": "Cloud activity from a high-risk IP address",
+    "wip_api_call_from_tor": "Suspicious API call from a Tor exit node",
+    "wip_multiple_failed_logins": "Multiple failed logins from a single IP",
+    "wip_impossible_travel_cloud": "Impossible travel by a cloud identity",
+    "wip_suspicious_device_code": "Suspicious Entra ID Device Code Authentication Flow",
+    "wip_unknown_tenant_app_access": "Attempted Azure application access from unknown tenant",
+    "wip_remote_service_principal_token": "Remote usage of an Azure Service Principal token",
+    "wip_remote_managed_identity_token": "Remote usage of an Azure Managed Identity token",
+    "wip_graph_enumeration_activity": "Azure enumeration activity using Microsoft Graph API",
+    "wip_graph_throttling_app": "An Azure application reached a throttling API rate",
+    "wip_graph_denied_burst": "An Azure identity performed multiple actions that were denied",
+    "wip_graph_response_size_spike": "Uncommon increase in Azure Microsoft Graph API request sizes",
+    "wip_graph_privileged_app": "Privileged role used by Azure application",
+    "wip_unusual_resource_by_app": "Unusual resource access by Azure application",
+    "wip_cloud_identity_unusual_country": "A cloud identity executed an API call from an unusual country",
+    "wip_graph_enumeration_exact": "Suspicious Azure enumeration activity",
+    "wip_graph_throttling_exact": "Cloud identity reached a throttling API rate",
+    "wip_mailbox_enumeration": "Mailbox enumeration activity by Azure application",
+    "wip_mailbox_rule_create": "Azure mailbox rule creation",
+    "wip_cloud_email_infrastructure_enum": "Cloud email infrastructure enumeration activity",
+    "wip_cloud_email_service_abuse": "Suspicious activity indicating a potential abuse of a cloud-native email service",
+    "wip_cloud_email_service_activity": "Cloud email service activity",
+    "wip_unusual_cloud_identity_user_agent": "Unusual user-agent for a cloud identity",
+    "wip_cloud_pentest_activity": "Cloud penetration testing tool activity",
+    "wip_multiple_risk_indicators": "Multiple risk indicators for a cloud identity",
 }
 
 
@@ -674,16 +891,21 @@ def get_threat_names():
     return list(SCENARIOS.keys())
 
 
+def _copies(config, records):
+    """Every signIn plus its Event Hub copy (msft_azure_raw, which the Cloud analytics read)."""
+    return ac.with_eventhub_signins(records) if ac.eventhub_enabled(config, CONFIG_KEY) else records
+
+
 def generate_log(config=None, threat_level="Realistic", benign_only=False,
                  scenario=None, scenario_event=None, context=None):
     if scenario_event:
         key = scenario_event if scenario_event in SCENARIOS else scenario_event.lower()
         if key in SCENARIOS:
-            return (SCENARIOS[key](config), key)
+            return (_copies(config, SCENARIOS[key](config)), key)
         return None
     if benign_only or threat_level == "Benign Traffic Only":
-        return generate_benign(config, context)
+        return _copies(config, generate_benign(config, context))
     if _GATE.fire(threat_level, config):
         key = random.choice(list(SCENARIOS))
-        return (SCENARIOS[key](config), key)
-    return generate_benign(config, context)
+        return (_copies(config, SCENARIOS[key](config)), key)
+    return _copies(config, generate_benign(config, context))
