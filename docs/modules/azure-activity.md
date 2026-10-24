@@ -252,9 +252,21 @@ URI, and property structure. AI `Audit` and `RequestResponse` categories and com
 fields are documented. A public Azure OpenAI example confirms `Models_List`, result signature,
 caller IP, `properties.objectId`, API version, model deployment/name/version, and request/response
 length and times. The generator now follows those fields. The example is a Log Analytics view of
-the event and does not prove every Event Hub raw-field detail or XSIAM mapping. This review did not
-measure XSIAM analytic firings for threat scenarios. `wip_` marks detector-level matching as
-unconfirmed.
+the event and does not prove every Event Hub raw-field detail or XSIAM mapping. `wip_` marks
+detector-level matching as unconfirmed.
+
+**Confirmed firing (promoted out of `wip_`, 2026-10-23/24 fire-all).** These ten scenarios were
+observed raising their alert on this feed's data, so they carry plain keys and their
+`ANALYTIC_ALERTS` value is the tenant's observed name; the old `wip_` names still resolve on
+demand via `_RENAMED_THREATS`:
+`firewall_policy_delete` (An Azure Firewall policy deletion), `network_watcher_delete` (Azure
+Network Watcher Deletion), `alert_rule_delete` (Unusual Azure Monitor alert rule deletion),
+`eventhub_delete` (Azure Event Hub Deletion), `vm_command` (Unusual Azure VM remote command
+execution), `ai_safeguard_delete` (AI safeguards were successfully deleted), `ai_safeguard_modify`
+(Unusual modification of AI safeguards), `kube_anonymous` (A Kubernetes API operation was
+successfully invoked by an anonymous user), `kube_node_external` and `kube_dashboard_external`
+(the Kubernetes service-account-outside-cluster detections). Everything else stays `wip_` until
+its own alert is observed.
 
 Sources:
 
