@@ -591,7 +591,7 @@ _ARM_TARGETS = {
     # Network/security configuration and logging controls
     "wip_nsg_rule_change": ("An Azure Network Security Group was modified", "Microsoft.Network/networkSecurityGroups/securityRules/write", "net", "Network Contributor"),
     "wip_firewall_change": ("An Azure Firewall was modified", "Microsoft.Network/azureFirewalls/write", "net", "Network Contributor"),
-    "wip_firewall_policy_delete": ("An Azure Firewall policy deletion", "Microsoft.Network/firewallPolicies/delete", "net", "Network Contributor"),
+    "firewall_policy_delete": ("An Azure Firewall policy deletion", "Microsoft.Network/firewallPolicies/delete", "net", "Network Contributor"),
     "wip_firewall_rule_collection_delete": ("An Azure Firewall rule collection group was modified or deleted", "Microsoft.Network/firewallPolicies/ruleCollectionGroups/delete", "net", "Network Contributor"),
     "wip_firewall_rule_collection": ("An Azure Firewall rule collection group was modified or deleted", "Microsoft.Network/firewallPolicies/ruleCollectionGroups/write", "net", "Network Contributor"),
     "wip_firewall_rule_group": ("An Azure firewall rule group was modified", "Microsoft.Network/firewallPolicies/ruleCollectionGroups/write", "net", "Network Contributor"),
@@ -601,7 +601,7 @@ _ARM_TARGETS = {
     "wip_vpn_connection_change": ("An Azure VPN Connection was modified", "Microsoft.Network/connections/write", "net", "Network Contributor"),
     "wip_p2s_vpn_change": ("An Azure Point-to-Site VPN was modified", "Microsoft.Network/p2sVpnGateways/write", "net", "Network Contributor"),
     "wip_diagnostic_settings_delete": ("Azure diagnostic configuration deletion", "Microsoft.Insights/diagnosticSettings/delete", "sec", "Monitoring Contributor"),
-    "wip_alert_rule_delete": ("Azure Monitor alert rule deleted", "Microsoft.Insights/metricAlerts/delete", "sec", "Monitoring Contributor"),
+    "alert_rule_delete": ("Unusual Azure Monitor alert rule deletion", "Microsoft.Insights/metricAlerts/delete", "sec", "Monitoring Contributor"),
     "wip_logging_disabled": ("Cloud resource logging was disabled", "Microsoft.Insights/diagnosticSettings/delete", "sec", "Monitoring Contributor"),
     "wip_suppression_rule_create": ("An Azure Suppression Rule was created", "Microsoft.Security/alertsSuppressionRules/write", "sec", "Security Admin"),
     # IAM and persistence
@@ -619,7 +619,7 @@ _ARM_TARGETS = {
     "wip_vm_create": ("Cloud instance creation attempt", "Microsoft.Compute/virtualMachines/write", "cloud", "Virtual Machine Contributor"),
     "wip_vm_delete": ("Cloud instance deletion attempt", "Microsoft.Compute/virtualMachines/delete", "cloud", "Virtual Machine Contributor"),
     "wip_vm_stop": ("A cloud instance was stopped", "Microsoft.Compute/virtualMachines/powerOff/action", "cloud", "Virtual Machine Contributor"),
-    "wip_vm_command": ("Azure virtual machine commands execution", "Microsoft.Compute/virtualMachines/runCommand/action", "cloud", "Virtual Machine Contributor"),
+    "vm_command": ("Unusual Azure VM remote command execution", "Microsoft.Compute/virtualMachines/runCommand/action", "cloud", "Virtual Machine Contributor"),
     "wip_vm_extension": ("Azure VM extension abuse attempt", "Microsoft.Compute/virtualMachines/extensions/write", "cloud", "Virtual Machine Contributor"),
     "wip_snapshot_sas": ("An Azure VM snapshot SAS URL was generated", "Microsoft.Compute/snapshots/beginGetAccess/action", "cloud", "Backup Contributor"),
     "wip_snapshot_create": ("Cloud snapshot created or modified", "Microsoft.Compute/snapshots/write", "cloud", "Backup Contributor"),
@@ -632,7 +632,7 @@ _ARM_TARGETS = {
     "wip_storage_replication": ("Azure storage account cross-tenant object replication was enabled", "Microsoft.Storage/storageAccounts/objectReplicationPolicies/write", "data", "Storage Account Contributor"),
     "wip_blob_public_access": ("Azure Blob Container Access Level Modification", "Microsoft.Storage/storageAccounts/blobServices/containers/write", "data", "Storage Account Contributor"),
     "wip_eventhub_auth_rule": ("Azure Event Hub Authorization rule creation/modification", "Microsoft.EventHub/namespaces/authorizationRules/write", "cloud", "Contributor"),
-    "wip_eventhub_delete": ("Azure Event Hub Deletion", "Microsoft.EventHub/namespaces/eventhubs/delete", "cloud", "Contributor"),
+    "eventhub_delete": ("Azure Event Hub Deletion", "Microsoft.EventHub/namespaces/eventhubs/delete", "cloud", "Contributor"),
     "wip_sql_export": ("An Azure SQL database was exported from a production subscription", "Microsoft.Sql/servers/databases/export/action", "data", "SQL DB Contributor"),
     "wip_compute_allocation": ("Allocation of multiple cloud compute resources", "Microsoft.Compute/virtualMachines/write", "cloud", "Contributor"),
     "wip_vm_serial_console": ("Cloud compute serial console access", "Microsoft.SerialConsole/serialPorts/connect/action", "cloud", "Virtual Machine Contributor"),
@@ -643,9 +643,9 @@ _ARM_TARGETS = {
     "wip_keyvault_config": ("An Azure Key Vault was modified", "Microsoft.KeyVault/vaults/write", "sec", "Key Vault Administrator"),
     "wip_cosmos_key_read": ("Uncommon Azure Cosmos DB master key read by identity", "Microsoft.DocumentDB/databaseAccounts/listKeys/action", "data", "Contributor"),
     "wip_app_gateway_change": ("Modification or Deletion of an Azure Application Gateway Detected", "Microsoft.Network/applicationGateways/write", "net", "Network Contributor"),
-    "wip_network_watcher_delete": ("Azure Network Watcher Deletion", "Microsoft.Network/networkWatchers/delete", "net", "Network Contributor"),
-    "wip_ai_safeguard_delete": ("AI safeguards deletion attempt", "Microsoft.CognitiveServices/accounts/raiPolicies/delete", "data", "Cognitive Services Contributor"),
-    "wip_ai_safeguard_modify": ("AI safeguards were modified", "Microsoft.CognitiveServices/accounts/raiPolicies/write", "data", "Cognitive Services Contributor"),
+    "network_watcher_delete": ("Azure Network Watcher Deletion", "Microsoft.Network/networkWatchers/delete", "net", "Network Contributor"),
+    "ai_safeguard_delete": ("AI safeguards were successfully deleted", "Microsoft.CognitiveServices/accounts/raiPolicies/delete", "data", "Cognitive Services Contributor"),
+    "ai_safeguard_modify": ("Unusual modification of AI safeguards", "Microsoft.CognitiveServices/accounts/raiPolicies/write", "data", "Cognitive Services Contributor"),
     "wip_backup_policy_change": ("Cloud storage automatic backup disabled", "Microsoft.RecoveryServices/vaults/backupPolicies/write", "data", "Backup Contributor"),
     "wip_database_export": ("Data exfiltration from cloud database", "Microsoft.Sql/servers/databases/export/action", "data", "SQL DB Contributor"),
     "wip_network_packet_capture": ("Network sniffing detected in Cloud environment", "Microsoft.Network/networkWatchers/packetCaptures/write", "net", "Network Contributor"),
@@ -996,7 +996,7 @@ _KUBE_EXTRA = {
 
 
 _KUBE_TARGETS = {
-    "wip_kube_anonymous": ("A Kubernetes API operation was successfully invoked by an anonymous user", "anonymous"),
+    "kube_anonymous": ("A Kubernetes API operation was successfully invoked by an anonymous user", "anonymous"),
     "wip_kube_secret": ("A Kubernetes secret was created or deleted", "secret"),
     "wip_kube_configmap": ("A Kubernetes ConfigMap was created or deleted", "configmap"),
     "wip_kube_deployment": ("A Kubernetes deployment was created", "deployment"),
@@ -1010,8 +1010,8 @@ _KUBE_TARGETS = {
     "wip_kube_exec": ("Unusual exec into a Kubernetes Pod", "exec"),
     "wip_kube_ephemeral": ("A Kubernetes ephemeral container was created", "ephemeral"),
     "wip_kube_clusterrolebinding": ("A Kubernetes cluster role binding was created or deleted", "clusterrolebinding"),
-    "wip_kube_dashboard_external": ("A Kubernetes dashboard service account was used outside the cluster", "dashboard_external"),
-    "wip_kube_node_external": ("A Kubernetes node service account activity from external IP", "node_external"),
+    "kube_dashboard_external": ("A Kubernetes dashboard service account was used outside the cluster", "dashboard_external"),
+    "kube_node_external": ("A Kubernetes node service account was used outside the cluster", "node_external"),
     "wip_kube_sidecar_pod": ("A Kubernetes Pod was created with a sidecar container", "sidecar_pod"),
     "wip_kube_pod_delete": ("A Kubernetes Pod was deleted", "pod_delete"),
     "wip_kube_replicaset": ("A Kubernetes ReplicaSet was created", "replicaset"),
@@ -1186,8 +1186,6 @@ ANALYTIC_ALERTS.update({
     "wip_blob_public_access": "Azure Blob Container Access Level Modification",
     "wip_storage_multiple_downloads": "An identity performed a suspicious download of multiple cloud storage objects",
     "wip_vm_ssh_key_modification": "Suspicious cloud compute instance SSH keys modification attempt",
-    "wip_ai_safeguard_delete": "AI safeguards deletion attempt",
-    "wip_ai_safeguard_modify": "AI safeguards were modified",
     "wip_backup_policy_change": "Cloud storage automatic backup disabled",
     "wip_backup_delete_protection_disabled": "Cloud storage delete protection disabled",
     "wip_database_export": "Data exfiltration from cloud database",
@@ -1254,3 +1252,18 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
         key = random.choice(list(SCENARIOS))
         return (SCENARIOS[key](config), key)
     return generate_benign(config, context)
+
+# Scenarios promoted out of wip_ once their alert was observed firing on this feed's data
+# (2026-10-23/24 fire-all). Old wip_ names still resolve on demand via this table.
+_RENAMED_THREATS = {
+    "WIP_AI_SAFEGUARD_DELETE": "ai_safeguard_delete",
+    "WIP_AI_SAFEGUARD_MODIFY": "ai_safeguard_modify",
+    "WIP_ALERT_RULE_DELETE": "alert_rule_delete",
+    "WIP_EVENTHUB_DELETE": "eventhub_delete",
+    "WIP_FIREWALL_POLICY_DELETE": "firewall_policy_delete",
+    "WIP_KUBE_ANONYMOUS": "kube_anonymous",
+    "WIP_KUBE_DASHBOARD_EXTERNAL": "kube_dashboard_external",
+    "WIP_KUBE_NODE_EXTERNAL": "kube_node_external",
+    "WIP_NETWORK_WATCHER_DELETE": "network_watcher_delete",
+    "WIP_VM_COMMAND": "vm_command",
+}
