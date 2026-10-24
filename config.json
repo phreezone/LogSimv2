@@ -4995,6 +4995,23 @@
       }
     }
   },
+  "panw_ngfw_config": {
+    "_comment": "Palo Alto Networks NGFW (PAN-OS) traffic logs, CEF over syslog to the Broker VM Syslog Collector (Format=CEF). Lands in panw_ngfw_traffic_raw. Threat mix is the module's _DEFAULT_THREAT_EVENTS; override event_mix.threat to retune.",
+    "syslog_port": 514,
+    "serial_number": "007051000012345",
+    "hostname": "PA-VM-01",
+    "mgmt_ip": "10.0.0.1",
+    "syslog_hostname_format": "hostname",
+    "_comment_syslog_hostname_format": "What PAN stamps in the syslog header HOSTNAME field (Device -> Setup -> Management -> Syslog HOSTNAME Format): 'hostname' uses the firewall name, 'ipv4-address' uses mgmt_ip.",
+    "sw_version": "11.1.4",
+    "vsys": "vsys1",
+    "interface_lan": "ethernet1/2",
+    "interface_wan": "ethernet1/1",
+    "interface_dmz": "ethernet1/3",
+    "default_rule": "Allow-Users-Outbound",
+    "nat_pool_cidr": "203.0.113.0/27",
+    "domain_controllers": ["10.0.10.10", "10.0.20.10"]
+  },
   "firepower_config": {
     "hostname": "DC1-FTD-01",
     "device_id": "ftd-9a8b7c6d-5e4f-3a2b-1c0d",
