@@ -264,7 +264,7 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | Proofpoint Email | HTTP Collector | 1 type (delivered email) | 11 types | [docs/modules/proofpoint.md](docs/modules/proofpoint.md) |
 | XDR Attack Orchestration | WinRM (real endpoint) + network transports | *(coordinator — real Atomic Red Team techniques on a live Cortex-agent box + synthetic network logs pinned to its identity)* | *Phase 1 — foundation validated; stories in progress* | [docs/modules/xdr-orchestration.md](docs/modules/xdr-orchestration.md) |
 
-**Totals:** 660 named threats across the 21 log-source modules, 338 of them offered on demand, plus 21 cross-feed identity campaigns.
+**Totals:** 946 named threats across the 23 log-source modules, 481 of them offered on demand, plus 21 cross-feed identity campaigns.
 
 ## Recent Changes
 
