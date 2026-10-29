@@ -37,11 +37,26 @@ try:
 except ImportError:  # pragma: no cover
     raise SystemExit("The 'requests' package is required: pip install -r requirements.txt")
 
-# Dedicated catalog UUIDs verified against the tenant (land + parse into the named dataset).
+# Dedicated catalog UUIDs, one per LogSim source, checked against the Cortex "Data source
+# UUIDs" catalog (Cribl). A module's SOURCE_IDENTIFIER must be one of these, or its records
+# land in the wrong dataset (or raw) and never reach the source's OOTB analytics.
 DEDICATED_UUIDS = {
-    "o365_azure_ad":   "e1f109f886ea42fbb96be6ec0cc597a9",  # -> msft_o365_azure_ad_raw
-    "azure_ad_signin": "f56dcfdf6bca43e793a4b6e9290e7b12",  # -> msft_azure_ad_raw
+    # Cribl is the module's transport (or its "auto" fallback).
+    "o365_azure_ad":     "e1f109f886ea42fbb96be6ec0cc597a9",  # -> msft_o365_azure_ad_raw
+    "azure_ad_signin":   "f56dcfdf6bca43e793a4b6e9290e7b12",  # -> msft_azure_ad_raw
+    "azure_ad_audit":    "0e076d5abe864bf78e8145ea9e0d749e",  # -> msft_azure_ad_audit_raw
+    "o365_exchange":     "dee8e85ce7db4573a8bc21b807e1d73a",  # -> msft_o365_exchange_online_raw
+    "o365_sharepoint":   "3a37f519e9094a3f8c4185fa572cd111",  # -> msft_o365_sharepoint_online_raw
+    "o365_dlp":          "8f052782739d4b8389644cca23b994ac",  # -> msft_o365_dlp_raw
+    "o365_general":      "c7655e83805b4a058e66043a6715156c",  # -> msft_o365_general_raw
+    "gcp_cloud_logging": "00a8322c85e14beabfa7ad5f3d62db73",  # -> google_cloud_logging_raw
+    "aws_cloudtrail":    "c19f87b6262f48259b3d5d2a2c691802",  # -> amazon_aws_raw (AWS audit logs)
+    # Catalog entries for sources LogSim sends another way today (HTTP collector / WEC).
+    "okta_sso":          "5faf4c1fdb8443d9920d6a54815432c1",  # -> okta_sso_raw
+    "proofpoint_tap":    "3eefce0f791e4391a3643b8cf860a361",  # -> proofpoint_tap_raw
+    "windows_events":    "63b0fbeb501e4650896e7064d3412e14",  # -> microsoft_windows_raw
 }
+GENERIC_UUID = "af01292940d7426594d3d3e55ae17ee0"   # <vendor>_<product>_raw, no OOTB analytics
 
 
 class CriblDirectSender:

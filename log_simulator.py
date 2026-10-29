@@ -588,32 +588,40 @@ def flush_s3_batch():
             continue
         records = []
         for b in blobs:
-            try:
-                obj = json.loads(gzip.decompress(b).decode("utf-8"))
-            except Exception:
-                continue
-            if isinstance(obj, dict) and "Records" in obj:
-                records.extend(obj["Records"])
-            elif isinstance(obj, list):
-                records.extend(obj)
-            else:
-                records.append(obj)
+            records.extend(_blob_records(b))
         if not records:
             continue
 
         # CloudTrail: single {"Records":[...]} envelope.
         body = json.dumps({"Records": records}, default=str)
         merged = gzip.compress(body.encode("utf-8"))
-        send_s3_message(merged, module, config, f"batch:{len(records)} events")
+        status = send_s3_message(merged, module, config, f"batch:{len(records)} events")
+        if status == "auth" and (config.get(module.CONFIG_KEY) or {}).get("transport") == "auto":
+            # S3 is now marked unusable: deliver this batch via the Cribl receiver.
+            send_cribl_batch(records, module, config)
+
+
+def _blob_records(blob):
+    """The CloudTrail records inside one gzipped {"Records":[...]} blob."""
+    try:
+        obj = json.loads(gzip.decompress(blob).decode("utf-8"))
+    except Exception:
+        return []
+    if isinstance(obj, dict) and "Records" in obj:
+        return list(obj["Records"])
+    if isinstance(obj, list):
+        return obj
+    return [obj]
 
 
 def send_s3_message(content_bytes, module, config, event_name):
+    """Uploads a gzipped log file to S3. Returns "ok", "auth" (credential, permission
+    or bucket failure) or "error"."""
     event_str = f" ({event_name})" if event_name else ""
 
-    """Uploads a gzipped log file to S3."""
     conf_key = getattr(module, 'CONFIG_KEY', None)
     if not conf_key or conf_key not in config:
-        return
+        return "error"
 
     try:
         # Use timezone-aware datetime object
@@ -633,7 +641,7 @@ def send_s3_message(content_bytes, module, config, event_name):
 
         if not bucket_name:
             print(f"ERROR: S3 bucket is not defined (S3_BUCKET_NAME in .env / '{conf_key}' in config.json). Cannot upload log.")
-            return
+            return "error"
 
         # CloudTrail's native layout: a date-partitioned {"Records":[...]}.json.gz object.
         file_name = f"{account_id}_CloudTrail_{region}_{now.strftime('%Y%m%dT%H%MZ')}_{str(uuid.uuid4())[:6].upper()}.json.gz"
@@ -662,14 +670,124 @@ def send_s3_message(content_bytes, module, config, event_name):
                 time.sleep(0.5 * (_attempt + 1))
         if last_err is not None:
             _tprint(f"ERROR: S3 put failed after 3 attempts ({file_name}): {last_err}")
+            if _is_s3_auth_error(last_err):
+                if aws_conf.get("transport") == "auto":
+                    _mark_native_unusable("s3", module, last_err)
+                return "auth"
+            return "error"
+        return "ok"
 
     except ImportError:
         _tprint("ERROR: 'boto3' library not found. Please install it with 'pip install boto3' to use S3 transport.")
+        return "error"
+
+
+# ── Transport "auto": the module's native pipe when configured, else Cribl ────
+# A module that sets NATIVE_TRANSPORT ("pubsub" for GCP, "s3" for AWS) and runs with
+# transport = "auto" uses that native pipe when it is configured, and otherwise XSIAM's
+# integrated Cribl receiver under the module's dedicated Source-Identifier. If the native
+# pipe then fails on credentials or permissions (bad key, revoked account, missing
+# topic/bucket), it is marked unusable for the rest of the run, the failed payload is
+# resent via Cribl, and later auto sends go to Cribl too.
+_NATIVE_UNUSABLE = {"pubsub": None, "s3": None}   # transport -> reason, once it fails
+_NATIVE_UNUSABLE_LOCK = threading.Lock()
+_PUBSUB_AUTH_ERRORS = {"Unauthenticated", "PermissionDenied", "NotFound", "Forbidden",
+                       "RefreshError", "DefaultCredentialsError", "GoogleAuthError",
+                       "JSONDecodeError"}
+_S3_AUTH_ERRORS = {"NoCredentialsError", "PartialCredentialsError"}
+_S3_AUTH_CODES = {"AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch",
+                  "NoSuchBucket", "AllAccessDisabled", "ExpiredToken", "InvalidToken",
+                  "AccountProblem", "InvalidBucketName"}
+
+
+def _s3_settings(module_conf):
+    """(bucket, has_credentials) as send_s3_message reads them."""
+    bucket = os.getenv('S3_BUCKET_NAME') or module_conf.get('s3_bucket_name') or ''
+    if bucket.startswith('PLACEHOLDER'):
+        bucket = ''
+    has_creds = bool(os.getenv('AWS_ACCESS_KEY_ID') and os.getenv('AWS_SECRET_ACCESS_KEY'))
+    return bucket, has_creds
+
+
+def s3_configured(module_conf):
+    """True when native S3 (CloudTrail bucket) has everything it needs to upload."""
+    bucket, has_creds = _s3_settings(module_conf)
+    return bool(bucket and has_creds)
+
+
+def _is_s3_auth_error(exc):
+    if any(cls.__name__ in _S3_AUTH_ERRORS for cls in type(exc).__mro__):
+        return True
+    code = (getattr(exc, "response", None) or {}).get("Error", {}).get("Code", "")
+    return code in _S3_AUTH_CODES or code in ("403", "404")
+
+
+def _pubsub_settings(module_conf):
+    """(project_id, topic_id, has_credentials) as send_pubsub_message reads them."""
+    project_id = os.getenv('GCP_PROJECT_ID') or module_conf.get('gcp_project_id', '')
+    if project_id.startswith('PLACEHOLDER'):
+        project_id = ''
+    topic_id = os.getenv('GCP_PUBSUB_TOPIC') or module_conf.get('pubsub_topic', '')
+    has_creds = bool(os.getenv('GCP_SERVICE_ACCOUNT_KEY_JSON')
+                     or os.getenv('GOOGLE_APPLICATION_CREDENTIALS'))
+    return project_id, topic_id, has_creds
+
+
+def pubsub_configured(module_conf):
+    """True when native Pub/Sub has everything it needs to publish."""
+    project_id, topic_id, has_creds = _pubsub_settings(module_conf)
+    if not (project_id and topic_id and has_creds):
+        return False
+    try:
+        from google.cloud import pubsub_v1  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+_NATIVE_CONFIGURED = {"pubsub": pubsub_configured, "s3": s3_configured}
+
+
+def resolve_transport(module_conf, native=None):
+    """The transport a module's sends use. "auto" means the module's native pipe
+    (*native*: "pubsub" or "s3") when it is configured and has not failed on
+    credentials this run, otherwise Cribl."""
+    transport = module_conf.get("transport", "syslog")
+    if transport != "auto":
+        return transport
+    check = _NATIVE_CONFIGURED.get(native)
+    if check and _NATIVE_UNUSABLE[native] is None and check(module_conf):
+        return native
+    return "cribl"
+
+
+def _module_transport(module, config):
+    """(resolved transport, module config section) for *module*."""
+    conf_key = getattr(module, 'CONFIG_KEY', None)
+    if not conf_key or conf_key not in config:
+        return "syslog", {}
+    module_conf = config.get(conf_key, {}) or {}
+    return resolve_transport(module_conf, getattr(module, 'NATIVE_TRANSPORT', None)), module_conf
+
+
+def _mark_native_unusable(native, module, exc):
+    with _NATIVE_UNUSABLE_LOCK:
+        if _NATIVE_UNUSABLE[native] is not None:
+            return
+        _NATIVE_UNUSABLE[native] = f"{type(exc).__name__}: {exc}"
+    label = {"pubsub": "Pub/Sub", "s3": "S3"}[native]
+    _tprint(f"WARNING: {label} rejected {module.NAME} ({type(exc).__name__}). "
+            f"transport=auto falls back to the Cribl receiver for the rest of this run.")
+
+
+def _is_pubsub_auth_error(exc):
+    return any(cls.__name__ in _PUBSUB_AUTH_ERRORS for cls in type(exc).__mro__)
 
 
 def send_pubsub_message(message_data, module, config, event_name=None):
     """
     Publishes a single log entry (JSON string) to a Google Cloud Pub/Sub topic.
+    Returns "ok", "auth" (credential/permission/topic failure) or "error".
 
     Authentication uses one of two methods (checked in order):
       1. GCP_SERVICE_ACCOUNT_KEY_JSON env var — inline JSON key content
@@ -685,18 +803,17 @@ def send_pubsub_message(message_data, module, config, event_name=None):
     except ImportError:
         _tprint("ERROR: 'google-cloud-pubsub' not installed. "
                "Run: pip install google-cloud-pubsub")
-        return
+        return "error"
 
     conf_key = getattr(module, 'CONFIG_KEY', None)
     module_conf = config.get(conf_key, {}) if conf_key else {}
 
-    project_id = os.getenv('GCP_PROJECT_ID', module_conf.get('gcp_project_id', ''))
-    topic_id   = os.getenv('GCP_PUBSUB_TOPIC', module_conf.get('pubsub_topic', ''))
+    project_id, topic_id, _ = _pubsub_settings(module_conf)
 
     if not project_id or not topic_id:
         _tprint("WARNING: Pub/Sub not configured — set GCP_PROJECT_ID and "
                "GCP_PUBSUB_TOPIC in .env or config.json gcp_config section.")
-        return
+        return "error"
 
     event_str = f" ({event_name})" if event_name else ""
 
@@ -722,9 +839,15 @@ def send_pubsub_message(message_data, module, config, event_name=None):
 
         future = publisher.publish(topic_path, data)
         future.result(timeout=10)
+        return "ok"
 
     except Exception as e:
         _tprint(f"ERROR: Pub/Sub publish failed for {module.NAME}{event_str}: {e}")
+        if _is_pubsub_auth_error(e):
+            if module_conf.get("transport") == "auto":
+                _mark_native_unusable("pubsub", module, e)
+            return "auth"
+        return "error"
 
 
 # ── Throughput counter (shared across all calls to process_and_send) ─────────
@@ -1210,6 +1333,9 @@ def send_cribl_message(record, module, config):
     return send_cribl_batch([record], module, config)
 
 
+_UNKNOWN_UUID_WARNED = set()
+
+
 def send_cribl_batch(records, module, config):
     """Push records into XSIAM's integrated Cribl receiver (cribl_direct transport), many
     per gzip NDJSON request -- the shape the real Cribl destination sends -- chunked to
@@ -1224,6 +1350,11 @@ def send_cribl_batch(records, module, config):
     if not src:
         _tprint(f"Error: {getattr(module, 'NAME', '?')} cribl transport requires module.SOURCE_IDENTIFIER.")
         return 0
+    from integrations.cribl_direct import DEDICATED_UUIDS
+    if src not in DEDICATED_UUIDS.values() and src not in _UNKNOWN_UUID_WARNED:
+        _UNKNOWN_UUID_WARNED.add(src)
+        _tprint(f"Warning: {module.NAME} SOURCE_IDENTIFIER {src} is not a catalog UUID in "
+                f"cribl_direct.DEDICATED_UUIDS; records may land raw or in the wrong dataset.")
     integ = getattr(module, 'INTEGRATION_IDENTIFIER', 'logsim:synthetic')
     parsed, sizes = [], []
     for record in records:
@@ -1372,12 +1503,7 @@ def process_and_send(log_content, module, config, event_name=None):
 
 def _transmit(log_content, module, config, event_name=None):
     """Send a payload (or list of payloads) on the module's transport and count it."""
-    transport = "syslog"
-    conf_key = getattr(module, 'CONFIG_KEY', None)
-    module_config = {}
-    if conf_key and conf_key in config:
-        module_config = config.get(conf_key, {})
-        transport = module_config.get("transport", "syslog")
+    transport, module_config = _module_transport(module, config)
 
     if transport == "s3":
         if isinstance(log_content, bytes):
@@ -1410,18 +1536,25 @@ def _transmit(log_content, module, config, event_name=None):
             event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} wants WEC transport but did not return a string or list of strings. Skipping.")
     elif transport == "pubsub":
-        if isinstance(log_content, list):
-            for msg in log_content:
-                send_pubsub_message(msg, module, config, event_name)
+        if isinstance(log_content, (list, str)):
+            msgs = log_content if isinstance(log_content, list) else [log_content]
+            for i, msg in enumerate(msgs):
+                status = send_pubsub_message(msg, module, config, event_name)
+                if status == "auth" and module_config.get("transport") == "auto":
+                    # Pub/Sub is now marked unusable: resend the rest via Cribl.
+                    return _transmit(msgs[i:], module, config, event_name)
                 _increment_throughput()
-        elif isinstance(log_content, str):
-            send_pubsub_message(log_content, module, config, event_name)
-            _increment_throughput()
         else:
             event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} wants Pub/Sub transport but did not return a string or list of strings. Skipping.")
     elif transport == "cribl":
-        if isinstance(log_content, list):
+        if isinstance(log_content, bytes):
+            # A native-format blob (AWS: gzipped {"Records":[...]}) sent via Cribl one
+            # record per line, as the native S3 collector splits it.
+            records = _blob_records(log_content)
+            send_cribl_batch(records, module, config)
+            _increment_throughput(len(records))
+        elif isinstance(log_content, list):
             # One gzip NDJSON request per chunk, not per record (send_cribl_batch).
             send_cribl_batch(log_content, module, config)
             _increment_throughput(len(log_content))

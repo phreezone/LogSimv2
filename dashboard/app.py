@@ -815,8 +815,8 @@ _BATCH_MAX_EVENTS = max(1, int(os.getenv("HTTP_BATCH_MAX_EVENTS", "1000")))
 def _lane_queue(item):
     """The queue for this event's transport: a batched lane for HTTP/Cribl/syslog, else default."""
     _msg, module, config, _name = item
-    key = getattr(module, "CONFIG_KEY", None)
-    transport = ((config or {}).get(key, {}) or {}).get("transport", "syslog") if key else "syslog"
+    from log_simulator import _module_transport   # "auto" -> native pipe or cribl
+    transport, _ = _module_transport(module, config or {})
     if transport in _UNBATCHED_TRANSPORTS:
         return _SEND_QUEUE
     return _BATCH_QUEUES.get(transport, _BATCH_QUEUES["syslog"])
@@ -2095,6 +2095,14 @@ def _run_health_checks() -> dict:
         "WEC_PFX_PATH":           "WEC",
         "WEC_PFX_PASSWORD":       "WEC",
     }
+    from log_simulator import resolve_transport
+    gcp_transport = resolve_transport(CONFIG.get("gcp_config", {}) or {"transport": "pubsub"}, "pubsub")
+    if gcp_transport != "pubsub":
+        ENV_VARS.pop("GCP_PUBSUB_TOPIC")  # GCP goes through the Cribl receiver
+    aws_transport = resolve_transport(CONFIG.get("aws_config", {}) or {"transport": "s3"}, "s3")
+    if aws_transport != "s3":
+        for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "s3_bucket_name"):
+            ENV_VARS.pop(var)   # AWS goes through the Cribl receiver
     for var, group in ENV_VARS.items():
         val = os.getenv(var, "")
         results.append({
@@ -2293,7 +2301,21 @@ def _run_health_checks() -> dict:
     # Accept upper or lower case — .env may use lowercase names
     aws_bucket = os.getenv("S3_BUCKET_NAME", "") or os.getenv("s3_bucket_name", "")
     aws_region = os.getenv("AWS_REGION", "") or os.getenv("aws_region", "us-east-1")
-    if aws_key and aws_secret and aws_bucket:
+    aws_mode = CONFIG.get("aws_config", {}).get("transport", "s3")
+    if aws_transport != "s3":
+        # AWS goes through the Cribl receiver; S3 credentials are not used.
+        from log_simulator import _NATIVE_UNUSABLE
+        if aws_mode == "auto" and _NATIVE_UNUSABLE["s3"]:
+            detail = f"S3 rejected credentials, sending via Cribl ({_NATIVE_UNUSABLE['s3']})"
+        elif aws_mode == "auto":
+            detail = "S3 not configured, sending via Cribl (aws_config.transport = auto)"
+        else:
+            detail = f"not used (aws_config.transport = {aws_mode})"
+        results.append({
+            "group": "AWS S3", "check": "S3 access",
+            "status": "skip", "detail": detail,
+        })
+    elif aws_key and aws_secret and aws_bucket:
         try:
             import boto3 as _boto3
             session = _boto3.Session(
@@ -2360,9 +2382,13 @@ def _run_health_checks() -> dict:
                 "status": "error", "detail": "not installed — run: pip install boto3",
             })
         except Exception as exc:
+            from log_simulator import _is_s3_auth_error
+            fallback = aws_mode == "auto" and _is_s3_auth_error(exc)
             results.append({
                 "group": "AWS S3", "check": "S3 access",
-                "status": "error", "detail": str(exc),
+                "status": "warn" if fallback else "error",
+                "detail": (f"auto: uploads will fall back to Cribl ({exc})" if fallback
+                           else str(exc)),
             })
     else:
         missing = [v for v in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "S3_BUCKET_NAME"]
@@ -2377,7 +2403,21 @@ def _run_health_checks() -> dict:
     gcp_topic   = os.getenv("GCP_PUBSUB_TOPIC", "")
     inline_key  = os.getenv("GCP_SERVICE_ACCOUNT_KEY_JSON", "")
     adc_path    = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
-    if gcp_project and gcp_topic and (inline_key or adc_path):
+    gcp_mode = CONFIG.get("gcp_config", {}).get("transport", "pubsub")
+    if gcp_transport != "pubsub":
+        # GCP goes through the Cribl receiver; Pub/Sub credentials are not used.
+        from log_simulator import _NATIVE_UNUSABLE
+        if gcp_mode == "auto" and _NATIVE_UNUSABLE["pubsub"]:
+            detail = f"Pub/Sub rejected credentials, sending via Cribl ({_NATIVE_UNUSABLE['pubsub']})"
+        elif gcp_mode == "auto":
+            detail = "Pub/Sub not configured, sending via Cribl (gcp_config.transport = auto)"
+        else:
+            detail = f"not used (gcp_config.transport = {gcp_mode})"
+        results.append({
+            "group": "GCP Pub/Sub", "check": "Pub/Sub access",
+            "status": "skip", "detail": detail,
+        })
+    elif gcp_project and gcp_topic and (inline_key or adc_path):
         try:
             from google.cloud import pubsub_v1 as _pubsub
             if inline_key:
@@ -2402,9 +2442,13 @@ def _run_health_checks() -> dict:
                 "status": "error", "detail": "not installed — run: pip install google-cloud-pubsub",
             })
         except Exception as exc:
+            from log_simulator import _is_pubsub_auth_error
+            fallback = gcp_mode == "auto" and _is_pubsub_auth_error(exc)
             results.append({
                 "group": "GCP Pub/Sub", "check": "Pub/Sub access",
-                "status": "error", "detail": str(exc),
+                "status": "warn" if fallback else "error",
+                "detail": (f"auto: sends will fall back to Cribl ({exc})" if fallback
+                           else str(exc)),
             })
     else:
         missing = []

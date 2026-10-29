@@ -8,12 +8,12 @@ Follow these steps to get the simulator up and running.
 - **Cortex XSIAM instance** with at least one data collection method configured:
   - Broker VM for Syslog-based modules (firewall, proxy, DNS, web server)
   - Broker VM Windows Event Collector (WEC) + client PFX for the Windows module
-  - S3 bucket + SQS queue for the AWS module
+  - S3 bucket + SQS queue for the AWS module (optional: without it AWS goes through Cribl)
   - HTTP Collector URL + API key for Okta and Proofpoint
-  - Google Cloud Pub/Sub topic + subscription for the GCP module
   - The free **Cribl** integration (Settings → Data Sources → add Cribl → generate token) for
-    the Microsoft Entra ID / Office 365 modules, plus the Office 365 and Azure AD content
-    packs. No Cribl Stream instance or Microsoft tenant is needed — see
+    the Microsoft Entra ID / Office 365 modules, and for AWS and GCP when their native pipe is not
+    configured, plus the AWS, Google Cloud Logging, Office 365 and Azure AD content packs. (AWS uses
+    your S3 bucket and GCP your Pub/Sub topic + subscription instead when those are configured.) No Cribl Stream instance or Microsoft tenant is needed — see
     [microsoft-entra.md](modules/microsoft-entra.md#transport-the-cribl-receiver-no-cribl-instance-needed)
 
 ---
@@ -73,17 +73,17 @@ The key packages and what they support:
 | Package | Used by |
 |---|---|
 | `flask` | Dashboard web UI and REST API |
-| `requests` | HTTP Collector transport (Okta, Proofpoint) and the Cribl receiver transport (Microsoft modules) |
+| `requests` | HTTP Collector transport (Okta, Proofpoint) and the Cribl receiver transport (Microsoft modules, and the AWS/GCP fallback) |
 | `python-dotenv` | Loads `.env` secrets into the runtime environment |
-| `boto3` | AWS module — writes gzip-compressed CloudTrail JSON to S3 |
-| `google-cloud-pubsub` | GCP module — publishes LogEntry objects to Google Cloud Pub/Sub |
+| `boto3` | AWS module — writes gzip-compressed CloudTrail JSON to S3 (the native path; without S3 settings `auto` sends via Cribl) |
+| `google-cloud-pubsub` | GCP module, only to publish over native Pub/Sub (without it, `auto` sends via Cribl) |
 | `lxml` | XML log formatting |
 | `requests-pkcs12` | WEC module — client certificate authentication |
 | `cryptography` | WEC module — PFX/PKCS#12 certificate handling |
 
-> **IAM requirement:** The AWS IAM user (created by the CloudFormation stack) needs `s3:PutObject` on the log bucket. The CloudFormation template creates this automatically — see [CloudFormation setup in Configuration](configuration.md#aws-s3-setup--cloudformation-recommended).
+> **IAM requirement:** Only for the native S3 path (used automatically once configured). The AWS IAM user (created by the CloudFormation stack) needs `s3:PutObject` on the log bucket. The CloudFormation template creates this automatically — see [CloudFormation setup in Configuration](configuration.md#aws-s3-setup--cloudformation-recommended).
 
-> **Auth requirement:** The GCP module requires a service account key with `roles/pubsub.publisher` on the topic. The Terraform template creates this automatically — see [Terraform setup in Configuration](configuration.md#gcp-pubsub-setup--terraform-recommended).
+> **Auth requirement:** Only if you want the GCP module on native Pub/Sub (used automatically once configured): it then needs a service account key with `roles/pubsub.publisher` on the topic. The Terraform template creates this automatically — see [Terraform setup in Configuration](configuration.md#gcp-pubsub-setup--terraform-recommended).
 
 ---
 

@@ -44,6 +44,13 @@ DESCRIPTION = "Simulates various AWS CloudTrail events to trigger XSIAM analytic
 XSIAM_VENDOR = "AWS"
 XSIAM_PRODUCT = "CloudTrail"
 CONFIG_KEY = "aws_config"
+# transport "auto": native S3 (CloudTrail bucket) when configured, else the Cribl
+# receiver. Cortex catalog UUID for "AWS audit logs" -> amazon_aws_raw, the dataset the
+# S3 collector fills; each Cribl record is one CloudTrail record from the Records array.
+NATIVE_TRANSPORT = "s3"
+SOURCE_IDENTIFIER = "c19f87b6262f48259b3d5d2a2c691802"
+INTEGRATION_IDENTIFIER = "logsim:aws_cloudtrail"
+DATASET = "amazon_aws_raw"
 last_threat_event_time = 0
 
 
@@ -374,11 +381,11 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
                 "creationDate": now.strftime('%Y-%m-%dT%H:%M:%SZ')
             }
         }
-         # Add invokedBy for AssumedRole if relevant (simulating a service assuming the role)
-         invoker_service = user_identity.get('invokedBy') # Check if it's already set
-         if not invoker_service and random.random() < 0.3:
-             invoker_service = random.choice(["ec2.amazonaws.com", "lambda.amazonaws.com", "ecs-tasks.amazonaws.com"])
-
+         # invokedBy only when the caller set it. Never inject it at random: a random
+         # lambda/ec2/ecs invoker stamped onto human role sessions taught the tenant that
+         # ordinary roles are "service roles", so every later human CLI use of them raised
+         # "Remote command line usage of AWS Lambda's role" / "Suspicious usage of EC2 token".
+         invoker_service = user_identity.get('invokedBy')
          if invoker_service:
             user_identity_block["invokedBy"] = invoker_service
 
@@ -4990,33 +4997,70 @@ def _generate_rds_modify_db_snapshot_attribute(config, context=None):
 
 
 def _generate_lambda_role_remote_usage(config, context=None):
-    """(Threat) Simulates stolen Lambda execution-role credentials used from an external IP via CLI.
-    Triggers XSIAM: 'Remote usage of AWS Lambda's role'
-    Detection logic: AssumedRole with invokedBy=lambda.amazonaws.com + external sourceIPAddress.
-    4-event CLI chain: GetCallerIdentity -> ListBuckets -> ListSecrets -> GetSecretValue
+    """(Threat) An IAM user assumes the Lambda execution role from outside AWS with the
+    CLI, then works with the issued credentials.
+    Triggers XSIAM: 'Remote command line usage of AWS Lambda's role' [High]
+    Detection logic (confirmed from ~180 tenant alerts, 2026-10-22..29): AssumeRole by
+    an IAMUser, aws-cli user agent, non-AWS sourceIPAddress, Lambda-style roleSessionName
+    (lambda-NNNN). The baseline only ever has lambda.amazonaws.com assume this role, so
+    the human CLI assumption stands out.
+    5-event CLI chain: AssumeRole -> GetCallerIdentity -> ListBuckets -> ListSecrets -> GetSecretValue
     """
     aws_conf = config.get(CONFIG_KEY, {})
     account_id = aws_conf.get('aws_account_id', '123456789012')
     region = aws_conf.get('aws_region', 'us-east-1')
     s3_buckets = aws_conf.get("s3_buckets", ["default-sim-bucket-1"])
 
-    func_name = random.choice(aws_conf.get("lambda_functions", ["default-function"]))
-    # Role name derived from the function — realistic naming convention
-    role_name = f"{func_name}-exec-role"
+    caller = (context or {}).get('user_identity')
+    if not caller:
+        iam_users = [u for u in aws_conf.get('users_and_roles', []) if u.get('type') == 'IAMUser']
+        caller = (_get_random_user_from_template(config, random.choice(iam_users)) if iam_users
+                  else _get_random_user(config))
+    # Outside the cloud environment: an ordinary external IP, not an AWS range.
+    ip_address = (context or {}).get('ip_address') or _get_random_ip(config, force_external=True)
+
+    # The same role the baseline only ever sees lambda.amazonaws.com assume.
+    role_name = "LambdaExecutionRole"
     role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
     role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
+    session_name = f"lambda-{random.randint(1000, 9999)}"
 
-    # ASIA prefix = temporary STS credentials (from Lambda execution environment)
+    # ASIA prefix = temporary STS credentials issued by the AssumeRole below
     temp_access_key = f"ASIA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=16))}"
 
-    # Attacker using stolen creds via CLI from VPN/Tor — not from Lambda infrastructure
-    ip_address = _get_random_ip(config, use_anon=True)
-
-    # Force a CLI user agent — key signal that credentials are being used outside Lambda
+    # Force a CLI user agent — key signal that the role is used outside Lambda
     cli_agents = [ua for ua in _AWS_USER_AGENTS if ua.startswith("aws-cli/")]
     cli_ua = random.choice(cli_agents) if cli_agents else _AWS_USER_AGENTS[0]
 
-    # Identity: AssumedRole with invokedBy=lambda.amazonaws.com is the key XSIAM detection signal
+    base_time = datetime.datetime.now(datetime.UTC)
+    expiry = (base_time + datetime.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    # Event 0: AssumeRole — the alerting event
+    e0 = _get_base_event(config, caller, ip_address, 'us-east-1', "AssumeRole", "sts.amazonaws.com",
+                         api_version="2011-06-15", read_only=True)
+    e0["eventTime"] = base_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+    e0["userAgent"] = cli_ua
+    e0.pop("vpcEndpointId", None)
+    e0.pop("vpcEndpointAccountId", None)
+    e0.update({
+        "requestParameters": {"roleArn": role_arn, "roleSessionName": session_name, "durationSeconds": 3600},
+        "responseElements": {
+            "credentials": {
+                "accessKeyId": temp_access_key,
+                "sessionToken": "Value hidden due to security reasons.",
+                "expiration": expiry,
+            },
+            "assumedRoleUser": {
+                "assumedRoleId": f"{role_id}:{session_name}",
+                "arn": f"arn:aws:sts::{account_id}:assumed-role/{role_name}/{session_name}",
+            },
+        },
+        "resources": [{"type": "AWS::IAM::Role", "ARN": role_arn, "accountId": account_id}],
+    })
+
+    # Follow-on calls run as the assumed-role session from the same host. No invokedBy:
+    # Lambda did not make these calls.
+    func_name = session_name
     assumed_role_arn = f"arn:aws:sts::{account_id}:assumed-role/{role_name}/{func_name}"
     lambda_identity = {
         "type": "AssumedRole",
@@ -5025,7 +5069,6 @@ def _generate_lambda_role_remote_usage(config, context=None):
         "principalId": f"{role_id}:{func_name}",
         "accountId": account_id,
         "accessKeyId": temp_access_key,
-        "invokedBy": "lambda.amazonaws.com",
         "sessionContext": {
             "sessionIssuer": {
                 "type": "Role",
@@ -5041,11 +5084,12 @@ def _generate_lambda_role_remote_usage(config, context=None):
         }
     }
 
-    base_time = datetime.datetime.now(datetime.UTC)
+    # The CLI chain starts a few seconds after the credentials are issued
+    base_time = base_time + datetime.timedelta(seconds=random.randint(2, 6))
     secret_arn = f"arn:aws:secretsmanager:{region}:{account_id}:secret:prod/db/creds-AbCdEf"
-    events = []
+    events = [e0]
 
-    # Event 1: GetCallerIdentity — attacker verifies stolen creds are valid (first CLI step)
+    # Event 1: GetCallerIdentity — attacker verifies the assumed-role creds work
     e1 = _get_base_event(config, lambda_identity, ip_address, region, "GetCallerIdentity", "sts.amazonaws.com", api_version="2011-06-15", read_only=True)
     e1["eventTime"] = base_time.strftime('%Y-%m-%dT%H:%M:%SZ')
     e1["userAgent"] = cli_ua
@@ -5103,6 +5147,10 @@ def _generate_lambda_role_remote_usage(config, context=None):
     })
     events.append(e4)
 
+    # Off-network host: none of these calls arrive through a VPC endpoint
+    for e in events:
+        e.pop("vpcEndpointId", None)
+        e.pop("vpcEndpointAccountId", None)
     return events
 
 
@@ -6300,38 +6348,85 @@ def _generate_dynamodb_write(config, context=None):
     return [event]
 
 
+# Roles only an AWS service assumes (role -> the service principal that assumes it).
+# Their AssumeRole records carry userIdentity {type: AWSService, invokedBy: <service>}
+# and the service FQDN as sourceIPAddress/userAgent. A human assuming one of these from
+# outside AWS is exactly the "Remote command line usage of AWS Lambda's role" /
+# "Suspicious usage of EC2 token" pattern, so it must stay out of the baseline.
+_SERVICE_ASSUMED_ROLES = {
+    "LambdaExecutionRole":  "lambda.amazonaws.com",
+    "ECSTaskExecutionRole": "ecs-tasks.amazonaws.com",
+    "EC2InstanceRole":      "ec2.amazonaws.com",
+}
+# Roles people and CI runners assume (aws sts assume-role / SDK).
+_HUMAN_ASSUMED_ROLES = ["CodeDeployRole", "CodePipelineRole", "CloudFormationDeployRole"]
+
+
+def _service_role_session_name(service, config):
+    """The roleSessionName each service really uses when it assumes its role."""
+    if service == "lambda.amazonaws.com":
+        # Lambda names the session after the function.
+        return random.choice(config.get(CONFIG_KEY, {}).get("lambda_functions", ["default-function"]))
+    if service == "ecs-tasks.amazonaws.com":
+        return uuid.uuid4().hex  # ECS task ID
+    return f"i-{''.join(random.choices('0123456789abcdef', k=17))}"  # EC2 instance ID
+
+
 def _generate_sts_assume_role_benign(config, context=None):
-    """(Benign) Routine same-account STS AssumeRole — CI/CD pipelines, cross-service automation."""
+    """(Benign) Routine same-account STS AssumeRole — service roles assumed by their
+    service, and CI/CD or deploy roles assumed by people and pipelines.
+
+    Service-role sessions never come from a human: a Lambda-style session assumed by an
+    IAM user with aws-cli from outside AWS is the LAMBDA_ROLE_REMOTE threat, and when it
+    was in the baseline (~200/week) it raised "Remote command line usage of AWS Lambda's
+    role" on every hit and would have trained it away."""
     user_identity = None
     ip_address = None
     if context:
         user_identity = context.get('user_identity')
         ip_address = context.get('ip_address')
 
-    if not user_identity: user_identity = _get_random_user(config)
-    if not ip_address: ip_address = _get_random_ip(config, force_external=False)
-
     aws_conf = config.get(CONFIG_KEY, {})
     region = aws_conf.get('aws_region', 'us-east-1')
-    account_id = user_identity.get('accountId', aws_conf.get('aws_account_id', '123456789012'))
 
-    service_roles = aws_conf.get('cross_account_role_names', [
-        'LambdaExecutionRole', 'EC2InstanceRole', 'CodeDeployRole',
-        'CodePipelineRole', 'CloudFormationDeployRole', 'ECSTaskExecutionRole',
-    ])
-    role_name = random.choice(service_roles)
+    # Services assume their roles far more often than people do (every cold start,
+    # task launch and instance credential refresh), but a pinned caller from scenario
+    # context is always a human/CI assumption.
+    service = None
+    if not user_identity and random.random() < 0.6:
+        role_name, service = random.choice(list(_SERVICE_ASSUMED_ROLES.items()))
+        user_identity = _get_random_user(config)  # only for base-event plumbing; replaced below
+    else:
+        if not user_identity: user_identity = _get_random_user(config)
+        if not ip_address: ip_address = _get_random_ip(config, force_external=False)
+        human_roles = [r for r in aws_conf.get('cross_account_role_names', _HUMAN_ASSUMED_ROLES)
+                       if r not in _SERVICE_ASSUMED_ROLES] or _HUMAN_ASSUMED_ROLES
+        role_name = random.choice(human_roles)
+
+    account_id = user_identity.get('accountId', aws_conf.get('aws_account_id', '123456789012'))
     role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
-    session_name = random.choice([
-        f"lambda-{random.randint(1000,9999)}",
-        f"codepipeline-{random.randint(1000,9999)}",
-        f"ecs-task-{str(uuid.uuid4())[:8]}",
-        f"automation-{random.randint(100,999)}",
-    ])
+    if service:
+        session_name = _service_role_session_name(service, config)
+    else:
+        session_names = [f"codepipeline-{random.randint(1000,9999)}", f"automation-{random.randint(100,999)}"]
+        if user_identity.get('type') == 'IAMUser':
+            # `aws sts assume-role --role-session-name <me>-<ts>` habit
+            session_names.append(f"{user_identity.get('userName') or user_identity.get('name')}-"
+                                 f"{int(datetime.datetime.now(datetime.UTC).timestamp())}")
+        session_name = random.choice(session_names)
     assumed_role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
     expiry = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    event = _get_base_event(config, user_identity, ip_address, region,
+    event = _get_base_event(config, user_identity, service or ip_address, region,
                             "AssumeRole", "sts.amazonaws.com", api_version="2011-06-15", read_only=True)
+    if service:
+        # AWSService identity: no principalId/arn/accessKeyId/sessionContext, and the
+        # service is both the source and the agent. Never via a customer VPC endpoint.
+        event["userIdentity"] = {"type": "AWSService", "invokedBy": service}
+        event["sourceIPAddress"] = service
+        event["userAgent"] = service
+        event.pop("vpcEndpointId", None)
+        event.pop("vpcEndpointAccountId", None)
     event.update({
         "requestParameters": {"roleArn": role_arn, "roleSessionName": session_name, "durationSeconds": 3600},
         "responseElements": {
@@ -7492,6 +7587,50 @@ THREAT_SCENARIOS = {
 _LINKED_IAM_MERGED: dict = {}
 
 
+_LAMBDA_SDK_UAS = [
+    "Boto3/1.34.84 md/Botocore#1.34.84 ua/2.0 os/linux#5.10.214-223.837.amzn2.x86_64 md/arch#x86_64 "
+    "lang/python#3.12.3 md/pyimpl#CPython exec-env/AWS_Lambda_python3.12 cfg/retry-mode#legacy Botocore/1.34.84",
+    "aws-sdk-nodejs/2.1588.0 linux/v20.12.2 exec-env/AWS_Lambda_nodejs20.x promise",
+    "aws-sdk-java/2.25.31 Linux/5.10.214-223.837.amzn2.x86_64 OpenJDK_64-Bit_Server_VM/21.0.3+9-LTS "
+    "Java/21.0.3 vendor/Amazon.com_Inc. exec-env/AWS_Lambda_java21 io/sync http/Apache cfg/retry-mode/legacy",
+]
+_INSTANCE_SDK_UAS = [
+    "Boto3/1.34.84 md/Botocore#1.34.84 ua/2.0 os/linux#5.10.214-223.837.amzn2.x86_64 md/arch#x86_64 "
+    "lang/python#3.11.8 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.34.84",
+    "aws-sdk-go/1.51.21 (go1.22.2; linux; amd64)",
+    "aws-sdk-go-v2/1.26.1 os/linux lang/go#1.22.2 md/GOOS#linux md/GOARCH#amd64 api/sts#1.28.6",
+]
+
+
+def _ground_compute_sessions(events, config):
+    """Benign only: keep Lambda / EC2 / EKS role sessions inside the cloud.
+
+    Compute-role credentials are used by code on the function or instance, so their
+    calls come from inside the VPC with an SDK user agent. Benign generators draw these
+    identities from the shared pool with random IPs and user agents -- ~3% of the
+    baseline was a Lambda or instance session calling from the internet with aws-cli,
+    which is the LAMBDA_ROLE_REMOTE / IMDS_CREDENTIAL_THEFT threat pattern and would
+    train those detectors to ignore it."""
+    internal = config.get('internal_networks') or ["10.0.0.0/16"]
+    for e in events:
+        ui = e.get("userIdentity") or {}
+        if ui.get("type") != "AssumedRole" or "amazonaws.com" in str(e.get("sourceIPAddress", "")):
+            continue
+        role, _, session = (ui.get("arn") or "").rpartition(":assumed-role/")[2].partition("/")
+        if "Lambda" in role:
+            uas = _LAMBDA_SDK_UAS
+        elif session.startswith("i-"):
+            uas = _INSTANCE_SDK_UAS
+        else:
+            continue
+        try:
+            net = ip_network(random.choice(internal), strict=False)
+            e["sourceIPAddress"] = str(net.network_address + random.randint(1, max(1, net.num_addresses - 2)))
+        except ValueError:
+            pass
+        e["userAgent"] = random.choice(uas)
+
+
 def _end_by_now(events):
     """Shift a generated batch's eventTimes back so the last one is not after now.
 
@@ -7663,6 +7802,8 @@ def generate_log(config, context=None, threat_level="Benign", benign_only=False,
         logger.warning("Failed to generate events after attempts (or scenario failed).")
         return None
     _end_by_now(events)
+    if not scenario_event and chosen_func in BENIGN_SCENARIOS:
+        _ground_compute_sessions(events, config)
 
     # Determine event name for return tuple — use scenario key if available
     _func_to_key = {fn: k for k, fn in SCENARIO_FUNCTIONS.items()}

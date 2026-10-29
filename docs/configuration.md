@@ -58,7 +58,7 @@ These settings control the simulator's overall behavior.
 
 ## B. Transport Configuration
 
-This section defines *how* logs are sent. Each module uses one of four transport mechanisms: Syslog TCP, HTTP Collector, AWS S3, or Google Cloud Pub/Sub.
+This section defines *how* logs are sent. Each module uses one of these transport mechanisms: Syslog TCP, HTTP Collector, AWS S3, Windows Event Collector, XSIAM's integrated Cribl receiver, or Google Cloud Pub/Sub.
 
 ```json
 "http_collectors": {
@@ -106,11 +106,11 @@ This section defines *how* logs are sent. Each module uses one of four transport
   }
 },
 "aws_config": {
-  "transport": "s3",
+  "transport": "auto",
   "users_and_roles": [ ... ]
 },
 "gcp_config": {
-  "transport": "pubsub",
+  "transport": "auto",
   "gcp_project_id": "PLACEHOLDER_GCP_PROJECT_ID",
   "pubsub_topic": "xsiam-audit-logs",
   "organization_id": "PLACEHOLDER_ORG_ID"
@@ -125,9 +125,9 @@ This section defines *how* logs are sent. Each module uses one of four transport
 
 The dict key (e.g., `"okta_collector"`) is referenced by the module's `collector_id` setting.
 
-**`aws_config`** — required for the AWS module. Contains `transport: "s3"` and a `users_and_roles` array defining the simulated IAM identities used to generate CloudTrail events. All AWS credentials (access key, secret key, bucket name, region, account ID) live in `.env` — see [Getting Started](getting-started.md) for the full `.env` reference.
+**`aws_config`** — required for the AWS module. Contains `transport: "auto"` (uploads CloudTrail files to your S3 bucket when S3 is configured, otherwise, or if S3 rejects its credentials, sends through XSIAM's Cribl receiver under the AWS audit logs UUID; set `"s3"` or `"cribl"` to force one path) and a `users_and_roles` array defining the simulated IAM identities used to generate CloudTrail events. All AWS credentials (access key, secret key, bucket name, region, account ID) live in `.env` — see [Getting Started](getting-started.md) for the full `.env` reference.
 
-**`gcp_config`** — required for the GCP module. Contains `transport: "pubsub"`, the `gcp_project_id` and `pubsub_topic` (fallbacks if `GCP_PROJECT_ID` / `GCP_PUBSUB_TOPIC` env vars are not set), plus extensive simulated environment data (regions, service accounts, clusters, buckets, secrets, etc.). The `config.json` file ships with three placeholder strings that are automatically substituted at startup from your `.env` — **you do not need to edit `config.json` manually**:
+**`gcp_config`** — required for the GCP module. Contains `transport: "auto"` (publishes to your own Pub/Sub topic when Pub/Sub is configured, otherwise, or if Pub/Sub rejects its credentials, sends through XSIAM's Cribl receiver with `CRIBL_COLLECTOR_URL` + `CRIBL_TOKEN`; set `"pubsub"` or `"cribl"` to force one path), the `gcp_project_id` and `pubsub_topic` (Pub/Sub only; fallbacks if `GCP_PROJECT_ID` / `GCP_PUBSUB_TOPIC` env vars are not set), plus extensive simulated environment data (regions, service accounts, clusters, buckets, secrets, etc.). The `config.json` file ships with three placeholder strings that are automatically substituted at startup from your `.env` — **you do not need to edit `config.json` manually**:
 
 | Placeholder | Replaced by env var | What it populates |
 |---|---|---|
@@ -140,6 +140,8 @@ GCP credentials are set via `.env` — see [Getting Started](getting-started.md)
 ---
 
 ### AWS S3 Setup — CloudFormation (Recommended)
+
+Without S3 settings the AWS module sends through the Cribl receiver. Once S3 is configured, the default `aws_config.transport = "auto"` uses it as the primary path, with Cribl as the fallback.
 
 The `CloudFormation/S3LogSim.yaml` template creates all required AWS infrastructure in a single stack. It provisions: an S3 bucket, an SQS notification queue (XSIAM polls this for new log files), an IAM user for LogSim (write-only S3 access), and an IAM role for XSIAM (read S3 + SQS). Permissions follow the principle of least privilege.
 
@@ -201,6 +203,10 @@ The `CloudFormation/S3LogSim.yaml` template creates all required AWS infrastruct
 5. Populate `.env` with the IAM user access key/secret, bucket name, and region (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `AWS_REGION`). No edits to `config.json` are needed — `AWS_ACCOUNT_ID` in `.env` automatically substitutes `PLACEHOLDER_AWS_ACCOUNT_ID` throughout the configuration at startup.
 
 ---
+
+### GCP Pub/Sub Setup (optional)
+
+Without these settings the GCP module sends through the Cribl receiver. Once Pub/Sub is configured, the default `gcp_config.transport = "auto"` uses it as the primary path, with Cribl as the fallback.
 
 ### GCP Pub/Sub Setup — Terraform (Recommended)
 

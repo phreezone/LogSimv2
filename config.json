@@ -50,7 +50,7 @@
     }
   },
   "aws_config": {
-    "transport": "s3",
+    "transport": "auto",
     "s3_flush_idle_s": 4,
     "s3_flush_max_age_s": 30,
     "s3_flush_max_events": 500,
@@ -6024,7 +6024,7 @@
     ]
   },
   "gcp_config": {
-    "transport": "pubsub",
+    "transport": "auto",
     "gcp_project_id": "PLACEHOLDER_GCP_PROJECT_ID",
     "pubsub_topic": "xsiam-audit-logs",
     "organization_id": "123456789012",

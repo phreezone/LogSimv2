@@ -12,6 +12,14 @@ DESCRIPTION = "Simulates GCP Cloud Audit Log events to trigger XSIAM analytics."
 XSIAM_VENDOR = "Google Cloud"
 XSIAM_PRODUCT = "Cloud Audit Logs"
 CONFIG_KEY = "gcp_config"
+# cribl transport (gcp_config.transport = "cribl", or "auto" when native Pub/Sub is
+# not configured or rejects its credentials): Cortex catalog UUID for
+# "Cloud Logging (audit logs/flow logs)" -> google_cloud_logging_raw, the same dataset
+# the Pub/Sub collector fills. Each record is the bare LogEntry, as published to Pub/Sub.
+NATIVE_TRANSPORT = "pubsub"
+SOURCE_IDENTIFIER = "00a8322c85e14beabfa7ad5f3d62db73"
+INTEGRATION_IDENTIFIER = "logsim:gcp_cloud_logging"
+DATASET = "google_cloud_logging_raw"
 last_threat_event_time = 0
 
 

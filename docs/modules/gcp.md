@@ -1,10 +1,12 @@
 # GCP Cloud Audit Logs
 
 **Dataset:** `google_cloud_logging_raw`
-**Transport:** Google Cloud Pub/Sub (`google-cloud-pubsub` library; `send_pubsub_message()` in log_simulator.py)
-**Format:** Single GCP LogEntry JSON per Pub/Sub message (NOT gzip-compressed, unlike AWS)
+**Transport:** `gcp_config.transport = "auto"` (the default) publishes to your own Pub/Sub topic when native Pub/Sub is configured (`GCP_PROJECT_ID`, `GCP_PUBSUB_TOPIC`, a service-account key or `GOOGLE_APPLICATION_CREDENTIALS`, and `google-cloud-pubsub` installed), and otherwise sends through XSIAM's integrated Cribl receiver (`send_cribl_batch()` in log_simulator.py). If Pub/Sub rejects its credentials or permissions, or the topic is missing, `auto` switches to Cribl for the rest of the run and the dashboard health check says so. Set `"pubsub"` or `"cribl"` to force one path.
+**Format:** One bare GCP LogEntry per record. Over Cribl the records are batched as gzip NDJSON `{"data": <LogEntry>, "collector_ms": …}` under Source-Identifier `00a8322c85e14beabfa7ad5f3d62db73` (Cortex catalog: Cloud Logging); over Pub/Sub, one LogEntry per message.
 
-Simulates Google Cloud Audit Log events for the XSIAM `google_cloud_logging_raw` dataset. The GoogleCloudLogging XIF pack (`GCP_MAP_COMMON_FIELDS` + `GCP_MAP_AUDIT_LOGS` rules) maps LogEntry fields to XDM. Each message is a complete Cloud Audit Log `LogEntry` JSON object published as a single Pub/Sub message. Log routing matches real GCP: operations that create or modify resources land in the Admin Activity log (`cloudaudit.googleapis.com%2Factivity`); read/list operations land in the Data Access log (`cloudaudit.googleapis.com%2Fdata_access`).
+**Cribl path, verified 2026-10-29:** rows land in `google_cloud_logging_raw` parsed into native columns with `_vendor`/`_product` = Google / Cloud Logging and `_collector_type` = `GCP Pub/Sub` (the same as the native collector). `_time` is taken from the LogEntry `timestamp` (a 20-minute back-dated record kept its own time), and the GoogleCloudLogging modeling rules populate XDM. No GCP project, topic or service account is needed, only `CRIBL_COLLECTOR_URL` + `CRIBL_TOKEN`.
+
+Simulates Google Cloud Audit Log events for the XSIAM `google_cloud_logging_raw` dataset. The GoogleCloudLogging XIF pack (`GCP_MAP_COMMON_FIELDS` + `GCP_MAP_AUDIT_LOGS` rules) maps LogEntry fields to XDM. Each record is a complete Cloud Audit Log `LogEntry` JSON object. Log routing matches real GCP: operations that create or modify resources land in the Admin Activity log (`cloudaudit.googleapis.com%2Factivity`); read/list operations land in the Data Access log (`cloudaudit.googleapis.com%2Fdata_access`).
 
 - **XIF:** GoogleCloudLogging pack — `GCP_MAP_COMMON_FIELDS` + `GCP_MAP_AUDIT_LOGS`
 - **Key XDM fields:** `insertId`, `logName`, `severity`, `resource.labels.project_id`, `resource.type`, `protoPayload.authenticationInfo.principalEmail`, `protoPayload.requestMetadata.callerIp`, `protoPayload.methodName`, `protoPayload.status.code`

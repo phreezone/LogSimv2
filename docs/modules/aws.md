@@ -1,7 +1,7 @@
 # AWS CloudTrail Module
 
 **Dataset:** `amazon_aws_raw`
-**Transport:** AWS S3 (gzip-compressed JSON PUT)
+**Transport:** `aws_config.transport = "auto"` (the default) uploads gzip-compressed CloudTrail files to your S3 bucket when native S3 is configured (`S3_BUCKET_NAME` plus `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), and otherwise sends through XSIAM's integrated Cribl receiver: one CloudTrail record per line under Source-Identifier `c19f87b6262f48259b3d5d2a2c691802` (Cortex catalog: AWS audit logs → `amazon_aws_raw`). If S3 rejects its credentials or permissions, or the bucket is missing, `auto` resends that batch through Cribl and stays on Cribl for the rest of the run. Set `"s3"` or `"cribl"` to force one path.
 **Format:** CloudTrail JSON array (schema 1.08), gzip-compressed, wrapped in `{"Records":[...]}` envelope
 
 Simulates AWS CloudTrail management and data events for the XSIAM `amazon_aws_raw` dataset. The `AWSCloudTrail.xif` XIF pack filters on `_log_type = "Cloud Audit Log"` and maps `Records[]` array elements to XDM. Each simulated log file is written to S3 using the real CloudTrail path structure (`AWSLogs/<accountId>/CloudTrail/<region>/<YYYY>/<MM>/<DD>/<accountId>_CloudTrail_<region>_<timestamp>_<uuid>.json.gz`), so the XSIAM S3 SQS-based collector picks it up identically to a live CloudTrail stream.
@@ -52,7 +52,7 @@ Normal operational traffic establishing a clean baseline across all major AWS se
 | Service | Events Generated |
 |---|---|
 | **IAM** | ListRoles, ListUsers, GetUser, ListPolicies, GetRole, CreateRole |
-| **STS** | GetCallerIdentity, AssumeRole (same-account, routine service automation) |
+| **STS** | GetCallerIdentity, AssumeRole (same-account: service roles — Lambda/ECS/EC2 — assumed only by their `AWSService` principal; deploy/CI roles assumed by people and pipelines) |
 
 ### Networking & Infrastructure
 
@@ -123,7 +123,7 @@ Context-dependent events that are common in legitimate admin workflows but also 
 * **`TOR_LOGIN`** — Successful `ConsoleLogin` event from a known Tor exit node IP.
 * **`API_CALL_FROM_TOR`** — Read API call (`ListUsers`) from a Tor exit node via an AssumedRole identity — lower confidence than console login.
 * **`LAMBDA_UPDATE_CODE`** — `UpdateFunctionCode20150331v2` replacing a live function's deployment package via S3 or inline zip. Attacker injects a backdoor into an existing function that continues operating normally. *Signal: code update from an unusual identity or external IP.*
-* **`LAMBDA_ROLE_REMOTE`** — Lambda execution using a remote or cross-account role — function running with an identity it was not originally configured with.
+* **`LAMBDA_ROLE_REMOTE`** — An IAM user assumes `LambdaExecutionRole` from a non-AWS IP with `aws-cli` and a Lambda-style session name (`lambda-NNNN`), then uses the issued `ASIA` credentials for GetCallerIdentity → ListBuckets → ListSecrets → GetSecretValue. *Signal: a role that only `lambda.amazonaws.com` assumes in the baseline, assumed by a person from outside the cloud.* Fires **Remote command line usage of AWS Lambda's role** [High].
 * **`IAM_CREATE_ACCESS_KEY`** — Programmatic access key creation for an existing user (also in Suspicious pool).
 
 ### Defense Evasion
@@ -206,7 +206,7 @@ The following scenario keys can be passed as `scenario_event` in coordinated sim
 | `SSM_START_SESSION` | StartSession | Remote access |
 | `SSM_SEND_COMMAND` | SendCommand | Remote execution |
 | `RDS_SHARE_SNAPSHOT` | ModifyDBSnapshotAttribute | Data exfiltration |
-| `LAMBDA_ROLE_REMOTE` | Lambda invocation with remote role | Lateral movement |
+| `LAMBDA_ROLE_REMOTE` | AssumeRole of the Lambda role via CLI from outside AWS + CLI chain | Credential access |
 | `BEDROCK_DELETE_LOGGING` | DeleteModelInvocationLoggingConfiguration | Defense evasion |
 | `CROSS_ACCOUNT_ASSUME_ROLE` | AssumeRole (cross-account) | Lateral movement |
 | `DISABLE_SECURITY_HUB` | DisableSecurityHub | Defense evasion |
@@ -244,7 +244,7 @@ The following scenario keys can be passed as `scenario_event` in coordinated sim
 | `lambda_function_names` | Lambda functions targeted in Lambda scenarios |
 | `lambda_role_names` | IAM roles used in Lambda remote-role scenarios |
 | `foreign_account_ids` | External account IDs used in cross-account/exfil scenarios |
-| `cross_account_role_names` | Role names used in AssumeRole (both benign and threat) |
+| `cross_account_role_names` | Role names used in AssumeRole: the human/CI pool of the benign AssumeRole (service roles are filtered out) and the cross-account threat |
 | `dynamodb_tables` | Table names for DynamoDB read/write events |
 | `sqs_queues` | Queue names for SQS events |
 | `sns_topics` | Topic names for SNS events |
