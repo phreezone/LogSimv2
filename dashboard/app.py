@@ -406,6 +406,29 @@ def _min_interval(module) -> float:
         return _MIN_EVENT_INTERVAL
 
 
+def _module_default_interval(module) -> float:
+    """A module's starting event_interval. Order: the module's config-section
+    `event_interval` override, then the module's own DEFAULT_EVENT_INTERVAL attribute,
+    then the global base_event_interval_seconds. Lets a quiet source (e.g. VMware ESXi:
+    a real host changes state rarely) default to a much lower rate than 1/s without
+    forcing every operator to retune it by hand."""
+    conf_key = getattr(module, "CONFIG_KEY", None)
+    if conf_key:
+        iv = (CONFIG.get(conf_key) or {}).get("event_interval")
+        if iv:
+            try:
+                return float(iv)
+            except (TypeError, ValueError):
+                pass
+    iv = getattr(module, "DEFAULT_EVENT_INTERVAL", None)
+    if iv:
+        try:
+            return float(iv)
+        except (TypeError, ValueError):
+            pass
+    return CONFIG.get("base_event_interval_seconds", 1.0)
+
+
 def _notify_interval(state) -> None:
     """Tell a module that sets its own volume (Windows: worker threads, not calls) the
     rate it was given; modules without the hook are paced by their calls alone."""
@@ -441,7 +464,7 @@ class ModuleState:
 
         # Config
         self.threat_level = "Realistic"
-        self.event_interval: float = CONFIG.get("base_event_interval_seconds", 1.0)
+        self.event_interval: float = _module_default_interval(module)
 
         # Metrics
         self.total_logs = 0
