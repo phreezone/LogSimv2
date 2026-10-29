@@ -3179,6 +3179,7 @@ def _gen_compute_instance_insert(config, context=None):
         log_type        = _LOG_ACTIVITY,
         operation_id    = op_id,
         operation_last  = False,
+        offset_seconds  = -random.randint(5, 30),   # the insert ran 5-30 s before it completed
         request_body    = {
             "name": instance_name,
             "machineType": f"projects/{project_id}/zones/{zone}/machineTypes/{machine_type}",
@@ -3222,7 +3223,7 @@ def _gen_compute_instance_insert(config, context=None):
         operation_id    = op_id,
         operation_first = False,
         operation_last  = True,
-        offset_seconds  = random.randint(5, 30),
+        offset_seconds  = 0,
         response_body   = {
             "targetLink": f"https://www.googleapis.com/compute/v1/projects/{project_id}/zones/{zone}/instances/{instance_name}",
             "status": "DONE",

@@ -2074,6 +2074,9 @@ def _parse_iso_ts(s: str) -> float:
     return dt.timestamp()
 
 
+_ISO_TS_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z")   # _iso_ts output
+
+
 def _end_by_now(events, now=None):
     """Rebase a built sequence so its LAST event lands at or just before now.
 
@@ -2093,11 +2096,20 @@ def _end_by_now(events, now=None):
     if not times or max(times) <= now:
         return events
     delta = max(times) - now + random.uniform(0.2, 3.0)
+    # Every timestamp the sequence generated moves with it -- time_created AND event-data
+    # times rendered into the fields and message (PasswordLastSet on 4720/4741, ...), or
+    # those would be left seconds ahead of the event that set them. Older values (account
+    # creation dates, prior logons) predate the sequence and stay put.
+    lo = min(times) - 1.0
+
+    def shift(m):
+        t = _parse_iso_ts(m.group(0))
+        return _iso_ts(t - delta) if t >= lo else m.group(0)
+
     out = []
     for e, r in zip(events, recs):
-        if r.get("time_created"):
-            r["time_created"] = _iso_ts(_parse_iso_ts(r["time_created"]) - delta)
-        out.append(json.dumps(r) if isinstance(e, str) else r)
+        s = _ISO_TS_RE.sub(shift, json.dumps(r))
+        out.append(s if isinstance(e, str) else json.loads(s))
     return out
 
 

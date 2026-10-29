@@ -101,12 +101,13 @@ def seq_aitm_token_theft(config):
 def seq_spray_compromise_persist(config):
     """Password spray (Medium) -> success -> attacker adds MFA method (persistence)."""
     ip = random.choice(RISKY_IPS); out = []
-    for i in range(10):
-        v = ac.pick_user(config)
+    # 25-50 different accounts, one failure each over 10-20 minutes, ending before the success.
+    users = ac.pick_distinct_users(config, random.randint(25, 50))
+    for v, off in zip(users, ac.attack_offsets(len(users), random.randint(600, 1200), 60)):
         out.append(_aad(aad._signin(v, _loc(ip), interactive=True, success=False, error_code=50126,
                                     failure="Invalid username or password.", conditional="notApplied",
-                                    offset_s=-(300 - i * 10))))
-    victim = ac.pick_user(config)
+                                    offset_s=off)))
+    victim = random.choice(users)          # the compromised account is one of the sprayed ones
     out.append(_aad(aad._signin(victim, _loc(ip), interactive=True, offset_s=-30)))
     out.append(_o365(o365._audit("User registered security info.", victim, ip,
                                  modified=[{"Name": "SecurityInfo.Method", "NewValue": "Mobile app notification", "OldValue": ""}])))

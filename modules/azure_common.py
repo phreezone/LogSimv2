@@ -743,6 +743,23 @@ def _active_profile_names(profiles):
     return names
 
 
+def pick_distinct_users(config, n):
+    """Up to `n` DIFFERENT users (a spray hits each account once, not the same one twice)."""
+    seen, tries = {}, 0
+    while len(seen) < n and tries < n * 6:
+        u = pick_user(config)
+        seen.setdefault(u["upn"], u)
+        tries += 1
+    return list(seen.values())
+
+
+def attack_offsets(n, span_s, gap_before_end=20):
+    """`n` sorted negative offsets spread over the last `span_s` seconds, the newest at
+    least `gap_before_end` seconds ago -- the failures of a spray / brute force, placed so
+    the success that follows (offset 0) is clearly the last event."""
+    return sorted(-random.uniform(gap_before_end, span_s) for _ in range(n))
+
+
 def pick_user(config=None, context=None, include_reserved=False):
     """Return a normalized identity from LogSim's user model.
 

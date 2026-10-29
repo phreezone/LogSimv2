@@ -563,6 +563,12 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
     built_time    = event_time
     teardown_time = (event_time + timedelta(seconds=max(0, int(duration_sec)))
                      if event_time else None)
+    # A placed session must have ENDED by now: when the Teardown would land in the
+    # future, slide the whole session back (gap and duration unchanged).
+    if teardown_time is not None:
+        overshoot = teardown_time - datetime.now(timezone.utc)
+        if overshoot.total_seconds() > 0:
+            built_time, teardown_time = built_time - overshoot, teardown_time - overshoot
 
     # Same-interface traffic (intra-interface lateral) → direction reported as
     # "inbound" — matches real ASA behaviour with `same-security-traffic permit
@@ -2647,7 +2653,9 @@ def _simulate_mgmt_logging_suppressed(config, session_context=None, backdate=Fal
         return (_asa_logging_off_lines(config, user, src, now - timedelta(seconds=window + 60))
                 + _asa_logging_on_lines(config, user, src, now))
     mgmt_plane.open_suppression(_SUPPRESS_KEY, window, user, src)
-    return _asa_logging_off_lines(config, user, src, now)
+    # start=None: the session ENDS now ('no logging enable' is the last line), so nothing
+    # is stamped ahead of the clock; the silent window opens from here.
+    return _asa_logging_off_lines(config, user, src, None)
 
 
 _ASA_HARVEST_COMMANDS = mgmt_plane.CISCO_HARVEST_COMMANDS

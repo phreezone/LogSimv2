@@ -193,27 +193,26 @@ def scenario_password_spray(config=None, victims=None, src_ip=None):
     """Password spray: one attacker source IP, many victim users each failing exactly once with
     the same STS error, then a success for one of the sprayed users — from a different IP (the
     spray tool yields to an interactive session). Failure and code share the same user."""
-    n = victims or random.randint(3, 6)
     ip = src_ip or random.choice(RISKY_IPS)
-    out = []
-    victim = None
-    for i in range(n):
-        u = ac.pick_user(config)
-        victim = u
-        out.append(_signin("UserLoginFailed", u, ip, result_status="Failed", error_number="50126",
-                           extended=[{"Name": "ResultStatusDetail", "Value": "InvalidUserNameOrPassword"}],
-                           offset_s=-(60 - i)))
-    # The successful compromise is one of the sprayed users, distinctly later + different IP.
-    out.append(_signin("UserLoggedIn", victim, random.choice(RISKY_IPS), offset_s=0))
+    # 25-50 different accounts, one failure each, throttled across 10-20 minutes.
+    users = ac.pick_distinct_users(config, victims or random.randint(25, 50))
+    out = [_signin("UserLoginFailed", u, ip, result_status="Failed", error_number="50126",
+                   extended=[{"Name": "ResultStatusDetail", "Value": "InvalidUserNameOrPassword"}],
+                   offset_s=off)
+           for u, off in zip(users, ac.attack_offsets(len(users), random.randint(600, 1200)))]
+    # The successful compromise is one of the sprayed users, after the spray + different IP.
+    out.append(_signin("UserLoggedIn", random.choice(users), random.choice(RISKY_IPS), offset_s=0))
     return out
 
 
-def scenario_brute_force(config=None, user=None, attempts=10, src_ip=None):
+def scenario_brute_force(config=None, user=None, attempts=None, src_ip=None):
+    """30-60 wrong passwords on one account over 5-15 minutes, then the guess succeeds."""
     u = ac.pick_user(config)
     ip = src_ip or random.choice(RISKY_IPS)
+    n = attempts or random.randint(30, 60)
     out = [_signin("UserLoginFailed", u, ip, result_status="Failed", error_number="50126",
                    extended=[{"Name": "ResultStatusDetail", "Value": "InvalidUserNameOrPassword"}],
-                   offset_s=-(120 - i * 8)) for i in range(attempts)]
+                   offset_s=off) for off in ac.attack_offsets(n, random.randint(300, 900))]
     out.append(_signin("UserLoggedIn", u, ip, offset_s=0))
     return out
 

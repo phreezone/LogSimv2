@@ -270,30 +270,34 @@ def generate_benign(config=None, context=None):
 
 # ── attack scenarios ─────────────────────────────────────────────────────────────────
 
-def scenario_brute_force(config=None, user=None, attempts=10, src_ip=None):
+def scenario_brute_force(config=None, user=None, attempts=None, src_ip=None):
+    """Brute force: 30-60 wrong passwords on ONE account from one source over 5-15 minutes,
+    then the password is guessed -- the success (same account, same IP) is the last event."""
     u = ac.pick_user(config)
-    loc = ac.egress(u)
     ip = src_ip or random.choice(RISKY_IPS)
     bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    n = attempts or random.randint(30, 60)
     out = [_signin(u, bad, interactive=True, success=False, error_code=50126,
                    failure="Invalid username or password.", conditional="notApplied",
-                   offset_s=-(120 - i * 8)) for i in range(attempts)]
+                   offset_s=off) for off in ac.attack_offsets(n, random.randint(300, 900))]
     out.append(_signin(u, bad, interactive=True, offset_s=0))
     return out
 
 
-def scenario_password_spray(config=None, victims=12, src_ip=None):
+def scenario_password_spray(config=None, victims=None, src_ip=None):
+    """Password spray: one source tries one password against 25-50 DIFFERENT accounts over
+    10-20 minutes (one failure each, throttled to stay under lockout), then one of the
+    sprayed accounts signs in successfully from the same source -- the last event."""
     ip = src_ip or random.choice(RISKY_IPS)
     bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
-    out = []
-    for i in range(victims):
-        u = ac.pick_user(config)
-        out.append(_signin(u, bad, interactive=True, success=False, error_code=50126,
-                           failure="Invalid username or password.", conditional="notApplied",
-                           offset_s=-(60 - i)))
-    out.append(_signin(ac.pick_user(config), bad, interactive=True, offset_s=0))
+    users = ac.pick_distinct_users(config, victims or random.randint(25, 50))
+    out = [_signin(u, bad, interactive=True, success=False, error_code=50126,
+                   failure="Invalid username or password.", conditional="notApplied",
+                   offset_s=off)
+           for u, off in zip(users, ac.attack_offsets(len(users), random.randint(600, 1200)))]
+    out.append(_signin(random.choice(users), bad, interactive=True, offset_s=0))
     return out
 
 
