@@ -21,7 +21,7 @@ the threat half and to file names.
 | `firepower_config.malicious_files` | 6 fixed dicts | generated, with matching AV detection names |
 | `checkpoint_firewall` C2 list | 5 hard-coded in the function | generated per source |
 | `fortinet_config.dga_beacon_domains` | 8 fixed | generated DGA per source |
-| `exfiltration_destinations` (file sharing) | 25 real services | **60 real services** (not generated -- rule literals) |
+| `exfiltration_destinations` (file sharing) | 25 real services | **74 real services** (not generated -- rule literals) |
 | Firepower large upload / download destinations | **4 fixed** | shared pool, ~130 distinct per 300 |
 | `zscaler._UPLOAD_FILES` | 20 fixed, no placeholders | generated, ~99% distinct |
 | Proofpoint attachment templates | 8 + 8, varying only by `{num}` | generated |
@@ -55,10 +55,15 @@ fields (`cs1`, `reason`), which are a fixed vocabulary by design.
 * `exfiltration_destinations` -- the shared file-sharing pool. These are real services,
   and the "Infoblox - DNS Resolution of Unsanctioned Cloud Storage" rule matches them as
   literals, so generating over them would break that rule. It is **grown by adding more
-  genuine services instead** -- 25 to 60 -- which also put three of that rule's literals
+  genuine services instead** -- 25 to 60, then a second wave (letsupload.io, turbobit.net,
+  rapidgator.net, Backblaze B2 and 10 more) to 74 -- which also put three of that rule's
+  literals
   (`filebin`, `transfer.sh`, `send.now`) into the project for the first time. Cardinality
   here comes from the number of distinct services plus the 30% long-tail share; a single
   service correctly keeps its one real domain (`pastebin.com` is always `pastebin.com`).
+  Every URL a service emits uses that service's real link shape -- turbobit/hitfile
+  short links (`/<id>.html`), rapidgator `<hash>.html`, filestore `?d=<id>`, Backblaze's
+  `b2_download_file_by_id` API -- so URL-shaped detectors can key on per-service format.
 * Per-source C2 stability. Check Point, FortiGate and Zscaler each keep a
   `_beacon_target_map` so one source keeps calling the same host across runs -- that
   recurrence IS the "recurring rare domain" detection signal. The generator is

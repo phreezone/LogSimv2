@@ -45,7 +45,7 @@ def _tor_ip(config):
 
 def _signin(user, loc, *, interactive=True, success=True, error_code=0,
             failure="Other.", risk_level="none", risk_state="none", risk_detail="none",
-            risk_events=None, offset_s=0,
+            risk_events=None, offset_s=0, session_id=None,
             app=None, resource=None, conditional="success", client_app="Browser",
             mfa=False, ca_result=None, auth_method=None, user_type="member",
             cross_tenant="none", device=None):
@@ -94,11 +94,12 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
         "authenticationRequirementPolicies": ([{"detail": "Security Defaults",
                                                  "requirementProvider": "securityDefaults"}] if (mfa or auth_method) else []),
         "authenticationProcessingDetails": [{"key": "Is CAE Token", "value": "False"}],
-        "networkLocationDetails": [],
+        "networkLocationDetails": ac.network_location_details(loc),
         "deviceDetail": device or ac.device_for(user),
         "location": {"city": loc["city"], "state": loc["state"],
                      "countryOrRegion": loc["countryOrRegion"], "geoCoordinates": loc["geoCoordinates"]},
-        "ipAddressFromResourceProvider": None, "networkNames": [],
+        "ipAddressFromResourceProvider": None,
+        "sessionId": session_id or _g(),
         "autonomousSystemOrganization": loc.get("isp"),
         "appliedConditionalAccessPolicies": (ac.applied_ca(ca_result, n=random.randint(1, 2))
                                              if ca_result else []),
@@ -138,20 +139,30 @@ def _mi_signin(loc, offset_s=0):
     name = random.choice(["logsim-vm-prod", "logsim-func-app", "logsim-aks-cluster",
                           "logsim-logicapp", "logsim-datafactory"])
     msi = random.choice(["userAssigned", "systemAssigned"])
+    # resourceDisplayName, resourceId and associatedResourceId must tell ONE coherent story
+    # (e.g. the Key Vault resource -> the /subscriptions/.../Microsoft.KeyVault/vaults/<name> ARM id).
+    res = random.choice(["Windows Azure Service Management API", "Azure Key Vault",
+                         "Azure Storage", "Microsoft Graph"])
+    sub = ac._stable_guid("sub"); rg = "rg-prod"
+    _arm_resource = {
+        "Azure Key Vault": f"Microsoft.KeyVault/Vaults/logsim-kv-{ac._h('kv:' + name) % 90 + 1:02d}",
+        "Azure Storage": f"Microsoft.Storage/storageAccounts/logsimst{ac._h('st:' + name) % 1000:03d}",
+        "Windows Azure Service Management API": f"Microsoft.Compute/virtualMachines/{name}",
+        "Microsoft Graph": f"Microsoft.Compute/virtualMachines/{name}",
+    }[res]
     return {
         "id": _g(), "createdDateTime": _ts(offset_s), "appId": ac.app_id(name),
         "appDisplayName": name, "servicePrincipalId": ac.user_oid("mi:" + name),
         "servicePrincipalName": name, "ipAddress": loc["ip"], "correlationId": _g(),
         "conditionalAccessStatus": "notApplied", "isInteractive": False,
         "riskState": "none", "riskLevelDuringSignIn": "none",
-        "resourceDisplayName": random.choice(["Azure Resource Manager", "Azure Key Vault",
-                                              "Azure Storage", "Microsoft Graph"]),
-        "resourceId": ac.resource_id("Azure Resource Manager"),
+        "resourceDisplayName": res, "resourceId": ac.resource_id(res),
         "signInEventTypes": ["managedIdentity"], "tokenIssuerType": "AzureAD",
         "authenticationProtocol": "none", "clientCredentialType": "managedIdentity",
-        "managedServiceIdentity": {"msiType": msi, "associatedResourceId":
-            f"/subscriptions/{ac._stable_guid('sub')}/resourceGroups/rg-prod/providers/"
-            f"Microsoft.Compute/virtualMachines/{name}", "federatedTokenId": "", "federatedTokenIssuer": ""},
+        "managedServiceIdentity": {"msiType": msi,
+            "associatedResourceId": (f"/subscriptions/{sub}/resourceGroups/{rg}/providers/"
+                                     f"{_arm_resource}"),
+            "federatedTokenId": "", "federatedTokenIssuer": ""},
         "status": {"errorCode": 0, "failureReason": "Other.", "additionalDetails": None},
         "location": {"city": loc["city"], "state": loc["state"],
                      "countryOrRegion": loc["countryOrRegion"], "geoCoordinates": loc["geoCoordinates"]},
@@ -300,7 +311,8 @@ def scenario_high_risk_signin(config=None, user=None):
     bad = {"ip": random.choice(RISKY_IPS), "city": "Frankfurt", "state": "Hesse",
            "countryOrRegion": "DE", "geoCoordinates": {"latitude": 50.11, "longitude": 8.68}}
     rec = _signin(u, bad, interactive=True, risk_level="high", risk_state="atRisk")
-    rec["riskDetail"] = "aiConfirmedSigninSafe"
+    # riskState=atRisk with riskDetail=none: Identity Protection flagged it; nothing has confirmed
+    # it safe or compromised yet (coherent pair for the alert story).
     rec["riskEventTypes_v2"] = ["unfamiliarFeatures", "anonymizedIPAddress"]
     return [rec]
 
@@ -320,7 +332,7 @@ def scenario_powershell_signin(config=None, user=None):
           "geoCoordinates": {"latitude": 50.11, "longitude": 8.68}}
     rec = _signin(u, de, interactive=True, app="Microsoft Azure PowerShell",
                   client_app="Mobile Apps and Desktop clients")
-    rec["appId"] = "1950a258-227b-4e31-a9cf-717495945fc2"  # well-known Azure PowerShell app id
+    # ac.app_id() resolves "Microsoft Azure PowerShell" to the real well-known AppId.
     return [rec]
 
 
@@ -390,8 +402,9 @@ def scenario_multi_resource_sso(config=None, user=None):
     """One user accesses many apps/resources via SSO in a short window -> 'Suspicious user accessed
     multiple items via SSO'."""
     u = ac.pick_user(config); loc = ac.egress(u); out = []
+    sid = _g()   # one SSO session folded across the resource accesses
     for i, r in enumerate(random.sample(ac.RESOURCES, min(6, len(ac.RESOURCES)))):
-        out.append(_signin(u, loc, interactive=False, resource=r,
+        out.append(_signin(u, loc, interactive=False, resource=r, session_id=sid,
                            app=random.choice(ac.APPS_NONINTERACTIVE), offset_s=-(i * 20)))
     return out
 
@@ -403,9 +416,10 @@ def scenario_multi_sso_anon_proxy(config=None, user=None):
     bad = {"ip": _tor_ip(config), "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
     out = []
+    sid = _g()   # one SSO session folded across the resource accesses
     for i, r in enumerate(random.sample(ac.RESOURCES, min(6, len(ac.RESOURCES)))):
-        rec = _signin(u, bad, interactive=True, resource=r, risk_level="high", risk_state="atRisk",
-                      offset_s=-(i * 15))
+        rec = _signin(u, bad, interactive=True, resource=r, session_id=sid, risk_level="high",
+                      risk_state="atRisk", offset_s=-(i * 15))
         rec["riskEventTypes_v2"] = ["anonymizedIPAddress"]
         out.append(rec)
     return out
@@ -464,9 +478,13 @@ def scenario_sso_abnormal_user_agent(config=None, user=None):
     """Sign-in with a user-agent abnormal for this user (automation/LOLBin agent) -> 'SSO with
     abnormal user agent'."""
     u = ac.pick_user(config)
-    dev = dict(ac.device_for(u), browser=random.choice(
-        ["python-requests/2.31.0", "curl/8.4.0", "axios/1.6.2", "Go-http-client/2.0"]))
-    return [_signin(u, ac.egress(u), interactive=False, device=dev, risk_level="low", risk_state="atRisk")]
+    agent = random.choice(
+        ["python-requests/2.31.0", "curl/8.4.0", "axios/1.6.2", "Go-http-client/2.0"])
+    dev = dict(ac.device_for(u), browser=agent)
+    rec = _signin(u, ac.egress(u), interactive=False, device=dev, risk_level="low", risk_state="atRisk")
+    # Abnormal UA must be visible in the top-level Graph field too, so userAgent analytics fire.
+    rec["userAgent"] = agent
+    return [rec]
 
 
 def scenario_sso_abnormal_os(config=None, user=None):
@@ -474,7 +492,7 @@ def scenario_sso_abnormal_os(config=None, user=None):
     operating system'."""
     u = ac.pick_user(config)
     odd = "Linux" if u.get("os_type") != "Linux" else "Windows"
-    dev = dict(ac.device_for(u), operatingSystem=odd, isCompliant=False, isManaged=False, trustType="")
+    dev = dict(ac.device_for(u), operatingSystem=odd, isCompliant=False, isManaged=False, trustType=None)
     return [_signin(u, ac.egress(u), interactive=True, device=dev, risk_level="low", risk_state="atRisk")]
 
 
@@ -534,12 +552,15 @@ def scenario_pentest_tool_activity(config=None, user=None, attempts=8):
     out = []
     for i in range(attempts):
         u = ac.pick_user(config)
-        dev = dict(ac.device_for(u), browser=agent, isCompliant=False, isManaged=False, trustType="")
-        out.append(_signin(u, bad, interactive=True, success=(i == attempts - 1),
-                           error_code=(0 if i == attempts - 1 else 50126),
-                           failure="Invalid username or password.", device=dev,
-                           risk_level="high", risk_state="atRisk", conditional="notApplied",
-                           offset_s=-(120 - i * 12)))
+        dev = dict(ac.device_for(u), browser=agent, isCompliant=False, isManaged=False, trustType=None)
+        rec = _signin(u, bad, interactive=True, success=(i == attempts - 1),
+                      error_code=(0 if i == attempts - 1 else 50126),
+                      failure="Invalid username or password.", device=dev,
+                      risk_level="high", risk_state="atRisk", conditional="notApplied",
+                      offset_s=-(120 - i * 12))
+        # Offensive-tool signature must reach the top-level userAgent for the UA analytics.
+        rec["userAgent"] = agent
+        out.append(rec)
     return out
 
 
@@ -566,8 +587,11 @@ def scenario_app_access_unknown_tenant(config=None, user=None):
     loc = ac.rare_asn_loc()
     rec = _sp_signin(loc)
     tenant = ac.rare_tenant()                        # a never-seen external tenant (unbounded)
-    rec["homeTenantId"] = tenant["tenant_id"]
+    # Cross-tenant sign-ins carry both tenant ids; for a service principal Graph has no user home
+    # tenant — the foreign tenant is the app OWNER (appOwnerTenantId), and ours is the resource.
+    rec["appOwnerTenantId"] = tenant["tenant_id"]
     rec["resourceTenantId"] = ac.HOME_TENANT_ID
+    rec.pop("homeTenantId", None)
     rec["crossTenantAccessType"] = "b2bCollaboration"
     rec["riskState"] = "atRisk"
     rec["riskLevelDuringSignIn"] = "high"
@@ -588,6 +612,7 @@ def scenario_device_code_auth_flow(config=None, user=None):
                   client_app="Mobile Apps and Desktop clients",
                   risk_level="high", risk_state="atRisk")
     rec["authenticationProtocol"] = "deviceCode"
+    rec["originalTransferMethod"] = "deviceCodeFlow"   # Graph originalTransferMethods enum
     rec["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures"]
     return [rec]
 
@@ -630,7 +655,26 @@ def scenario_sp_token_remote_usage(config=None, user=None):
     return [rec]
 
 
+def scenario_app_credential_first_use(config=None, user=None):
+    """Cross-feed chain with azuread_audit `app_credential_added`: that feed adds a certificate/
+    secret to 'Internal Automation App' (Core Directory audit record); detectors then look for the
+    credential's FIRST use as an app-only sign-in. Here the SP signs in with the freshly added
+    credential (clientSecret/cert) shaped like the audit record's KeyType, from external egress."""
+    loc = ac.rare_asn_loc()                            # credential read offline -> odd egress
+    rec = _sp_signin(loc)
+    rec["appId"] = ac.app_id("Internal Automation App")
+    rec["appDisplayName"] = "Internal Automation App"
+    rec["servicePrincipalId"] = ac.user_oid("sp:Internal Automation App")
+    rec["servicePrincipalName"] = "Internal Automation App"
+    rec["clientCredentialType"] = random.choice(["clientSecret", "certificate"])
+    rec["riskState"] = "atRisk"
+    rec["riskLevelDuringSignIn"] = "medium"
+    rec["riskEventTypes_v2"] = ["unfamiliarFeatures"]
+    return [rec]
+
+
 SCENARIOS = {
+    "app_credential_first_use": scenario_app_credential_first_use,
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
     "impossible_travel": scenario_impossible_travel,

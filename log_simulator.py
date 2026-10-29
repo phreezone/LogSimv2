@@ -15,6 +15,8 @@ import sys
 import threading
 import copy
 import contextvars  # per-run emission capture (external API run-tracking)
+import heapq
+import itertools
 from dotenv import load_dotenv
 
 # Session context helper (imported after modules dir is on path)
@@ -1257,9 +1259,94 @@ def send_cribl_batch(records, module, config):
     return sent
 
 
+# ── Deferred scenario steps (modules.deferred) ────────────────────────────────
+# A scenario step stamped later than now is held here and transmitted at its own time, so
+# the tenant never receives an event dated in the future. Bookkeeping (capture sink, run
+# collector, dry run, training bulk collection) happens when the step is GENERATED; only
+# the transmit waits. One daemon thread releases due steps in time order.
+_DEFERRED_HEAP = []                 # (release_at, seq, payload, module, config, event_name)
+_DEFERRED_CV = threading.Condition()
+_DEFERRED_SEQ = itertools.count()
+_DEFERRED_THREAD = None
+
+
+def _hold_deferred(log_content, module, config, event_name):
+    """Schedule the not-yet-due deferred steps in log_content; return what is left to send
+    now (an empty list / None when everything was held)."""
+    from modules import deferred
+    now = time.time()
+    items = log_content if isinstance(log_content, list) else [log_content]
+    later = [m for m in items if (deferred.release_at(m) or 0) > now]
+    if not later:
+        return log_content
+    global _DEFERRED_THREAD
+    with _DEFERRED_CV:
+        for m in later:
+            heapq.heappush(_DEFERRED_HEAP, (deferred.release_at(m), next(_DEFERRED_SEQ),
+                                            m, module, config, event_name))
+        if _DEFERRED_THREAD is None:
+            _DEFERRED_THREAD = threading.Thread(target=_release_deferred, daemon=True,
+                                                name="deferred-release")
+            _DEFERRED_THREAD.start()
+        _DEFERRED_CV.notify()
+    if not isinstance(log_content, list):
+        return None
+    held = {id(m) for m in later}
+    return [m for m in log_content if id(m) not in held]
+
+
+def _release_deferred():
+    """Transmit each held step once its release time has come."""
+    while True:
+        with _DEFERRED_CV:
+            while True:
+                if not _DEFERRED_HEAP:
+                    _DEFERRED_CV.wait()
+                    continue
+                wait = _DEFERRED_HEAP[0][0] - time.time()
+                if wait <= 0:
+                    _, _, payload, module, config, event_name = heapq.heappop(_DEFERRED_HEAP)
+                    _DEFERRED_CV.notify_all()
+                    break
+                _DEFERRED_CV.wait(wait)
+        try:
+            _transmit(payload, module, config, event_name)
+            if getattr(module, "CONFIG_KEY", None) and \
+                    (config.get(module.CONFIG_KEY) or {}).get("transport") == "wec":
+                _flush_wec_batch(config)
+        except Exception as exc:
+            _tprint(f"[deferred] send FAILED for {getattr(module, 'NAME', '?')} "
+                    f"({event_name}): {type(exc).__name__}: {exc}")
+
+
+def deferred_pending():
+    """(count, seconds until the last one is due) for steps still held."""
+    with _DEFERRED_CV:
+        if not _DEFERRED_HEAP:
+            return 0, 0.0
+        return len(_DEFERRED_HEAP), max(0.0, max(e[0] for e in _DEFERRED_HEAP) - time.time())
+
+
+def wait_for_deferred(timeout=None):
+    """Block until every held step has been sent (one-shot CLI runs exit right after
+    generating). Returns True when nothing is left."""
+    n, last = deferred_pending()
+    if n:
+        print(f"Waiting {last:.0f}s to send {n} delayed scenario step(s) at their own time...")
+    end = None if timeout is None else time.time() + timeout
+    with _DEFERRED_CV:
+        while _DEFERRED_HEAP:
+            remaining = None if end is None else end - time.time()
+            if remaining is not None and remaining <= 0:
+                return False
+            _DEFERRED_CV.wait(remaining if remaining is not None else 1.0)
+    time.sleep(0.2)   # let the releaser finish the last transmit
+    return True
+
+
 def process_and_send(log_content, module, config, event_name=None):
-    """Determines how to send the log and sends it. Counts logs for throughput reporting."""
-    transport = "syslog"
+    """Determines how to send the log and sends it. Counts logs for throughput reporting.
+    Steps marked with modules.deferred are recorded now and transmitted at their own time."""
     if not log_content:
         return
 
@@ -1278,7 +1365,14 @@ def process_and_send(log_content, module, config, event_name=None):
     if _bulk_collector is not None:
         _bulk_collector.append((module, log_content, event_name))
         return
+    log_content = _hold_deferred(log_content, module, config, event_name)
+    if log_content:
+        _transmit(log_content, module, config, event_name)
 
+
+def _transmit(log_content, module, config, event_name=None):
+    """Send a payload (or list of payloads) on the module's transport and count it."""
+    transport = "syslog"
     conf_key = getattr(module, 'CONFIG_KEY', None)
     module_config = {}
     if conf_key and conf_key in config:
@@ -1544,6 +1638,8 @@ def run_specific_threat(module, threat_name, config, session_context, repeat):
 
     try:
         _dispatch_result(_generate(), module, config)
+        if not repeat:
+            wait_for_deferred()
         if repeat:
             while True:
                 time.sleep(interval)
@@ -2163,6 +2259,7 @@ _FW_MODULE_NAMES = [
     "Cisco ASA Firewall",
     "Check Point Firewall",
     "Fortinet FortiGate",
+    "Palo Alto Networks NGFW",
     "Zscaler Web Gateway",
 ]
 

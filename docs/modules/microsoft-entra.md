@@ -92,7 +92,30 @@ a disabled / dormant / honey user, suspicious-country and new-country sign-in, a
 user-agent / OS, machine-account SSO, SSO spray with IP rotation, pen-test tool activity,
 first SSO to a resource / from a new ASN, unusual resource access by an app, app access
 from an unknown tenant, service-principal and managed-identity token used remotely, device
-code flow, service-account SSO, PowerShell sign-in, new-device sign-in.
+code flow, service-account SSO, PowerShell sign-in, new-device sign-in, and the cross-feed
+`app_credential_first_use` (first use of the credential added by azuread_audit's
+`app_credential_added`).
+
+Schema alignment (validated against Graph `signIn` and the live tenant dataset): first-party
+AppIds are real well-known GUIDs from Microsoft's first-party tables, via
+`azure_common.app_id` — 31 client AppIds and 12 resource AppIds are registry-validated
+(docs CSV / SP-enumeration CSV); anything un-enumerated falls back to a deterministic
+stable id. All Graph enums used by the module are doc-verified: `signInEventTypes`
+(`interactiveUser` / `nonInteractiveUser` / `servicePrincipal` / `managedIdentity`),
+`clientCredentialType` (`clientSecret` / `clientAssertion` / `certificate` / `managedIdentity` /
+`federatedIdentityCredential` / `none`), `originalTransferMethod` `deviceCodeFlow`,
+`incomingTokenType` (`primaryRefreshToken`/`saml20`/`refreshToken`/…), CA grant controls
+(`mfa`, `block`, `compliantDevice`, `domainJoinedDevice`, `approvedApplication`) with a
+proper GUID per applied-CA-policy entry, and `deviceDetail.trustType` display forms
+("Azure AD joined"/"Azure AD registered"/"Workplace joined") with null for unregistered
+devices. BENIGN_FAIL wording aligned to the AADSTS error-code reference.
+Abnormal-UA and pentest scenarios
+also populate the top-level `userAgent` so UA analytics can fire; multi-app scenarios share a
+`sessionId`; `networkLocationDetails` uses the real Graph shape (the bogus flat
+`networkNames` key was removed); SP sign-ins from unknown tenants set `appOwnerTenantId`/
+`resourceTenantId` (no `homeTenantId`); risk fields are coherent; managed-identity records
+keep `resourceDisplayName`/`associatedResourceId` per workload; device-code flow emits
+`originalTransferMethod=routerCodeFlow`.
 
 ## `azuread_audit` — Graph directory audit
 
@@ -105,17 +128,30 @@ maintenance, app consent, password resets, device registration. Admin actions ar
 to IT/admin role pools and follow business hours, so "unusual admin" and "unusual time"
 hold up.
 
-**Threats (38):** admin role assignment and multiple role removals, risky app consent,
-app credential added, app privilege escalation, application owner added/removed, app role
+**Threats (38):** admin role assignment (`Role.IsSystem` + `RoleDefinitionId` properties on
+role ops) and multiple role removals, risky app consent (with `Scope`), app credential added
+(feeds the signin-side `app_credential_first_use` chain), app privilege escalation, application owner added/removed, app role
 assignment, application URI change, service principal created/removed, MFA fraud
 reported, security info disabled, authentication method added, temporary access pass
 registered, BitLocker key retrieval, Conditional Access policy removed or unusual CA
-operation, PIM elevation request / alert disabled / member removal / role settings
-change, device registration policy change, unusual guest invitation, unlock plus password
-reset, first PowerShell operation, on-prem sync collision, account created / deleted /
-short-lived, federation change failed / federated-domain backdoor, unverified domain
-added, and the cross-tenant set: trust abuse, outbound sync, default weakened, delegated
-admin partner abuse, multi-tenant org join.
+operation (`loggedByService` = `Core Directory`, the real value — fake "Conditional
+Access"/"PIM" service names were removed; PIM records use `Privileged Identity
+Management`), PIM elevation request (real started→completed pair, same correlationId),
+PIM alert disabled / member removal / role settings change, device registration policy
+change (real `Set device registration policies` op), unusual guest invitation, unlock
+plus password reset, first PowerShell operation, on-prem sync collision, account created /
+deleted / short-lived, federation change failed / federated-domain backdoor (with
+`SigningCertificateUpdateStatus`), unverified domain added, and the cross-tenant set:
+trust abuse (chain now ends with an `Invite external user` provisioning a B2B guest from
+the rogue tenant, one correlationId throughout), outbound sync and multi-tenant org join
+(each with a follow-on provisioning `Execution` record), delegated admin partner abuse
+(partner admin performs a follow-on privileged `Update user`), multi-tenant org join.
+
+Records in each multi-stage chain share one `correlationId` and ascend in time so XSIAM can
+fold them into a single story. Audit `id` prefixes and the `<prefix>_<correlationId>_<code>_
+<digits>` format are verified against Graph `directoryAudit` examples ("Directory", "SSGM");
+`additionalDetails` uses doc-verified keys (`User-Agent`, `UserType`) plus a few
+real-tenant-row-derived keys.
 
 Confirmed firing in the tenant: `admin_role_add` raises *Suspicious Azure AD Administrator
 Role assignment*. `federated_domain_backdoor` raises *Rare unverified domain addition to
@@ -127,13 +163,33 @@ Azure AD* and *A successful Azure domain federation settings modification*.
 StsLogon sign-ins and RecordType 8 is directory operations. This is a different feed and
 dataset from the Graph sign-ins above, as in a real tenant that collects both.
 
+**Dual-plane policy (researched 2026-10-28):** the Graph/Entra plane is the complete,
+authoritative source for directory operations (Sentinel/XSIAM detections key on
+`AuditLogs`/`SigninLogs` from Graph), while the Management-API AAD feed carries a
+live-but-subset mirror (M365-context ops; UAL sign-in events piped from Entra since
+Nov 2020). Emissions overlap is real and officially expected — Microsoft's FAQ states
+the Management API performs no de-duplication and leave dedup to the SIEM. Concretely:
+password spray / brute force / role add-remove / user create-delete / admin password
+reset / federation change are mirrored (dual-plane ✔); PIM details, consent-policy,
+cross-tenant and CA changes are Graph-plane only (primary emission on
+`msft_azure_ad_audit_raw` ✔); non-interactive / service-principal / managed-identity
+sign-ins never appear in RT15. Note: the old `azure-active-directory-schema` Learn page
+has been retired — RT8/RT15 schemas now live in the merged
+`office-365-management-activity-api-schema` article.
+
 **Baseline:** mostly successful interactive sign-ins, some routine failures, occasional
 directory activity.
 
-**Threats (14):** password spray, brute force, impossible travel, TOR sign-in, admin role
-add and admin role removals, MFA disabled, privileged auth method added, atypical account
-deletion, non-standard account creation, create-then-delete user, federation change, user
-deletion, PIM role change.
+**Threats (14):** password spray (same attacker IP across victims, one STS-coded failure
+per victim, success = last-victim user from a different IP), brute force, TOR sign-in,
+admin role add and admin role removals, MFA disabled, privileged auth method added,
+atypical account deletion, non-standard account creation, create-then-delete user
+(delete record offset ~60 s after create), federation change, user deletion, PIM role
+change. Enumerated `AzureActiveDirectoryEventType` (0 = logon, 1 = audit), RT8 targets use
+object GUIDs, and failures carry the real numeric `LogonError` (50126/50053/50074/…).
+Spray/failure records target M365-relevant apps only, matching real RT15 coverage.
+`impossible_travel` was removed from this dataset — the detector needs the Graph geo fields
+and is covered by azuread_signin's impossible travel on `msft_azure_ad_raw`.
 
 ## `azuread_campaigns` — cross-feed identity campaigns
 

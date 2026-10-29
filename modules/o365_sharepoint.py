@@ -1,10 +1,26 @@
 """Office 365 SharePoint Online / OneDrive audit (O365 Management Activity)
 -> msft_o365_sharepoint_online_raw, via the cribl_direct transport (dedicated UUID).
 
-Field set verified against real tenant rows: RecordType 6 (SharePoint file/folder operations)
-and 14 (SharePoint sharing operations), Workload "SharePoint"/"OneDrive", with ObjectId as the
+Field set verified against real tenant rows: RecordType 6 (SharePointFileOperation)
+and 14 (SharePointSharingOperation), Workload "SharePoint"/"OneDrive", with ObjectId as the
 full file URL, Site/SiteUrl/WebId/ListId/ListItemUniqueId, SourceFileName/SourceRelativeUrl,
 ItemType, EventSource, ApplicationDisplayName, Browser/Device/Platform, GeoLocation.
+Sensitivity labels: SharePoint file records carry SensitivityLabelId (label GUID) and
+SensitivityLabelOwnerEmail — verified in the live tenant row schema AND in the
+"SharePoint file operations" schema table of the Management Activity API docs
+(https://learn.microsoft.com/en-us/office/office-365-management-api/office-365-management-activity-api-schema).
+("SensitivityLabel" is the Exchange-only property; we use the SharePoint fields.)
+
+Sharing operations verified against
+https://learn.microsoft.com/en-us/purview/audit-log-sharing : SharingSet,
+SharingInvitationCreated (logged for shared SITES), SharingInvitationAccepted,
+AnonymousLinkCreated, AnonymousLinkUsed, SecureLinkCreated, AddedToSecureLink.
+TargetUserOrGroupType is a string with documented values Member, Guest,
+SharePointGroup, SecurityGroup, Partner (also the api-schema table: Member/Guest/Group/Partner).
+Additional operation names verified against the audit-log activities catalog
+(https://learn.microsoft.com/en-us/purview/audit-log-activities): SiteCollectionAdminRemoved,
+RemovedFromSecureLink, PageViewedExtended, FileDeletedFirstStageRecycleBin,
+FileDeletedSecondStageRecycleBin, UnmanagedSyncClientBlocked.
 
 Benign baseline = routine document activity (access/modify/preview/upload/download, page views,
 folder ops), weighted to business hours. Detection scenarios target the M365 storage
@@ -246,11 +262,21 @@ def _sp(operation, user, record_type=6, workload="SharePoint", site=None, doc=No
          "SiteUrl": f'https://{f["host"]}{f["sitepath"]}/',
          "ObjectId": f'https://{f["host"]}{rel}', "SourceFileName": f["filename"],
          "SourceRelativeUrl": f["dir"].lstrip("/"),
+         "SourceFileExtension": (f["filename"].rsplit(".", 1)[-1]
+                                 if "." in f["filename"] else ""),
          "ApplicationDisplayName": "OneDrive SyncEngine" if workload == "OneDrive" else "SharePoint",
          "UserAgent": _prof[4], "BrowserName": _prof[1], "BrowserVersion": _prof[2], "Platform": _prof[3],
          "IsManagedDevice": True, "DeviceDisplayName": f'{user["username"].upper().replace(".", "")}-PC',
          "GeoLocation": loc["countryOrRegion"], "AuthenticationType": "OAuth",
          "ResultStatus": "Succeeded"}
+    if operation in ("FileCopied", "FileMoved"):
+        # Source* describe the origin; Destination* + ObjectId describe the destination
+        # (SiteUrl + DestinationRelativeUrl + DestinationFileName = ObjectId per schema).
+        dest_dir = f["dir"] if operation == "FileCopied" else f["dir"] + "/Archive"
+        r["DestinationFileName"] = f["filename"]
+        r["DestinationRelativeUrl"] = dest_dir.lstrip("/")
+        r["DestinationFileExtension"] = r["SourceFileExtension"]
+        r["ObjectId"] = f'https://{f["host"]}{dest_dir}/{f["filename"]}'
     if extra:
         r.update(extra)
     return r
@@ -260,12 +286,16 @@ def _sp(operation, user, record_type=6, workload="SharePoint", site=None, doc=No
 
 _BENIGN_OPS = ["FileAccessed", "FileModified", "FilePreviewed", "FileUploaded",
                "FileDownloaded", "FileCheckedOut", "FileCheckedIn", "FileRenamed",
-               "PageViewed", "FolderCreated", "FileCopied", "FileMoved"]
+               "PageViewed", "PageViewedExtended", "FolderCreated", "FileCopied", "FileMoved"]
 # Benign RT14 sharing / access-request outcomes (internal, routine — the normal collaboration mix).
+# Docs-verified sharing operations (https://learn.microsoft.com/en-us/purview/audit-log-sharing).
+# Note: CompanyLinkCreated/AccessRequestWithdrawn are routinely seen in tenant logs but are NOT
+# documented on that page, so we emit only the documented set (SharedLinkCreated covers internal
+# "copy a link to share" flow, which the docs list as a real activity).
 _SHARING_OPS = ["SharingSet", "SharingInvitationCreated", "SharingInvitationAccepted",
-                "AddedToSecureLink", "SecureLinkCreated", "CompanyLinkCreated",
-                "AccessRequestCreated", "AccessRequestApproved", "AccessRequestRejected",
-                "AccessRequestWithdrawn", "SharingRevoked"]
+                "AddedToSecureLink", "SecureLinkCreated", "SharedLinkCreated",
+                "AddedToGroup", "AccessRequestCreated", "AccessRequestApproved",
+                "AccessRequestRejected", "SharingRevoked", "RemovedFromSecureLink"]
 # Sensitive-looking files for the risky-sharing scenarios.
 _SENSITIVE_DOCS = ["Salary Bands.xlsx", "Customer List.xlsx", "Board Deck.pptx", "Cardholder Data.csv",
                    "Patient Records.xlsx", "Master Services Agreement.pdf", "Source Code.zip",
@@ -287,8 +317,12 @@ def _b_sharing(cfg):
     u = ac.pick_user(cfg)
     op = random.choice(_SHARING_OPS)
     if random.random() < 0.15 and op in ("SharingInvitationCreated", "SharingInvitationAccepted",
-                                         "CompanyLinkCreated", "SecureLinkCreated"):
-        # routine external collaboration with a known partner (normal external-domain baseline)
+                                         "SecureLinkCreated", "AddedToSecureLink",
+                                         "SharedLinkCreated"):
+        # routine external collaboration with a known partner (normal external-domain baseline).
+        # Per the sharing-auditing doc, external file shares surface as SecureLinkCreated /
+        # AddedToSecureLink (specific-people link); SharingInvitationCreated is logged when the
+        # shared resource is a site.
         ext = f"{random.choice(['j.doe','contact','projects','team','ap','sales'])}@{random.choice(_PARTNER_DOMAINS)}"
         return _sp(op, u, record_type=14,
                    extra={"TargetUserOrGroupName": ext, "TargetUserOrGroupType": "Guest",
@@ -334,11 +368,14 @@ def scenario_mass_download(config=None, count=40):
 
 
 def scenario_mass_file_deletion(config=None, count=50):
-    """Many files deleted/recycled in a short window by one user -> 'Massive files deletion in
-    Microsoft SharePoint or OneDrive' (ransomware/destruction or anti-forensics)."""
+    """Many files deleted in a short window by one user -> 'Massive files deletion in
+    Microsoft SharePoint or OneDrive' (ransomware/destruction or anti-forensics).
+    One burst = ONE operation throughout (volume analytics group on Operation); the
+    recycled/deleted variety only differs ACROSS bursts, never within one burst."""
     u = ac.pick_user(config); site = random.choice(_SITES)
-    return [_sp(random.choice(["FileDeleted", "FileRecycled"]), u, site=site, offset_s=-(count - i))
-            for i in range(count)]
+    op = random.choice(["FileDeleted", "FileRecycled", "FileDeletedFirstStageRecycleBin",
+                        "FileDeletedSecondStageRecycleBin"])
+    return [_sp(op, u, site=site, offset_s=-(count - i)) for i in range(count)]
 
 
 def scenario_mass_file_editing(config=None, count=40):
@@ -352,8 +389,8 @@ def scenario_mass_file_upload(config=None, count=40):
     """Many files uploaded in a short window -> 'Massive upload to SaaS service' (staging/implants
     or re-upload of encrypted files)."""
     u = ac.pick_user(config); site = random.choice(_SITES)
-    return [_sp(random.choice(["FileUploaded", "FileSyncUploadedFull"]), u, site=site,
-                offset_s=-(count - i)) for i in range(count)]
+    op = random.choice(["FileUploaded", "FileSyncUploadedFull"])
+    return [_sp(op, u, site=site, offset_s=-(count - i)) for i in range(count)]
 
 
 def scenario_aip_sensitive_file_access(config=None, count=15):
@@ -366,10 +403,21 @@ def scenario_aip_sensitive_file_access(config=None, count=15):
                 offset_s=-(count - i) * 5) for i in range(count)]
 
 
-def scenario_full_sync_download(config=None):
-    """OneDrive full-library sync download -> bulk data staging/exfil."""
+def scenario_full_sync_download(config=None, count=30):
+    """OneDrive full-library sync download -> bulk data staging/exfil. A single record cannot
+    drive a volume analytic, so this is a burst of FileSyncDownloadedFull records for one user
+    on the same OneDrive site, with sequential timestamps plus a couple of notebook/version files."""
     u = ac.pick_user(config)
-    return [_sp("FileSyncDownloadedFull", u, workload="OneDrive")]
+    n = random.randint(20, 40)
+    out = [_sp("FileSyncDownloadedFull", u, workload="OneDrive", offset_s=-(n - i) * 2)
+           for i in range(n)]
+    # A couple of distinct OneNote/weekly-versioned entries riding on the same sync session.
+    versions = ["Weekly Status Report - FY26 " + random.choice(["W01", "W02", "W03", "Q1"]) + ".one",
+                "Notebook Archive " + random.choice(["2025", "2026"]) + ".one"]
+    for i, name in enumerate(versions):
+        out.append(_sp("FileSyncDownloadedFull", u, workload="OneDrive", doc=name,
+                       offset_s=-(i + 1)))
+    return out
 
 
 def scenario_anonymous_link(config=None):
@@ -380,9 +428,14 @@ def scenario_anonymous_link(config=None):
 
 
 def scenario_external_sharing(config=None):
-    """Sharing invitation to an external recipient -> data shared outside the org."""
+    """Sensitive file shared to an external recipient via a specific-people link -> data shared
+    outside the org. Per the sharing-auditing doc, external FILE shares log SecureLinkCreated
+    (the link) + AddedToSecureLink (the recipient), with nearly identical timestamps; only site
+    shares log SharingInvitationCreated."""
     u = ac.pick_user(config); ext = f"recipient@{random.choice(_EXT_DOMAINS)}"
-    return [_sp("SharingInvitationCreated", u, record_type=14, doc=random.choice(_SENSITIVE_DOCS),
+    return [_sp("SecureLinkCreated", u, record_type=14, doc=random.choice(_SENSITIVE_DOCS),
+                offset_s=-6, extra={"EventData": "<Secure link, Edit>"}),
+            _sp("AddedToSecureLink", u, record_type=14, offset_s=-5,
                 extra={"TargetUserOrGroupName": ext, "TargetUserOrGroupType": "Guest",
                        "EventData": "<Edit>"})]
 
@@ -405,11 +458,49 @@ _UNUSUAL_SHARE_DOMAINS = ["mail.ru", "protonmail.ch", "tutanota.com", "cock.li",
 
 def scenario_site_collection_admin_added(config=None):
     """A user is granted Site Collection Administrator on a sensitive site -> 'Abnormal SharePoint
-    site collection admin addition' (full control over the whole site collection)."""
+    site collection admin addition' (full control over the whole site collection). Site-admin
+    changes are admin activity carrying ModifiedProperties; the record targets the SITE (ObjectId
+    = site URL, ItemType Web), not a file."""
     u = ac.pick_user(config); tgt = ac.pick_user(config)
-    return [_sp("SiteCollectionAdminAdded", u, record_type=14, doc=random.choice(_SENSITIVE_DOCS),
-                extra={"TargetUserOrGroupName": tgt["upn"], "TargetUserOrGroupType": "Member",
-                       "EventData": "<SiteCollectionAdmin added>"})]
+    site = random.choice(_SITES)
+    r = _sp("SiteCollectionAdminAdded", u, record_type=4, site=site)
+    r["ObjectId"] = f'https://{SP_HOST}/sites/{site}/'
+    r["ItemType"] = "Web"
+    r.pop("SourceFileName", None); r.pop("SourceRelativeUrl", None)
+    r.pop("SourceFileExtension", None); r.pop("ListItemUniqueId", None)
+    r["ModifiedProperties"] = [{"Name": "SiteAdmin", "NewValue": tgt["upn"], "OldValue": ""}]
+    r["TargetUserOrGroupName"] = tgt["upn"]
+    r["TargetUserOrGroupType"] = "Member"
+    return [r]
+
+
+def scenario_site_collection_admin_removed(config=None):
+    """A site collection administrator is REMOVED from a site -> pairs with
+    SiteCollectionAdminAdded for privilege-change analytics. Verified against the
+    audit-log activities doc, Site permissions activities
+    (https://learn.microsoft.com/en-us/purview/audit-log-activities): 'Removed site
+    collection admin | SiteCollectionAdminRemoved'. Same admin-change shape as the Added
+    scenario: admin activity on RecordType 4 with ModifiedProperties, site-targeted."""
+    u = ac.pick_user(config); tgt = ac.pick_user(config)
+    site = random.choice(_SITES)
+    r = _sp("SiteCollectionAdminRemoved", u, record_type=4, site=site)
+    r["ObjectId"] = f'https://{SP_HOST}/sites/{site}/'
+    r["ItemType"] = "Web"
+    r.pop("SourceFileName", None); r.pop("SourceRelativeUrl", None)
+    r.pop("SourceFileExtension", None); r.pop("ListItemUniqueId", None)
+    r["ModifiedProperties"] = [{"Name": "SiteAdmin", "NewValue": "", "OldValue": tgt["upn"]}]
+    r["TargetUserOrGroupName"] = tgt["upn"]
+    r["TargetUserOrGroupType"] = "Member"
+    return [r]
+
+
+def scenario_sync_client_blocked(config=None):
+    """A device that is NOT on the domain safe-recipients list tries to sync a document
+    library and is blocked -> 'UnmanagedSyncClientBlocked' (verified in the audit-log
+    activities doc, Synchronization activities). Detector-relevant: sync-based exfil from
+    an unmanaged/rogue device is blocked on the service side."""
+    u = ac.pick_user(config)
+    return [_sp("UnmanagedSyncClientBlocked", u, extra={"ResultStatus": "Failed"})]
 
 
 def scenario_anon_link_used_external(config=None):
@@ -418,17 +509,22 @@ def scenario_anon_link_used_external(config=None):
     u = ac.pick_user(config)
     ext = f"external@{random.choice(_EXT_DOMAINS)}"
     return [_sp("AnonymousLinkUsed", u, record_type=14, doc=random.choice(_SENSITIVE_DOCS),
-                extra={"UserId": "urn:spo:anon#" + _g(), "UserType": "Anonymous",
+                extra={"UserId": "urn:spo:anon#" + _g(), "UserType": 10,
+                       "UserKey": "00000000-0000-0000-0000-000000000000",
                        "TargetUserOrGroupName": ext, "EventData": "<Anyone link, View>"})]
 
 
 def scenario_external_sharing_unusual_domain(config=None):
-    """External sharing invitation to an UNUSUAL/rare recipient domain -> 'SaaS external file
-    sharing to an unusual domain'. The domain is drawn from the unbounded rare pool (never one of
-    the org's usual partner domains), so it always reads as a never-seen external destination."""
+    """External sharing of a sensitive file to an UNUSUAL/rare recipient domain via a
+    specific-people (secure) link -> 'SaaS external file sharing to an unusual domain'. The domain
+    is drawn from the unbounded rare pool (never one of the org's usual partner domains), so it
+    always reads as a never-seen external destination. Uses the doc-verified external-file-share
+    shape: SecureLinkCreated + AddedToSecureLink."""
     u = ac.pick_user(config)
     ext = ac.rare_ext_email()
-    return [_sp("SharingInvitationCreated", u, record_type=14, doc=random.choice(_SENSITIVE_DOCS),
+    return [_sp("SecureLinkCreated", u, record_type=14, doc=random.choice(_SENSITIVE_DOCS),
+                offset_s=-6, extra={"EventData": "<Secure link, Edit>"}),
+            _sp("AddedToSecureLink", u, record_type=14, offset_s=-5,
                 extra={"TargetUserOrGroupName": ext, "TargetUserOrGroupType": "Guest",
                        "EventData": "<Edit>"})]
 
@@ -470,6 +566,8 @@ SCENARIOS = {
     "malware_detected": scenario_malware_detected,
     "malware_suspicious_filename": scenario_malware_suspicious_filename,
     "site_collection_admin_added": scenario_site_collection_admin_added,
+    "site_collection_admin_removed": scenario_site_collection_admin_removed,
+    "sync_client_blocked": scenario_sync_client_blocked,
     "anon_link_used_external": scenario_anon_link_used_external,
     "external_sharing_unusual_domain": scenario_external_sharing_unusual_domain,
     "mass_file_deletion": scenario_mass_file_deletion,

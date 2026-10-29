@@ -1641,6 +1641,24 @@ _EXFIL_URL_SHAPES = {
     "privatebin.net":   ("/?", 16, "#"),
     "termbin.com":      ("/", 4, ""),
     "hastebin.com":     ("/share/", 10, ""),
+    # Second wave, added with the 74-entry pool expansion. Same rule: each shape
+    # is the host's real link format -- turbobit/hitfile/dailyuploads use
+    # /<id>.html short links, rapidgator a <hash>.html long link, filestore a
+    # query-string object id (?d=...), Backblaze B2 the by-id download API.
+    "letsupload.io":    ("/d/", 32, ""),
+    "workupload.com":   ("/file/", 8, ""),
+    "datanodes.to":     ("/d/", 16, ""),
+    "turbobit.net":     ("/", 16, ".html"),
+    "nitroflare.com":   ("/view/", 16, ""),
+    "rapidgator.net":   ("/file/", 24, ".html"),
+    "hitfile.net":      ("/", 16, ".html"),
+    "dailyuploads.net": ("/", 16, ".html"),
+    "usersdrive.com":   ("/file/", 16, ".html"),
+    "up-load.io":       ("/", 12, ".html"),
+    "filedot.to":       ("/", 10, ".html"),
+    "backblazeb2.com":  ("/b2api/v3/b2_download_file_by_id?fileId=", 24, ""),
+    "filestore.to":     ("/?d=", 10, ""),
+    "uploadfiles.io":   ("/", 12, ""),
 }
 
 

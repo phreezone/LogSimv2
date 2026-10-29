@@ -18,11 +18,21 @@ harness, but are not offered on the dashboard's Fire Individual Threat panel.
 ## `o365_exchange` — Exchange Online
 
 Record shapes follow the Management Activity schema and real tenant rows:
-- ExchangeAdmin cmdlet audit: `Parameters [{Name, Value}]`, an `ObjectId` path,
-  `ResultStatus`.
-- ExchangeItem mailbox actions: `LogonType` (0 owner, 2 delegated), `MailboxOwnerUPN`,
-  `ClientInfoString`.
-- MailItemsAccessed: `OperationProperties` with `MailAccessType`, plus `OperationCount`.
+- ExchangeAdmin cmdlet audit: `Parameters [{Name, Value}]`, `ModifiedObjectResolvedName`,
+  `ObjectId` path, `ResultStatus`, `OriginatingServer`, `TokenObjectId` (schema-pinned —
+  `AppPoolName`/`RequestId` were dropped as non-schema).
+- `LogonType` verified enum: 0 Owner / 1 Admin / 2 Delegated / 3 Transport / 4 SystemService
+  / 5 BestAccess / 6 DelegatedAdmin; `InternalLogonType` mirrors it.
+- `ClientInfoString` uses documented real values (`Client=OWA;…`, `Client=WebServices;
+  ExchangeWebServices`, `Client=REST;A3883EBA-FBE9-48BD-9ED3-DCA3E0E84250;;`,
+  `Client=REST;Client=RESTSystem;;`, `Client=ActiveSync;…`).
+- Store-folder ids use the real `AAMk…` base64 shape; `DestFolder {Id, Path, Name}`;
+  aggregated-folder `Id` mandatory on MailItemsAccessed `Folders` entries.
+- Mail sensitivity: top-level `SensitivityLabel` GUID + `recipientList` as the documented
+  `Collection(EmailAddress)` shape.
+- MailItemsAccessed: `OperationProperties` with `MailAccessType` (Bind/Sync), plus
+  `OperationCount`; no undocumented `IsThrottled` pair; `AppId` = Graph GUID; `ClientAppId`
+  is omitted (schema defines it as the original-caller identifier).
 
 **Baseline:** routine mailbox activity (MailItemsAccessed dominates, then Send, Move,
 benign inbox rules and logins), plus light admin.
@@ -43,12 +53,24 @@ benign inbox rules and logins), plus light admin.
 
 The field set is verified against real tenant rows. `ObjectId` is the full file URL, with
 `Site`/`SiteUrl`/`WebId`/`ListId`/`ListItemUniqueId`, `SourceFileName`/
-`SourceRelativeUrl`, `ItemType`, `EventSource`, `ApplicationDisplayName`, browser,
-device and platform, and `GeoLocation`. File paths come from a programmatic corpus with
-hot and cold tiers, so files are stable entities while unique paths stay unbounded.
-
+`SourceRelativeUrl`/`SourceFileExtension`, `ItemType`, `EventSource`,
+`ApplicationDisplayName`, browser, device and platform, and `GeoLocation`. Copy/move
+records also emit the `DestinationFileName`/`DestinationRelativeUrl`/
+`DestinationFileExtension` set (per the schema rule that `ObjectId` on those ops is the
+destination URL). Anonymous-download actors use the numeric `UserType: 10` (Guest) with the
+`urn:spo:anon#…` UserId, not a string enum. Site-admin changes are RecordType 4 with
+`SiteAdmin` in `ModifiedProperties`. Mass bursts keep one uniform `Operation` each so
+volume analytics see a single coherent op.
 **Baseline:** routine document activity (access, modify, preview, upload, download, page
 views, folder operations), weighted to business hours.
+
+Sharing ops and the sensitive-file shape are doc-verified: real sharing operations are
+`SharingSet`, `SharingInvitationCreated/Accepted` (site-resource invitations),
+`AnonymousLinkCreated`/`AnonymousLinkUsed`, `SecureLinkCreated`/`AddedToSecureLink`,
+`SharedLinkCreated` (undocumented variants dropped); `TargetUserOrGroupType` carries the
+documented string values (Member / Guest / SharePointGroup / SecurityGroup / Partner);
+sensitivity labels ride the schema-pinned `SensitivityLabelId` +=
+`SensitivityLabelOwnerEmail` fields.
 
 **Threats (15):**
 - **Exfiltration:** mass download, full-sync download.
@@ -63,9 +85,27 @@ views, folder operations), weighted to business hours.
 ## `o365_dlp` — Data Loss Prevention
 
 Built from the Management Activity DLP schema: `PolicyDetails[{PolicyName, Rules[{RuleName,
-Actions, Severity, ConditionsMatched.SensitiveInformation[...]}]}]`, plus workload metadata
-(`ExchangeMetaData` for mail, `SharePointMetaData` for files). The source tenant has no DLP
-policies, so this feed was built from the schema, not sampled from live rows.
+Actions, Severity, RuleMode, ConditionsMatched.SensitiveInformation[{Name, SensitiveType
+(real SIT GUID), Count, Confidence}, ...]}]}]`, plus workload metadata (`ExchangeMetaData`
+with `RecipientCount` for mail, `SharePointMetaData` with the full mandatory set —
+`FileOwner`, `DocumentLastModifier`, `DocumentSharer`, `SiteCollectionGuid/Url`,
+`UniqueId`, `IsViewableByExternalUsers`, `itemCreationTime`, `LastModifiedTime`,
+`ItemSize`, …). RecordType is 13 for Exchange and 11 for SharePoint/OneDrive. String
+property values are Microsoft-encoded. `UserKey` is `DlpAgent`. User-override records carry
+top-level `ExceptionInfo {Reason, Justification}` (the mis-filed `OverrideInfo` was
+removed). `DlpRuleUndo` is emitted only under the SharePoint workload. The source tenant
+has no DLP policies, so this feed was built from the schema, not sampled from live rows. SIT pairs
+and value semantics are doc-verified from the official entity-definition pages: credit
+card `50842eb7-edc8-4019-85dd-5a5c1f2bb085`, U.S. SSN `a44669fe-0d48-453d-a9b1-2cc83f2cba77`,
+U.S. bank account `a2ce32a8-f935-4bb6-8e96-2a5157672e2c`, ABA routing
+`cb353f78-2b72-4c3c-8827-92ebe4f69fdf`, U.S. ITIN `e55e2a32-f92d-4985-a35d-a0b269eb687b`,
+U.S./U.K. passport `178ec42a-18b4-47cc-85c7-d62c92fd67f8`; `SensitiveInformation` uses the
+documented complex shape (`SensitiveType` GUID / `SensitiveInformationTypeName` /
+`Count` / `UniqueCount` / `Confidence` with the documented High=85, Medium=75,
+Low≤65 mapping), `RuleMode` = `Enforce` / `Audit with Notify` / `Audit only`, and
+`ExceptionInfo` follows the documented complex type.
+(RT40 `SecurityComplianceAlerts` — the aggregated DLP alert plane — is deliberately not
+emulated yet.)
 
 **Baseline:** low-severity, notify-only matches (routine false positives).
 
@@ -75,8 +115,18 @@ externally.
 
 ## `o365_general` — General feed (Copilot, Power BI)
 
-The catch-all workloads. The Copilot field set (`CopilotEventData`, `CopilotLogVersion`,
-`AppIdentity`) is verified against a real tenant row.
+The catch-all workloads. Copilot records are aligned to the official Copilot audit schema:
+top-level `ClientRegion` (ISO country) / `CopilotLogVersion`; `CopilotEventData` carries
+`AppHost` from the documented host list (Teams/Word/Excel/PowerPoint/Outlook/M365App),
+`Contexts[] = {Id, Type, ContainerId}` with real Type values (`docx`/`xlsx`/`pptx`/
+`TeamsMeeting`/`TeamsChannel`/`TeamsChat`), `ThreadId`, `Messages[] = {Id, isPrompt}`,
+`AccessedResources[] = {Id, SiteUrl, listItemUniqueId, Type, Name, SensitivityLabelId,
+Action}` and `ModelTransparencyDetails[]` — every invented key (Graph-type accessed
+resources, random MessageIds) was dropped. `AppIdentity` remains `"Copilot for Microsoft
+365"` (not in the published schema; flagged unverified). Power BI records carry the
+verified `WorkSpaceName`/`DashboardName`/`ReportName`/`DatasetName`/`CapacityID`/
+`CapacityName`/`ReportSection` set; view/print/export op names verified against the Fabric
+operation list. Success records are marked `ResultStatus: "Succeeded"`.
 
 **Baseline:** Copilot interactions, plus Power BI report and dashboard views.
 

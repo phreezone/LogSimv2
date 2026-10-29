@@ -1,5 +1,25 @@
 # Microsoft Connector Detection Catalog (XSIAM)
 
+> **Realignment status (2026-10):** every Microsoft module was re-validated field-by-field
+> against Microsoft's Graph/Management-Activity schemas and the live tenant datasets, and
+> re-shaped for detectors. Highlights — real first-party AppIds; top-level `userAgent` +
+> `sessionId` on sign-in scenarios; `networkLocationDetails` Graph shape; correct
+> `loggedByService` (`Core Directory` / `Privileged Identity Management`); JSON-encoded
+> modifiedProperty values; real PIM started→completed pairs; cross-tenant chains carry
+> follow-on provisioning/guest/partner records on one correlationId; DLP RecordType 13
+> (Exchange) vs 11 (SharePoint) with full `SharePointMetaData` and top-level
+> `ExceptionInfo`; SharePoint anonymous = `UserType: 10`; exchange `DestFolder`,
+> `Folders`, `recipientList` shapes; Copilot/Power BI canonical fields and op names.
+> Cross-feed chain: audit `app_credential_added` → signin `app_credential_first_use`.
+> App/resource GUID registry: `azure_common._FIRST_PARTY_APP_IDS` / `_RESOURCE_IDS` — every
+> entry validated against Microsoft's first-party application tables (the "Verify first-party
+> Microsoft applications in sign-in reports" CSV and the Conditional Access Admin-Portals doc);
+> five previously-incorrect GUIDs were recomputed (Azure Portal, Microsoft Office, Office365
+> Shell WCSS-Client, OfficeHome, Microsoft Teams). Names with no published stable GUID keep a
+> deterministic stable-hash id. RT40 `SecurityComplianceAlerts` intentionally not
+> emulated (deferred).
+> Verification: run `python <tmp>\verify_msft_fixes.py` (146 checks, harness kept in temp).
+
 Target detections for the synthetic Microsoft generators (`modules/o365_azuread.py`,
 `modules/azuread_signin.py`), pushed via the `cribl_direct` transport into the native
 datasets. Source of truth: Cortex **Analytics Alerts — alerts-by-name** reference and the
@@ -170,10 +190,32 @@ Each feed emits the full documented event-type set Microsoft supports for it:
   `malware_detected` (M365 storage exfiltration / external sharing).
 - **O365 DLP** (`msft_o365_dlp_raw`, `8f052782…`) — `modules/o365_dlp.py`: Audit.DLP RT11
   DLPRuleMatch with PolicyDetails/SensitiveInformation + Exchange/SharePoint metadata;
-  scenarios `dlp_exfil_block`, `dlp_sharepoint_block`, `dlp_match_burst`.
+  scenarios `dlp_exfil_block`, `dlp_sharepoint_block`, `dlp_match_burst`, `dlp_undo_after_block`.
 - **O365 General** (`msft_o365_general_raw`, `c7655e83…`) — `modules/o365_general.py`: Copilot
-  (RT261) + Power BI (RT20); scenarios `powerbi_mass_export`, `powerbi_print_bulk`.
+  (RT261) + Power BI (RT20); scenarios `powerbi_mass_export`, `powerbi_print_bulk`,
+  `powerbi_publish_to_web`, `powerbi_bulk_download`.
 All three verified landing parsed.
+
+## Event-ID gap analysis (2026-10-28)
+Generated-operation inventory (117 distinct) was compared against Microsoft's official
+operation catalogs (Entra audit activity reference; O365 Management Activity schema /
+Purview audit-log-activities; Fabric operation list). Verification harness grew 146 → 160
+checks. New verified operations added:
+- **Entra audit**: `Disable account`, `Update per-user multifactor authentication state`,
+  `Add delegated permission grant`, `Add application`/`Delete application` (rogue-app
+  lifecycle chain), `Update named location`, `Add owner to service principal`;
+  benign `Set user manager`, `Add registered owner to device`. Deferred (duplicates or
+  low value): `Reset password`, `Enable account`, device delete trio.
+- **Exchange**: `New-ComplianceSearchAction` (purge), `Remove-MailboxPermission`,
+  `Set-InboxRule`, `Disable-TransportRule`, RT2 `HardDelete` burst. Power BI benign ops:
+  `ViewUsageMetrics`, `CreateReport`, `CreateDashboard`, `DownloadReport` (all from the
+  Fabric operation list).
+- **SharePoint**: `SiteCollectionAdminRemoved`, `UnmanagedSyncClientBlocked`,
+  `FileDeletedFirstStageRecycleBin`/`FileDeletedSecondStageRecycleBin`,
+  `RemovedFromSecureLink`, `PageViewedExtended`. **o365_aad RT8**: `Reset user password.`
+  admin-reset → victim `UserLoggedIn` chain. **DLP**: op space confirmed closed
+  (schema lists exactly DlpInfo/DlpRuleMatch/DlpRuleUndo); added the `DlpRuleUndo`
+  rollback story.
 
 ## Not yet built (supported M365/Entra sources & event types)
 - **Connectors**: Graph Security alerts (alert ingestion).

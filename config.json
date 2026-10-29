@@ -2913,6 +2913,76 @@
       "ip_range": "104.21.80.0/20",
       "domain": "hastebin.com",
       "direction": "upload"
+    },
+    {
+      "name": "LetsUpload",
+      "ip_range": "194.145.226.0/24",
+      "domain": "letsupload.io"
+    },
+    {
+      "name": "WorkUpload",
+      "ip_range": "89.163.244.0/24",
+      "domain": "workupload.com"
+    },
+    {
+      "name": "DataNodes",
+      "ip_range": "87.120.40.0/24",
+      "domain": "datanodes.to"
+    },
+    {
+      "name": "TurboBit",
+      "ip_range": "46.163.70.0/24",
+      "domain": "turbobit.net"
+    },
+    {
+      "name": "NitroFlare",
+      "ip_range": "223.27.78.0/24",
+      "domain": "nitroflare.com"
+    },
+    {
+      "name": "RapidGator",
+      "ip_range": "193.29.14.0/24",
+      "domain": "rapidgator.net"
+    },
+    {
+      "name": "HitFile",
+      "ip_range": "82.146.48.0/24",
+      "domain": "hitfile.net"
+    },
+    {
+      "name": "DailyUploads",
+      "ip_range": "154.16.192.0/24",
+      "domain": "dailyuploads.net"
+    },
+    {
+      "name": "UsersDrive",
+      "ip_range": "185.231.68.0/24",
+      "domain": "usersdrive.com"
+    },
+    {
+      "name": "Up-Load",
+      "ip_range": "23.161.104.0/24",
+      "domain": "up-load.io"
+    },
+    {
+      "name": "FileDot",
+      "ip_range": "194.39.84.0/24",
+      "domain": "filedot.to"
+    },
+    {
+      "name": "Backblaze B2",
+      "ip_range": "149.248.0.0/16",
+      "domain": "backblazeb2.com"
+    },
+    {
+      "name": "FileStore",
+      "ip_range": "91.205.172.0/24",
+      "domain": "filestore.to"
+    },
+    {
+      "name": "UploadFiles",
+      "ip_range": "185.245.86.0/24",
+      "domain": "uploadfiles.io"
     }
   ],
   "resolver": {
@@ -3219,6 +3289,97 @@
       ]
     },
     {
+      "name": "Dropbox",
+      "domain": "dropbox.com",
+      "ip_range": "162.125.0.0/16",
+      "country": "US",
+      "asn": 19679,
+      "service_types": [
+        "File Sharing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Box",
+      "domain": "box.com",
+      "ip_range": "103.116.4.0/23",
+      "country": "US",
+      "asn": 40680,
+      "service_types": [
+        "File Sharing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "YouTube",
+      "domain": "youtube.com",
+      "ip_range": "173.194.0.0/16",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Google Drive",
+      "domain": "drive.google.com",
+      "ip_range": "173.194.0.0/16",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Netflix",
+      "domain": "netflix.com",
+      "ip_range": "208.75.76.0/22",
+      "country": "US",
+      "asn": 2906,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "LinkedIn",
+      "domain": "linkedin.com",
+      "ip_range": "108.174.10.0/24",
+      "country": "US",
+      "asn": 14413,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Facebook",
+      "domain": "facebook.com",
+      "ip_range": "31.13.64.0/18",
+      "country": "US",
+      "asn": 32934,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
       "name": "NTP Pool Servers",
       "domain": "pool.ntp.org",
       "ip_range": "192.0.2.0/24",
@@ -3373,6 +3534,48 @@
     {
       "name": "Verizon FiOS Newark NJ",
       "ip_range": "71.163.116.0/24",
+      "country": "US",
+      "resolved_country": "United States"
+    },
+    {
+      "name": "iiNet Perth",
+      "ip_range": "101.127.44.0/24",
+      "country": "AU",
+      "resolved_country": "Australia"
+    },
+    {
+      "name": "Shaw Edmonton",
+      "ip_range": "24.79.44.0/24",
+      "country": "CA",
+      "resolved_country": "Canada"
+    },
+    {
+      "name": "Deutsche Telekom Berlin",
+      "ip_range": "89.244.44.0/24",
+      "country": "DE",
+      "resolved_country": "Germany"
+    },
+    {
+      "name": "Plusnet Manchester",
+      "ip_range": "84.13.44.0/24",
+      "country": "GB",
+      "resolved_country": "United Kingdom"
+    },
+    {
+      "name": "EE London",
+      "ip_range": "95.144.44.0/24",
+      "country": "GB",
+      "resolved_country": "United Kingdom"
+    },
+    {
+      "name": "Verizon FiOS Tampa",
+      "ip_range": "173.49.44.0/24",
+      "country": "US",
+      "resolved_country": "United States"
+    },
+    {
+      "name": "Spectrum Charlotte",
+      "ip_range": "174.65.44.0/24",
       "country": "US",
       "resolved_country": "United States"
     }
@@ -3585,6 +3788,192 @@
     {
       "name": "VNPT Hanoi",
       "ip_range": "113.162.20.0/24",
+      "country": "VN",
+      "resolved_country": "Vietnam"
+    },
+    {
+      "name": "A1 Telekom Graz",
+      "ip_range": "213.33.21.0/24",
+      "country": "AT",
+      "resolved_country": "Austria"
+    },
+    {
+      "name": "Vivo Rio de Janeiro",
+      "ip_range": "187.10.21.0/24",
+      "country": "BR",
+      "resolved_country": "Brazil"
+    },
+    {
+      "name": "Vivacom Plovdiv",
+      "ip_range": "95.42.21.0/24",
+      "country": "BG",
+      "resolved_country": "Bulgaria"
+    },
+    {
+      "name": "China Unicom Shanghai",
+      "ip_range": "61.135.21.0/24",
+      "country": "CN",
+      "resolved_country": "China"
+    },
+    {
+      "name": "O2 Czech Brno",
+      "ip_range": "88.100.21.0/24",
+      "country": "CZ",
+      "resolved_country": "Czech Republic"
+    },
+    {
+      "name": "TDC Aarhus",
+      "ip_range": "80.62.21.0/24",
+      "country": "DK",
+      "resolved_country": "Denmark"
+    },
+    {
+      "name": "Elisa Espoo",
+      "ip_range": "91.153.21.0/24",
+      "country": "FI",
+      "resolved_country": "Finland"
+    },
+    {
+      "name": "Orange France Lyon",
+      "ip_range": "90.10.21.0/24",
+      "country": "FR",
+      "resolved_country": "France"
+    },
+    {
+      "name": "OTE Thessaloniki",
+      "ip_range": "79.130.21.0/24",
+      "country": "GR",
+      "resolved_country": "Greece"
+    },
+    {
+      "name": "Reliance Jio Delhi",
+      "ip_range": "49.36.21.0/24",
+      "country": "IN",
+      "resolved_country": "India"
+    },
+    {
+      "name": "Telkomsel Bandung",
+      "ip_range": "114.5.21.0/24",
+      "country": "ID",
+      "resolved_country": "Indonesia"
+    },
+    {
+      "name": "Pelephone Tel Aviv",
+      "ip_range": "79.178.21.0/24",
+      "country": "IL",
+      "resolved_country": "Israel"
+    },
+    {
+      "name": "Telecom Italia Milan",
+      "ip_range": "79.20.21.0/24",
+      "country": "IT",
+      "resolved_country": "Italy"
+    },
+    {
+      "name": "NTT Osaka",
+      "ip_range": "210.150.21.0/24",
+      "country": "JP",
+      "resolved_country": "Japan"
+    },
+    {
+      "name": "Telmex Monterrey",
+      "ip_range": "189.130.21.0/24",
+      "country": "MX",
+      "resolved_country": "Mexico"
+    },
+    {
+      "name": "Ziggo Rotterdam",
+      "ip_range": "84.26.21.0/24",
+      "country": "NL",
+      "resolved_country": "Netherlands"
+    },
+    {
+      "name": "Telenor Bergen",
+      "ip_range": "84.210.21.0/24",
+      "country": "NO",
+      "resolved_country": "Norway"
+    },
+    {
+      "name": "Orange Polska Krakow",
+      "ip_range": "83.5.21.0/24",
+      "country": "PL",
+      "resolved_country": "Poland"
+    },
+    {
+      "name": "MEO Porto",
+      "ip_range": "85.242.21.0/24",
+      "country": "PT",
+      "resolved_country": "Portugal"
+    },
+    {
+      "name": "RCS RDS Cluj",
+      "ip_range": "79.114.21.0/24",
+      "country": "RO",
+      "resolved_country": "Romania"
+    },
+    {
+      "name": "Singtel Jurong",
+      "ip_range": "116.87.21.0/24",
+      "country": "SG",
+      "resolved_country": "Singapore"
+    },
+    {
+      "name": "Telkom SA Cape Town",
+      "ip_range": "41.134.21.0/24",
+      "country": "ZA",
+      "resolved_country": "South Africa"
+    },
+    {
+      "name": "LG Uplus Seoul",
+      "ip_range": "175.200.21.0/24",
+      "country": "KR",
+      "resolved_country": "South Korea"
+    },
+    {
+      "name": "Telefonica Barcelona",
+      "ip_range": "88.2.21.0/24",
+      "country": "ES",
+      "resolved_country": "Spain"
+    },
+    {
+      "name": "Telia Gothenburg",
+      "ip_range": "78.69.21.0/24",
+      "country": "SE",
+      "resolved_country": "Sweden"
+    },
+    {
+      "name": "Swisscom Geneva",
+      "ip_range": "85.2.21.0/24",
+      "country": "CH",
+      "resolved_country": "Switzerland"
+    },
+    {
+      "name": "HiNet Kaohsiung",
+      "ip_range": "61.217.21.0/24",
+      "country": "TW",
+      "resolved_country": "Taiwan"
+    },
+    {
+      "name": "TrueOnline Chiang Mai",
+      "ip_range": "171.98.21.0/24",
+      "country": "TH",
+      "resolved_country": "Thailand"
+    },
+    {
+      "name": "Turk Telekom Ankara",
+      "ip_range": "88.226.21.0/24",
+      "country": "TR",
+      "resolved_country": "Turkey"
+    },
+    {
+      "name": "Kyivstar Lviv",
+      "ip_range": "46.211.21.0/24",
+      "country": "UA",
+      "resolved_country": "Ukraine"
+    },
+    {
+      "name": "VNPT Da Nang",
+      "ip_range": "113.162.21.0/24",
       "country": "VN",
       "resolved_country": "Vietnam"
     }
@@ -4984,6 +5373,29 @@
         "domain": "freestuffandcoupons.net"
       }
     }
+  },
+  "panw_ngfw_config": {
+    "_comment": "Palo Alto Networks NGFW (PAN-OS) traffic logs, CEF over syslog to the Broker VM Syslog Collector (Format=CEF). Lands in panw_ngfw_traffic_raw. Threat mix is the module's _DEFAULT_THREAT_EVENTS; override event_mix.threat to retune.",
+    "rarity_horizon_days": 30,
+    "_comment_rarity_horizon_days": "Rare-event budgeting: every analytic NOT high-volume threat event is capped so its EXPECTED count is <=1 per this many days at the Realistic gate cadence (threat_generation_levels.Realistic seconds = 360 threat slots per 30 days); the freed probability mass flows to _HIGH_VOLUME_EVENTS (port_scan, port_sweep, failed_connections, large_upload https/smtp/ftp, spam_bot, crypto_miner, torrent) in proportion to their classic weights, so the threat pie stays the same size. The six recurring_/ddns daily events are exempt (they are claimed once per UTC day via _due_daily by design, not weight-sampled). Realistic yields <=1 per event per horizon; Extreme (4320 slots/30d) scales every cap proportionally to ~12. 0 disables budgeting and restores the classic fixed weights. Insane always keeps classic weights -- it is a stress mode." ,
+    "syslog_port": 514,
+    "serial_number": "007051000012345",
+    "hostname": "PA-VM-01",
+    "mgmt_ip": "10.0.0.1",
+    "syslog_hostname_format": "hostname",
+    "_comment_syslog_hostname_format": "What PAN stamps in the syslog header HOSTNAME field (Device -> Setup -> Management -> Syslog HOSTNAME Format): 'hostname' uses the firewall name, 'ipv4-address' uses mgmt_ip.",
+    "sw_version": "12.1.12",
+    "vsys": "vsys1",
+    "emit_rt": false,
+    "_comment_emit_rt": "Emit the CEF rt receipt-time key. Not a PAN traffic-log field (live CLCS rows have rt=null) and ignored for _time on the Syslog-Collector custom-format path; opt in only for consumers that read rt.",
+    "log_set": "Full EAL Logging",
+    "action_source": "from-policy",
+    "interface_lan": "ethernet1/2",
+    "interface_wan": "ethernet1/1",
+    "interface_dmz": "ethernet1/3",
+    "default_rule": "Allow-Users-Outbound",
+    "nat_pool_cidr": "203.0.113.0/27",
+    "domain_controllers": ["10.0.10.10", "10.0.20.10"]
   },
   "firepower_config": {
     "hostname": "DC1-FTD-01",

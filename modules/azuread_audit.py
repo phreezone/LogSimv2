@@ -20,10 +20,12 @@ import datetime
 import json
 import random
 import string
+import time
 import uuid
 
 from modules import azure_common as ac
 from modules import azure_audit_catalog as cat
+from modules import deferred
 
 NAME = "Azure AD Audit"
 DESCRIPTION = "Simulates Microsoft Graph directoryAudits events for msft_azure_ad_audit_raw via the cribl_direct transport."
@@ -36,8 +38,19 @@ DATASET = "msft_azure_ad_audit_raw"
 
 ADMIN_ROLES = ("IT Administrator", "IT Director", "Systems Engineer")
 HELPDESK_ROLES = ("Help Desk", "IT Administrator")
+# directoryAudit id format VERIFIED against Microsoft Graph docs examples:
+#   list API (learn.microsoft.com/en-us/graph/api/directoryaudit-list, beta examples):
+#     "Directory_504a302a-8f2d-418d-b7df-bf77de6ed831_M1N6X_27777783" (Core Directory)
+#     "SSGM_b662f17a-4e4d-4e1c-9248-cdec180024b2_MCDC4_88453290" (Self-service Group Management)
+#   i.e. "<ServicePrefix>_<correlationId>_<5-char code>_<digits>" — matches our generator.
+# The per-service prefixes below beyond "Directory" are NOT doc-published ("prefix unverified"):
+# kept as-is (plausible tenant-observed values); only "Directory" is doc-verified.
 _ID_PREFIX = {"Core Directory": "Directory", "Self-service Password Management": "SSPR",
-              "Authentication Methods": "Authentication Methods", "Account Provisioning": "Sync"}
+              "Authentication Methods": "Authentication Methods", "Account Provisioning": "Sync",
+              "PIM": "PIM"}
+# "SSGM" (Self-service Group Management, doc-verified) is included for completeness if the
+# catalog ever emits that service.
+_ID_PREFIX.setdefault("Self-service Group Management", "SSGM")
 # Directory-lifecycle operators: the only admins who create/delete users in the baseline. Other
 # admins (IT Director, Systems Engineer) carry heavy admin activity but never delete accounts, so
 # a deletion by one of them reads as 'deletion by a non-standard account'.
@@ -62,9 +75,22 @@ def _saas_app():
 _CA_POLICIES = [n for n, _ in ac.CA_POLICIES]
 
 
-def _ts():
-    d = datetime.datetime.now(datetime.timezone.utc)
+def _ts(at=None):
+    """activityDateTime for epoch `at` (default now)."""
+    d = datetime.datetime.fromtimestamp(time.time() if at is None else at, datetime.timezone.utc)
     return f"{d:%Y-%m-%dT%H:%M:%S}.{d.microsecond:06d}{random.randint(0, 9)}Z"
+
+
+def _sequence(out, offsets, start=None):
+    """Time a multi-step scenario: step i happens offsets[i] seconds after `start` (default
+    now). Each step is stamped with its own time and a step still in the future is held by
+    the sender until then (modules.deferred), so it is never sent before it happened.
+    Callers that embed the steps in a back-dated story pass an earlier `start`."""
+    t0 = time.time() if start is None else start
+    for i, (rec, off) in enumerate(zip(out, offsets)):
+        rec["activityDateTime"] = _ts(t0 + off)
+        out[i] = deferred.at(rec, t0 + off)
+    return out
 
 
 def _code():
@@ -79,15 +105,25 @@ def mp(name, old, new):
     return {"displayName": name, "oldValue": _enc(old), "newValue": _enc(new)}
 
 
+def _display_from_username(username):
+    parts = username.replace("_", " ").replace(".", " ").split()
+    return " ".join(p.capitalize() for p in parts[:2]) if parts else username
+
+
 def by_user(u, ip=None):
     ip = ip or ac.egress(u)["ip"]
-    return {"user": {"id": ac.user_oid(u["username"]), "displayName": None,
+    return {"user": {"id": ac.user_oid(u["username"]),
+                     "displayName": u.get("display_name") or _display_from_username(u["username"]),
                      "userPrincipalName": u["upn"], "ipAddress": ip, "userType": "Member",
-                     "agentType": "notAgentic", "homeTenantId": None, "homeTenantName": None},
+                     "homeTenantId": None, "homeTenantName": None},
             "app": None}
 
 
 def by_app(name, app_id=None):
+    # initiatedBy app shape VERIFIED against microsoft.graph.appIdentity
+    # (learn.microsoft.com/en-us/graph/api/resources/appidentity): the only documented
+    # properties are appId / displayName / servicePrincipalId / servicePrincipalName —
+    # there is NO "id" property on appIdentity (matches our output as-is).
     return {"user": None, "app": {"appId": app_id, "displayName": name,
                                   "servicePrincipalId": None, "servicePrincipalName": None}}
 
@@ -103,19 +139,24 @@ def t_obj(kind, name, mods=None, group_type=None):
 
 
 def audit(activity, category, service, op_type, initiator, targets,
-          details=None, result="success", reason=""):
-    corr = str(uuid.uuid4())
+          details=None, result="success", reason="", ts=None, corr=None):
+    corr = corr or str(uuid.uuid4())
     pfx = _ID_PREFIX.get(service, "Directory")
     return {"id": f"{pfx}_{corr}_{_code()}_{random.randint(1000000, 999999999)}",
             "category": category, "correlationId": corr, "result": result,
             "resultReason": reason or activity, "activityDisplayName": activity,
-            "activityDateTime": _ts(), "loggedByService": service, "operationType": op_type,
+            "activityDateTime": ts or _ts(), "loggedByService": service, "operationType": op_type,
             "initiatedBy": initiator, "targetResources": targets, "additionalDetails": details or []}
 
 
 def _ua(u):
     # Per-user, stable, varied (5 desktop + mobile profiles) and consistent with the user's
     # sign-in device browser — not one of two hardcoded strings.
+    # additionalDetails key/value REAL keys: "User-Agent" and "UserType" are doc-verified (the
+    # Graph directoryaudit-list example carries additionalDetails [{"key":"UserType",...}]);
+    # "OnPremisesAgent", "InitiatedFrom", "EventName" appear in real tenant SSPR /
+    # security-info / provisioning rows (kept deliberately, not doc-published). Invented keys
+    # such as "MfaStatus"/"OriginalRequestIp" were NOT added.
     return {"key": "User-Agent", "value": ac.user_agent(u)}
 
 
@@ -197,6 +238,7 @@ def _b_admin_consent(cfg, app=None):
             mp("ConsentContext.Tags", None, "[]"),
             mp("TargetId.ServicePrincipalNames", None, app_id),
             mp("ServicePrincipal.AppId", None, app_id),
+            mp("Scope", None, "openid profile offline_access"),
             mp("ConsentAction.Permissions", None,
                random.choice(["User.Read.All Group.Read.All openid profile offline_access",
                               "User.Read.All Directory.Read.All openid profile",
@@ -230,9 +272,29 @@ def _b_provisioning(cfg):
                  reason="Retrieved TenantDetail 'MSFT' from Microsoft Entra ID")
 
 
+def _b_set_user_manager(cfg):
+    # activityDisplayName "Set user manager" VERIFIED against the official Entra audit
+    # activity reference (UserManagement, Core Directory).
+    admin = ac.pick_by_role(cfg, HELPDESK_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
+    mgr = ac.pick_user(cfg)
+    return audit("Set user manager", "UserManagement", "Core Directory", "Assign",
+                 by_user(admin), [t_user(tgt, [mp("User.ManagerViaLdap", None,
+                 f"M={mgr['upn']}")])], [_ua(admin), {"key": "UserType", "value": "Member"}])
+
+
+def _b_device_owner_add(cfg):
+    # activityDisplayName "Add registered owner to device" VERIFIED against the official
+    # Entra audit activity reference (Device, Core Directory).
+    u = ac.pick_user(cfg); dev = f'{u["username"].upper().replace(".", "")}-PC'
+    return audit("Add registered owner to device", "Device", "Core Directory", "Add",
+                 by_user(ac.pick_by_role(cfg, HELPDESK_ROLES, ("IT",))),
+                 [t_obj("Device", dev), t_user(u)])
+
+
 # High-fidelity builders for the common activities (bespoke modifiedProperties/details).
 _B_HUMAN = [_b_update_user, _b_secinfo_register, _b_group_member, _b_self_password,
-            _b_app_role_assign, _b_consent, _b_register_device, _b_admin_reset, _b_token_timestamp]
+            _b_app_role_assign, _b_consent, _b_register_device, _b_admin_reset, _b_token_timestamp,
+            _b_set_user_manager, _b_device_owner_add]
 
 _ROLES_T = ["Helpdesk Administrator", "User Administrator", "Security Reader",
             "Exchange Administrator", "Global Reader", "Application Administrator"]
@@ -352,6 +414,8 @@ def scenario_admin_role_add(config=None):
     admin = ac.pick_by_role(config, ("IT Director",), ("IT",)); tgt = ac.pick_user(config)
     return [audit("Add member to role", "RoleManagement", "Core Directory", "Add", by_user(admin),
                   [t_obj("Role", "Global Administrator", [mp("Role.DisplayName", None, "Global Administrator"),
+                   mp("Role.IsSystem", None, "False"),
+                   mp("RoleDefinitionId", None, "62e90394-69f5-4237-9190-012177145e10"),
                    mp("Role.TemplateId", None, "62e90394-69f5-4237-9190-012177145e10")]), t_user(tgt)])]
 
 
@@ -363,6 +427,7 @@ def scenario_consent_risky_app(config=None):
     app = ac.rare_app_name()   # a never-before-seen app -> genuine first-seen high-privilege consent
     mods = [mp("ConsentContext.IsAdminConsent", None, "True"),
             mp("ConsentContext.OnBehalfOfAll", None, "True"),
+            mp("Scope", None, "openid profile offline_access"),
             mp("ConsentAction.Permissions", None, "Mail.Read Files.ReadWrite.All Directory.Read.All offline_access")]
     return [audit("Consent to application", "ApplicationManagement", "Core Directory", "Assign",
                   by_user(admin), [t_obj("ServicePrincipal", app, mods)],
@@ -370,7 +435,9 @@ def scenario_consent_risky_app(config=None):
 
 
 def scenario_app_credential_added(config=None):
-    """Certificate/secret added to an app -> 'Azure application credentials added'."""
+    """Certificate/secret added to an app -> 'Azure application credentials added'.
+    Cross-feed: the follow-on FIRST USE of that credential is emulated by azuread_signin's
+    `app_credential_first_use` scenario (same app, deterministic ids)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
     return [audit("Update application - Certificates and secrets management", "ApplicationManagement",
                   "Core Directory", "Update", by_user(admin),
@@ -395,7 +462,7 @@ def _rogue():
     return ac.rare_tenant()
 
 
-def scenario_cross_tenant_trust_abuse(config=None, rogue=None):
+def scenario_cross_tenant_trust_abuse(config=None, rogue=None, start=None):
     """Attacker trusts a rogue external tenant and opens inbound B2B + cross-tenant sync
     (the cloud 'rogue forest trust'): CrossTenantAccessSettings + CrossTenantIdentitySyncSettings
     changes granting inbound collaboration/direct-connect, MFA trust, auto-redemption and inbound
@@ -412,29 +479,41 @@ def scenario_cross_tenant_trust_abuse(config=None, rogue=None):
         mp("inboundTrust.isMfaAccepted", "false", "true"),
         mp("inboundTrust.isCompliantDeviceAccepted", "false", "true"),
         mp("automaticUserConsentSettings.inboundAllowed", "false", "true")]
-    return [
+    corr = str(uuid.uuid4())
+    out = [
         audit("Add a partner to cross-tenant access setting", "CrossTenantAccessSettings",
-              "Core Directory", "Add", by_user(admin), [tgt], [_ua(admin)]),
+              "Core Directory", "Add", by_user(admin), [tgt], [_ua(admin)], corr=corr),
         audit("Update a partner cross-tenant access setting", "CrossTenantAccessSettings",
               "Core Directory", "Update", by_user(admin),
               [t_obj("Other", dom,
                      [mp("inboundTrust.isMfaAccepted", "false", "true"),
                       mp("automaticUserConsentSettings.inboundAllowed", "false", "true")])],
-              [_ua(admin)]),
+              [_ua(admin)], corr=corr),
         audit("Create a partner cross-tenant identity sync setting", "CrossTenantIdentitySyncSettings",
               "Core Directory", "Add", by_user(admin),
               [t_obj("Other", dom,
                      [mp("tenantId", None, tid),
                       mp("userSyncInbound.isSyncAllowed", "false", "true")])],
-              [_ua(admin)])]
+              [_ua(admin)], corr=corr)]
+    # Sequencing: settings fire first, then the B2B guest from the rogue tenant is invited
+    # minutes later on the same correlationId.
+    guest = f"ops_sync@{dom}"
+    gu = {"username": guest, "upn": f"{guest.split('@')[0]}_b2b@examplecorp.com",
+          "display_name": "External Sync Operator"}
+    out.append(audit("Invite external user", "UserManagement", "Core Directory", "Add",
+                     by_user(admin), [t_user(gu,
+                     [mp("Invitation.InvitedUserEmailAddress", None, guest),
+                      mp("Invitation.RedirectUri", None, "https://myapps.microsoft.com")])],
+                     [_ua(admin)], corr=corr))
+    return _sequence(out, [0, 20, 40, random.randint(120, 600)], start)
 
 
-def scenario_cross_tenant_sync_outbound(config=None, rogue=None):
+def scenario_cross_tenant_sync_outbound(config=None, rogue=None, start=None):
     """Outbound cross-tenant sync: OUR users are provisioned OUT to the rogue tenant (user/data
     exfiltration via the identity fabric, T1537)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
     rogue = rogue or _rogue(); dom, tid = rogue["domain"], rogue["tenant_id"]
-    return [
+    out = [
         audit("Update a partner cross-tenant access setting", "CrossTenantAccessSettings",
               "Core Directory", "Update", by_user(admin),
               [t_obj("Other", dom,
@@ -446,30 +525,55 @@ def scenario_cross_tenant_sync_outbound(config=None, rogue=None):
               [t_obj("Other", dom,
                      [mp("tenantId", None, tid),
                       mp("userSyncOutbound.isSyncAllowed", "false", "true")])], [_ua(admin)])]
+    corr = out[0]["correlationId"]
+    # Sequencing: settings change first, then the provisioning/sync-execution record
+    # (real ProvisioningManagement activity) runs minutes later on the same correlationId.
+    out.append(audit("Execution", "ProvisioningManagement", "Account Provisioning", "Add",
+                     by_app("Azure AD Cloud Sync"),
+                     [t_obj("ServicePrincipal", dom,
+                            [mp("SyncJobEnabled", None, "True"),
+                             mp("userSyncOutbound.isSyncAllowed", None, "true")])],
+                     [{"key": "EventName", "value": "ProvisioningJobStartedIncrementalSync"},
+                      {"key": "ProvisioningTargetTenant", "value": tid}],
+                     reason="Incremental sync job completed", corr=corr))
+    return _sequence(out, [0, 20, random.randint(120, 900)], start)
 
 
-def scenario_delegated_admin_partner_abuse(config=None, rogue=None):
+def scenario_delegated_admin_partner_abuse(config=None, rogue=None, start=None):
     """External delegated-admin (GDAP/DAP) partner promoted with Global Admin over the tenant —
     partner-tenant takeover (T1098 Account Manipulation / abuse of delegated administration)."""
     admin = ac.pick_by_role(config, ("IT Director",), ("IT",))
     partner = (rogue or _rogue())["domain"]
     pid = ac._stable_guid("gdap:" + partner)
-    return [
+    corr = str(uuid.uuid4())
+    padmin = {"username": f"pa_{random.randint(1000, 9999)}",
+              "upn": f"admin@{partner}",
+              "display_name": f"{partner.split('.')[0].upper()} Partner Administrator"}
+    out = [
         audit("Add partner to company", "DirectoryManagement", "Core Directory", "Add",
-              by_user(admin), [t_obj("Directory", partner, [mp("PartnerTenantId", None, pid)])], [_ua(admin)]),
+              by_user(admin), [t_obj("Directory", partner, [mp("PartnerTenantId", None, pid)])],
+              [_ua(admin)], corr=corr),
         audit("Promote company to partner", "DirectoryManagement", "Core Directory", "Add",
               by_user(admin), [t_obj("Directory", partner,
                      [mp("DelegatedAdminRelationship", None, "Global Administrator"),
-                      mp("AccessAssignment", None, "Microsoft Entra Global Administrator")])], [_ua(admin)])]
+                      mp("AccessAssignment", None, "Microsoft Entra Global Administrator")])],
+              [_ua(admin)], corr=corr),
+        # The promoted partner admin immediately acts privileged on OUR tenant (same corr).
+        audit("Update user", "UserManagement", "Core Directory", "Update",
+              by_user(padmin), [t_user(ac.pick_user(config),
+                     [mp("Included Updated Properties", None, "AccountEnabled"),
+                      mp("AccountEnabled", "False", "True")])],
+              [_ua(padmin)], corr=corr)]
+    return _sequence(out, [0, 30, random.randint(60, 300)], start)
 
 
-def scenario_multitenant_org_join(config=None, rogue=None):
+def scenario_multitenant_org_join(config=None, rogue=None, start=None):
     """Tenant joined into an attacker-run multi-tenant org with identity sync — cloud cross-tenant
     fabric persistence (the cloud analog of joining a rogue forest)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
     rogue = rogue or _rogue()
     mto = rogue["domain"].split(".")[0].replace("-", " ").title() + " MTO"
-    return [
+    out = [
         audit("Create a MultiTenantOrg", "MultiTenantOrg", "Core Directory", "Add", by_user(admin),
               [t_obj("Other", mto, [mp("tenantId", None, rogue["tenant_id"]),
                                     mp("role", None, "owner"), mp("state", None, "active")])], [_ua(admin)]),
@@ -477,6 +581,18 @@ def scenario_multitenant_org_join(config=None, rogue=None):
               "MultiTenantOrgIdentitySyncPolicyUpdate", "Core Directory", "Update", by_user(admin),
               [t_obj("Other", mto, [mp("templateApplicationLevel", None, "MemberAndOwnerTenants"),
                                     mp("userSyncInbound.isSyncAllowed", "false", "true")])], [_ua(admin)])]
+    corr = out[0]["correlationId"]
+    # Sequencing: join + sync-policy change first, then the sync-execution record runs
+    # minutes later on the same correlationId.
+    out.append(audit("Execution", "ProvisioningManagement", "Account Provisioning", "Add",
+                     by_app("Azure AD Cloud Sync"),
+                     [t_obj("ServicePrincipal", mto,
+                            [mp("SyncJobEnabled", None, "True"),
+                             mp("userSyncInbound.isSyncAllowed", None, "true")])],
+                     [{"key": "EventName", "value": "ProvisioningJobStartedIncrementalSync"},
+                      {"key": "ProvisioningTargetTenant", "value": rogue["tenant_id"]}],
+                     reason="Incremental sync job completed", corr=corr))
+    return _sequence(out, [0, 20, random.randint(120, 900)], start)
 
 
 def scenario_cross_tenant_default_weakened(config=None):
@@ -504,7 +620,8 @@ def scenario_federated_domain_backdoor(config=None, dom=None):
               by_user(admin), [t_obj("Directory", dom,
                      [mp("IssuerUri", None, "http://any.sts/adfs/services/trust"),
                       mp("PassiveSignInUri", None, f"https://{ac.rare_domain(kind='federation')}/adfs/ls/"),
-                      mp("SigningCertificate", None, "<attacker-cert-thumbprint>")])], [_ua(admin)])]
+                      mp("SigningCertificate", None, "<attacker-cert-thumbprint>"),
+                      mp("SigningCertificateUpdateStatus", None, '{"Success":true}')])], [_ua(admin)])]
 
 
 def scenario_failed_federation_change(config=None, dom=None):
@@ -520,6 +637,22 @@ def scenario_failed_federation_change(config=None, dom=None):
                   reason="Insufficient privileges to complete the operation.")]
 
 
+def scenario_domain_authentication_change(config=None, dom=None):
+    """Convert a domain to/from federated auth -> 'Set domain authentication' (DirectoryManagement).
+    Same family as 'Set federation settings on domain': Sentinel's NRT_ADFSDomainTrustMods
+    matches BOTH strings under Azure domain federation settings modification, and real
+    directoryAudit rows carry the 'DomainAuthentication' modifiedProperty."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    dom = dom or random.choice(
+        ["cloudwidgets.com", "redlisted-vendor.net", "boxhill-logistics.co.uk",
+         "meridian-holdings.dev", "northgate-partners.io"])
+    return [audit("Set domain authentication", "DirectoryManagement", "Core Directory", "Update",
+                  by_user(admin),
+                  [t_obj("Directory", dom,
+                         [mp("DomainAuthentication", "Managed", "Federated")])],
+                  [_ua(admin)])]
+
+
 def scenario_app_privilege_escalation(config=None):
     """An APPLICATION (service principal) assigns an Azure administrator role to a user ->
     'Azure Privilege Escalation Using an Application'. Per the detector the APP is the initiator
@@ -530,6 +663,8 @@ def scenario_app_privilege_escalation(config=None):
                   by_app(sp_name, ac.app_id(sp_name)),
                   [t_obj("Role", "Global Administrator",
                          [mp("Role.DisplayName", None, "Global Administrator"),
+                          mp("Role.IsSystem", None, "False"),
+                          mp("RoleDefinitionId", None, "62e90394-69f5-4237-9190-012177145e10"),
                           mp("Role.TemplateId", None, "62e90394-69f5-4237-9190-012177145e10")]),
                    t_user(tgt)])]
 
@@ -549,7 +684,7 @@ def scenario_ca_operation_unusual(config=None):
     'Unusual Conditional Access operation for an identity'."""
     actor = ac.pick_nonstandard_actor(config)   # not a typical CA admin
     pol = random.choice(_CA_POLICIES)
-    return [audit("Update conditional access policy", "Policy", "Conditional Access", "Update",
+    return [audit("Update conditional access policy", "Policy", "Core Directory", "Update",
                   by_user(actor), [t_obj("Policy", pol,
                   [mp("ConditionalAccessPolicy", "[state=enabled]", "[state=disabled]")])], [_ua(actor)])]
 
@@ -603,17 +738,28 @@ def scenario_application_uri_modification(config=None):
 
 def scenario_pim_elevation_request(config=None):
     """A PIM activation elevates an identity into a privileged role -> 'Azure AD PIM elevation
-    request'."""
+    request'. Emits the real MS PIM op pair: 'Add member to role requested (PIM activation)'
+    first, then 'Add member to role completed (PIM activation)' on the same correlationId."""
     u = ac.pick_user(config)
-    return [audit("Add member to role completed (PIM activation)", "RoleManagement", "Core Directory",
-                  "Add", by_user(u), [t_obj("Role", "Global Administrator",
-                  [mp("Role.DisplayName", None, "Global Administrator")]), t_user(u)], [_ua(u)])]
+    corr = str(uuid.uuid4())
+    mods = [mp("Role.DisplayName", None, "Global Administrator"),
+            mp("Role.IsSystem", None, "False"),
+            mp("RoleDefinitionId", None, "62e90394-69f5-4237-9190-012177145e10")]
+    out = [
+        audit("Add member to role requested (PIM activation)", "RoleManagement",
+              "PIM", "Add", by_user(u),
+              [t_obj("Role", "Global Administrator", mods), t_user(u)], [_ua(u)], corr=corr),
+        audit("Add member to role completed (PIM activation)", "RoleManagement",
+              "PIM", "Add", by_user(u),
+              [t_obj("Role", "Global Administrator", mods), t_user(u)], [_ua(u)], corr=corr)]
+    return _sequence(out, [0, random.randint(5, 120)])
 
 
 def scenario_pim_alert_disabled(config=None):
     """A PIM security alert is disabled -> 'Azure AD PIM alert disabled' (defense evasion)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
-    return [audit("Disable PIM alert", "RoleManagement", "PIM", "Update", by_user(admin),
+    return [audit("Disable PIM alert", "RoleManagement", "PIM", "Update",
+                  by_user(admin),
                   [t_obj("Other", "Roles are being assigned outside of Privileged Identity Management",
                    [mp("AlertEnabled", "True", "False")])], [_ua(admin)])]
 
@@ -622,8 +768,9 @@ def scenario_device_registration_policy_mod(config=None):
     """The device registration policy is weakened (e.g. MFA no longer required to join) -> 'Device
     Registration Policy modification'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
-    return [audit("Set device registration policy", "Policy", "Core Directory", "Update",
-                  by_user(admin), [t_obj("Policy", "Device Registration Policy",
+    return [audit("Set device registration policies", "Policy", "Device Registration Service",
+                  "Update", by_user(admin),
+                  [t_obj("Policy", "Device Registration Policy",
                   [mp("RequireMfaSetting", "True", "False"),
                    mp("AzureADJoinPolicy", "Selected", "All")])], [_ua(admin)])]
 
@@ -738,9 +885,11 @@ def scenario_pim_member_removal(config=None):
     """A privileged member is removed from a role via PIM (removing a rival admin / hiding an
     assignment) -> 'PIM privilege member removal'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security")); tgt = ac.pick_user(config)
-    return [audit("Remove member from role (PIM activation)", "RoleManagement", "PIM", "Remove",
+    return [audit("Remove member from role completed (PIM deactivate)", "RoleManagement",
+                  "PIM", "Remove",
                   by_user(admin), [t_obj("Role", "Privileged Role Administrator",
-                   [mp("Role.DisplayName", None, "Privileged Role Administrator")]), t_user(tgt)],
+                   [mp("Role.DisplayName", None, "Privileged Role Administrator"),
+                    mp("Role.IsSystem", None, "False")]), t_user(tgt)],
                   [_ua(admin)])]
 
 
@@ -748,7 +897,8 @@ def scenario_pim_role_settings_change(config=None):
     """PIM role settings are weakened (e.g. MFA/approval/justification no longer required for
     activation) -> 'Azure AD PIM role settings change'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
-    return [audit("Update role setting in PIM", "RoleManagement", "PIM", "Update", by_user(admin),
+    return [audit("Update role setting in PIM", "RoleManagement", "PIM",
+                  "Update", by_user(admin),
                   [t_obj("Role", "Global Administrator",
                    [mp("Setting.MfaOnActivation", "True", "False"),
                     mp("Setting.RequireApproval", "True", "False"),
@@ -799,6 +949,108 @@ def scenario_unverified_domain_added(config=None):
                    [mp("Capability", None, "Email"), mp("IsVerified", None, "False")])], [_ua(admin)])]
 
 
+# ── detection-relevant scenarios added against the official activity reference ──────
+# activityDisplayName wording below is VERIFIED against the official Microsoft Entra
+# audit log activity reference (learn.microsoft.com/en-us/entra/identity/
+# monitoring-health/reference-audit-activities, fetched 2026-10-28) unless noted
+# "# wording unverified".
+
+def scenario_account_disabled(config=None):
+    """A standard user account is disabled by an identity that doesn't normally manage
+    account state -> 'Azure AD account disabled' (attacker cover-tracks / denial of
+    access). Op name 'Disable account' VERIFIED (UserManagement, Core Directory)."""
+    actor = ac.pick_nonstandard_actor(config); tgt = ac.pick_user(config)
+    return [audit("Disable account", "UserManagement", "Core Directory", "Update",
+                  by_user(actor), [t_user(tgt, [mp("AccountEnabled", "True", "False")])],
+                  [_ua(actor)])]
+
+
+def scenario_mfa_state_disabled(config=None):
+    """Per-user MFA is flipped to disabled on a victim account (authentication downgrade
+    before a password-spray / replay attack) -> 'Azure AD per-user MFA state change'.
+    Op name 'Update per-user multifactor authentication state' VERIFIED (UserManagement,
+    Authentication Methods table). Service 'Authentication Methods' is module-consistent;
+    modifiedProperties values are representative (not doc-published)."""
+    actor = ac.pick_nonstandard_actor(config); tgt = ac.pick_user(config)
+    return [audit("Update per-user multifactor authentication state", "UserManagement",
+                  "Authentication Methods", "Update", by_user(actor),
+                  [t_user(tgt, [mp("State", "Enabled", "Disabled")])], [_ua(actor)])]
+
+
+def scenario_delegated_permission_grant(config=None):
+    """A high-privilege delegated Graph scope is granted to a rogue service principal
+    (OAuth consent abuse) -> 'Azure AD delegated permission grant'. Op name
+    'Add delegated permission grant' VERIFIED (ApplicationManagement, Core Directory)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    app = ac.rare_app_name()
+    return [audit("Add delegated permission grant", "ApplicationManagement", "Core Directory",
+                  "Assign", by_user(admin), [t_obj("ServicePrincipal", app,
+                  [mp("ConsentAction.Permissions", None, "User.ReadWrite.All Mail.ReadWrite"),
+                   mp("ConsentContext.IsAdminConsent", None, "True")])], [_ua(admin)])]
+
+
+def _rogue_app_chain(config):
+    """Shared chainer: 'Add application' -> 'Add service principal' -> 'Update application -
+    Certificates and secrets management' -> 'Delete application', one correlationId
+    (rogue app registered, seeded with a credential, then removed to hide the trail).
+    All four op names VERIFIED (ApplicationManagement, Core Directory)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    app = ac.rare_app_name()
+    corr = str(uuid.uuid4())
+    app_obj = t_obj("Application", app, [mp("AppId", None, ac.app_id(app)),
+                                         mp("DisplayName", None, app)])
+    out = [
+        audit("Add application", "ApplicationManagement", "Core Directory", "Add",
+              by_user(admin), [app_obj], [_ua(admin)], corr=corr),
+        audit("Add service principal", "ApplicationManagement", "Core Directory", "Add",
+              by_user(admin), [app_obj], [_ua(admin)], corr=corr),
+        audit("Update application - Certificates and secrets management",
+              "ApplicationManagement", "Core Directory", "Update", by_user(admin),
+              [app_obj, t_obj("None", None)], [_ua(admin)], corr=corr),
+        audit("Delete application", "ApplicationManagement", "Core Directory", "Delete",
+              by_user(admin), [app_obj], [_ua(admin)], corr=corr)]
+    return _sequence(out, [i * random.randint(30, 150) for i in range(len(out))])
+
+
+def scenario_rogue_app_lifecycle(config=None):
+    """Rogue application registered with a service principal, a credential is seeded and
+    the app is hard-removed to leave no app object behind -> 'Azure rogue application
+    lifecycle' (multi-stage persistence story on one correlationId)."""
+    return _rogue_app_chain(config)
+
+
+def scenario_rogue_app_persists(config=None):
+    """Rogue application registered with a service principal and credential seeded, but
+    the Delete is NOT executed (the app identity persists for future abuse)."""
+    return _rogue_app_chain(config)[:3]
+
+
+def scenario_named_location_modified(config=None):
+    """A trusted named location's IP range is widened to include attacker infrastructure
+    (Condition Access 'trusted location' abuse -> downstream MFA skipped for those IPs)
+    -> 'Azure AD named location modified'. Op name 'Update named location' VERIFIED
+    (Policy, Conditional Access table); targetResource type 'Policy' and properties are
+    representative. # modifiedProperties wording unverified."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [audit("Update named location", "Policy", "Core Directory", "Update",
+                  by_user(admin), [t_obj("Policy", "HQ Corporate Network",
+                  [mp("NamedLocation.CountryLookupMethod", None, None),
+                   mp("NamedLocation.IpRanges", None,
+                      "203.0.113.0/24,185.199.108.0/22")])], [_ua(admin)])]
+
+
+def scenario_sp_owner_granted(config=None):
+    """An owner is added to a service principal (persistence: the owner can then roll the
+    principal's credential and add itself to privileged app roles) -> 'Azure service
+    principal owner added'. Op name 'Add owner to service principal' VERIFIED
+    (ApplicationManagement, Core Directory)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
+    return [audit("Add owner to service principal", "ApplicationManagement",
+                  "Core Directory", "Add", by_user(admin),
+                  [t_obj("ServicePrincipal", "External Reporting Connector"),
+                   t_user(tgt)], [_ua(admin)])]
+
+
 SCENARIOS = {
     "admin_role_add": scenario_admin_role_add,
     "consent_risky_app": scenario_consent_risky_app,
@@ -819,6 +1071,7 @@ SCENARIOS = {
     "unusual_guest_invitation": scenario_unusual_guest_invitation,
     "account_unlock_password_reset": scenario_account_unlock_password_reset,
     "failed_federation_change": scenario_failed_federation_change,
+    "domain_authentication_change": scenario_domain_authentication_change,
     "app_privilege_escalation": scenario_app_privilege_escalation,
     "app_credential_added": scenario_app_credential_added,
     "security_info_disabled": scenario_security_info_disabled,
@@ -838,6 +1091,13 @@ SCENARIOS = {
     "sp_removed": scenario_sp_removed,
     "auth_method_added": scenario_auth_method_added,
     "unverified_domain_added": scenario_unverified_domain_added,
+    "account_disabled": scenario_account_disabled,
+    "mfa_state_disabled": scenario_mfa_state_disabled,
+    "delegated_permission_grant": scenario_delegated_permission_grant,
+    "rogue_app_lifecycle": scenario_rogue_app_lifecycle,
+    "rogue_app_persists": scenario_rogue_app_persists,
+    "named_location_modified": scenario_named_location_modified,
+    "sp_owner_granted": scenario_sp_owner_granted,
 }
 
 # On-demand threats (threat_catalog): only scenarios whose analytic has been SEEN firing

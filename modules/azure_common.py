@@ -104,24 +104,26 @@ RESOURCES = ["Microsoft Graph", "Office 365 Exchange Online", "Office 365 ShareP
 BENIGN_FAIL = [
     (50126, "Error validating credentials due to invalid username or password."),
     (50055, "The password is expired."),
-    (50074, "Strong Authentication is required."),
+    (50074, "Strong authentication is required and the user did not pass the MFA challenge."),
     (50058, "Session information is not sufficient for single-sign-on."),
     (50072, "User needs to enroll for second factor authentication."),
     (50076, "Due to a configuration change made by your administrator, or because you moved to a new location, you must use multi-factor authentication."),
     (50140, "This occurred due to 'Keep me signed in' interrupt when the user was signing in."),
-    (50173, "The provided grant has expired due to it being revoked; the user must sign in again."),
+    (50173, "The provided grant has expired due to it being revoked, a fresh auth token is needed."),
     (65001, "The user or administrator has not consented to use the application."),
-    (16000, "Either multiple user identities are available for the current request or none are selected."),
+    (16000, "Either multiple user identities are available for the current request or selected account is not supported for the scenario."),
 ]
 
 
 # Conditional Access policies a tenant typically has (displayName -> grant controls).
 CA_POLICIES = [
-    ("Require MFA for All Users", ["Mfa"]),
-    ("Block Legacy Authentication", ["Block"]),
-    ("Require Compliant or Hybrid Joined Device", ["CompliantDevice", "DomainJoinedDevice"]),
-    ("Require MFA for Admins", ["Mfa"]),
-    ("Require Approved Client App", ["ApprovedApplication"]),
+    # Grant-control values per Graph conditionalAccessGrantControls.builtInControls
+    # (block, mfa, compliantDevice, domainJoinedDevice, approvedApplication, compliantApplication, ...).
+    ("Require MFA for All Users", ["mfa"]),
+    ("Block Legacy Authentication", ["block"]),
+    ("Require Compliant or Hybrid Joined Device", ["compliantDevice", "domainJoinedDevice"]),
+    ("Require MFA for Admins", ["mfa"]),
+    ("Require Approved Client App", ["approvedApplication"]),
 ]
 # MFA / authentication methods (Entra authenticationMethod values).
 MFA_METHODS = ["Mobile app notification", "Mobile app verification code", "Text message",
@@ -709,7 +711,7 @@ def applied_ca(result="success", n=1):
     picks = random.sample(CA_POLICIES, min(n, len(CA_POLICIES)))
     out = []
     for name, grants in picks:
-        out.append({"id": str(_h(name) % 10**32).zfill(8)[:8] + "-ca",  # stable-ish id
+        out.append({"id": _stable_guid("capolicy:" + name),    # proper GUID, stable per policy
                     "displayName": name, "enforcedGrantControls": grants,
                     "enforcedSessionControls": [], "result": result})
     return out
@@ -1010,14 +1012,78 @@ def user_oid(username):
     return _stable_guid("oid:" + str(username))
 
 
+# Real Microsoft first-party application (client) AppIds, keyed by the display names the
+# Graph/Office tenant view uses. Same name -> same real GUID (deterministic); apps outside the
+# table (3rd-party / novel apps) fall back to the stable hash id as before.
+_FIRST_PARTY_APP_IDS = {
+    # Microsoft Graph PowerShell signs in as "Microsoft Graph Command Line Tools"
+    # (learn.microsoft.com "Verify first-party Microsoft applications in sign-in reports").
+    "Microsoft Graph PowerShell": "14d82eec-204b-4c2f-b7e8-296a70dab67e",
+    "Microsoft Graph Command Line Tools": "14d82eec-204b-4c2f-b7e8-296a70dab67e",
+    "Azure PowerShell": "1950a258-227b-4e31-a9cf-717495945fc2",
+    "Microsoft Azure PowerShell": "1950a258-227b-4e31-a9cf-717495945fc2",
+    "Azure CLI": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+    "Microsoft Azure CLI": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+    "Azure Portal": "c44b4083-3bb0-49c1-b47d-974e53cbdf3c",
+    "Microsoft Graph": "00000003-0000-0000-c000-000000000000",
+    "Office 365 SharePoint Online": "00000003-0000-0ff1-ce00-000000000000",
+    "Office 365 Exchange Online": "00000002-0000-0ff1-ce00-000000000000",
+    "Microsoft Exchange Online": "00000002-0000-0ff1-ce00-000000000000",
+    "Outlook Mobile": "27922004-5251-4030-b22d-91ecd9a37ea4",
+    "Office 365": "52f1f179-dad0-4d53-a4a0-9c04cb9a7e37",
+    "Windows Azure Active Directory": "00000002-0000-0000-c000-000000000000",
+    # Microsoft's first-party app tables (learn.microsoft.com "Verify first-party Microsoft
+    # applications in sign-in reports" CSV / conditional-access admin-portals doc):
+    "Microsoft Office 365 Portal": "00000006-0000-0ff1-ce00-000000000000",
+    "Microsoft 365 Security and Compliance Center": "80ccca67-54bd-44ab-8625-4b79c4dc7775",
+    "Exchange Admin Center": "497effe9-df71-4043-a8bb-14cf78c4b63b",
+    "Microsoft Office": "d3590ed6-52b3-4102-aeff-aad2292ab01c",
+    "Office365 Shell WCSS-Client": "89bee1f7-5e6e-4d8a-9f3d-ecd601259da7",
+    "OfficeHome": "4765445b-32c6-49b0-83e6-1d93765276ca",
+    "Microsoft Teams": "1fec8e78-bce4-4aaf-ab1b-5451cc387264",
+    "Microsoft Teams Web Client": "5e3ce6c0-2b1f-4285-8d4b-75ee78787346",
+    "Microsoft Authentication Broker": "29d9ed98-a469-4536-ade2-f981bc1d605e",
+    "OneDrive SyncEngine": "ab9b8c07-8f02-4f72-87fa-80105867a763",
+    "OfficeClientService": "0f698dd4-f011-4d23-a33e-b36416dcb1e6",
+    "Enterprise Roaming and Backup": "60c8bde5-3167-4f92-8fdb-059f6176dc0f",
+    "Microsoft Intune Web Company Portal": "74bcdadc-2fdc-4bb3-8459-76d06952a0e9",
+    "Microsoft App Access Panel": "0000000c-0000-0000-c000-000000000000",
+    "Microsoft Forms": "c9a559d2-7aab-4f13-a6ed-e7e9c52aec87",
+    "Power BI": "871c010f-5e61-4fb1-83ac-98610a7e9110",
+    "Microsoft Stream": "cf53fce8-def6-4aeb-8d30-b158e7b1cf83",
+    "Yammer": "00000005-0000-0ff1-ce00-000000000000",
+    "SharePoint Online Client": "57fb890c-0dab-4253-a5e0-7188c88b2bb4",
+}
+# Resource (service) principals keyed the same way — used by Graph resourceId. Every id below
+# is validated against Microsoft's first-party tables (docs CSV / SP-enumeration CSV).
+_RESOURCE_IDS = {
+    "Microsoft Graph": "00000003-0000-0000-c000-000000000000",
+    "Office 365 Exchange Online": "00000002-0000-0ff1-ce00-000000000000",
+    "Office 365 SharePoint Online": "00000003-0000-0ff1-ce00-000000000000",
+    "Windows Azure Active Directory": "00000002-0000-0000-c000-000000000000",
+    "Microsoft.Azure.SyncFabric": "00000014-0000-0000-c000-000000000000",
+    "Windows Azure Service Management API": "797f4846-ba00-4fd7-ba43-dac1f8f63013",
+    "Microsoft Teams Services": "cc15fd57-2c6c-4117-a88c-83b1d56b4bbe",
+    "Azure Key Vault": "cfa8b339-82a2-471a-a3c9-0fc0be7a4093",
+    "Microsoft Information Protection Sync Service": "870c4f2e-85b6-4d43-bdda-6ed9a579b725",
+    "Office 365 Management APIs": "c5393580-f805-4401-95e8-94b7a6ef2fc2",
+    "Microsoft Graph Change Tracking": "0bf30f3b-4a52-48df-9a82-234910c4a086",
+    "Azure Storage": "e406a681-f3d4-42a8-90b6-c2b029497af1",
+}
+
+
 def app_id(name):
-    """Stable application id for an app display name (Graph appId / O365 ApplicationId)."""
-    return _stable_guid("app:" + str(name))
+    """Stable application id for an app display name (Graph appId / O365 ApplicationId).
+    First-party Microsoft apps map to their real well-known AppIds; anything else falls back
+    to the stable hash id."""
+    return _FIRST_PARTY_APP_IDS.get(str(name)) or _stable_guid("app:" + str(name))
 
 
 def resource_id(name):
-    """Stable resource id for a resource display name (Graph resourceId)."""
-    return _stable_guid("res:" + str(name))
+    """Stable resource id for a resource display name (Graph resourceId).
+    Microsoft service-principal resources map to their real service appIds (validated against
+    Microsoft's first-party tables); anything else falls back to the stable hash id."""
+    return _RESOURCE_IDS.get(str(name)) or _stable_guid("res:" + str(name))
 
 
 # Device trust posture, stable per user. Most corporate endpoints are AADJ/Hybrid + managed/
@@ -1039,8 +1105,9 @@ def device_for(user, new=False, mobile=False):
     os_type = user.get("os_type", "Windows")
     os_str = f'{os_type} {user.get("os_version", "")}'.strip()
     if new:
-        return {"deviceId": "", "displayName": "", "browser": _browser(os_type, user),
-                "operatingSystem": os_str, "isCompliant": False, "isManaged": False, "trustType": ""}
+        # Graph's own example for an unregistered device: deviceId "" with the rest null.
+        return {"deviceId": "", "displayName": None, "browser": _browser(os_type, user),
+                "operatingSystem": os_str, "isCompliant": None, "isManaged": None, "trustType": None}
     if mobile:
         label, bname, _bv, _plat, _ua = _profile(user, mobile=True)
         mos = "iOS 17.4" if "iOS" in _plat or _plat == "IPhone" else "Android 14.0"
@@ -1053,6 +1120,22 @@ def device_for(user, new=False, mobile=False):
             "displayName": f'{user["username"].upper().replace(".", "")}-PC',
             "browser": _browser(os_type, user), "operatingSystem": os_str,
             "isCompliant": compliant, "isManaged": managed, "trustType": trust}
+
+
+_OFFICE_BY_IP = {ip: site for site in OFFICES for ip in site["ips"]}
+
+
+def network_location_details(loc):
+    """Graph networkLocationDetails for a sign-in: objects with networkType (intranet / extranet /
+    namedNetwork / trusted) and networkNames -- there is no networkName property. Entra fills it
+    only when the IP matches a configured named location; otherwise it is [] (every real sign-in
+    in this tenant, which has no named locations, carries []). The sim's tenant names its office
+    egress ranges, so an office IP is a namedNetwork and everything else (home, carrier,
+    anonymizer, VPS) is []."""
+    site = _OFFICE_BY_IP.get(loc.get("ip"))
+    if site:
+        return [{"networkType": "namedNetwork", "networkNames": [f'{site["city"]} Office']}]
+    return []
 
 
 def office_for(user):

@@ -2,7 +2,14 @@
 
 Emits Audit.AzureActiveDirectory records in the manage.office.com Management Activity
 shape (captured from the live tenant): RecordType 15 = StsLogon sign-ins, RecordType 8 =
-directory audit operations. Identities come from LogSim's user model via azure_common, so
+directory audit operations. RT8 operation names verified against the audit-log activities
+catalog (https://learn.microsoft.com/en-us/purview/audit-log-activities, operations carry a
+trailing period): Add user., Delete user., Update user., Reset user password.,
+Add member to role., Remove member from role., Update domain., Set federation settings on
+domain., Set company contact information. RT15 ops (UserLoggedIn / UserLoginFailed) match
+the known STS feed; candidates such as "Update StsRefreshToken Validity." and
+"Add principal token to login session." are NOT verifiable in any current doc table and
+are deliberately not emitted. Identities come from LogSim's user model via azure_common, so
 O365 activity ties to the same people as every other module. Pushed via cribl_direct under
 the dedicated O365 Azure AD UUID (lands parsed in the native dataset, Fusion-eligible).
 
@@ -15,6 +22,7 @@ import uuid
 
 from modules import azure_common as ac
 from modules import azure_audit_catalog as _auditcat
+from modules import deferred
 
 # O365 Management Activity directory operations (RecordType 8), derived from the Entra audit
 # catalog's Core Directory activities in O365-MA naming (trailing period). Gives the O365
@@ -36,6 +44,11 @@ ORG_ID = "09febfec-25f3-48fa-bd8c-9b4a44f896ec"
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
 _APPS = ["Microsoft Office 365 Portal", "Office365 Shell WCSS-Client", "Microsoft Teams",
          "OfficeHome", "Microsoft 365 Security and Compliance Center"]
+
+# Real STS logon error strings (AzureActiveDirectoryStsLogon LogonError field).
+_STS_ERRORS = {"50126": "Invalid password", "50053": "Account locked/suspended",
+               "50074": "MFA required", "50076": "MFA required due to CA policy",
+               "53003": "Blocked by conditional access"}
 
 # Threat rate is governed centrally by ac.ThreatGate / ac.THREAT_EPISODES_PER_HOUR (wall-clock
 # episode rate, with a benign warmup) — see _GATE below.
@@ -75,7 +88,10 @@ def _signin(operation, user, ip, *, result_status="Success", error_number="0",
         "OrganizationId": ORG_ID, "RecordType": 15, "ResultStatus": result_status,
         "UserKey": ac.user_oid(user["username"]), "UserType": 0, "Version": 1,
         "Workload": "AzureActiveDirectory",
-        "ClientIP": ip, "ObjectId": app_guid, "UserId": upn, "AzureActiveDirectoryEventType": 1,
+        "ClientIP": ip, "ObjectId": app_guid, "UserId": upn,
+        # AzureActiveDirectoryEventType is 1 on both RT15 sign-ins and RT8 directory changes
+        # (the tenant's real msft_o365_azure_ad_raw rows, checked 2026-10-28).
+        "AzureActiveDirectoryEventType": 1,
         "ExtendedProperties": ext, "ModifiedProperties": [],
         "Actor": [{"ID": ac.user_oid(user["username"]), "Type": 0}, {"ID": upn, "Type": 5}],
         "ActorContextId": ORG_ID, "ActorIpAddress": ip, "InterSystemsId": _g(),
@@ -86,25 +102,38 @@ def _signin(operation, user, ip, *, result_status="Success", error_number="0",
                              {"Name": "BrowserType", "Value": "Chrome"},
                              {"Name": "IsCompliant", "Value": "True"}],
         "ErrorNumber": error_number,
+        # LogonError carries the numeric STS code (e.g. 50126) — detectors key on it.
+        "LogonError": error_number or "",
     }
 
 
-def _audit(operation, actor, ip, target_name=None, modified=None, result_status="Success"):
+def _audit(operation, actor, ip, target_name=None, modified=None, result_status="Success",
+           offset_s=0):
     """Audit.AzureActiveDirectory directory-change record (RecordType 8 = AzureActiveDirectory)."""
     upn = actor["upn"]
     rid = _g()
+    tid = target_name or _g()
+    # Object-id targets (users/service principals) are addressed by GUID in ObjectId and
+    # Target[*].ID, not by UPN; Type 5 marks the GUID-typed target object.
+    if target_name and "@" in target_name:
+        tid = ac._stable_guid("User:" + target_name)
+        target_type = 5
+    else:
+        target_type = 1
     return {
-        "CreationTime": _now(), "Id": rid, "Operation": operation, "OrganizationId": ORG_ID,
+        "CreationTime": _now(offset_s), "Id": rid, "Operation": operation, "OrganizationId": ORG_ID,
         "RecordType": 8, "ResultStatus": result_status,
         "UserKey": ac.user_oid(actor["username"]), "UserType": 0,
-        "Version": 1, "Workload": "AzureActiveDirectory", "ObjectId": target_name or _g(),
-        "UserId": upn, "AzureActiveDirectoryEventType": 0,
+        "Version": 1, "Workload": "AzureActiveDirectory", "ObjectId": tid,
+        "UserId": upn,
+        # 1 on RT8 directory changes too (real tenant rows, checked 2026-10-28).
+        "AzureActiveDirectoryEventType": 1,
         "ExtendedProperties": [{"Name": "additionalDetails", "Value": "{}"}],
         "ModifiedProperties": modified or [],
         "Actor": [{"ID": ac.user_oid(actor["username"]), "Type": 0}, {"ID": upn, "Type": 5}],
         "ActorContextId": ORG_ID, "ActorIpAddress": ip, "InterSystemsId": _g(),
         "IntraSystemId": rid, "SupportTicketId": "",
-        "Target": [{"ID": target_name or _g(), "Type": 1}], "TargetContextId": ORG_ID,
+        "Target": [{"ID": tid, "Type": target_type}], "TargetContextId": ORG_ID,
     }
 
 
@@ -160,15 +189,22 @@ def generate_benign(config=None, context=None):
 
 # ── attack scenarios ─────────────────────────────────────────────────────────────────
 
-def scenario_password_spray(config=None, victims=12, src_ip=None):
+def scenario_password_spray(config=None, victims=None, src_ip=None):
+    """Password spray: one attacker source IP, many victim users each failing exactly once with
+    the same STS error, then a success for one of the sprayed users — from a different IP (the
+    spray tool yields to an interactive session). Failure and code share the same user."""
+    n = victims or random.randint(3, 6)
     ip = src_ip or random.choice(RISKY_IPS)
     out = []
-    for i in range(victims):
+    victim = None
+    for i in range(n):
         u = ac.pick_user(config)
+        victim = u
         out.append(_signin("UserLoginFailed", u, ip, result_status="Failed", error_number="50126",
                            extended=[{"Name": "ResultStatusDetail", "Value": "InvalidUserNameOrPassword"}],
                            offset_s=-(60 - i)))
-    out.append(_signin("UserLoggedIn", ac.pick_user(config), ip, offset_s=0))
+    # The successful compromise is one of the sprayed users, distinctly later + different IP.
+    out.append(_signin("UserLoggedIn", victim, random.choice(RISKY_IPS), offset_s=0))
     return out
 
 
@@ -182,10 +218,10 @@ def scenario_brute_force(config=None, user=None, attempts=10, src_ip=None):
     return out
 
 
-def scenario_impossible_travel(config=None, user=None):
-    u = ac.pick_user(config)
-    return [_signin("UserLoggedIn", u, "108.245.61.200", offset_s=-300),
-            _signin("UserLoggedIn", u, "103.21.244.12", offset_s=-60)]
+# impossible_travel was removed from this module: the detector fundamentally lives on the Entra
+# sign-in (Graph) feed msft_azure_ad_raw, which carries LocationCity/LocationState/LocationCountry
+# geo fields on sign-ins. The RT15 record shape here cannot support it; that scenario is handled
+# (conceptually) by azuread_signin handling, which is out of scope for this module.
 
 
 def scenario_tor_signin(config=None, user=None):
@@ -261,9 +297,11 @@ def scenario_user_create_delete_short(config=None, user=None):
     'Azure AD user created and deleted in a short time period'."""
     actor = ac.pick_user(config); ip = ac.egress(actor)["ip"]
     burner = f"temp_{random.randint(1000, 9999)}@{ac.UPN_DOMAIN}"
+    # The delete really happens a minute later: stamped then, and held until then.
+    t0 = time.time()
     return [_audit("Add user.", actor, ip, target_name=burner,
                    modified=[{"Name": "AccountEnabled", "NewValue": "True", "OldValue": ""}]),
-            _audit("Delete user.", actor, ip, target_name=burner)]
+            deferred.at(_audit("Delete user.", actor, ip, target_name=burner, offset_s=60), t0 + 60)]
 
 
 def scenario_pim_role_change(config=None, user=None):
@@ -276,15 +314,33 @@ def scenario_pim_role_change(config=None, user=None):
 def scenario_admin_role_removals(config=None):
     actor = ac.pick_user(config)
     ip = ac.egress(actor)["ip"]
+    # Stagger the sequential removals (one role removed after the next, ~20s apart).
     return [_audit("Remove member from role.", actor, ip, target_name=ac.pick_user(config)["upn"],
-                   modified=[{"Name": "Role.DisplayName", "NewValue": "", "OldValue": "Global Administrator"}])
-            for _ in range(4)]
+                   modified=[{"Name": "Role.DisplayName", "NewValue": "", "OldValue": "Global Administrator"}],
+                   offset_s=-(i * 20))
+            for i in range(4)]
+
+
+def scenario_admin_password_reset(config=None, user=None):
+    """An attacker controlling an admin account RESETS a victim user's password ('Reset user
+    password.', verified in the audit-log activities doc, User administration activities
+    (https://learn.microsoft.com/en-us/purview/audit-log-activities)) and then signs in as
+    the victim from a risky IP — the takeover chain: reset -> victim's RT15 login from the
+    attacker IP (never the victim's usual egress)."""
+    actor = ac.pick_by_role(config, _PRIV_ROLES, ("IT", "Security"))
+    victim = ac.pick_user(config)
+    ip = random.choice(RISKY_IPS)
+    # The takeover sign-in follows 45 s after the reset: stamped then, and held until then.
+    t0 = time.time()
+    return [_audit("Reset user password.", actor, ip, target_name=victim["upn"],
+                   modified=[{"Name": "User.Password", "NewValue": "****", "OldValue": ""}],
+                   offset_s=0),
+            deferred.at(_signin("UserLoggedIn", victim, ip, offset_s=45), t0 + 45)]
 
 
 SCENARIOS = {
     "password_spray": scenario_password_spray,
     "brute_force": scenario_brute_force,
-    "impossible_travel": scenario_impossible_travel,
     "tor_signin": scenario_tor_signin,
     "admin_role_add": scenario_admin_role_add,
     "mfa_disabled": scenario_mfa_disabled,
@@ -296,6 +352,7 @@ SCENARIOS = {
     "user_deletion": scenario_user_deletion,
     "pim_role_change": scenario_pim_role_change,
     "admin_role_removals": scenario_admin_role_removals,
+    "admin_password_reset": scenario_admin_password_reset,
 }
 
 

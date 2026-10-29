@@ -15,6 +15,7 @@ inbox forwarding rule, email-hiding rule, mailbox SMTP forwarding, mailbox deleg
 SendAs grant, transport (mail-flow) forwarding rule, folder-permission modification, and
 mailbox audit bypass.
 """
+import base64
 import random
 import time
 import uuid
@@ -55,6 +56,21 @@ def _mbx_path(u):
             f"{ORG_NAME}/{u['display_name']}")
 
 
+def _store_id(seed):
+    """Exchange store identifier — 'AAMk' + base64 blob, the real Item/Folder Id shape
+    seen in mailbox audit records (Item.Id, ParentFolder.Id, DestFolder.Id, Folders[].Id).
+    https://learn.microsoft.com/en-us/purview/audit-log-exchange-properties"""
+    # Mask explicitly to 256 bits (32 bytes) BEFORE to_bytes: the raw XOR of h1 with
+    # (h2 << 64) can span up to 320 bits, and int.to_bytes() raises OverflowError for any
+    # value >= 1 << 256. The paste-order mask guarantees no seed can ever overflow.
+    n = (ac._h("store:" + seed) ^ (ac._h("store2:" + seed) << 64)) & ((1 << 256) - 1)
+    return "AAMk" + base64.b64encode(n.to_bytes(32, "big")).decode().rstrip("=")
+
+
+_OWA_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+           "Chrome/131.0.0.0 Safari/537.36")
+
+
 def _param(**kv):
     return [{"Name": k, "Value": v} for k, v in kv.items()]
 
@@ -67,13 +83,45 @@ def _common(operation, actor, record_type, result, offset_s=0):
             "OriginatingServer": random.choice(_SERVERS)}
 
 
+def _folder_name(path):
+    # "\\Inbox" -> "Inbox"; "\\Inbox\\Old Mail" -> "Old Mail"
+    return path.strip("\\").split("\\")[-1]
+
+
+def _item_shape(item):
+    """Normalize an Item dict to the ExchangeItem complex type: Id (store id, 'AAMk...' —
+    mandatory), Subject, ParentFolder {Id, Path (+'\\\\'+Name)}, InternetMessageId,
+    Attachments (string of names+sizes) — https://learn.microsoft.com/en-us/office/
+    office-365-management-api/office-365-management-activity-api-schema#exchangeitem"""
+    out = {"Id": _store_id("item:" + item.get("Subject", _g()))}
+    if "Subject" in item:
+        out["Subject"] = item["Subject"]
+    pf = item.get("ParentFolder")
+    if pf:
+        path = pf.get("Path", "\\Inbox")
+        pf = dict(pf)
+        pf.setdefault("Id", _store_id("folder:" + path))
+        pf.setdefault("Name", _folder_name(path))
+        out["ParentFolder"] = pf
+    out["InternetMessageId"] = f"<{_g()}@{ORG_NAME}>"
+    if "Attachments" in item:
+        out["Attachments"] = item["Attachments"]
+    return out
+
+
 def admin_cmdlet(operation, actor, params, target_user=None, result="True",
                  external=False, offset_s=0):
-    """RecordType 1 — Exchange admin cmdlet audit record."""
+    """RecordType 1 — Exchange admin cmdlet audit record.
+    Exchange Admin schema (ManagedProperties/Parameters/ExternalAccess/OriginatingServer/
+    OrganizationName/Token{ObjectId,TenantId}) — https://learn.microsoft.com/en-us/office/
+    office-365-management-api/office-365-management-activity-api-schema#exchange-admin-schema
+    ClientInfoString for management-tool cmdlets: "Client=WebServices;ExchangeWebServices"
+    (documented example). AppPoolName/RequestId are NOT in the schema and were dropped."""
     r = _common(operation, actor, 1, result, offset_s)
     r.update({"UserType": 2, "ExternalAccess": external, "ClientIP": ac.egress(actor)["ip"],
               "ObjectId": _mbx_path(target_user or actor), "Parameters": params,
-              "AppPoolName": "MSExchangePowerShellAppPool", "RequestId": _g(),
+              "ClientInfoString": "Client=WebServices;ExchangeWebServices",
+              "TokenObjectId": ac.user_oid(actor["username"]),
               "TokenTenantId": ORG_ID,
               "AppAccessContext": {"IssuedAtTime": _now(offset_s)}})
     if target_user:
@@ -81,33 +129,54 @@ def admin_cmdlet(operation, actor, params, target_user=None, result="True",
     return r
 
 
+def _client_info(client):
+    """Real ClientInfoString values (Exchange mailbox + admin audit records):
+    - "Client=OWA;<browser UA>"            — doc example
+    - "Client=REST;A3883EBA-FBE9-48BD-9ED3-DCA3E0E84250;;" — Outlook desktop REST client
+    - "Client=REST;Client=RESTSystem;;"    — server-side/system REST access
+    - "Client=ActiveSync;Apple-iPhone/1309.63" — doc example
+    - "Client=WebServices;ExchangeWebServices" — doc example (EWS)
+    https://learn.microsoft.com/en-us/purview/audit-log-exchange-properties
+    ({Client=Out of Office | Client=Scheduled Processing} values relate to OOF/scheduled
+    server workflows; not emitted by this schedule.)"""
+    parts = {
+        "OWA": f"Client=OWA;{_OWA_UA}",
+        "REST": "Client=REST;A3883EBA-FBE9-48BD-9ED3-DCA3E0E84250;;",   # Outlook desktop REST
+        "RESTSystem": "Client=REST;Client=RESTSystem;;",               # system/Graph REST
+        "ActiveSync": "Client=ActiveSync;Apple-iPhone/1309.63",
+        "EWS": "Client=WebServices;ExchangeWebServices",
+    }
+    return parts.get(client, parts["OWA"])
+
+
 def mailbox_action(operation, owner, actor=None, logon_type=0, client="OWA",
                    item=None, extra=None, offset_s=0, result="Succeeded"):
-    """RecordType 2 — mailbox action (owner or delegate access)."""
+    """RecordType 2 — mailbox action (owner or delegate access).
+    Exchange Mailbox schema — LogonType/InternalLogonType share the enum (InternalLogonType
+    mirrors LogonType in real records)."""
     actor = actor or owner
     r = _common(operation, actor, 2, result, offset_s)
-    r.update({"UserType": 0, "ExternalAccess": (actor["username"] != owner["username"]),
-              "LogonType": logon_type, "InternalLogonType": 0,
+    r.update({"UserType": 0, "ExternalAccess": False,   # True = out-of-tenant/delegated-admin logon
+              "LogonType": logon_type, "InternalLogonType": logon_type,
               "MailboxOwnerUPN": owner["upn"], "MailboxOwnerSid": _sid(owner["username"]),
               "MailboxGuid": ac.user_oid("mbx:" + owner["username"]),
               "LogonUserSid": _sid(actor["username"]),
               "ClientIPAddress": ac.egress(actor)["ip"], "ClientIP": ac.egress(actor)["ip"],
-              "ClientInfoString": ("Client=OWA;Action=ViaProxy" if client == "OWA"
-                                   else "Client=REST;Client=RESTSystem;;"),
+              "ClientInfoString": _client_info(client),
               "AppId": "00000002-0000-0ff1-ce00-000000000000",
-              "ClientAppId": "d3590ed6-52b3-4102-aeff-aad2292ab01c",
               "TokenTenantId": ORG_ID, "SessionId": _g()})
+    if client == "OWA":
+        r["ClientAppId"] = "d3590ed6-52b3-4102-aeff-aad2292ab01c"   # Office/OWA web client GUID
     if item is not None:
-        r["Item"] = item
+        r["Item"] = _item_shape(item)
     if extra:
         r.update(extra)
     return r
 
 
 def mail_items_accessed(owner, count=1, offset_s=0, throttled=False):
-    """RecordType 50 — MailItemsAccessed. throttled=True emits a sync-level throttled access
-    (IsThrottled True) — Microsoft stops logging per-item binds under heavy access, which is itself
-    a documented mass-mailbox-access / compromise indicator."""
+    """RecordType 50 — MailItemsAccessed. throttled=True emits a sync-level access
+    (MailAccessType=Sync, no per-item binds logged) — heavy mass-mailbox-access pattern."""
     r = _common("MailItemsAccessed", owner, 50, "Succeeded", offset_s)
     r.update({"UserType": 5, "ExternalAccess": False, "LogonType": 0, "InternalLogonType": 0,
               "MailboxOwnerUPN": owner["upn"], "MailboxOwnerSid": _sid(owner["username"]),
@@ -115,16 +184,19 @@ def mail_items_accessed(owner, count=1, offset_s=0, throttled=False):
               "LogonUserSid": _sid(owner["username"]),
               "ClientIPAddress": ac.egress(owner)["ip"],
               "ClientInfoString": "Client=REST;Client=RESTSystem;;",
-              "AppId": "00000003-0000-0000-c000-000000000000", "ClientAppId": _g(),
+              "AppId": "00000003-0000-0000-c000-000000000000",  # Microsoft Graph app id
               "OperationCount": count, "TokenTenantId": ORG_ID})
+    # Real RT50 records carry ClientAppId only as a known client-app GUID (or not at all);
+    # a random app GUID is invalid, so it is omitted.
     if throttled:
-        r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Sync"},
-                                    {"Name": "IsThrottled", "Value": "True"}]
+        r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Sync"}]
     else:
-        r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Bind"},
-                                    {"Name": "IsThrottled", "Value": "False"}]
-        r["Folders"] = [{"Path": "\\Inbox", "FolderItems": [{"InternetMessageId": f"<{_g()}@{ORG_NAME}>"}
-                                                            for _ in range(count)]}]
+        r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Bind"}]
+        # ExchangeAggregatedFolder: Id mandatory, Path, FolderItems = ExchangeFolderItem
+        r["Folders"] = [{"Id": _store_id("access-folder:" + owner["username"]),
+                         "Path": "\\Inbox",
+                         "FolderItems": [{"InternetMessageId": f"<{_g()}@{ORG_NAME}>"}
+                                         for _ in range(count)]}]
     return r
 
 
@@ -163,7 +235,7 @@ def _b_login(cfg):
 def _b_new_mailbox(cfg):
     admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
     return admin_cmdlet("New-Mailbox", admin, _param(Name=tgt["display_name"],
-                        UserPrincipalName=tgt["upn"]), target_user=tgt, external=True)
+                        UserPrincipalName=tgt["upn"]), target_user=tgt)   # admin's own action, not ExternalAccess
 
 
 # Full mailbox-audit operation set (Exchange mailbox auditing — owner/delegate/admin actions).
@@ -325,11 +397,16 @@ def scenario_transport_forwarding_rule(config=None):
 
 
 def scenario_folder_permission_mod(config=None):
-    """ModifyFolderPermissions granting the Default user access -> 'Exchange mailbox folder permission modification'."""
+    """AddFolderPermissions granting the Default user access -> 'Exchange mailbox folder
+    permission modification'. Permission info lives on the Folders (ExchangeFolder) complex —
+    real schema: Id/Path/Name + MemberUpn/MemberSid/MemberRights; no FolderId/Permissions
+    nested sub-objects in the Management Activity schema."""
     u = ac.pick_user(config)
-    item = {"Id": _g(), "ParentFolder": {"Path": "\\Inbox", "MemberRights": "ReadAny",
-            "MemberUpn": "Default", "MemberSid": "S-1-1-0"}}
-    return [mailbox_action("ModifyFolderPermissions", u, item=item, result="Succeeded")]
+    folder = {"Id": _store_id("folder:\\\\Inbox:" + u["username"]), "Path": "\\Inbox",
+              "Name": "Inbox", "MemberUpn": "Default", "MemberSid": "S-1-1-0",
+              "MemberRights": "ReadAny"}
+    return [mailbox_action("ModifyFolderPermissions", u, extra={"Folders": [folder]},
+                           result="Succeeded")]
 
 
 def scenario_mail_accessed_multi_ip_subnet(config=None):
@@ -359,7 +436,10 @@ def scenario_sent_to_deleted_scripted(config=None):
     for i in range(12):
         r = mailbox_action("Move", u, client="REST",
                            item={"Subject": ac.email_subject(), "ParentFolder": {"Path": "\\Sent Items"}},
-                           extra={"DestFolderPathName": "\\Deleted Items"}, offset_s=-(i * 5))
+                           extra={"DestFolder": {"Id": _store_id("destfolder:Deleted Items:"
+                                                                + u["username"]),
+                                                 "Path": "\\Deleted Items", "Name": "Deleted Items"}},
+                           offset_s=-(i * 5))
         r["ClientIPAddress"] = bad
         r["ClientIP"] = bad
         out.append(r)
@@ -457,19 +537,26 @@ def scenario_mailbox_enumeration(config=None):
         r = mail_items_accessed(owner, count=1, offset_s=-(i * 6))
         r["ClientInfoString"] = "Client=REST;Client=RESTSystem;;"   # Graph app, not interactive
         r["AppId"] = "00000003-0000-0000-c000-000000000000"         # Microsoft Graph
+        r["LogonType"] = 5      # BestAccess: client app acting on the mailbox, not the owner
+        r["InternalLogonType"] = 5
+        r["UserType"] = 0
         out.append(r)
     return out
 
 
 def scenario_sensitive_mail_external(config=None):
-    """Sensitive mail sent to an external recipient -> 'Sensitive Exchange mail sent to external
-    users'."""
+    """Sensitive (AIP-labelled) mail sent to an external recipient -> 'Sensitive Exchange mail
+    sent to external users'. Real schema: SensitivityLabel is a top-level property (label GUID
+    assigned to the mail item — detailed-properties reference); recipientList is a Collection
+    (EmailAddress) of {Address, Name}; recipientCount is Int64."""
     u = ac.pick_user(config)
     ext = f"{u['username'].replace('.', '')}@{random.choice(_EXT_DOMAINS)}"
     return [mailbox_action("Send", u, client="OWA",
                            item={"Subject": "Wire transfer instructions - CONFIDENTIAL",
                                  "ParentFolder": {"Path": "\\Sent Items"}},
-                           extra={"Recipients": [ext], "ExternalAccess": True})]
+                           extra={"recipientList": [{"Address": ext, "Name": ext}],
+                                  "recipientCount": 1,
+                                  "SensitivityLabel": ac.user_oid("label:confidential")})]
 
 
 def scenario_dlp_policy_disabled(config=None):
@@ -486,6 +573,67 @@ def scenario_audit_bypass(config=None):
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
     return [admin_cmdlet("Set-MailboxAuditBypassAssociation", admin,
                          _param(Identity=tgt["upn"], AuditBypassEnabled="True"), target_user=tgt)]
+
+
+def scenario_compliance_search_purge_action(config=None):
+    """New-ComplianceSearchAction with a Purge action on an existing search -> mass soft/
+    hard-delete of mailbox content from within a compliance search (T1070.002 email
+    anti-forensics). Mirrors scenario_compliance_search_created's record shape.
+    Wording verified as an Exchange admin cmdlet: the admin audit log records changes made
+    by running cmdlets in Exchange Online PowerShell — 'The audit log doesn't record cmdlets
+    that begin with the verbs Get-, Search-, or Test-' (audit-log-activities, 'Exchange admin
+    activities'). Original ComplianceSearchAction op: New-ComplianceSearchAction."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    search = f"Search-{random.randint(1000, 9999)}"
+    return [admin_cmdlet("New-ComplianceSearchAction", admin,
+                         _param(SearchName=search, Purge=random.choice(["SoftDelete", "HardDelete"]),
+                                Confirm="False"))]
+
+
+def scenario_mailbox_permission_removed(config=None):
+    """Remove-MailboxPermission FullAccess from a victim -> 'removed delegate mailbox
+    permissions'; an attacker who finished with a delegate path deletes the trail.
+    Verified: 'Removed delegate mailbox permissions | Remove-MailboxPermission' in the
+    Exchange mailbox activities table (audit-log-activities)."""
+    attacker = ac.pick_user(config); victim = ac.pick_user(config)
+    return [admin_cmdlet("Remove-MailboxPermission", attacker, _param(Identity=victim["upn"],
+                          User=attacker["upn"], AccessRights="FullAccess"), target_user=victim)]
+
+
+def scenario_inbox_rule_modified(config=None):
+    """Set-InboxRule that adds external forwarding to an EXISTING rule -> 'modified inbox
+    rule' variant of the classic forwarding-down detector. Verified: 'Modified inbox rule
+    from Outlook web app | Set-InboxRule' in the Exchange mailbox activities table."""
+    u = ac.pick_user(config)
+    ext = f"{u['username'].replace('.', '')}@{random.choice(_EXT_DOMAINS)}"
+    return [admin_cmdlet("Set-InboxRule", u, _param(Name="Invoices", ForwardTo=ext,
+                          StopProcessingRules="True"), target_user=u)]
+
+
+def scenario_transport_rule_disabled(config=None):
+    """Existing transport (mail-flow) rule disabled or edited off by a delegate -> mail-flow
+    protection removed. Real Exchange cmdlets (Disable-TransportRule / disabling via
+    Set-TransportRule Enabled=False): cmdlet-run records per the Exchange admin audit rules
+    noted in scenario_compliance_search_purge_action."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [admin_cmdlet(random.choice(["Disable-TransportRule", "Set-TransportRule"]), admin,
+                         _param(Identity=random.choice(["Junk Filter", "Vendor Domains Valid"]),
+                                Enabled="False", ExceptIfFrom=ORG_NAME),
+                         result="True")]
+
+
+def scenario_recoverable_items_purge(config=None):
+    """Purged messages from the mailbox (HardDelete — permanently removed from Recoverable
+    Items) in a short burst from OWA -> anti-forensic permanent deletion.
+    Verified: 'Purged messages from the mailbox | HardDelete' in the Exchange mailbox
+    activities table (audit-log-activities)."""
+    u = ac.pick_user(config)
+    return [mailbox_action("HardDelete", u, client="OWA",
+                           item={"Subject": random.choice(["Invoice overdue", "Wire transfer confirmation",
+                                                           "Password reset instructions"]),
+                                 "ParentFolder": {"Path": "\\Deleted Items"}},
+                           offset_s=-i * 7)
+            for i in range(random.randint(3, 6))]
 
 
 SCENARIOS = {
@@ -517,6 +665,11 @@ SCENARIOS = {
     "mailbox_enumeration": scenario_mailbox_enumeration,
     "dlp_policy_disabled": scenario_dlp_policy_disabled,
     "audit_bypass": scenario_audit_bypass,
+    "compliance_search_purge_action": scenario_compliance_search_purge_action,
+    "mailbox_permission_removed": scenario_mailbox_permission_removed,
+    "inbox_rule_modified": scenario_inbox_rule_modified,
+    "transport_rule_disabled": scenario_transport_rule_disabled,
+    "recoverable_items_purge": scenario_recoverable_items_purge,
 }
 
 
