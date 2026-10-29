@@ -5381,6 +5381,50 @@
       "Claude"
     ]
   },
+  "vmware_esxi_config": {
+    "_comment": "VMware ESXi host syslog. PLAIN syslog (Format=Raw), not CEF. Broker VM Syslog applet: Protocol=TCP, Format=Raw, Vendor=VMware, Product=ESXi, listening on syslog_port. Lands in vmware_esxi_raw; the Marketplace 'VMware ESXi' content pack supplies the parsing + modeling rules (regexcapture -> parsed_fields -> XDM identity/user/process + Virtualization Stories). Threat mix is the module's _THREATS table.",
+    "syslog_port": 1517,
+    "event_interval": 100,
+    "_comment_event_interval": "Default seconds between events for this source (~0.01/s). A real ESXi host is quiet — outside the ambient vpxa poll it changes state rarely — so it defaults far below the usual 1/s. The dashboard reads this at module load (overrides the module's DEFAULT_EVENT_INTERVAL and the global base_event_interval_seconds); operators can still raise the rate per run.",
+    "_comment_syslog_port": "Dedicated collector port — plain syslog has no in-body routing key, so ESXi is separated from the other syslog sources (cisco_asa 1514, apache 1515, infoblox 1516) BY PORT. Configure a Broker VM Syslog collector on 1517 with Vendor=VMware Product=ESXi Format=Raw.",
+    "hosts": [
+      "esxi01.corp.examplecorp.local",
+      "esxi02.corp.examplecorp.local",
+      "esxi03.corp.examplecorp.local"
+    ],
+    "mgmt_ip": "127.0.0.1",
+    "_comment_mgmt_ip": "Loopback is what hostd records for local/console (DCUI/esxcli) auth; remote logons carry the client IP from the session context or an external pool.",
+    "admins": [
+      "root",
+      "svc_vcenter",
+      "vmadmin"
+    ],
+    "disabled_accounts": [
+      "svc_legacy",
+      "auditor"
+    ],
+    "_comment_disabled_accounts": "Accounts that still exist but are disabled (NoAccess/locked). A login attempt against one is logged as 'account is disabled' — distinct from an unknown user.",
+    "former_accounts": [
+      "jdoe",
+      "contractor1",
+      "tempadmin"
+    ],
+    "_comment_former_accounts": "Deleted/offboarded accounts. A login attempt surfaces as an unknown user (SSH 'Invalid user' / console 'no such user').",
+    "datastores": [
+      "datastore1",
+      "ds-prod-nfs01",
+      "ds-vsan-01"
+    ],
+    "vms": [
+      "DC01",
+      "FILE01",
+      "SQL01",
+      "WEB01",
+      "APP01",
+      "EXCH01",
+      "BACKUP01"
+    ]
+  },
   "infoblox_config": {
     "syslog_port": 1516,
     "hostnames": [
