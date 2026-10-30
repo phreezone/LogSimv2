@@ -46,9 +46,13 @@ import time
 from datetime import datetime, timezone
 
 try:
+    from modules import mgmt_plane
+    from modules.azure_common import activity_weight
     from modules.session_utils import (correlated_or_random_user, get_random_user,
                                         random_external_ip, rare_external_ip)
 except ImportError:
+    import mgmt_plane
+    from azure_common import activity_weight
     from session_utils import (correlated_or_random_user, get_random_user,
                                random_external_ip, rare_external_ip)
 
@@ -214,6 +218,21 @@ def _mgmt_ip(config):
     return _conf(config).get("mgmt_ip", "127.0.0.1")
 
 
+def _vcenter(config):
+    """(name, ip) of the managing vCenter. vpxa is present on these hosts, so they ARE
+    vCenter-managed; vCenter drives the host through the built-in 'vpxuser' account."""
+    c = _conf(config)
+    return (c.get("vcenter_name", "vcenter.corp.examplecorp.local"),
+            c.get("vcenter_ip", "10.0.20.20"))
+
+
+def _backup_proxy(config):
+    """(ip, account) of the VM backup proxy that snapshots and reads VMs over NFC. The
+    legitimate counterpart to the vm_disk_export threat (same NFC file-read mechanism)."""
+    c = _conf(config)
+    return c.get("backup_proxy_ip", "10.0.20.15"), c.get("backup_account", "svc_vmbackup")
+
+
 # ── Timestamp / header ─────────────────────────────────────────────────────────
 
 def _ts(dt=None):
@@ -322,7 +341,10 @@ def _resolve_admin(config, session_context, external=False):
     user = random.choice(_admins(config))
     if external:
         return user, random_external_ip(config)
-    return user, _mgmt_ip(config)
+    # Remote administration comes from the shared ops-team jump hosts / admin subnet
+    # (mgmt_plane) — the same sources the firewall modules use. Console-only generators
+    # (DCUI, the syslog-logHost "Set called with key") hardcode loopback themselves.
+    return user, mgmt_plane.admin_source(config)
 
 
 # ── Benign generators ───────────────────────────────────────────────────────────
@@ -722,34 +744,238 @@ def _b_stale_account_login(config, host, session_context):
                        opid=_opid())
 
 
-# Benign mix — weights tuned so the ambient poll dominates while the activities the
-# environment must always show (shell logins, SSH/Shell enable+disable, VM power, VM
-# lifecycle) each appear reliably.
+# ── Policy / configuration changes ─────────────────────────────────────────────
+
+# Benign values for the advanced settings admins actually tune: shell timeouts, password
+# and lockout policy, log levels, the DCUI banner, BPDU filter, session timeout. (The
+# syslog-logHost clear is the remote_syslog_disabled threat; the same mechanism carries
+# ordinary tuning here.)
+_BENIGN_ADVANCED_SETTINGS = [
+    ("UserVars.ESXiShellTimeOut", "900"),
+    ("UserVars.ESXiShellInteractiveTimeOut", "900"),
+    ("UserVars.HostClientSessionTimeout", "900"),
+    ("Security.AccountLockFailures", "5"),
+    ("Security.AccountUnlockTime", "900"),
+    ("Security.PasswordQualityControl", "retry=3 min=disabled,disabled,disabled,7,7"),
+    ("Security.PasswordMaxDays", "90"),
+    ("Config.HostAgent.log.level", "info"),
+    ("Syslog.global.logLevel", "info"),
+    ("Annotations.WelcomeMessage", "Authorized use only"),
+    ("Net.BlockGuestBPDU", "1"),
+    ("UserVars.SuppressShellWarning", "0"),
+]
+
+_PORTGROUPS = ["VM Network", "Prod-VLAN110", "Mgmt-VLAN10", "vMotion", "Backup-VLAN30"]
+
+
+def _b_config_change(config, host, session_context):
+    """Routine host policy / configuration changes by the ops team: advanced settings
+    (password / lockout / shell-timeout policy), lockdown mode, NTP / DNS, vSwitch
+    port-group security policy, firewall allowed-IP lists, role definitions. hostd records
+    both the low-level 'Set called with key' and the higher-level Event."""
+    user, src = _resolve_admin(config, session_context)
+    ev = random.randint(900000, 999999)
+    kind = random.choices(["advanced", "lockdown", "ntp_dns", "portgroup", "fw_allowed", "role"],
+                          weights=[34, 10, 14, 14, 14, 14], k=1)[0]
+    if kind == "advanced":
+        key, val = random.choice(_BENIGN_ADVANCED_SETTINGS)
+        return [
+            _hostd_line(config, host, "info", "Vimsvc", f'Set called with key "{key}", value "{val}"',
+                        opid=_opid(), user=user),
+            _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                        f"Event {ev} : Advanced option {key} changed to '{val}' on {host} "
+                        f"by {user}@{src}", opid=_opid(), user=user),
+        ]
+    if kind == "lockdown":
+        # Admins drop lockdown for a maintenance task and restore it afterwards.
+        a, b = random.choice([("Disabled", "Normal"), ("Disabled", "Normal"), ("Normal", "Disabled")])
+        return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                           f"Event {ev} : Lockdown mode of host {host} changed from {a} to {b} "
+                           f"by {user}@{src}", opid=_opid(), user=user)
+    if kind == "ntp_dns":
+        if random.random() < 0.5:
+            servers = random.choice(["10.0.10.10, 10.0.20.10", "time.google.com, pool.ntp.org"])
+            body = f"NTP server list updated to [{servers}] on {host}"
+        else:
+            body = (f"DNS configuration changed on {host}: servers 10.0.10.10, 10.0.20.10, "
+                    f"search domain corp.examplecorp.local")
+        return _hostd_line(config, host, "info", "Hostsvc", body, opid=_opid(), user=user)
+    if kind == "portgroup":
+        pg = random.choice(_PORTGROUPS)
+        policy = random.choice(["promiscuous mode", "forged transmits", "MAC address changes"])
+        return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                           f"Event {ev} : Security policy on port group '{pg}' updated: {policy} "
+                           f"set to Reject by {user}@{src}", opid=_opid(), user=user)
+    if kind == "fw_allowed":
+        ruleset = random.choice(["sshServer", "vSphereClient", "webAccess", "CIMHttpsServer"])
+        subnet = mgmt_plane.conf(config)["admin_subnet"]
+        return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                           f"Event {ev} : Firewall ruleset {ruleset} allowed IP list set to "
+                           f"{subnet} on {host} by {user}@{src}", opid=_opid(), user=user)
+    role = random.choice(["BackupOperator", "MonitoringReadOnly", "VMOperator", "HelpdeskConsole"])
+    verb = random.choice(["created", "modified"])
+    return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                       f"Event {ev} : Role {role} was {verb} on host {host} by {user}@{src}",
+                       opid=_opid(), user=user)
+
+
+def _b_service_policy(config, host, session_context):
+    """A host service's startup policy or running state changed — SSH / ESXi Shell / NTP /
+    CIM / SNMP start policy, or a start / stop / restart."""
+    user, src = _resolve_admin(config, session_context)
+    svc, policies = random.choice([
+        ("TSM-SSH", ["on", "off", "automatic"]),
+        ("TSM", ["on", "off"]),              # ESXi Shell
+        ("ntpd", ["on", "automatic"]),
+        ("sfcbd-watchdog", ["off", "on"]),   # CIM
+        ("snmpd", ["off", "on"]),
+    ])
+    ev = random.randint(900000, 999999)
+    if random.random() < 0.6:
+        pol = random.choice(policies)
+        body = f"Event {ev} : Service {svc} startup policy changed to '{pol}' on {host}"
+    else:
+        act = random.choice(["started", "stopped", "restarted"])
+        body = f"Event {ev} : Service {svc} {act} on {host}"
+    return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr", body, opid=_opid(), user=user)
+
+
+def _b_patch_activity(config, host, session_context):
+    """Benign patch / VIB maintenance — the legitimate counterpart to the VIB-bypass
+    threat: a signed VIB install and an image-profile compliance scan via esxupdate."""
+    user, src = _resolve_admin(config, session_context)
+    pri = _pri(_FAC_DAEMON, "info")
+    pid = random.randint(2100000, 2600000)
+    if random.random() < 0.5:
+        vib = random.choice(["VMware_bootbank_esx-base", "VMW_bootbank_nvme-pcie",
+                             "VMware_bootbank_esx-update", "VMW_bootbank_vmkusb"])
+        return (f"<{pri}>{_ts()} {host} esxupdate[{pid}]: esxupdate: INFO: Installed VIB "
+                f"{vib} (acceptance level VMwareCertified)")
+    return (f"<{pri}>{_ts()} {host} esxupdate[{pid}]: esxupdate: INFO: Scanning image "
+            f"profile against depot; host is compliant")
+
+
+# ── Runtime activity ────────────────────────────────────────────────────────────
+
+def _b_vcenter_sync(config, host, session_context):
+    """vCenter <-> host management traffic over vpxa: vpxuser login / logout, inventory
+    and task syncs, heartbeat, connect / disconnect / reconnect. On a managed host this is
+    the bulk of authenticated activity — most hostd logins are vpxuser, not people."""
+    vc_name, vc_ip = _vcenter(config)
+    ev = random.randint(900000, 999999)
+    kind = random.choices(
+        ["heartbeat", "vpxa_task", "vpxuser_login", "vpxuser_logout", "connected",
+         "disconnected", "reconnect"],
+        weights=[30, 30, 12, 8, 6, 6, 8], k=1)[0]
+    if kind == "heartbeat":
+        return _hostd_line(config, host, "verbose", "vpxLro",
+                           f"Sent heartbeat to vCenter Server {vc_ip}; sequence "
+                           f"{random.randint(1000, 999999)}",
+                           opid=f"hb-{random.randint(0, 0xffffff):06x}")
+    if kind == "vpxa_task":
+        op = random.choice(["vim.host.StorageSystem.refresh", "vim.host.NetworkSystem.refresh",
+                            "vpxapi.VpxaService.retrieveChanges", "vim.PerformanceManager.queryStats",
+                            "vim.HostSystem.retrieveInternalConfigManager"])
+        return _hostd_line(config, host, "verbose", "vpxLro",
+                           f"Task {op} invoked by vCenter {vc_name} completed",
+                           opid=f"vpxd-{random.randint(0, 0xffffff):06x}")
+    if kind == "vpxuser_login":
+        return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                           f"Event {ev} : User vpxuser@{vc_ip} logged in as VMware-client/8.0.0",
+                           opid=_opid(), user="vpxuser")
+    if kind == "vpxuser_logout":
+        return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                           f"Event {ev} : User vpxuser@{vc_ip} logged out (login time: {_ts()}, "
+                           f"number of API invocations: {random.randint(50, 4000)}, user agent: "
+                           f"VMware-client/8.0.0)", opid=_opid(), user="vpxuser")
+    if kind == "connected":
+        return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                           f"Event {ev} : Host {host} is connected to vCenter Server {vc_ip}",
+                           opid=_opid())
+    if kind == "disconnected":
+        return _hostd_line(config, host, "warning", "Vimsvc.ha-eventmgr",
+                           f"Event {ev} : Host {host} has lost connection to vCenter Server {vc_ip}",
+                           opid=_opid())
+    return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                       f"Event {ev} : vpxa reconnected to vCenter Server {vc_ip}", opid=_opid())
+
+
+def _b_backup_job(config, host, session_context):
+    """The scheduled VM backup: the backup proxy snapshots a VM, reads it over NFC, then
+    removes the snapshot. The BENIGN baseline the vm_disk_export threat stands against —
+    same NFC file-read, but a known proxy IP and service account."""
+    proxy_ip, acct = _backup_proxy(config)
+    vm = random.choice(_vms(config))
+    ds = random.choice(_datastores(config))
+    e = lambda: random.randint(900000, 999999)
+    return [
+        _hostd_line(config, host, "info", f"Vmsvc.vm:/vmfs/volumes/{vm}",
+                    f"Create Snapshot: VEEAM BACKUP TEMP, memory=false, quiescent=true "
+                    f"state=5 vm={vm}", opid=_opid(), user=acct),
+        _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                    f"Event {e()} : File download from path /vmfs/volumes/{ds}/{vm}/{vm}-flat.vmdk "
+                    f"was initiated from {proxy_ip} by {acct}", opid=_opid(), user=acct),
+        _hostd_line(config, host, "info", f"Vmsvc.vm:/vmfs/volumes/{vm}",
+                    f"Remove Snapshot: VEEAM BACKUP TEMP vm={vm}", opid=_opid(), user=acct),
+    ]
+
+
+def _b_datastore_ops(config, host, session_context):
+    """Routine datastore / storage administration — HBA rescan, NFS mount, capacity, grow."""
+    ds = random.choice(_datastores(config))
+    ev = random.randint(900000, 999999)
+    body = random.choice([
+        f"Event {ev} : Rescan of all HBAs on {host} completed",
+        f"Event {ev} : NFS datastore {ds} mounted on {host}",
+        f"Event {ev} : Datastore {ds} on {host} is {random.randint(60, 88)}% full",
+        f"Event {ev} : VMFS volume {ds} was expanded on {host}",
+    ])
+    sev = "warning" if ("% full" in body and int(body.split("% full")[0].split()[-1]) >= 85) else "info"
+    return _hostd_line(config, host, sev, "Vmsvc.vm", body, opid=_opid())
+
+
+# Benign mix — (generator, weight, human). `human` events are admin / config / login
+# driven and cluster in business hours; the rest are machine-driven and run around the
+# clock, dominating off-hours (see _benign's activity_weight gate). Weights keep the
+# ambient poll + vCenter sync on top while every named activity still appears reliably.
 _BENIGN_MIX = [
-    (_b_vpxa_poll,         22),
-    (_b_shell_command,     14),   # common-command baseline for the rarity analytics
-    (_b_vmkernel,          12),   # storage path/SCSI/APD/PDL, NIC link, hardware sensors
-    (_b_shell_login,       11),   # SSH / ESXi Shell / DCUI logins + logouts
-    (_b_vm_power,          11),   # VM power on/off/suspend/reset/guest shutdown
-    (_b_ssh_service_toggle, 7),   # SSH / ESXi Shell enabled + disabled
-    (_b_vm_lifecycle,       7),   # create/clone/reconfigure/vMotion/snapshot
-    (_b_vsphere_session,    6),   # vSphere Client / API login + logout
-    (_b_ha_drs,             5),   # vSphere HA (fdm) + DRS load-balancing
-    (_b_service_health,     5),
-    (_b_service_control,    5),   # service restart / cert renew / NTP / ruleset
-    (_b_storage,            4),
-    (_b_account_admin,      4),   # create/disable/delete/lockout/password/role/review
-    (_b_stale_account_login, 4),  # login attempts vs disabled + deleted accounts
-    (_b_snapshot,           3),
-    (_b_maintenance_mode,   3),
-    (_b_crond,              3),
+    (_b_vpxa_poll,          18, False),
+    (_b_vcenter_sync,       14, False),  # vpxuser/vpxa sync — bulk of managed-host auth
+    (_b_shell_command,      12, False),  # common-command baseline for the rarity analytics
+    (_b_vmkernel,           11, False),  # storage path/SCSI/APD/PDL, NIC link, sensors
+    (_b_vm_power,            9, False),  # VM power on/off/suspend/reset/guest shutdown
+    (_b_shell_login,         9, True),   # SSH / ESXi Shell / DCUI logins + logouts
+    (_b_config_change,       7, True),   # advanced settings / lockdown / NTP / fw / role
+    (_b_vm_lifecycle,        6, True),   # create/clone/reconfigure/vMotion/snapshot
+    (_b_ssh_service_toggle,  5, True),   # SSH / ESXi Shell enabled + disabled
+    (_b_vsphere_session,     5, True),   # vSphere Client / API login + logout
+    (_b_ha_drs,              5, False),  # vSphere HA (fdm) + DRS load-balancing
+    (_b_service_control,     4, False),  # service restart / cert renew / NTP / ruleset
+    (_b_service_health,      4, False),
+    (_b_backup_job,          4, False),  # nightly snapshot + NFC read + remove
+    (_b_account_admin,       4, True),   # create/disable/delete/lockout/password/role
+    (_b_service_policy,      3, True),   # service startup policy + start/stop/restart
+    (_b_storage,             3, False),
+    (_b_datastore_ops,       3, False),  # rescan / NFS mount / capacity / grow
+    (_b_stale_account_login, 3, False),  # login attempts vs disabled + deleted accounts
+    (_b_snapshot,            3, False),
+    (_b_maintenance_mode,    3, True),
+    (_b_patch_activity,      2, True),   # signed VIB install / image-profile scan
+    (_b_crond,               3, False),
 ]
 
 
 def _benign(config, session_context=None):
     host = random.choice(_hosts(config))
-    fns = [f for f, _ in _BENIGN_MIX]
-    weights = [w for _, w in _BENIGN_MIX]
+    # Business-hours gate: human admin / config-change / login events cluster in work
+    # hours; machine events (poll, kernel, vCenter sync, backup, cron) run around the
+    # clock and dominate off-hours. activity_weight() is the shared org-time curve.
+    if random.random() > activity_weight():
+        pool = [(f, w) for f, w, human in _BENIGN_MIX if not human]
+    else:
+        pool = [(f, w) for f, w, human in _BENIGN_MIX]
+    fns = [f for f, _ in pool]
+    weights = [w for _, w in pool]
     fn = random.choices(fns, weights=weights, k=1)[0]
     return fn(config, host, session_context)
 

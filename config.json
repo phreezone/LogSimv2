@@ -5778,7 +5778,13 @@
       "esxi03.corp.examplecorp.local"
     ],
     "mgmt_ip": "127.0.0.1",
-    "_comment_mgmt_ip": "Loopback is what hostd records for local/console (DCUI/esxcli) auth; remote logons carry the client IP from the session context or an external pool.",
+    "_comment_mgmt_ip": "Loopback is what hostd records for local/console (DCUI/esxcli) auth; remote logons carry the client IP from the session context, the ops-team jump hosts (management_plane), or an external pool.",
+    "vcenter_name": "vcenter.corp.examplecorp.local",
+    "vcenter_ip": "10.0.20.20",
+    "_comment_vcenter": "The managing vCenter Server. vpxa is present on these hosts, so they are vCenter-managed; vCenter drives the host as the built-in 'vpxuser' account (the bulk of hostd logins on a managed host).",
+    "backup_proxy_ip": "10.0.20.15",
+    "backup_account": "svc_vmbackup",
+    "_comment_backup": "VM backup proxy (NFC/VDDK) that snapshots and reads whole VMs on a schedule. The benign baseline the vm_disk_export threat stands against.",
     "admins": [
       "root",
       "svc_vcenter",
