@@ -1417,13 +1417,17 @@ _THREAT_FUNCS = {
 
 
 def _generate_threat_log(config, session_context, forced_event=None):
+    """Returns (log_content, event_name) so the dashboard counts the threat. The caller
+    (generate_log) passes this through unchanged; record_log increments total_threats
+    once per event when event_name is in get_threat_names(). Returning bare logs here
+    (the earlier bug) left event_name None, so the threat counter never moved."""
     if forced_event:
         fn = _THREAT_FUNCS.get(forced_event)
-        return fn(config, session_context) if fn else None
+        return (fn(config, session_context), forced_event) if fn else None
     events = [t["event"] for t in _THREATS]
     weights = [t["weight"] for t in _THREATS]
     choice = random.choices(events, weights=weights, k=1)[0]
-    return _THREAT_FUNCS[choice](config, session_context)
+    return (_THREAT_FUNCS[choice](config, session_context), choice)
 
 
 def _get_threat_interval(threat_level, config):
