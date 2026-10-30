@@ -1105,6 +1105,14 @@ ANALYTIC_ALERTS = {
     "failed_federation_change": "Azure domain federation settings modification attempt",
     "wip_cloud_group_change": "A cloud identity created or modified a security group",
     "wip_azure_group_create_delete": "Azure group creation/deletion",
+    # App-management family: validated 2026-10-30 against REAL user-initiated tenant events (a custom
+    # "Crawler" app registration + credential) — our record shapes match the real rows. They did NOT
+    # raise standalone alerts, and that is EXPECTED: on their Cortex pages these are Informational
+    # severity (Service principal/Application creation, Owner added, Credentials added via the Cloud
+    # module) which do not surface as standalone alerts, and the Low/Medium variants carry a 14-day
+    # activation + 30-day training window. So "no alert here" is Informational/activation-gated, NOT a
+    # data-shape bug — do not re-chase these as broken. Required data: Azure Audit Log OR Microsoft
+    # Graph Logs (Cloud module) or AzureAD Audit Log + Identity Threat Module.
     "wip_app_credential_added": "Credentials were added to Azure application",
     "wip_app_owner_added": "Owner was added to Azure application",
     "wip_app_owner_removed": "Removal of an Azure Owner from an Application or Service Principal",
