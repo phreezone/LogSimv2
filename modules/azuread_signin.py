@@ -52,6 +52,14 @@ def _tor_ip(config):
     return random.choice(RISKY_IPS)
 
 
+def _ext_src(config=None, src_ip=None):
+    """A non-TOR external source location (a real announced hosting/VPS IP, geolocated) for brute
+    force / spray / lockout. Those must NOT come from a TOR exit, or XSIAM raises the TOR sign-in
+    detector instead of the brute-force/spray analytics. src_ip overrides the IP but keeps the geo."""
+    loc = ac.rare_asn_loc()
+    return {**loc, "ip": src_ip} if src_ip else loc
+
+
 def _signin(user, loc, *, interactive=True, success=True, error_code=0,
             failure="Other.", risk_level="none", risk_state="none", risk_detail="none",
             risk_events=None, offset_s=0,
@@ -291,10 +299,7 @@ def _benign_mix(config, user, loc):
 
 def scenario_brute_force(config=None, user=None, attempts=60, src_ip=None):
     u = ac.pick_user(config)
-    loc = ac.egress(u)
-    ip = src_ip or random.choice(RISKY_IPS)
-    bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    bad = _ext_src(config, src_ip)   # one non-TOR external source IP for the whole campaign
     offs = _burst_offsets(attempts)
     out = [_signin(u, bad, interactive=True, success=False, error_code=50126,
                    failure="Invalid username or password.", conditional="notApplied",
@@ -329,9 +334,7 @@ def _distinct_victims(config, n):
 
 
 def scenario_password_spray(config=None, victims=50, src_ip=None):
-    ip = src_ip or random.choice(RISKY_IPS)
-    bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    bad = _ext_src(config, src_ip)   # one non-TOR external source IP, many distinct victims
     sprayed = _distinct_victims(config, victims)
     offs = _burst_offsets(victims)
     out = [_signin(u, bad, interactive=True, success=False, error_code=50126,
@@ -400,16 +403,12 @@ def scenario_new_country_signin(config=None, user=None):
 def scenario_account_lockout_spray(config=None, victims=40, src_ip=None):
     """Many distinct users hit account lockout (errorCode 50053) from one source ->
     'Multiple user accounts failed login due to account lockouts' (Low)."""
-    ip = src_ip or random.choice(RISKY_IPS)
-    bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 0, "longitude": 0}}
-    out = []
+    bad = _ext_src(config, src_ip)   # non-TOR external source
     offs = _burst_offsets(victims)
-    for i in range(victims):
-        u = ac.pick_user(config)
-        out.append(_signin(u, bad, interactive=True, success=False, error_code=50053,
-                           failure="Account is locked because the user tried to sign in too many times with an incorrect user ID or password.",
-                           conditional="notApplied", offset_s=offs[i]))
+    out = [_signin(u, bad, interactive=True, success=False, error_code=50053,
+                   failure="Account is locked because the user tried to sign in too many times with an incorrect user ID or password.",
+                   conditional="notApplied", offset_s=offs[i])
+           for i, u in enumerate(_distinct_victims(config, victims))]
     return out
 
 
@@ -551,16 +550,13 @@ def scenario_machine_account_sso(config=None, user=None):
 def scenario_sso_spray_ip_rotation(config=None, victims=50):
     """Password spray with ROTATING source IPs across a subnet -> 'IP Rotation Pattern in SSO
     Spray' (evades per-IP lockout)."""
-    net = random.choice(["45.148", "193.218", "185.220"])
-    out = []
+    base = _ext_src(config)                       # a real non-TOR hosting block
+    net = ".".join(base["ip"].split(".")[:3])     # rotate IPs within its /24
     offs = _burst_offsets(victims)
-    for i in range(victims):
-        v = ac.pick_user(config)
-        ip = f"{net}.{random.randint(0, 255)}.{random.randint(2, 250)}"
-        out.append(_signin(v, {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
-                    "geoCoordinates": {"latitude": 0, "longitude": 0}}, interactive=True,
-                    success=False, error_code=50126, failure="Invalid username or password.",
-                    conditional="notApplied", offset_s=offs[i]))
+    out = [_signin(v, {**base, "ip": f"{net}.{random.randint(2, 250)}"}, interactive=True,
+                   success=False, error_code=50126, failure="Invalid username or password.",
+                   conditional="notApplied", offset_s=offs[i])
+           for i, v in enumerate(_distinct_victims(config, victims))]
     return out
 
 
