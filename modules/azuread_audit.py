@@ -1160,6 +1160,9 @@ ANALYTIC_ALERTS = {
     "pim_alert_disabled":       "Azure AD PIM alert disabled",
     "pim_role_settings_change": "Azure AD PIM role settings change",
     "unverified_domain_added":  "Rare unverified domain addition to Azure AD",
+    # Confirmed firing 2026-10-30 (fire -> alert observed; CA-removed re-confirmed with the full
+    # policy-JSON shape, guest invite with the two-row Invited Users + Add user shape).
+    "unusual_guest_invitation": "Rare successful guest invitation in the organization",
     "federated_domain_backdoor": "A successful Azure domain federation settings modification",
     "failed_federation_change": "Azure domain federation settings modification attempt",
     "wip_cloud_group_change": "A cloud identity created or modified a security group",
