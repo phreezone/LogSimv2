@@ -856,6 +856,8 @@ SCENARIOS.update({
 })
 
 ANALYTIC_ALERTS = {
+    # Confirmed firing 2026-10-30 (fire -> alert observed on this feed's synthetic data).
+    "tor_signin": "A successful SSO sign-in from TOR",
     "wip_unusual_country_api": "A cloud identity executed an API call from an unusual country",
     "wip_high_risk_ip_activity": "Cloud activity from a high-risk IP address",
     "wip_api_call_from_tor": "Suspicious API call from a Tor exit node",

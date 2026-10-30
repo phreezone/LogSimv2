@@ -1093,7 +1093,10 @@ SCENARIOS.update({
 # held back: one alert in three weeks, not attributable to the scenario over the
 # catalog's own password-reset records.
 ANALYTIC_ALERTS = {
-    "admin_role_add":           "Suspicious Azure AD Administrator Role assignment",
+    # Observed firing 2026-10-30: the tenant raised the Cloud privilege-escalation analytic for the
+    # Global Administrator grant (was mapped to "Suspicious Azure AD Administrator Role assignment").
+    "admin_role_add":           "A cloud identity escalated its permissions to a high privilege role/policy",
+    "consent_risky_app":        "First seen Azure admin consent to an application",
     "ca_policy_removed":        "Conditional Access policy removed",
     "pim_alert_disabled":       "Azure AD PIM alert disabled",
     "pim_role_settings_change": "Azure AD PIM role settings change",
