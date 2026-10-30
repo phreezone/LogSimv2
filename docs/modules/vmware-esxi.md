@@ -31,7 +31,7 @@ Plain syslog carries **no in-body routing key** (unlike the CEF `__firewall_type
 
 ## Benign events
 
-Routine day-to-day ESX operations that build a clean per-host baseline. Each is its own weighted generator (`_BENIGN_MIX`), so the activities an ESX environment must always show are first-class and reliably present:
+Routine day-to-day ESX operations that build a clean per-host baseline. Each is its own weighted generator (`_BENIGN_MIX`), so the activities an ESX environment must always show are first-class and reliably present. The mix is **time-of-day weighted** (shared `azure_common.activity_weight`): admin/config/login events (`human`) cluster in business hours, while machine events (vpxa poll, vCenter sync, vmkernel, backup, cron) run around the clock and dominate off-hours. Remote admin sources come from the shared ops-team jump hosts (`mgmt_plane`), so ESXi administration correlates with the firewall feeds.
 
 | Event | Detail |
 |---|---|
@@ -45,6 +45,12 @@ Routine day-to-day ESX operations that build a clean per-host baseline. Each is 
 | VM lifecycle | Create, clone, reconfigure, vMotion migration, snapshot remove/consolidate |
 | vSphere session | vSphere Client / API login + logout (`hostd` `Vimsvc.ha-eventmgr`, with client IP + user) |
 | **vmkernel** | Storage path state / SCSI sense / APD / PDL, `vmnic` link up/down, hardware-sensor (fan/PSU/temp), memory admission — `vmkernel.log` / `vmkwarning.log` |
+| **vCenter sync (runtime)** | The bulk of a managed host's authenticated activity: `vpxuser` login/logout from vCenter, `vpxa` inventory/task syncs, heartbeats, and connect / disconnect / reconnect |
+| **Policy / config change** | Advanced settings (`Set called with key "…"` + the changed-option event: shell timeouts, password/lockout policy, log level, DCUI banner), lockdown-mode toggle, NTP/DNS config, port-group security policy, firewall allowed-IP lists, role create/modify |
+| **Service policy** | Service startup policy (SSH / ESXi Shell / NTP / CIM / SNMP → on/off/automatic) and service start/stop/restart |
+| **Backup job (runtime)** | Scheduled VM backup: snapshot create → NFC `File download` read → snapshot remove, by the backup proxy IP + service account (the benign baseline `vm_disk_export` stands against) |
+| **Patch activity** | Signed VIB install and image-profile compliance scan via `esxupdate` (benign counterpart to the VIB-bypass threat) |
+| **Datastore ops** | HBA rescan, NFS mount, capacity, VMFS grow |
 | **HA / DRS** | vSphere HA (`fdm`) heartbeats, master election, host-isolation checks, and DRS load-balancing migrations |
 | **Service control** | `hostd`/`vpxa`/`ntpd` restarts, SSL certificate renewal, NTP sync, firewall-ruleset enable/refresh |
 | Snapshot create | Backup-job snapshot, quiesced |
