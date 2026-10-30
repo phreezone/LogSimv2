@@ -254,9 +254,47 @@ def _b_provisioning(cfg):
                  reason="Retrieved TenantDetail 'MSFT' from Microsoft Entra ID")
 
 
+def _b_enable_disable_account(cfg):
+    # Routine lifecycle: an admin enables or disables a user account. Real rows carry array-form
+    # AccountEnabled plus the Included Updated Properties marker. Verified against live tenant rows.
+    admin = ac.pick_by_role(cfg, HELPDESK_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
+    enable = random.random() < 0.5
+    old, new = ([False], [True]) if enable else ([True], [False])
+    return audit("Enable account" if enable else "Disable account", "UserManagement",
+                 "Core Directory", "Update", by_user(admin),
+                 [t_user(tgt, [mp("AccountEnabled", old, new),
+                               mp("Included Updated Properties", None, "AccountEnabled")])], [_ua(admin)])
+
+
+def _b_update_sp(cfg):
+    # Routine service-principal property update (ApplicationManagement). Real mods carry just the
+    # Included Updated Properties marker; additionalDetails carry AppId + owner org + SP type.
+    admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",)); app = _saas_app(); app_id = ac.app_id(app)
+    return audit("Update service principal", "ApplicationManagement", "Core Directory", "Update",
+                 by_user(admin), [t_obj("ServicePrincipal", app,
+                 [mp("Included Updated Properties", None, "")])],
+                 _app_details(admin, app_id, owner_org=ac.HOME_TENANT_ID))
+
+
+def _b_delegated_grant(cfg):
+    # A delegated OAuth2 permission grant to Microsoft Graph (admin, AllPrincipals). Verified shape.
+    admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",))
+    scope = random.choice(["User.Read", "User.Read openid profile", "offline_access User.Read",
+                           "Directory.Read.All", "Group.Read.All User.Read"])
+    tgt = t_obj("ServicePrincipal", "Microsoft Graph",
+                [mp("DelegatedPermissionGrant.Scope", None, scope),
+                 mp("DelegatedPermissionGrant.ConsentType", None, "AllPrincipals"),
+                 mp("ServicePrincipal.ObjectID", None, ac._stable_guid("sp:" + _saas_app()))])
+    tgt["id"] = ac._stable_guid("sp:Microsoft Graph")
+    return audit("Add delegated permission grant", "ApplicationManagement", "Core Directory",
+                 "Assign", by_user(admin), [tgt],
+                 _app_details(admin, "00000003-0000-0000-c000-000000000000"))
+
+
 # High-fidelity builders for the common activities (bespoke modifiedProperties/details).
 _B_HUMAN = [_b_update_user, _b_secinfo_register, _b_group_member, _b_self_password,
-            _b_app_role_assign, _b_consent, _b_register_device, _b_admin_reset, _b_token_timestamp]
+            _b_app_role_assign, _b_consent, _b_register_device, _b_admin_reset, _b_token_timestamp,
+            _b_enable_disable_account, _b_update_sp, _b_delegated_grant]
 
 _ROLES_T = ["Helpdesk Administrator", "User Administrator", "Security Reader",
             "Exchange Administrator", "Global Reader", "Application Administrator"]
@@ -850,6 +888,16 @@ def scenario_auth_method_added(config=None):
                            [mp("AuthenticationMethod", None, method)])]
 
 
+def scenario_auth_method_removed(config=None):
+    """An admin removes an authentication (MFA) method from an account -> MFA teardown / defense
+    evasion ('Authentication method removed from an Azure account'). Real 'Admin deleted security
+    info' rows carry empty target modifiedProperties."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    tgt = ac.pick_by_role(config, ("IT Director",), ("IT",))
+    method = random.choice(["Phone", "Microsoft Authenticator", "Email", "FIDO2 Security Key"])
+    return [_admin_secinfo(admin, tgt, method, "Delete", [])]
+
+
 def scenario_unverified_domain_added(config=None):
     """An unverified custom domain is added to the tenant (precursor to federation backdoor /
     domain takeover) -> 'Unverified domain added to Azure AD'."""
@@ -926,6 +974,7 @@ SCENARIOS.update({
     "wip_service_principal_created": scenario_sp_created,
     "wip_service_principal_removed": scenario_sp_removed,
     "wip_auth_method_added": scenario_auth_method_added,
+    "wip_auth_method_removed": scenario_auth_method_removed,
     "wip_conditional_access_change": scenario_ca_operation_unusual,
     "wip_user_created": scenario_user_account_created,
     "wip_user_deleted": scenario_user_account_deleted,
@@ -961,6 +1010,7 @@ ANALYTIC_ALERTS = {
     "wip_service_principal_created": "A Service Principal was created in Azure",
     "wip_service_principal_removed": "A Service Principal was removed from Azure",
     "wip_auth_method_added": "Authentication method was added to Azure account",
+    "wip_auth_method_removed": "Authentication method was removed from Azure account",
     "wip_conditional_access_change": "Azure conditional access policy creation or modification",
     "wip_user_created": "Azure user creation/deletion",
     "wip_user_deleted": "Azure user creation/deletion",
