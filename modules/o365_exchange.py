@@ -52,9 +52,31 @@ def _sid(username):
     return f"S-1-5-21-{n % 4294967295}-{(n >> 32) % 4294967295}-{(n >> 64) % 4294967295}-{n % 90000 + 10000}"
 
 
+_MBX_HOST = "NAMPR22A009.PROD.OUTLOOK.COM"
+_POOL_OWA = "Microsoft.Exchange.Clients.Owa2.Server.NetCore"   # user-created rules (OWA/Outlook)
+_POOL_ADMIN = "MSExchangeAdminApiNetCore"                      # Set-Mailbox / transport (EAC/admin API)
+
+
 def _mbx_path(u):
-    return (f"NAMPR22A009.PROD.OUTLOOK.COM/Microsoft Exchange Hosted Organizations/"
+    return (f"{_MBX_HOST}/Microsoft Exchange Hosted Organizations/"
             f"{ORG_NAME}/{u['display_name']}")
+
+
+def _mbx_oid_path(u):
+    # Real O365 rows address the mailbox by its directory object GUID, not the display name.
+    return (f"{_MBX_HOST}/Microsoft Exchange Hosted Organizations/"
+            f"{ORG_NAME}/{ac.user_oid(u['username'])}")
+
+
+def _ip_port(ip):
+    # RecordType 1 admin-cmdlet ClientIP carries the source port (e.g. "72.147.250.56:24410").
+    return f"{ip}:{random.randint(1024, 65535)}"
+
+
+def _utoken():
+    # 22-char URL-safe token id, matching AppAccessContext.UniqueTokenId (e.g. "CfFaVFHZ20Cw_hYdx2XRAA").
+    import base64
+    return base64.urlsafe_b64encode(uuid.uuid4().bytes).decode().rstrip("=")
 
 
 def _param(**kv):
@@ -71,13 +93,33 @@ def _common(operation, actor, record_type, result, offset_s=0):
 
 def admin_cmdlet(operation, actor, params, target_user=None, result="True",
                  external=False, offset_s=0):
-    """RecordType 1 — Exchange admin cmdlet audit record."""
+    """RecordType 1 — Exchange admin cmdlet audit record. Field shapes (UserKey=UPN, ClientIP
+    with port, per-cmdlet ObjectId, AppAccessContext with AADSessionId/UniqueTokenId) match real
+    msft_o365_exchange_online_raw rows captured from a live .onmicrosoft.com tenant."""
     r = _common(operation, actor, 1, result, offset_s)
-    r.update({"UserType": 2, "ExternalAccess": external, "ClientIP": ac.egress(actor)["ip"],
-              "ObjectId": _mbx_path(target_user or actor), "Parameters": params,
-              "AppPoolName": "MSExchangePowerShellAppPool", "RequestId": _g(),
-              "TokenTenantId": ORG_ID,
-              "AppAccessContext": {"IssuedAtTime": _now(offset_s)}})
+    tgt = target_user or actor
+    sess = _g()
+    issued = _now(offset_s)
+    # ObjectId shape follows the real O365 audit rows per cmdlet family.
+    if operation in ("New-InboxRule", "Set-InboxRule"):
+        rule = next((p["Value"] for p in params if p["Name"] == "Name"), "")
+        obj = f"{_mbx_oid_path(tgt)}\\{rule}"
+        pool = _POOL_OWA
+    elif operation in ("New-TransportRule", "Set-TransportRule", "Remove-TransportRule"):
+        obj = ""                                  # transport rules are org-scoped, no mailbox ObjectId
+        pool = _POOL_ADMIN
+    elif operation.startswith("Set-Mailbox") or operation in ("Set-CASMailbox", "Enable-Mailbox"):
+        obj = ac.user_oid(tgt["username"])        # bare mailbox directory GUID
+        pool = _POOL_ADMIN
+    else:
+        obj = _mbx_path(tgt)
+        pool = _POOL_ADMIN
+    r.update({"UserType": 2, "UserKey": actor["upn"], "ExternalAccess": external,
+              "ClientIP": _ip_port(ac.egress(actor)["ip"]), "ObjectId": obj, "Parameters": params,
+              "AppPoolName": pool, "RequestId": _g(), "SessionId": sess,
+              "TokenObjectId": ac.user_oid(actor["username"]), "TokenTenantId": ORG_ID,
+              "AppAccessContext": {"AADSessionId": sess, "IssuedAtTime": issued,
+                                   "UniqueTokenId": _utoken()}})
     if target_user:
         r["ModifiedObjectResolvedName"] = target_user["display_name"]
     return r
