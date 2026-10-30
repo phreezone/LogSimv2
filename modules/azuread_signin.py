@@ -296,6 +296,16 @@ def _benign_mix(config, user, loc):
 
 
 # ── attack scenarios ─────────────────────────────────────────────────────────────────
+# NOTE on the credential-attack scenarios (brute_force / password_spray /
+# account_lockout_spray / sso_spray_ip_rotation / impossible_travel): on the Azure AD sign-in feed
+# these are Cortex *Identity Analytics* detections, which require (per Cortex docs) Identity
+# Analytics enabled + the Cloud Identity Engine set up + a multi-day baseline (cloud audit logs >= 5
+# days). A one-shot synthetic fire does not satisfy that, so they do not raise an alert here
+# regardless of source IP -- verified 2026-10-30 (off-TOR, high volume, 109 victims / 76 IPs -> no
+# alert). This tenant's live login brute-force coverage is correlation rules scoped to Okta and
+# Cisco ASA, and the standalone spray/brute analytics are VPN/host-based, not Azure AD SSO. These
+# stay WIP until Identity Analytics + CIE + baseline are in place. The records are field-correct;
+# the gap is the analytics prerequisite, not the data.
 
 def scenario_brute_force(config=None, user=None, attempts=60, src_ip=None):
     u = ac.pick_user(config)
