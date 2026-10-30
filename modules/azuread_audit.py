@@ -237,9 +237,12 @@ def _b_register_device(cfg):
 
 def _b_token_timestamp(cfg):
     admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
+    # Real rows use array-form ISO-Z values and add the "Included Updated Properties" marker.
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return audit("Update StsRefreshTokenValidFrom Timestamp", "UserManagement", "Core Directory",
-                 "Update", by_user(admin), [t_user(tgt, [mp("StsRefreshTokensValidFrom",
-                 "2026-01-01T00:00:00Z", _ts()[:-1])])])
+                 "Update", by_user(admin), [t_user(tgt, [
+                     mp("StsRefreshTokensValidFrom", ["2026-01-01T00:00:00Z"], [now_iso]),
+                     mp("Included Updated Properties", None, "StsRefreshTokensValidFrom")])])
 
 
 def _b_provisioning(cfg):
@@ -580,13 +583,33 @@ def scenario_ca_operation_unusual(config=None):
                   [mp("ConditionalAccessPolicy", "[state=enabled]", "[state=disabled]")])], [_ua(actor)])]
 
 
+# Real admin security-info rows (Authentication Methods service) carry an app component in
+# initiatedBy (the Entra portal auth-methods blade, ADIbizaUX) and populate the initiator's
+# displayName/userType; additionalDetails is InitiatedFrom, not User-Agent. Verified against live rows.
+_AUTHMETHODS_APP = ("ADIbizaUX", "74658136-14ec-4630-ad9b-26e160ff0fc6")
+
+
+def _admin_secinfo(admin, tgt, method, op, mods):
+    init = by_user(admin)
+    init["user"]["displayName"] = admin.get("display_name")
+    init["user"]["userType"] = "Member"
+    init["app"] = {"appId": _AUTHMETHODS_APP[1], "displayName": _AUTHMETHODS_APP[0],
+                   "servicePrincipalId": None, "servicePrincipalName": None}
+    activity = "Admin registered security info" if op == "Create" else "Admin deleted security info"
+    verb = "registered" if op == "Create" else "deleted"
+    return audit(activity, "UserManagement", "Authentication Methods", op, init,
+                 [t_user(tgt, mods)],
+                 [{"key": "InitiatedFrom", "value": f"{_AUTHMETHODS_APP[0]} ({_AUTHMETHODS_APP[1]})"}],
+                 reason=f"Admin {verb} {method} authentication method for user")
+
+
 def scenario_tap_registered(config=None):
     """A Temporary Access Pass is registered on an account (MFA-bypass persistence) -> 'Azure
     Temporary Access Pass (TAP) registered to an account'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
-    return [audit("Admin registered security info", "UserManagement", "Core Directory", "Update",
-                  by_user(admin), [t_user(tgt, [mp("StrongAuthenticationMethod", None,
-                  "TemporaryAccessPass"), mp("SecurityInfo.Action", None, "Register")])], [_ua(admin)])]
+    return [_admin_secinfo(admin, tgt, "Temporary Access Pass", "Create",
+                           [mp("StrongAuthenticationMethod", None, "TemporaryAccessPass"),
+                            mp("SecurityInfo.Action", None, "Register")])]
 
 
 def scenario_bitlocker_key_retrieval(config=None):
@@ -823,10 +846,8 @@ def scenario_auth_method_added(config=None):
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
     tgt = ac.pick_by_role(config, ("IT Director",), ("IT",))
     method = random.choice(["Phone", "Microsoft Authenticator", "Email", "FIDO2 Security Key"])
-    return [audit("Admin registered security info", "UserManagement", "Authentication Methods",
-                  "Update", by_user(admin),
-                  [t_user(tgt, [mp("AuthenticationMethod", None, method)])], [_ua(admin)],
-                  reason="Admin registered security info")]
+    return [_admin_secinfo(admin, tgt, method, "Create",
+                           [mp("AuthenticationMethod", None, method)])]
 
 
 def scenario_unverified_domain_added(config=None):
