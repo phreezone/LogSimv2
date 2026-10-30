@@ -126,6 +126,18 @@ def _ua(u):
     return {"key": "User-Agent", "value": ac.user_agent(u)}
 
 
+def _app_details(u, app_id, sp=True, owner_org=None):
+    """additionalDetails for ApplicationManagement rows: real rows carry AppId (and, for SP-targeted
+    events, ServicePrincipalProvisioningType; Add service principal also AppOwnerOrganizationId)
+    alongside the User-Agent. Verified against live tenant rows."""
+    d = [_ua(u), {"key": "AppId", "value": app_id}]
+    if owner_org:
+        d.append({"key": "AppOwnerOrganizationId", "value": owner_org})
+    if sp:
+        d.append({"key": "ServicePrincipalProvisioningType", "value": "Other"})
+    return d
+
+
 # ── benign activity builders (weight, fn) ───────────────────────────────────────────
 
 def _b_update_user(cfg):
@@ -188,6 +200,7 @@ def _b_consent(cfg):
     return audit("Consent to application", "ApplicationManagement", "Core Directory", "Assign",
                  by_user(u), [t_obj("ServicePrincipal", app, mods)],
                  [{"key": "User-Agent", "value": "EvoSTS"},
+                  {"key": "AppId", "value": ac.app_id(app)},
                   {"key": "ServicePrincipalProvisioningType", "value": "Other"}])
 
 
@@ -211,6 +224,7 @@ def _b_admin_consent(cfg, app=None):
     return audit("Consent to application", "ApplicationManagement", "Core Directory", "Assign",
                  by_user(admin), [t_obj("ServicePrincipal", app, mods)],
                  [{"key": "User-Agent", "value": "EvoSTS"},
+                  {"key": "AppId", "value": app_id},
                   {"key": "ServicePrincipalProvisioningType", "value": "Other"}])
 
 
@@ -373,7 +387,9 @@ def scenario_consent_risky_app(config=None):
             mp("ConsentAction.Permissions", None, "Mail.Read Files.ReadWrite.All Directory.Read.All offline_access")]
     return [audit("Consent to application", "ApplicationManagement", "Core Directory", "Assign",
                   by_user(admin), [t_obj("ServicePrincipal", app, mods)],
-                  [{"key": "User-Agent", "value": "EvoSTS"}])]
+                  [{"key": "User-Agent", "value": "EvoSTS"},
+                   {"key": "AppId", "value": ac.app_id(app)},
+                   {"key": "ServicePrincipalProvisioningType", "value": "Other"}])]
 
 
 def scenario_app_credential_added(config=None):
@@ -585,8 +601,12 @@ def scenario_owner_added_to_application(config=None):
     """An owner is added to an Azure application (app takeover / persistence) -> 'Owner added to
     Azure application'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
-    return [audit("Add owner to application", "ApplicationManagement", "Core Directory", "Add",
-                  by_user(admin), [t_obj("Application", "Internal Automation App"), t_user(tgt)],
+    app = "Internal Automation App"; app_oid = ac._stable_guid("App:" + app); app_id = ac.app_id(app)
+    owner_mods = [mp("Application.ObjectID", None, app_oid),
+                  mp("Application.DisplayName", None, app),
+                  mp("Application.AppId", None, app_id)]
+    return [audit("Add owner to application", "ApplicationManagement", "Core Directory", "Assign",
+                  by_user(admin), [t_user(tgt, owner_mods), t_obj("Application", app)],
                   [_ua(admin)])]
 
 
@@ -594,21 +614,26 @@ def scenario_sp_app_role_assigned(config=None):
     """A high-privilege app role (Graph app permission) is granted to a service principal ->
     'Azure service principal assigned app role'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    sp = "External Reporting Connector"
     return [audit("Add app role assignment to service principal", "ApplicationManagement",
                   "Core Directory", "Assign", by_user(admin),
-                  [t_obj("ServicePrincipal", "External Reporting Connector",
-                   [mp("AppRole.Value", None, "Mail.ReadWrite.All"),
-                    mp("AppRole.Id", None, "e2a3a72e-5f79-4c64-b1b1-878b674786c9")])], [_ua(admin)])]
+                  [t_obj("ServicePrincipal", sp,
+                   [mp("AppRole.Id", None, "e2a3a72e-5f79-4c64-b1b1-878b674786c9"),
+                    mp("AppRole.Value", None, "Mail.ReadWrite.All"),
+                    mp("AppRole.DisplayName", None, "Read and write mail in all mailboxes")])],
+                  _app_details(admin, ac.app_id(sp)))]
 
 
 def scenario_application_uri_modification(config=None):
     """An application's reply/redirect URI is modified to an attacker-controlled URL (token
     redirect hijack) -> 'Azure application URI modification'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    app = "Internal Automation App"
     return [audit("Update application", "ApplicationManagement", "Core Directory", "Update",
-                  by_user(admin), [t_obj("Application", "Internal Automation App",
+                  by_user(admin), [t_obj("Application", app,
                   [mp("AppAddress.ReplyUrl", "https://app.examplecorp.com/auth",
-                      "https://attacker-collect.example/oauth/callback")])], [_ua(admin)])]
+                      "https://attacker-collect.example/oauth/callback")])],
+                  [_ua(admin), {"key": "AppId", "value": ac.app_id(app)}])]
 
 
 def scenario_pim_elevation_request(config=None):
@@ -770,11 +795,16 @@ def scenario_sp_created(config=None):
     'Azure Service principal/Application creation'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
     app = ac.rare_app_name()     # a brand-new application identity (unbounded)
+    app_id = ac.app_id(app)
+    # Real "Add service principal" mods are array-form (AccountEnabled [true], AppPrincipalId
+    # ["<appId>"], DisplayName ["<name>"]); additionalDetails carry AppId + AppOwnerOrganizationId
+    # (our tenant) + ServicePrincipalProvisioningType. Verified against live tenant rows.
     return [audit("Add service principal", "ApplicationManagement", "Core Directory", "Add",
                   by_user(admin), [t_obj("ServicePrincipal", app,
-                   [mp("AccountEnabled", None, "True"),
-                    mp("AppId", None, ac.app_id(app)),
-                    mp("ServicePrincipalType", None, "Application")])], [_ua(admin)])]
+                   [mp("AccountEnabled", [], [True]),
+                    mp("AppPrincipalId", [], [app_id]),
+                    mp("DisplayName", [], [app])])],
+                  _app_details(admin, app_id, owner_org=ac.HOME_TENANT_ID))]
 
 
 def scenario_sp_removed(config=None):
