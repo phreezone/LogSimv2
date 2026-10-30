@@ -853,6 +853,17 @@ SCENARIOS.update({
     "wip_unusual_cloud_identity_user_agent": scenario_sso_abnormal_user_agent,
     "wip_cloud_pentest_activity": scenario_pentest_tool_activity,
     "wip_multiple_risk_indicators": scenario_high_risk_signin,
+    # CIE / ITDR-dependent: these detectors infer the account's directory classification
+    # (disabled / honey / machine / service / dormant) from the Cloud Identity Engine identity map,
+    # not from the sign-in log alone, so they cannot fire without a CIE directory export loaded in
+    # the tenant. They stay WIP until a fire -> alert is observed with that map in place.
+    # (disabled_user_signin was tested 2026-10-30 with a dedicated former-employee UPN + errorCode
+    # 50057 and did not alert without CIE.)
+    "wip_disabled_user_sso": scenario_disabled_user_signin,
+    "wip_honey_user_sso": scenario_honey_user_signin,
+    "wip_service_account_sso": scenario_service_account_sso,
+    "wip_machine_account_sso": scenario_machine_account_sso,
+    "wip_dormant_account_sso": scenario_dormant_account_signin,
 })
 
 ANALYTIC_ALERTS = {
@@ -885,6 +896,14 @@ ANALYTIC_ALERTS = {
     "wip_unusual_cloud_identity_user_agent": "Unusual user-agent for a cloud identity",
     "wip_cloud_pentest_activity": "Cloud penetration testing tool activity",
     "wip_multiple_risk_indicators": "Multiple risk indicators for a cloud identity",
+    # CIE / ITDR-dependent (unvalidated until a Cloud Identity Engine directory map is loaded that
+    # marks the account disabled/honey/machine/service/dormant). Names for disabled/honey/service are
+    # the published Cortex alerts; machine/dormant are provisional pending a confirmed fire.
+    "wip_disabled_user_sso": "A disabled user attempted to authenticate via SSO",
+    "wip_honey_user_sso": "SSO authentication attempt by a honey user",
+    "wip_service_account_sso": "SSO authentication by a service account",
+    "wip_machine_account_sso": "SSO authentication by a machine account",
+    "wip_dormant_account_sso": "Dormant account authenticated via SSO",
 }
 
 
