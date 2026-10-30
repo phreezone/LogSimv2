@@ -989,8 +989,16 @@ def _generate_threat_log(config, session_context, forced_event=None):
 
 
 def _get_threat_interval(threat_level, config):
-    levels = config.get("threat_generation_levels", {})
-    return levels.get(threat_level, {}).get("seconds", 0)
+    """Seconds between threat events for *threat_level*. config.json maps each level
+    directly to an int of seconds (e.g. "Realistic": 7200); tolerate a {"seconds": N}
+    shape too in case the schema ever changes."""
+    val = config.get("threat_generation_levels", {}).get(threat_level, 0)
+    if isinstance(val, dict):
+        val = val.get("seconds", 0)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return 0
 
 
 def generate_log(config, scenario=None, threat_level="Realistic", benign_only=False,
