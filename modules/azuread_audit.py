@@ -308,10 +308,72 @@ def _b_delegated_grant(cfg):
                  _app_details(admin, "00000003-0000-0000-c000-000000000000"))
 
 
+# PIM role-management records (loggedByService "PIM") have a distinct shape from Core Directory
+# audits: initiator displayName populated with a null ipAddress, a Role target + the "MSFT"
+# Directory target, and an additionalDetails block keyed by AuditType. Verified against live rows.
+_PIM_ROLES = [("Attack Payload Author", "9c6df0f2-1e7c-4dc3-b195-66dfbd24aa8f"),
+              ("AI Administrator", "d2562ede-74db-457e-a7b6-544e236ebb61"),
+              ("Global Secure Access Log Reader", "843318fb-79a6-4168-9e6f-aa9a07481cc4"),
+              ("Helpdesk Administrator", "729827e3-9c14-49f7-bb1b-9608f156bbb8"),
+              ("Security Reader", "5d6b6bb7-de71-4623-b4af-96380a352509")]
+_PIM_VARIANTS = [
+    ("Add eligible member to role in PIM requested (permanent)", "Create", "CreateRequestPermanentEligibleRole"),
+    ("Add eligible member to role in PIM completed (permanent)", "Update", "AssignPermanentEligibleRole"),
+    ("Remove eligible member from role in PIM completed (permanent)", "Update", "RemovePermanentEligibleRole"),
+    ("Process role update request", "Create", "CreateRoleUpdateRequest"),
+]
+
+
+def _by_user_pim(u):
+    b = by_user(u)
+    b["user"]["displayName"] = u.get("display_name")   # PIM rows populate the initiator name
+    b["user"]["ipAddress"] = None                       # and carry a null ipAddress
+    return b
+
+
+def _pim_role_target(role_name, tmpl):
+    return t_obj("Role", role_name, [mp("RoleDefinitionOriginId", "", tmpl),
+                                     mp("RoleDefinitionOriginType", "", "BuiltInRole"),
+                                     mp("TemplateId", "", tmpl)])
+
+
+def _dir_target():
+    return {"id": ac.HOME_TENANT_ID, "displayName": "MSFT", "type": "Directory",
+            "userPrincipalName": None, "groupType": None, "modifiedProperties": []}
+
+
+def _pim_details(admin, tmpl, audit_type):
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-1] + "Z"
+    return [{"key": "RoleDefinitionOriginId", "value": tmpl},
+            {"key": "RoleDefinitionOriginType", "value": "BuiltInRole"},
+            {"key": "TemplateId", "value": tmpl},
+            {"key": "StartTime", "value": now_iso},
+            {"key": "UserAgent", "value": ac.user_agent(admin)},
+            {"key": "ResourceOriginId", "value": "/"},
+            {"key": "AuditType", "value": audit_type},
+            {"key": "RoleAssignmentRequestId", "value": str(uuid.uuid4())},
+            {"key": "oid", "value": ac.user_oid(admin["username"])},
+            {"key": "tid", "value": ac.HOME_TENANT_ID},
+            {"key": "RequestId", "value": str(uuid.uuid4())}]
+
+
+def _pim_record(admin, activity, op, audit_type):
+    role, tmpl = random.choice(_PIM_ROLES)
+    return audit(activity, "RoleManagement", "PIM", op, _by_user_pim(admin),
+                 [_pim_role_target(role, tmpl), _dir_target()], _pim_details(admin, tmpl, audit_type))
+
+
+def _b_pim_role(cfg):
+    admin = ac.pick_by_role(cfg, ("IT Director", "IT Administrator"), ("IT",))
+    activity, op, audit_type = random.choice(_PIM_VARIANTS)
+    return _pim_record(admin, activity, op, audit_type)
+
+
 # High-fidelity builders for the common activities (bespoke modifiedProperties/details).
 _B_HUMAN = [_b_update_user, _b_secinfo_register, _b_group_member, _b_self_password,
             _b_app_role_assign, _b_consent, _b_register_device, _b_admin_reset, _b_token_timestamp,
-            _b_enable_disable_account, _b_update_sp, _b_delegated_grant, _b_update_password_profile]
+            _b_enable_disable_account, _b_update_sp, _b_delegated_grant, _b_update_password_profile,
+            _b_pim_role]
 
 _ROLES_T = ["Helpdesk Administrator", "User Administrator", "Security Reader",
             "Exchange Administrator", "Global Reader", "Application Administrator"]
@@ -436,6 +498,14 @@ def scenario_admin_role_add(config=None):
                  mp("Role.TemplateId", None, tmpl), mp("Role.WellKnownObjectName", None, "CompanyAdministrator")]
     return [audit("Add member to role", "RoleManagement", "Core Directory", "Assign", by_user(admin),
                   [t_user(tgt, role_mods), t_obj("Role", "Global Administrator")], [_ua(admin)])]
+
+
+def scenario_role_assigned_outside_pim(config=None):
+    """A privileged role is assigned permanently OUTSIDE PIM, bypassing just-in-time governance ->
+    PIM 'role elevated outside of PIM' alert (RoleElevatedOutsidePimAlert)."""
+    admin = ac.pick_by_role(config, ("IT Director",), ("IT",))
+    return [_pim_record(admin, "Add member to role outside of PIM (permanent)", "Update",
+                        "RoleElevatedOutsidePimAlert")]
 
 
 def scenario_consent_risky_app(config=None):
@@ -1002,6 +1072,7 @@ SCENARIOS.update({
     "wip_service_principal_removed": scenario_sp_removed,
     "wip_auth_method_added": scenario_auth_method_added,
     "wip_auth_method_removed": scenario_auth_method_removed,
+    "wip_role_assigned_outside_pim": scenario_role_assigned_outside_pim,
     "wip_conditional_access_change": scenario_ca_operation_unusual,
     "wip_user_created": scenario_user_account_created,
     "wip_user_deleted": scenario_user_account_deleted,
@@ -1038,6 +1109,7 @@ ANALYTIC_ALERTS = {
     "wip_service_principal_removed": "A Service Principal was removed from Azure",
     "wip_auth_method_added": "Authentication method was added to Azure account",
     "wip_auth_method_removed": "Authentication method was removed from Azure account",
+    "wip_role_assigned_outside_pim": "Azure AD role assigned outside of PIM",
     "wip_conditional_access_change": "Azure conditional access policy creation or modification",
     "wip_user_created": "Azure user creation/deletion",
     "wip_user_deleted": "Azure user creation/deletion",
