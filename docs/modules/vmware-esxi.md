@@ -92,6 +92,23 @@ The `uncommon_host_command` rare pool mirrors the ESXi-ransomware command catalo
 
 > **Still unverified in-tenant.** `uncommon_host_command` targets the real catalog analytic and emits the command-line the modeling rule reads, but no live fire has confirmed it here — every other module earned its "confirmed" status only after a fire → ingest → detect pass (`_local_validation/threat_harness.py`). The rarity model also needs the baseline to have trained (30 days of the common commands), so validation is not instantaneous. Run that pass before upgrading the claim.
 
+### Custom-rule targets (top tier)
+
+XSIAM ships no analytic for these, but each has clear log evidence and pairs with a benign baseline so a custom correlation / BIOC rule has something to stand out against. Log anchors (the string/field to key on) are in the right column.
+
+| Event | Benign baseline | Log anchor for the rule |
+|---|---|---|
+| `guest_ops_exec` | `_b_guest_ops` (VMware Tools ops) | `Guest operation StartProgramInGuest` / `InitiateFileTransferToGuest` — hypervisor→guest execution |
+| `datastore_upload` | ISO/template upload in `_b_datastore_ops` | `File upload to path /vmfs/volumes/… was initiated from` to a hidden/script/ELF path |
+| `vm_disk_attach` | VM add-disk in `_b_vm_lifecycle` | `Reconfigured … added existing disk /vmfs/volumes/<other-VM>/…-flat.vmdk` |
+| `kernel_module_load` | `esxcli … module list` (common cmds) | `esxcli system module load` + `vmkernel … not in VMware signed set` |
+| `promiscuous_mode` | port-group policy set **Reject** (`_b_config_change`) | `Security policy on port group '…': promiscuous mode set to Accept` |
+| `unplanned_reboot` | planned reboot in `_b_maintenance_mode` | `Host … is being rebooted … (host not in maintenance mode)` + vmkernel "not cleanly powered off" |
+| `snmp_external_target` | — | `esxcli system snmp set … -t <external-ip>@162` / `SNMP agent enabled with trap target <external>` |
+| `log_rotation_disabled` | log-level change in `_b_config_change` | `syslog config logger set … --size 0 --rotate 0`, `Set called with key "Syslog.global.logDir", value "/tmp"` |
+| `config_harvest` | single `shell_command` reads | burst of `esxcli … list` / `vim-cmd … get` from one host in seconds |
+| `permission_denied_burst` | — | repeated `Permission to perform this operation was denied for user <u>` |
+
 ## Configuration (`vmware_esxi_config`)
 
 | Key | Default | Purpose |
