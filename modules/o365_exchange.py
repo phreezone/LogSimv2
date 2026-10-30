@@ -231,9 +231,11 @@ def generate_benign(config=None, context=None):
 # ── Exchange BEC detection scenarios ────────────────────────────────────────────────
 
 def scenario_inbox_forwarding_rule(config=None):
-    """New-InboxRule that forwards mail to an external address -> 'Exchange inbox forwarding rule configured'."""
+    """New-InboxRule that forwards the whole inbox to an external public mailbox (gmail) ->
+    'Exchange inbox forwarding rule configured' (public domain -> 'External ...' Low variant).
+    No filter condition, so the rule carries every incoming message out to the external account."""
     u = ac.pick_user(config)
-    ext = f"{u['username'].replace('.', '')}@{random.choice(_EXT_DOMAINS)}"
+    ext = f"{u['username'].replace('.', '')}@gmail.com"
     return [admin_cmdlet("New-InboxRule", u, _param(Name="Invoices", ForwardTo=ext,
                          StopProcessingRules="True"), target_user=u)]
 
@@ -519,6 +521,40 @@ SCENARIOS = {
     "mailbox_enumeration": scenario_mailbox_enumeration,
     "dlp_policy_disabled": scenario_dlp_policy_disabled,
     "audit_bypass": scenario_audit_bypass,
+}
+
+
+# Maps each scenario to the Cortex analytics alert its O365 Audit (RecordType 1) record is built to
+# raise, so threat_catalog can offer them on demand. The three forwarding detectors
+# (confirmed on the Cortex "alerts-by-name" pages) all read Office 365 Audit and carry a 14-day
+# activation + 30-day training window, so a freshly started feed sits in activation before firing.
+# Delegate / suspicious / external shapes roll up under the base detector name as documented variations.
+ANALYTIC_ALERTS = {
+    "inbox_forwarding_rule": "Exchange inbox forwarding rule configured",
+    "inbox_forwarding_delegate": "Exchange inbox forwarding rule configured",
+    "inbox_forwarding_suspicious": "Exchange inbox forwarding rule configured",
+    "mailbox_smtp_forwarding": "Exchange user mailbox forwarding",
+    "mailbox_smtp_forwarding_delegate": "Exchange user mailbox forwarding",
+    "transport_forwarding_rule": "Exchange transport forwarding rule configured",
+    "transport_forwarding_delegate": "Exchange transport forwarding rule configured",
+    "email_hiding_rule": "Exchange email-hiding inbox rule",
+    "catch_all_hiding_rule": "Exchange email-hiding inbox rule",
+    "email_hiding_transport_rule": "Exchange email-hiding transport rule",
+    "mailbox_delegation": "Exchange mailbox delegation permissions added",
+    "folder_permission_mod": "Exchange mailbox folder permission modification",
+    "mail_accessed_multi_ip_subnet": "User mail items accessed from multiple IPs",
+    "single_ip_multi_mailbox": "Single IP accessed mail items of multiple users",
+    "mailbox_enumeration": "Mailbox enumeration activity by Azure application",
+    "sent_to_deleted_scripted": "User moved sent items to deleted items",
+    "anti_phish_policy_disabled": "Exchange anti-phish policy disabled or removed",
+    "exchange_audit_log_disabled": "Exchange audit log disabled",
+    "compliance_search_created": "Exchange compliance search created",
+    "dkim_disabled": "Exchange DKIM signing configuration disabled",
+    "malware_filter_removed": "Exchange malware filter policy removed",
+    "safe_attachment_disabled": "Exchange Safe Attachment policy disabled or removed",
+    "safe_link_disabled": "Exchange Safe Link policy disabled or removed",
+    "sensitive_mail_external": "Sensitive Exchange mail sent to external users",
+    "dlp_policy_disabled": "Microsoft 365 DLP policy disabled or removed",
 }
 
 
