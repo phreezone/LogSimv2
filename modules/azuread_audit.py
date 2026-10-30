@@ -862,13 +862,33 @@ def scenario_device_registration_policy_mod(config=None):
 
 def scenario_unusual_guest_invitation(config=None):
     """An external guest is invited by an identity that doesn't normally invite guests ->
-    'Successful unusual guest user invitation'."""
+    'Successful unusual guest user invitation'. A real B2B invite emits TWO rows, matched here from a
+    live tenant invite: 'Invite external user' (loggedByService 'Invited Users', the invitee email in
+    additionalDetails.invitedUserEmailAddress + InvitationId) and 'Add user' (Core Directory,
+    CreationType Invitation, InviteTicket, the '<email-with-@-as-_>#EXT#@<tenant>' guest UPN)."""
     inviter = ac.pick_nonstandard_actor(config)
     ext = ac.rare_ext_email()                        # never-seen external invitee (unbounded)
-    guest = f"{ext.split('@')[0]}#EXT#@examplecorp.com"
-    return [audit("Invite external user", "UserManagement", "Core Directory", "Add", by_user(inviter),
-                  [t_user({"username": "guest", "upn": guest, "display_name": "external guest"},
-                   [mp("Invitation.InvitedUserEmailAddress", None, ext)])], [_ua(inviter)])]
+    local = ext.split("@")[0]
+    guest_upn = f"{ext.replace('@', '_')}#EXT#@{ac.UPN_DOMAIN}"
+    gid = str(uuid.uuid4()); ip = ac.egress(inviter)["ip"]; oid = ac.user_oid(inviter["username"])
+    invite = audit("Invite external user", "UserManagement", "Invited Users", "Add", by_user(inviter, ip),
+                   [{"id": gid, "displayName": local, "type": "User", "userPrincipalName": guest_upn,
+                     "groupType": None, "modifiedProperties": []}],
+                   [{"key": "oid", "value": oid}, {"key": "tid", "value": ac.HOME_TENANT_ID},
+                    {"key": "ipaddr", "value": ip},
+                    {"key": "wids", "value": "62e90394-69f5-4237-9190-012177145e10"},
+                    {"key": "InvitationId", "value": str(uuid.uuid4())},
+                    {"key": "invitedUserEmailAddress", "value": ext}])
+    add = audit("Add user", "UserManagement", "Core Directory", "Add", by_user(inviter, ip),
+                [{"id": gid, "displayName": None, "type": "User", "userPrincipalName": guest_upn,
+                  "groupType": None, "modifiedProperties": [
+                      mp("AccountEnabled", [], [True]),
+                      mp("CreationType", [], ["Invitation"]),
+                      mp("DisplayName", [], [local]),
+                      mp("InviteTicket", [], [{"Type": 1, "Ticket": str(uuid.uuid4())}]),
+                      mp("MailNickname", [], [f"{ext.replace('@', '_')}#EXT#"])]}],
+                [_ua(inviter)])
+    return [invite, add]
 
 
 def scenario_account_unlock_password_reset(config=None):
