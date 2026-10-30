@@ -1,7 +1,7 @@
 # VMware ESXi
 
 **Dataset:** `vmware_esxi_raw`
-**Transport:** Syslog (TCP) to the Broker VM — `vmware_esxi_config.syslog_port` (default **1517**). Plain syslog is the default transport, so no `transport` key is set.
+**Transport:** Syslog (TCP) to the Broker VM — `vmware_esxi_config.syslog_port` (default **1518**). Plain syslog is the default transport, so no `transport` key is set.
 **Format:** Native ESXi `vmsyslogd` lines (RFC 5424-style header with an ISO 8601-UTC timestamp), **Raw** — *not* CEF.
 **Default rate:** ~**0.01 events/s** (one every 100 s). A real ESXi host is quiet — outside the ambient `vpxa` poll it changes state rarely — so this source defaults far below the usual 1/s. The default comes from the module's `DEFAULT_EVENT_INTERVAL` (100 s) and can be overridden with `vmware_esxi_config.event_interval`; operators can still raise the rate per run from the dashboard.
 
@@ -9,7 +9,7 @@ Simulates VMware ESXi host syslog for the XSIAM `vmware_esxi_raw` dataset. ESXi 
 
 ## Routing: why a dedicated port
 
-Plain syslog carries **no in-body routing key** (unlike the CEF `__firewall_type` used by PANW NGFW). The collector therefore tells ESXi apart from the other syslog sources **by listening port**, exactly as the existing syslog sources are separated — Cisco ASA `1514`, Apache `1515`, Infoblox `1516`. ESXi uses **`1517`**. Stand up a Broker VM Syslog collector on that port with Vendor = VMware, Product = ESXi, Format = Raw.
+Plain syslog carries **no in-body routing key** (unlike the CEF `__firewall_type` used by PANW NGFW). The collector therefore tells ESXi apart from the other syslog sources **by listening port**, exactly as the existing syslog sources are separated — Cisco ASA `1514`, Apache `1515`, Infoblox `1516`. ESXi uses **`1518`**. Stand up a Broker VM Syslog collector on that port with Vendor = VMware, Product = ESXi, Format = Raw.
 
 ## Format
 
@@ -90,7 +90,7 @@ The `uncommon_host_command` rare pool mirrors the ESXi-ransomware command catalo
 
 | Key | Default | Purpose |
 |---|---|---|
-| `syslog_port` | `1517` | Broker VM collector port for this source (Vendor = VMware, Product = ESXi, Format = Raw) |
+| `syslog_port` | `1518` | Broker VM collector port for this source (Vendor = VMware, Product = ESXi, Format = Raw) |
 | `hosts` | 3 `esxiNN.corp.examplecorp.local` | Cluster hostnames — stable so each host is a real entity for host-baselined analytics |
 | `mgmt_ip` | `127.0.0.1` | What `hostd` records for local/console (DCUI/esxcli) auth; remote logons carry the client IP |
 | `admins` | `root`, `svc_vcenter`, `vmadmin` | Local/service ESXi identities (fallback when no session context) |
