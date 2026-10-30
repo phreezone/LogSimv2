@@ -15,6 +15,7 @@ inbox forwarding rule, email-hiding rule, mailbox SMTP forwarding, mailbox deleg
 SendAs grant, transport (mail-flow) forwarding rule, folder-permission modification, and
 mailbox audit bypass.
 """
+import base64
 import random
 import time
 import uuid
@@ -81,6 +82,25 @@ def _utoken():
 
 def _param(**kv):
     return [{"Name": k, "Value": v} for k, v in kv.items()]
+
+
+# OWA first-party app + API ids that real MailItemsAccessed / ExchangeItemGroup rows carry.
+_OWA_APP = "9199bf20-a13f-4107-85dc-02114787ef48"
+_API_ID = "774A8455-3122-4FD5-90F1-C4D1A062AD91"
+
+
+def _userkey(username):
+    # Mailbox-activity rows (RecordType 2/3/50) carry a 16-hex UserKey, not a GUID.
+    return f"{ac._h('ukey:' + username) & 0xFFFFFFFFFFFFFFFF:016X}"
+
+
+def _b64id(nbytes=48):
+    return base64.b64encode(bytes(random.getrandbits(8) for _ in range(nbytes))).decode().rstrip("=")
+
+
+def _app_access_context(offset_s=0):
+    return {"AADSessionId": _g(), "APIId": _API_ID, "ClientAppId": _OWA_APP,
+            "IssuedAtTime": _now(offset_s), "UniqueTokenId": _utoken()}
 
 
 def _common(operation, actor, record_type, result, offset_s=0):
@@ -152,23 +172,81 @@ def mail_items_accessed(owner, count=1, offset_s=0, throttled=False):
     """RecordType 50 — MailItemsAccessed. throttled=True emits a sync-level throttled access
     (IsThrottled True) — Microsoft stops logging per-item binds under heavy access, which is itself
     a documented mass-mailbox-access / compromise indicator."""
+    # Field shapes verified against real msft_o365_exchange_online_raw MailItemsAccessed rows:
+    # UserType 0, OWA app/client ids, a 16-hex UserKey, AppAccessContext + TokenObjectId, and
+    # OperationProperties that are just MailAccessType (no IsThrottled) on an ordinary Bind.
     r = _common("MailItemsAccessed", owner, 50, "Succeeded", offset_s)
-    r.update({"UserType": 5, "ExternalAccess": False, "LogonType": 0, "InternalLogonType": 0,
+    r["UserKey"] = _userkey(owner["username"])
+    r.update({"UserType": 0, "ExternalAccess": False, "LogonType": 0, "InternalLogonType": 0,
               "MailboxOwnerUPN": owner["upn"], "MailboxOwnerSid": _sid(owner["username"]),
               "MailboxGuid": ac.user_oid("mbx:" + owner["username"]),
               "LogonUserSid": _sid(owner["username"]),
               "ClientIPAddress": ac.egress(owner)["ip"],
-              "ClientInfoString": "Client=REST;Client=RESTSystem;;",
-              "AppId": "00000003-0000-0000-c000-000000000000", "ClientAppId": _g(),
+              "ClientInfoString": "Client=OWA;Action=ViaProxy",
+              "AppId": _OWA_APP, "ClientAppId": _OWA_APP,
+              "AppAccessContext": _app_access_context(offset_s),
+              "TokenObjectId": ac.user_oid(owner["username"]),
               "OperationCount": count, "TokenTenantId": ORG_ID})
     if throttled:
+        # Microsoft stops per-item binds under heavy access (a documented mass-access indicator).
         r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Sync"},
                                     {"Name": "IsThrottled", "Value": "True"}]
     else:
-        r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Bind"},
-                                    {"Name": "IsThrottled", "Value": "False"}]
-        r["Folders"] = [{"Path": "\\Inbox", "FolderItems": [{"InternetMessageId": f"<{_g()}@{ORG_NAME}>"}
-                                                            for _ in range(count)]}]
+        r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Bind"}]
+        r["Folders"] = [{"FolderItems": [{"CreationTime": _now(offset_s), "Id": _b64id(),
+                                          "ImmutableId": _b64id(), "InternetMessageId": f"<{_g()}@{ORG_NAME}>",
+                                          "SizeInBytes": random.randint(1500, 90000)}
+                                         for _ in range(count)],
+                         "Path": "\\Inbox"}]
+    return r
+
+
+def item_group_action(operation, owner, actor=None, folder_path="\\Deleted Items", count=1, offset_s=0):
+    """RecordType 3 — ExchangeItemGroup (bulk move/soft-delete). Real SoftDelete/HardDelete rows
+    carry AffectedItems + a Folder object, Bearer auth and the OWA app ids."""
+    actor = actor or owner
+    r = _common(operation, actor, 3, "Succeeded", offset_s)
+    r["UserKey"] = _userkey(actor["username"])
+    folder = {"Id": _b64id(), "Path": folder_path}
+    r.update({"UserType": 0, "ExternalAccess": (actor["username"] != owner["username"]),
+              "CrossMailboxOperation": False, "LogonType": 0, "InternalLogonType": 0,
+              "AuthType": "Bearer", "TokenType": "V1AppActAs", "HostAppId": _API_ID,
+              "MailboxOwnerUPN": owner["upn"], "MailboxOwnerSid": _sid(owner["username"]),
+              "MailboxGuid": ac.user_oid("mbx:" + owner["username"]),
+              "LogonUserSid": _sid(actor["username"]),
+              "ClientIPAddress": ac.egress(actor)["ip"], "ClientIP": ac.egress(actor)["ip"],
+              "ClientInfoString": "Client=OWA;Action=ViaProxy",
+              "AppId": _OWA_APP, "ClientAppId": _OWA_APP,
+              "TokenObjectId": ac.user_oid(actor["username"]), "TokenTenantId": ORG_ID,
+              "AppAccessContext": _app_access_context(offset_s), "Folder": folder,
+              "AffectedItems": [{"Id": _b64id(), "InternetMessageId": f"<{_g()}@{ORG_NAME}>",
+                                 "ParentFolder": folder, "Subject": ac.email_subject()}
+                                for _ in range(count)]})
+    return r
+
+
+def dlp_rule_match(sender, offset_s=0):
+    """RecordType 13 — DlpRuleMatch: a sent message matched a DLP policy. Real rows carry
+    ExchangeMetaData + PolicyDetails and no ResultStatus/OriginatingServer."""
+    r = _common("DlpRuleMatch", sender, 13, "", offset_s)
+    for k in ("ResultStatus", "OriginatingServer", "OrganizationName"):
+        r.pop(k, None)
+    r["UserKey"] = ac.user_oid(sender["username"])
+    server = random.choice(_SERVERS).split()[0]
+    msg_id = f"<{_g().replace('-', '')}@{server}.namprd22.prod.outlook.com>"
+    r.update({"UserType": 0, "ObjectId": msg_id, "IncidentId": _g(),
+              "SensitiveInfoDetectionIsIncluded": False,
+              "ExchangeMetaData": {"BCC": [], "CC": [], "FileSize": random.randint(2000, 200000),
+                  "From": sender["upn"], "IsViewableByExternalUsers": True, "MessageID": msg_id,
+                  "RecipientCount": 1, "SensitivityLabelIds": [], "SensitivityLabelNames": [],
+                  "Sent": _now(offset_s)},
+              "PolicyDetails": [{"PolicyId": _g(),
+                  "PolicyName": "Default HR & Privacy Info Protection Policy",
+                  "Rules": [{"ActionParameters": ["GenerateAlert:true"],
+                             "Actions": ["NotifyUser", "GenerateAlert"],
+                             "AlertProperties": [{"Name": "GenerateAlertCutTime", "Value": _now(offset_s)}],
+                             "RuleId": _g(), "RuleName": random.choice(["U.S. PII", "Credit Card Number",
+                                                                        "U.S. Social Security Number (SSN)"])}]}]})
     return r
 
 
@@ -187,8 +265,16 @@ def _b_send(cfg):
 
 def _b_move(cfg):
     u = ac.pick_user(cfg)
-    return mailbox_action(random.choice(["MoveToDeletedItems", "Move", "SoftDelete"]), u,
-                          item={"Subject": ac.email_subject(), "ParentFolder": {"Path": "\\Inbox"}})
+    op = random.choice(["MoveToDeletedItems", "Move", "SoftDelete", "HardDelete"])
+    # SoftDelete/HardDelete are logged as RecordType 3 (ExchangeItemGroup) with AffectedItems;
+    # Move/MoveToDeletedItems stay RecordType 2 single-item actions.
+    if op in ("SoftDelete", "HardDelete"):
+        return item_group_action(op, u, count=random.randint(1, 5))
+    return mailbox_action(op, u, item={"Subject": ac.email_subject(), "ParentFolder": {"Path": "\\Inbox"}})
+
+
+def _b_dlp_match(cfg):
+    return dlp_rule_match(ac.pick_user(cfg))
 
 
 def _b_benign_rule(cfg):
@@ -240,8 +326,8 @@ def _b_admin_benign(cfg):
                         target_user=tgt)
 
 
-_BENIGN = [(8, _b_mail_accessed), (7, _b_mailbox_op), (2, _b_benign_rule),
-           (2, _b_login), (1, _b_new_mailbox), (1, _b_admin_benign)]
+_BENIGN = [(8, _b_mail_accessed), (7, _b_mailbox_op), (3, _b_move), (2, _b_benign_rule),
+           (2, _b_login), (1, _b_new_mailbox), (1, _b_admin_benign), (1, _b_dlp_match)]
 _B_POOL = [fn for w, fn in _BENIGN for _ in range(w)]
 _HUMAN = {_b_mailbox_op, _b_benign_rule, _b_login, _b_new_mailbox, _b_admin_benign}
 
