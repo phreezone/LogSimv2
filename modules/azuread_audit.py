@@ -83,8 +83,10 @@ def mp(name, old, new):
 
 def by_user(u, ip=None):
     ip = ip or ac.egress(u)["ip"]
+    # Real directoryAudits rows carry initiatedBy.user.userType = null (the "Member"/"Guest"
+    # distinction lives on the target, not the initiator). Verified against live tenant rows.
     return {"user": {"id": ac.user_oid(u["username"]), "displayName": None,
-                     "userPrincipalName": u["upn"], "ipAddress": ip, "userType": "Member",
+                     "userPrincipalName": u["upn"], "ipAddress": ip, "userType": None,
                      "agentType": "notAgentic", "homeTenantId": None, "homeTenantName": None},
             "app": None}
 
@@ -104,13 +106,22 @@ def t_obj(kind, name, mods=None, group_type=None):
             "userPrincipalName": None, "groupType": group_type, "modifiedProperties": mods or []}
 
 
+def _add_user_mods(upn, name):
+    # Real "Add user" rows carry array-form attribute values. Verified against live tenant rows.
+    return [mp("AccountEnabled", [], [True]), mp("DisplayName", [], [name]),
+            mp("UserPrincipalName", [], [upn])]
+
+
 def audit(activity, category, service, op_type, initiator, targets,
           details=None, result="success", reason="", offset_s=0.0):
     corr = str(uuid.uuid4())
     pfx = _ID_PREFIX.get(service, "Directory")
+    # Real rows set resultReason only when there is a genuine reason (e.g. "Successfully completed
+    # reset."); for lifecycle ops (Delete/Update/Enable/Disable user) the field is null, not an echo
+    # of the activity name. Verified against live tenant rows.
     return {"id": f"{pfx}_{corr}_{_code()}_{random.randint(1000000, 999999999)}",
             "category": category, "correlationId": corr, "result": result,
-            "resultReason": reason or activity, "activityDisplayName": activity,
+            "resultReason": reason or None, "activityDisplayName": activity,
             "activityDateTime": _ts(offset_s), "loggedByService": service, "operationType": op_type,
             "initiatedBy": initiator, "targetResources": targets, "additionalDetails": details or []}
 
@@ -119,6 +130,18 @@ def _ua(u):
     # Per-user, stable, varied (5 desktop + mobile profiles) and consistent with the user's
     # sign-in device browser — not one of two hardcoded strings.
     return {"key": "User-Agent", "value": ac.user_agent(u)}
+
+
+def _app_details(u, app_id, sp=True, owner_org=None):
+    """additionalDetails for ApplicationManagement rows: real rows carry AppId (and, for SP-targeted
+    events, ServicePrincipalProvisioningType; Add service principal also AppOwnerOrganizationId)
+    alongside the User-Agent. Verified against live tenant rows."""
+    d = [_ua(u), {"key": "AppId", "value": app_id}]
+    if owner_org:
+        d.append({"key": "AppOwnerOrganizationId", "value": owner_org})
+    if sp:
+        d.append({"key": "ServicePrincipalProvisioningType", "value": "Other"})
+    return d
 
 
 # ── benign activity builders (weight, fn) ───────────────────────────────────────────
@@ -162,11 +185,13 @@ def _b_group_member(cfg):
     admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
     g = ac.group_name()
     add = random.random() < 0.6
-    mods = [mp("Group.DisplayName", None, g),
-            mp("Group.ObjectID", None, ac._stable_guid("Group:" + g))]
+    # Real rows: operationType Assign/Unassign, the Group.ObjectID/DisplayName mods ride on the User
+    # target (member), and the Group object follows with empty mods. Verified against live tenant rows.
+    gmods = [mp("Group.ObjectID", None, ac._stable_guid("Group:" + g)),
+             mp("Group.DisplayName", None, g)]
     return audit("Add member to group" if add else "Remove member from group", "GroupManagement",
-                 "Core Directory", "Add" if add else "Remove", by_user(admin),
-                 [t_obj("Group", g, mods, group_type="unifiedGroups"), t_user(tgt)], [_ua(admin)])
+                 "Core Directory", "Assign" if add else "Unassign", by_user(admin),
+                 [t_user(tgt, gmods), t_obj("Group", g, group_type="unknownFutureValue")], [_ua(admin)])
 
 
 def _b_app_role_assign(cfg):
@@ -183,6 +208,7 @@ def _b_consent(cfg):
     return audit("Consent to application", "ApplicationManagement", "Core Directory", "Assign",
                  by_user(u), [t_obj("ServicePrincipal", app, mods)],
                  [{"key": "User-Agent", "value": "EvoSTS"},
+                  {"key": "AppId", "value": ac.app_id(app)},
                   {"key": "ServicePrincipalProvisioningType", "value": "Other"}])
 
 
@@ -206,6 +232,7 @@ def _b_admin_consent(cfg, app=None):
     return audit("Consent to application", "ApplicationManagement", "Core Directory", "Assign",
                  by_user(admin), [t_obj("ServicePrincipal", app, mods)],
                  [{"key": "User-Agent", "value": "EvoSTS"},
+                  {"key": "AppId", "value": app_id},
                   {"key": "ServicePrincipalProvisioningType", "value": "Other"}])
 
 
@@ -218,9 +245,12 @@ def _b_register_device(cfg):
 
 def _b_token_timestamp(cfg):
     admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
+    # Real rows use array-form ISO-Z values and add the "Included Updated Properties" marker.
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return audit("Update StsRefreshTokenValidFrom Timestamp", "UserManagement", "Core Directory",
-                 "Update", by_user(admin), [t_user(tgt, [mp("StsRefreshTokensValidFrom",
-                 "2026-01-01T00:00:00Z", _ts()[:-1])])])
+                 "Update", by_user(admin), [t_user(tgt, [
+                     mp("StsRefreshTokensValidFrom", ["2026-01-01T00:00:00Z"], [now_iso]),
+                     mp("Included Updated Properties", None, "StsRefreshTokensValidFrom")])])
 
 
 def _b_provisioning(cfg):
@@ -232,9 +262,118 @@ def _b_provisioning(cfg):
                  reason="Retrieved TenantDetail 'MSFT' from Microsoft Entra ID")
 
 
+def _b_enable_disable_account(cfg):
+    # Routine lifecycle: an admin enables or disables a user account. Real rows carry array-form
+    # AccountEnabled plus the Included Updated Properties marker. Verified against live tenant rows.
+    admin = ac.pick_by_role(cfg, HELPDESK_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
+    enable = random.random() < 0.5
+    old, new = ([False], [True]) if enable else ([True], [False])
+    return audit("Enable account" if enable else "Disable account", "UserManagement",
+                 "Core Directory", "Update", by_user(admin),
+                 [t_user(tgt, [mp("AccountEnabled", old, new),
+                               mp("Included Updated Properties", None, "AccountEnabled")])], [_ua(admin)])
+
+
+def _b_update_sp(cfg):
+    # Routine service-principal property update (ApplicationManagement). Real mods carry just the
+    # Included Updated Properties marker; additionalDetails carry AppId + owner org + SP type.
+    admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",)); app = _saas_app(); app_id = ac.app_id(app)
+    return audit("Update service principal", "ApplicationManagement", "Core Directory", "Update",
+                 by_user(admin), [t_obj("ServicePrincipal", app,
+                 [mp("Included Updated Properties", None, "")])],
+                 _app_details(admin, app_id, owner_org=ac.HOME_TENANT_ID))
+
+
+def _b_update_password_profile(cfg):
+    # Directory-side record of an admin password reset (distinct from the SSPR "Reset password (by
+    # admin)" row): ForceChangePassword flips and Password is a null/null mod. Verified against real rows.
+    admin = ac.pick_by_role(cfg, HELPDESK_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
+    return audit("Update PasswordProfile", "UserManagement", "Core Directory", "Update",
+                 by_user(admin), [t_user(tgt, [mp("ForceChangePassword", "False", "True"),
+                 mp("Password", None, None)])], [_ua(admin)])
+
+
+def _b_delegated_grant(cfg):
+    # A delegated OAuth2 permission grant to Microsoft Graph (admin, AllPrincipals). Verified shape.
+    admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",))
+    scope = random.choice(["User.Read", "User.Read openid profile", "offline_access User.Read",
+                           "Directory.Read.All", "Group.Read.All User.Read"])
+    tgt = t_obj("ServicePrincipal", "Microsoft Graph",
+                [mp("DelegatedPermissionGrant.Scope", None, scope),
+                 mp("DelegatedPermissionGrant.ConsentType", None, "AllPrincipals"),
+                 mp("ServicePrincipal.ObjectID", None, ac._stable_guid("sp:" + _saas_app()))])
+    tgt["id"] = ac._stable_guid("sp:Microsoft Graph")
+    return audit("Add delegated permission grant", "ApplicationManagement", "Core Directory",
+                 "Assign", by_user(admin), [tgt],
+                 _app_details(admin, "00000003-0000-0000-c000-000000000000"))
+
+
+# PIM role-management records (loggedByService "PIM") have a distinct shape from Core Directory
+# audits: initiator displayName populated with a null ipAddress, a Role target + the "MSFT"
+# Directory target, and an additionalDetails block keyed by AuditType. Verified against live rows.
+_PIM_ROLES = [("Attack Payload Author", "9c6df0f2-1e7c-4dc3-b195-66dfbd24aa8f"),
+              ("AI Administrator", "d2562ede-74db-457e-a7b6-544e236ebb61"),
+              ("Global Secure Access Log Reader", "843318fb-79a6-4168-9e6f-aa9a07481cc4"),
+              ("Helpdesk Administrator", "729827e3-9c14-49f7-bb1b-9608f156bbb8"),
+              ("Security Reader", "5d6b6bb7-de71-4623-b4af-96380a352509")]
+_PIM_VARIANTS = [
+    ("Add eligible member to role in PIM requested (permanent)", "Create", "CreateRequestPermanentEligibleRole"),
+    ("Add eligible member to role in PIM completed (permanent)", "Update", "AssignPermanentEligibleRole"),
+    ("Remove eligible member from role in PIM completed (permanent)", "Update", "RemovePermanentEligibleRole"),
+    ("Process role update request", "Create", "CreateRoleUpdateRequest"),
+]
+
+
+def _by_user_pim(u):
+    b = by_user(u)
+    b["user"]["displayName"] = u.get("display_name")   # PIM rows populate the initiator name
+    b["user"]["ipAddress"] = None                       # and carry a null ipAddress
+    return b
+
+
+def _pim_role_target(role_name, tmpl):
+    return t_obj("Role", role_name, [mp("RoleDefinitionOriginId", "", tmpl),
+                                     mp("RoleDefinitionOriginType", "", "BuiltInRole"),
+                                     mp("TemplateId", "", tmpl)])
+
+
+def _dir_target():
+    return {"id": ac.HOME_TENANT_ID, "displayName": "MSFT", "type": "Directory",
+            "userPrincipalName": None, "groupType": None, "modifiedProperties": []}
+
+
+def _pim_details(admin, tmpl, audit_type):
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-1] + "Z"
+    return [{"key": "RoleDefinitionOriginId", "value": tmpl},
+            {"key": "RoleDefinitionOriginType", "value": "BuiltInRole"},
+            {"key": "TemplateId", "value": tmpl},
+            {"key": "StartTime", "value": now_iso},
+            {"key": "UserAgent", "value": ac.user_agent(admin)},
+            {"key": "ResourceOriginId", "value": "/"},
+            {"key": "AuditType", "value": audit_type},
+            {"key": "RoleAssignmentRequestId", "value": str(uuid.uuid4())},
+            {"key": "oid", "value": ac.user_oid(admin["username"])},
+            {"key": "tid", "value": ac.HOME_TENANT_ID},
+            {"key": "RequestId", "value": str(uuid.uuid4())}]
+
+
+def _pim_record(admin, activity, op, audit_type):
+    role, tmpl = random.choice(_PIM_ROLES)
+    return audit(activity, "RoleManagement", "PIM", op, _by_user_pim(admin),
+                 [_pim_role_target(role, tmpl), _dir_target()], _pim_details(admin, tmpl, audit_type))
+
+
+def _b_pim_role(cfg):
+    admin = ac.pick_by_role(cfg, ("IT Director", "IT Administrator"), ("IT",))
+    activity, op, audit_type = random.choice(_PIM_VARIANTS)
+    return _pim_record(admin, activity, op, audit_type)
+
+
 # High-fidelity builders for the common activities (bespoke modifiedProperties/details).
 _B_HUMAN = [_b_update_user, _b_secinfo_register, _b_group_member, _b_self_password,
-            _b_app_role_assign, _b_consent, _b_register_device, _b_admin_reset, _b_token_timestamp]
+            _b_app_role_assign, _b_consent, _b_register_device, _b_admin_reset, _b_token_timestamp,
+            _b_enable_disable_account, _b_update_sp, _b_delegated_grant, _b_update_password_profile,
+            _b_pim_role]
 
 _ROLES_T = ["Helpdesk Administrator", "User Administrator", "Security Reader",
             "Exchange Administrator", "Global Reader", "Application Administrator"]
@@ -352,9 +491,21 @@ def generate_benign(config=None, context=None):
 def scenario_admin_role_add(config=None):
     """Grant of a privileged directory role -> 'Identity assigned an Azure AD Administrator Role'."""
     admin = ac.pick_by_role(config, ("IT Director",), ("IT",)); tgt = ac.pick_user(config)
-    return [audit("Add member to role", "RoleManagement", "Core Directory", "Add", by_user(admin),
-                  [t_obj("Role", "Global Administrator", [mp("Role.DisplayName", None, "Global Administrator"),
-                   mp("Role.TemplateId", None, "62e90394-69f5-4237-9190-012177145e10")]), t_user(tgt)])]
+    # Real rows: operationType Assign; the Role.* mods ride on the User (member) target, the Role
+    # object follows. Verified against live tenant rows.
+    tmpl = "62e90394-69f5-4237-9190-012177145e10"   # Global Administrator template id
+    role_mods = [mp("Role.ObjectID", None, tmpl), mp("Role.DisplayName", None, "Global Administrator"),
+                 mp("Role.TemplateId", None, tmpl), mp("Role.WellKnownObjectName", None, "CompanyAdministrator")]
+    return [audit("Add member to role", "RoleManagement", "Core Directory", "Assign", by_user(admin),
+                  [t_user(tgt, role_mods), t_obj("Role", "Global Administrator")], [_ua(admin)])]
+
+
+def scenario_role_assigned_outside_pim(config=None):
+    """A privileged role is assigned permanently OUTSIDE PIM, bypassing just-in-time governance ->
+    PIM 'role elevated outside of PIM' alert (RoleElevatedOutsidePimAlert)."""
+    admin = ac.pick_by_role(config, ("IT Director",), ("IT",))
+    return [_pim_record(admin, "Add member to role outside of PIM (permanent)", "Update",
+                        "RoleElevatedOutsidePimAlert")]
 
 
 def scenario_consent_risky_app(config=None):
@@ -368,16 +519,25 @@ def scenario_consent_risky_app(config=None):
             mp("ConsentAction.Permissions", None, "Mail.Read Files.ReadWrite.All Directory.Read.All offline_access")]
     return [audit("Consent to application", "ApplicationManagement", "Core Directory", "Assign",
                   by_user(admin), [t_obj("ServicePrincipal", app, mods)],
-                  [{"key": "User-Agent", "value": "EvoSTS"}])]
+                  [{"key": "User-Agent", "value": "EvoSTS"},
+                   {"key": "AppId", "value": ac.app_id(app)},
+                   {"key": "ServicePrincipalProvisioningType", "value": "Other"}])]
+
+
+# The real Entra portal writes this activity with an EN DASH and a trailing space, not a hyphen;
+# matching it exactly keeps any activityDisplayName string match aligned. Verified against live rows.
+_CERT_MGMT_ACTIVITY = "Update application – Certificates and secrets management "
 
 
 def scenario_app_credential_added(config=None):
     """Certificate/secret added to an app -> 'Azure application credentials added'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
-    return [audit("Update application - Certificates and secrets management", "ApplicationManagement",
+    app = "Internal Automation App"
+    return [audit(_CERT_MGMT_ACTIVITY, "ApplicationManagement",
                   "Core Directory", "Update", by_user(admin),
-                  [t_obj("Application", "Internal Automation App",
-                   [mp("KeyDescription", None, "[KeyType=AsymmetricX509Cert, KeyUsage=Verify]")])])]
+                  [t_obj("Application", app,
+                   [mp("KeyDescription", None, "[KeyType=AsymmetricX509Cert, KeyUsage=Verify]")])],
+                  [_ua(admin), {"key": "AppId", "value": ac.app_id(app)}])]
 
 
 def scenario_security_info_disabled(config=None):
@@ -401,27 +561,35 @@ def scenario_cross_tenant_trust_abuse(config=None, rogue=None):
     """Attacker trusts a rogue external tenant and opens inbound B2B + cross-tenant sync
     (the cloud 'rogue forest trust'): CrossTenantAccessSettings + CrossTenantIdentitySyncSettings
     changes granting inbound collaboration/direct-connect, MFA trust, auto-redemption and inbound
-    user provisioning from the attacker tenant -> anomalous directory/trust change + privilege path."""
+    user provisioning from the attacker tenant -> anomalous directory/trust change + privilege path.
+
+    WIP/prerequisite-gated (verified 2026-10-30, no alert from a synthetic fire): the cross-tenant
+    trust analytics need an activation baseline of what "normal" cross-tenant config looks like (and
+    likely correlation), so a one-shot synthetic change does not trip them. Record shapes are
+    field-correct (Policy-target Add/Update split matches real rows); the gap is the prerequisite."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
     rogue = rogue or _rogue(); dom, tid = rogue["domain"], rogue["tenant_id"]
-    tgt = t_obj("Other", dom)
-    tgt["modifiedProperties"] = [
-        mp("tenantId", None, tid),
-        mp("b2bCollaborationInbound.usersAndGroups", '{"accessType":"blocked"}',
-           '{"accessType":"allowed"}'),
-        mp("b2bDirectConnectInbound.usersAndGroups", '{"accessType":"blocked"}',
-           '{"accessType":"allowed"}'),
-        mp("inboundTrust.isMfaAccepted", "false", "true"),
-        mp("inboundTrust.isCompliantDeviceAccepted", "false", "true"),
-        mp("automaticUserConsentSettings.inboundAllowed", "false", "true")]
+    # Real cross-tenant access rows target a Policy object ("CrossTenantAccessPolicy for <ownTenant>"),
+    # not the partner domain: the Add carries only the partner tenantId, and the inbound B2B / trust /
+    # auto-consent changes arrive on the subsequent Update. Verified against live tenant rows.
+    def _xtap(mods):
+        t = t_obj("Policy", f"CrossTenantAccessPolicy for {ac.HOME_TENANT_ID}", mods)
+        t["id"] = ac._stable_guid("xtap:" + dom)
+        return t
     return [
         audit("Add a partner to cross-tenant access setting", "CrossTenantAccessSettings",
-              "Core Directory", "Add", by_user(admin), [tgt], [_ua(admin)]),
+              "Core Directory", "Add", by_user(admin),
+              [_xtap([mp("tenantId", None, tid)])], [_ua(admin)]),
         audit("Update a partner cross-tenant access setting", "CrossTenantAccessSettings",
               "Core Directory", "Update", by_user(admin),
-              [t_obj("Other", dom,
-                     [mp("inboundTrust.isMfaAccepted", "false", "true"),
-                      mp("automaticUserConsentSettings.inboundAllowed", "false", "true")])],
+              [_xtap([
+                  mp("b2bCollaborationInbound.usersAndGroups", '{"accessType":"blocked"}',
+                     '{"accessType":"allowed"}'),
+                  mp("b2bDirectConnectInbound.usersAndGroups", '{"accessType":"blocked"}',
+                     '{"accessType":"allowed"}'),
+                  mp("inboundTrust.isMfaAccepted", "false", "true"),
+                  mp("inboundTrust.isCompliantDeviceAccepted", "false", "true"),
+                  mp("automaticUserConsentSettings.inboundAllowed", "false", "true")])],
               [_ua(admin)]),
         audit("Create a partner cross-tenant identity sync setting", "CrossTenantIdentitySyncSettings",
               "Core Directory", "Add", by_user(admin),
@@ -536,33 +704,91 @@ def scenario_app_privilege_escalation(config=None):
                    t_user(tgt)])]
 
 
+def _ca_policy_obj(pid, name, state, mfa=True):
+    """A full Conditional Access policy object, matching the JSON the real
+    'ConditionalAccessPolicy' modifiedProperty carries (id/templateId/state/conditions/grantControls).
+    Verified against live msft_azure_ad_audit_raw rows."""
+    return {"id": pid, "templateId": ac._stable_guid("ca-tmpl:" + name), "displayName": name,
+            "createdDateTime": "2026-01-15T09:00:00+00:00", "state": state,
+            "conditions": {"applications": {"includeApplications": ["797f4846-ba00-4fd7-ba43-dac1f8f63013"],
+                                            "excludeApplications": []},
+                           "users": {"includeUsers": ["All"], "excludeUsers": []},
+                           "clientAppTypes": ["all"]},
+            "grantControls": {"operator": "OR", "builtInControls": (["mfa"] if mfa else [])}}
+
+
+def _ca_target(name, old_obj, new_obj):
+    pid = ac._stable_guid("ca:" + name)
+    tgt = t_obj("Policy", name, [mp("ConditionalAccessPolicy", old_obj, new_obj)])
+    tgt["id"] = pid
+    return pid, tgt
+
+
 def scenario_ca_policy_removed(config=None):
     """A Conditional Access policy is deleted -> 'Conditional Access policy removed' (guardrail
     removal)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
-    pol = random.choice(_CA_POLICIES)
+    name = random.choice(_CA_POLICIES)
+    pid = ac._stable_guid("ca:" + name)
+    old = _ca_policy_obj(pid, name, "enabled")
+    _, tgt = _ca_target(name, old, None)   # delete: old = policy JSON, new = null
     return [audit("Delete conditional access policy", "Policy", "Conditional Access", "Delete",
-                  by_user(admin), [t_obj("Policy", pol, [mp("ConditionalAccessPolicy", pol, None)])],
-                  [_ua(admin)])]
+                  by_user(admin), [tgt], [_ua(admin)])]
 
 
 def scenario_ca_operation_unusual(config=None):
     """A Conditional Access policy is weakened by an identity that doesn't normally touch CA ->
-    'Unusual Conditional Access operation for an identity'."""
+    'Unusual Conditional Access operation for an identity'. The weakening is MFA removed + state
+    flipped to disabled, carried in the full before/after policy JSON."""
     actor = ac.pick_nonstandard_actor(config)   # not a typical CA admin
-    pol = random.choice(_CA_POLICIES)
+    name = random.choice(_CA_POLICIES)
+    pid = ac._stable_guid("ca:" + name)
+    old = _ca_policy_obj(pid, name, "enabled", mfa=True)
+    new = _ca_policy_obj(pid, name, "disabled", mfa=False)
+    _, tgt = _ca_target(name, old, new)
     return [audit("Update conditional access policy", "Policy", "Conditional Access", "Update",
-                  by_user(actor), [t_obj("Policy", pol,
-                  [mp("ConditionalAccessPolicy", "[state=enabled]", "[state=disabled]")])], [_ua(actor)])]
+                  by_user(actor), [tgt], [_ua(actor)])]
+
+
+def scenario_ca_policy_created(config=None):
+    """A new Conditional Access policy is created -> 'Azure conditional access policy creation or
+    modification'. Created in report-only state, as the Entra portal does by default."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    name = random.choice(_CA_POLICIES)
+    pid = ac._stable_guid("ca:" + name)
+    new = _ca_policy_obj(pid, name, "enabledForReportingButNotEnforced")
+    _, tgt = _ca_target(name, None, new)   # add: old = null, new = policy JSON
+    return [audit("Add conditional access policy", "Policy", "Conditional Access", "Add",
+                  by_user(admin), [tgt], [_ua(admin)])]
+
+
+# Real admin security-info rows (Authentication Methods service) carry an app component in
+# initiatedBy (the Entra portal auth-methods blade, ADIbizaUX) and populate the initiator's
+# displayName/userType; additionalDetails is InitiatedFrom, not User-Agent. Verified against live rows.
+_AUTHMETHODS_APP = ("ADIbizaUX", "74658136-14ec-4630-ad9b-26e160ff0fc6")
+
+
+def _admin_secinfo(admin, tgt, method, op, mods):
+    init = by_user(admin)
+    init["user"]["displayName"] = admin.get("display_name")
+    init["user"]["userType"] = "Member"
+    init["app"] = {"appId": _AUTHMETHODS_APP[1], "displayName": _AUTHMETHODS_APP[0],
+                   "servicePrincipalId": None, "servicePrincipalName": None}
+    activity = "Admin registered security info" if op == "Create" else "Admin deleted security info"
+    verb = "registered" if op == "Create" else "deleted"
+    return audit(activity, "UserManagement", "Authentication Methods", op, init,
+                 [t_user(tgt, mods)],
+                 [{"key": "InitiatedFrom", "value": f"{_AUTHMETHODS_APP[0]} ({_AUTHMETHODS_APP[1]})"}],
+                 reason=f"Admin {verb} {method} authentication method for user")
 
 
 def scenario_tap_registered(config=None):
     """A Temporary Access Pass is registered on an account (MFA-bypass persistence) -> 'Azure
     Temporary Access Pass (TAP) registered to an account'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
-    return [audit("Admin registered security info", "UserManagement", "Core Directory", "Update",
-                  by_user(admin), [t_user(tgt, [mp("StrongAuthenticationMethod", None,
-                  "TemporaryAccessPass"), mp("SecurityInfo.Action", None, "Register")])], [_ua(admin)])]
+    return [_admin_secinfo(admin, tgt, "Temporary Access Pass", "Create",
+                           [mp("StrongAuthenticationMethod", None, "TemporaryAccessPass"),
+                            mp("SecurityInfo.Action", None, "Register")])]
 
 
 def scenario_bitlocker_key_retrieval(config=None):
@@ -577,30 +803,41 @@ def scenario_owner_added_to_application(config=None):
     """An owner is added to an Azure application (app takeover / persistence) -> 'Owner added to
     Azure application'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
-    return [audit("Add owner to application", "ApplicationManagement", "Core Directory", "Add",
-                  by_user(admin), [t_obj("Application", "Internal Automation App"), t_user(tgt)],
+    app = "Internal Automation App"; app_oid = ac._stable_guid("App:" + app); app_id = ac.app_id(app)
+    owner_mods = [mp("Application.ObjectID", None, app_oid),
+                  mp("Application.DisplayName", None, app),
+                  mp("Application.AppId", None, app_id)]
+    return [audit("Add owner to application", "ApplicationManagement", "Core Directory", "Assign",
+                  by_user(admin), [t_user(tgt, owner_mods), t_obj("Application", app)],
                   [_ua(admin)])]
 
 
 def scenario_sp_app_role_assigned(config=None):
     """A high-privilege app role (Graph app permission) is granted to a service principal ->
-    'Azure service principal assigned app role'."""
+    'Azure service principal assigned app role'. WIP/prerequisite-gated (verified 2026-10-30, no
+    alert from a synthetic fire): same class as the app-management family -- Informational / 14-day
+    activation + 30-day training. Record shape is field-correct; the gap is the analytics prerequisite."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    sp = "External Reporting Connector"
     return [audit("Add app role assignment to service principal", "ApplicationManagement",
                   "Core Directory", "Assign", by_user(admin),
-                  [t_obj("ServicePrincipal", "External Reporting Connector",
-                   [mp("AppRole.Value", None, "Mail.ReadWrite.All"),
-                    mp("AppRole.Id", None, "e2a3a72e-5f79-4c64-b1b1-878b674786c9")])], [_ua(admin)])]
+                  [t_obj("ServicePrincipal", sp,
+                   [mp("AppRole.Id", None, "e2a3a72e-5f79-4c64-b1b1-878b674786c9"),
+                    mp("AppRole.Value", None, "Mail.ReadWrite.All"),
+                    mp("AppRole.DisplayName", None, "Read and write mail in all mailboxes")])],
+                  _app_details(admin, ac.app_id(sp)))]
 
 
 def scenario_application_uri_modification(config=None):
     """An application's reply/redirect URI is modified to an attacker-controlled URL (token
     redirect hijack) -> 'Azure application URI modification'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    app = "Internal Automation App"
     return [audit("Update application", "ApplicationManagement", "Core Directory", "Update",
-                  by_user(admin), [t_obj("Application", "Internal Automation App",
+                  by_user(admin), [t_obj("Application", app,
                   [mp("AppAddress.ReplyUrl", "https://app.examplecorp.com/auth",
-                      "https://attacker-collect.example/oauth/callback")])], [_ua(admin)])]
+                      "https://attacker-collect.example/oauth/callback")])],
+                  [_ua(admin), {"key": "AppId", "value": ac.app_id(app)}])]
 
 
 def scenario_pim_elevation_request(config=None):
@@ -632,13 +869,33 @@ def scenario_device_registration_policy_mod(config=None):
 
 def scenario_unusual_guest_invitation(config=None):
     """An external guest is invited by an identity that doesn't normally invite guests ->
-    'Successful unusual guest user invitation'."""
+    'Successful unusual guest user invitation'. A real B2B invite emits TWO rows, matched here from a
+    live tenant invite: 'Invite external user' (loggedByService 'Invited Users', the invitee email in
+    additionalDetails.invitedUserEmailAddress + InvitationId) and 'Add user' (Core Directory,
+    CreationType Invitation, InviteTicket, the '<email-with-@-as-_>#EXT#@<tenant>' guest UPN)."""
     inviter = ac.pick_nonstandard_actor(config)
     ext = ac.rare_ext_email()                        # never-seen external invitee (unbounded)
-    guest = f"{ext.split('@')[0]}#EXT#@examplecorp.com"
-    return [audit("Invite external user", "UserManagement", "Core Directory", "Add", by_user(inviter),
-                  [t_user({"username": "guest", "upn": guest, "display_name": "external guest"},
-                   [mp("Invitation.InvitedUserEmailAddress", None, ext)])], [_ua(inviter)])]
+    local = ext.split("@")[0]
+    guest_upn = f"{ext.replace('@', '_')}#EXT#@{ac.UPN_DOMAIN}"
+    gid = str(uuid.uuid4()); ip = ac.egress(inviter)["ip"]; oid = ac.user_oid(inviter["username"])
+    invite = audit("Invite external user", "UserManagement", "Invited Users", "Add", by_user(inviter, ip),
+                   [{"id": gid, "displayName": local, "type": "User", "userPrincipalName": guest_upn,
+                     "groupType": None, "modifiedProperties": []}],
+                   [{"key": "oid", "value": oid}, {"key": "tid", "value": ac.HOME_TENANT_ID},
+                    {"key": "ipaddr", "value": ip},
+                    {"key": "wids", "value": "62e90394-69f5-4237-9190-012177145e10"},
+                    {"key": "InvitationId", "value": str(uuid.uuid4())},
+                    {"key": "invitedUserEmailAddress", "value": ext}])
+    add = audit("Add user", "UserManagement", "Core Directory", "Add", by_user(inviter, ip),
+                [{"id": gid, "displayName": None, "type": "User", "userPrincipalName": guest_upn,
+                  "groupType": None, "modifiedProperties": [
+                      mp("AccountEnabled", [], [True]),
+                      mp("CreationType", [], ["Invitation"]),
+                      mp("DisplayName", [], [local]),
+                      mp("InviteTicket", [], [{"Type": 1, "Ticket": str(uuid.uuid4())}]),
+                      mp("MailNickname", [], [f"{ext.replace('@', '_')}#EXT#"])]}],
+                [_ua(inviter)])
+    return [invite, add]
 
 
 def scenario_account_unlock_password_reset(config=None):
@@ -693,11 +950,10 @@ def scenario_user_account_created(config=None):
     'Azure account creation by a non-standard account' (rogue account persistence)."""
     actor = ac.pick_nonstandard_actor(config)
     newu = f"svc_{random.randint(1000,9999)}"
+    upn = f"{newu}@examplecorp.com"
     return [audit("Add user", "UserManagement", "Core Directory", "Add", by_user(actor),
-                  [t_user({"username": newu, "upn": f"{newu}@examplecorp.com",
-                           "display_name": "Service Account"},
-                          [mp("AccountEnabled", None, "True"),
-                           mp("UserPrincipalName", None, f"{newu}@examplecorp.com")])], [_ua(actor)])]
+                  [t_user({"username": newu, "upn": upn, "display_name": "Service Account"},
+                          _add_user_mods(upn, "Service Account"))], [_ua(actor)])]
 
 
 def scenario_user_account_deleted(config=None):
@@ -705,7 +961,7 @@ def scenario_user_account_deleted(config=None):
     'Azure account deletion by a non-standard account' (destruction / covering tracks)."""
     actor = ac.pick_nonstandard_actor(config); tgt = ac.pick_user(config)
     return [audit("Delete user", "UserManagement", "Core Directory", "Delete", by_user(actor),
-                  [t_user(tgt)], [_ua(actor)])]
+                  [t_user(tgt, [mp("Is Hard Deleted", None, "False")])], [_ua(actor)])]
 
 
 def scenario_short_lived_account(config=None):
@@ -715,9 +971,9 @@ def scenario_short_lived_account(config=None):
     burner = f"tmp_{random.randint(1000,9999)}"
     u = {"username": burner, "upn": f"{burner}@examplecorp.com", "display_name": "Temp Account"}
     add = audit("Add user", "UserManagement", "Core Directory", "Add", by_user(actor),
-                [t_user(u, [mp("AccountEnabled", None, "True")])], [_ua(actor)])
+                [t_user(u, _add_user_mods(u["upn"], u["display_name"]))], [_ua(actor)])
     rem = audit("Delete user", "UserManagement", "Core Directory", "Delete", by_user(actor),
-                [t_user(u)], [_ua(actor)])
+                [t_user(u, [mp("Is Hard Deleted", None, "False")])], [_ua(actor)])
     return [add, rem]
 
 
@@ -762,11 +1018,16 @@ def scenario_sp_created(config=None):
     'Azure Service principal/Application creation'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
     app = ac.rare_app_name()     # a brand-new application identity (unbounded)
+    app_id = ac.app_id(app)
+    # Real "Add service principal" mods are array-form (AccountEnabled [true], AppPrincipalId
+    # ["<appId>"], DisplayName ["<name>"]); additionalDetails carry AppId + AppOwnerOrganizationId
+    # (our tenant) + ServicePrincipalProvisioningType. Verified against live tenant rows.
     return [audit("Add service principal", "ApplicationManagement", "Core Directory", "Add",
                   by_user(admin), [t_obj("ServicePrincipal", app,
-                   [mp("AccountEnabled", None, "True"),
-                    mp("AppId", None, ac.app_id(app)),
-                    mp("ServicePrincipalType", None, "Application")])], [_ua(admin)])]
+                   [mp("AccountEnabled", [], [True]),
+                    mp("AppPrincipalId", [], [app_id]),
+                    mp("DisplayName", [], [app])])],
+                  _app_details(admin, app_id, owner_org=ac.HOME_TENANT_ID))]
 
 
 def scenario_sp_removed(config=None):
@@ -785,10 +1046,18 @@ def scenario_auth_method_added(config=None):
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
     tgt = ac.pick_by_role(config, ("IT Director",), ("IT",))
     method = random.choice(["Phone", "Microsoft Authenticator", "Email", "FIDO2 Security Key"])
-    return [audit("Admin registered security info", "UserManagement", "Authentication Methods",
-                  "Update", by_user(admin),
-                  [t_user(tgt, [mp("AuthenticationMethod", None, method)])], [_ua(admin)],
-                  reason="Admin registered security info")]
+    return [_admin_secinfo(admin, tgt, method, "Create",
+                           [mp("AuthenticationMethod", None, method)])]
+
+
+def scenario_auth_method_removed(config=None):
+    """An admin removes an authentication (MFA) method from an account -> MFA teardown / defense
+    evasion ('Authentication method removed from an Azure account'). Real 'Admin deleted security
+    info' rows carry empty target modifiedProperties."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    tgt = ac.pick_by_role(config, ("IT Director",), ("IT",))
+    method = random.choice(["Phone", "Microsoft Authenticator", "Email", "FIDO2 Security Key"])
+    return [_admin_secinfo(admin, tgt, method, "Delete", [])]
 
 
 def scenario_unverified_domain_added(config=None):
@@ -867,7 +1136,10 @@ SCENARIOS.update({
     "wip_service_principal_created": scenario_sp_created,
     "wip_service_principal_removed": scenario_sp_removed,
     "wip_auth_method_added": scenario_auth_method_added,
+    "wip_auth_method_removed": scenario_auth_method_removed,
+    "wip_role_assigned_outside_pim": scenario_role_assigned_outside_pim,
     "wip_conditional_access_change": scenario_ca_operation_unusual,
+    "wip_ca_policy_created": scenario_ca_policy_created,
     "wip_user_created": scenario_user_account_created,
     "wip_user_deleted": scenario_user_account_deleted,
     "wip_user_password_reset": scenario_account_unlock_password_reset,
@@ -887,22 +1159,39 @@ SCENARIOS.update({
 # held back: one alert in three weeks, not attributable to the scenario over the
 # catalog's own password-reset records.
 ANALYTIC_ALERTS = {
-    "admin_role_add":           "Suspicious Azure AD Administrator Role assignment",
+    # Observed firing 2026-10-30: the tenant raised the Cloud privilege-escalation analytic for the
+    # Global Administrator grant (was mapped to "Suspicious Azure AD Administrator Role assignment").
+    "admin_role_add":           "A cloud identity escalated its permissions to a high privilege role/policy",
+    "consent_risky_app":        "First seen Azure admin consent to an application",
     "ca_policy_removed":        "Conditional Access policy removed",
     "pim_alert_disabled":       "Azure AD PIM alert disabled",
     "pim_role_settings_change": "Azure AD PIM role settings change",
     "unverified_domain_added":  "Rare unverified domain addition to Azure AD",
+    # Confirmed firing 2026-10-30 (fire -> alert observed; CA-removed re-confirmed with the full
+    # policy-JSON shape, guest invite with the two-row Invited Users + Add user shape).
+    "unusual_guest_invitation": "Rare successful guest invitation in the organization",
     "federated_domain_backdoor": "A successful Azure domain federation settings modification",
     "failed_federation_change": "Azure domain federation settings modification attempt",
     "wip_cloud_group_change": "A cloud identity created or modified a security group",
     "wip_azure_group_create_delete": "Azure group creation/deletion",
+    # App-management family: validated 2026-10-30 against REAL user-initiated tenant events (a custom
+    # "Crawler" app registration + credential) — our record shapes match the real rows. They did NOT
+    # raise standalone alerts, and that is EXPECTED: on their Cortex pages these are Informational
+    # severity (Service principal/Application creation, Owner added, Credentials added via the Cloud
+    # module) which do not surface as standalone alerts, and the Low/Medium variants carry a 14-day
+    # activation + 30-day training window. So "no alert here" is Informational/activation-gated, NOT a
+    # data-shape bug — do not re-chase these as broken. Required data: Azure Audit Log OR Microsoft
+    # Graph Logs (Cloud module) or AzureAD Audit Log + Identity Threat Module.
     "wip_app_credential_added": "Credentials were added to Azure application",
     "wip_app_owner_added": "Owner was added to Azure application",
     "wip_app_owner_removed": "Removal of an Azure Owner from an Application or Service Principal",
     "wip_service_principal_created": "A Service Principal was created in Azure",
     "wip_service_principal_removed": "A Service Principal was removed from Azure",
     "wip_auth_method_added": "Authentication method was added to Azure account",
+    "wip_auth_method_removed": "Authentication method was removed from Azure account",
+    "wip_role_assigned_outside_pim": "Azure AD role assigned outside of PIM",
     "wip_conditional_access_change": "Azure conditional access policy creation or modification",
+    "wip_ca_policy_created": "Azure conditional access policy creation or modification",
     "wip_user_created": "Azure user creation/deletion",
     "wip_user_deleted": "Azure user creation/deletion",
     "wip_user_password_reset": "Azure user password reset",
@@ -931,7 +1220,7 @@ _GRAPH_CALLS = {
     "Invite external user": ("POST", "/v1.0/invitations", 201, ga.WID_MEMBER),
     "Update conditional access policy": ("PATCH", "/v1.0/identity/conditionalAccess/policies/{t}", 204, ga.WID_SECURITY_ADMIN),
     "Delete conditional access policy": ("DELETE", "/v1.0/identity/conditionalAccess/policies/{t}", 204, ga.WID_SECURITY_ADMIN),
-    "Update application - Certificates and secrets management": ("POST", "/v1.0/applications/{t}/addPassword", 200, ga.WID_APP_ADMIN),
+    _CERT_MGMT_ACTIVITY: ("POST", "/v1.0/applications/{t}/addPassword", 200, ga.WID_APP_ADMIN),
     "Add owner to application": ("POST", "/v1.0/applications/{t}/owners/$ref", 204, ga.WID_APP_ADMIN),
     "Remove owner from application": ("DELETE", "/v1.0/applications/{t}/owners/{t2}/$ref", 204, ga.WID_APP_ADMIN),
     "Admin registered security info": ("POST", "/v1.0/users/{t}/authentication/phoneMethods", 201, ga.WID_USER_ADMIN),

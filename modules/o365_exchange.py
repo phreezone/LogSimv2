@@ -15,6 +15,7 @@ inbox forwarding rule, email-hiding rule, mailbox SMTP forwarding, mailbox deleg
 SendAs grant, transport (mail-flow) forwarding rule, folder-permission modification, and
 mailbox audit bypass.
 """
+import base64
 import random
 import time
 import uuid
@@ -52,13 +53,54 @@ def _sid(username):
     return f"S-1-5-21-{n % 4294967295}-{(n >> 32) % 4294967295}-{(n >> 64) % 4294967295}-{n % 90000 + 10000}"
 
 
+_MBX_HOST = "NAMPR22A009.PROD.OUTLOOK.COM"
+_POOL_OWA = "Microsoft.Exchange.Clients.Owa2.Server.NetCore"   # user-created rules (OWA/Outlook)
+_POOL_ADMIN = "MSExchangeAdminApiNetCore"                      # Set-Mailbox / transport (EAC/admin API)
+
+
 def _mbx_path(u):
-    return (f"NAMPR22A009.PROD.OUTLOOK.COM/Microsoft Exchange Hosted Organizations/"
+    return (f"{_MBX_HOST}/Microsoft Exchange Hosted Organizations/"
             f"{ORG_NAME}/{u['display_name']}")
+
+
+def _mbx_oid_path(u):
+    # Real O365 rows address the mailbox by its directory object GUID, not the display name.
+    return (f"{_MBX_HOST}/Microsoft Exchange Hosted Organizations/"
+            f"{ORG_NAME}/{ac.user_oid(u['username'])}")
+
+
+def _ip_port(ip):
+    # RecordType 1 admin-cmdlet ClientIP carries the source port (e.g. "72.147.250.56:24410").
+    return f"{ip}:{random.randint(1024, 65535)}"
+
+
+def _utoken():
+    # 22-char URL-safe token id, matching AppAccessContext.UniqueTokenId (e.g. "CfFaVFHZ20Cw_hYdx2XRAA").
+    import base64
+    return base64.urlsafe_b64encode(uuid.uuid4().bytes).decode().rstrip("=")
 
 
 def _param(**kv):
     return [{"Name": k, "Value": v} for k, v in kv.items()]
+
+
+# OWA first-party app + API ids that real MailItemsAccessed / ExchangeItemGroup rows carry.
+_OWA_APP = "9199bf20-a13f-4107-85dc-02114787ef48"
+_API_ID = "774A8455-3122-4FD5-90F1-C4D1A062AD91"
+
+
+def _userkey(username):
+    # Mailbox-activity rows (RecordType 2/3/50) carry a 16-hex UserKey, not a GUID.
+    return f"{ac._h('ukey:' + username) & 0xFFFFFFFFFFFFFFFF:016X}"
+
+
+def _b64id(nbytes=48):
+    return base64.b64encode(bytes(random.getrandbits(8) for _ in range(nbytes))).decode().rstrip("=")
+
+
+def _app_access_context(offset_s=0):
+    return {"AADSessionId": _g(), "APIId": _API_ID, "ClientAppId": _OWA_APP,
+            "IssuedAtTime": _now(offset_s), "UniqueTokenId": _utoken()}
 
 
 def _common(operation, actor, record_type, result, offset_s=0):
@@ -71,13 +113,33 @@ def _common(operation, actor, record_type, result, offset_s=0):
 
 def admin_cmdlet(operation, actor, params, target_user=None, result="True",
                  external=False, offset_s=0):
-    """RecordType 1 — Exchange admin cmdlet audit record."""
+    """RecordType 1 — Exchange admin cmdlet audit record. Field shapes (UserKey=UPN, ClientIP
+    with port, per-cmdlet ObjectId, AppAccessContext with AADSessionId/UniqueTokenId) match real
+    msft_o365_exchange_online_raw rows captured from a live .onmicrosoft.com tenant."""
     r = _common(operation, actor, 1, result, offset_s)
-    r.update({"UserType": 2, "ExternalAccess": external, "ClientIP": ac.egress(actor)["ip"],
-              "ObjectId": _mbx_path(target_user or actor), "Parameters": params,
-              "AppPoolName": "MSExchangePowerShellAppPool", "RequestId": _g(),
-              "TokenTenantId": ORG_ID,
-              "AppAccessContext": {"IssuedAtTime": _now(offset_s)}})
+    tgt = target_user or actor
+    sess = _g()
+    issued = _now(offset_s)
+    # ObjectId shape follows the real O365 audit rows per cmdlet family.
+    if operation in ("New-InboxRule", "Set-InboxRule"):
+        rule = next((p["Value"] for p in params if p["Name"] == "Name"), "")
+        obj = f"{_mbx_oid_path(tgt)}\\{rule}"
+        pool = _POOL_OWA
+    elif operation in ("New-TransportRule", "Set-TransportRule", "Remove-TransportRule"):
+        obj = ""                                  # transport rules are org-scoped, no mailbox ObjectId
+        pool = _POOL_ADMIN
+    elif operation.startswith("Set-Mailbox") or operation in ("Set-CASMailbox", "Enable-Mailbox"):
+        obj = ac.user_oid(tgt["username"])        # bare mailbox directory GUID
+        pool = _POOL_ADMIN
+    else:
+        obj = _mbx_path(tgt)
+        pool = _POOL_ADMIN
+    r.update({"UserType": 2, "UserKey": actor["upn"], "ExternalAccess": external,
+              "ClientIP": _ip_port(ac.egress(actor)["ip"]), "ObjectId": obj, "Parameters": params,
+              "AppPoolName": pool, "RequestId": _g(), "SessionId": sess,
+              "TokenObjectId": ac.user_oid(actor["username"]), "TokenTenantId": ORG_ID,
+              "AppAccessContext": {"AADSessionId": sess, "IssuedAtTime": issued,
+                                   "UniqueTokenId": _utoken()}})
     if target_user:
         r["ModifiedObjectResolvedName"] = target_user["display_name"]
     return r
@@ -109,24 +171,92 @@ def mailbox_action(operation, owner, actor=None, logon_type=0, client="OWA",
 def mail_items_accessed(owner, count=1, offset_s=0, throttled=False):
     """RecordType 50 — MailItemsAccessed. throttled=True emits a sync-level throttled access
     (IsThrottled True) — Microsoft stops logging per-item binds under heavy access, which is itself
-    a documented mass-mailbox-access / compromise indicator."""
+    a documented mass-mailbox-access / compromise indicator.
+
+    WIP/prerequisite-gated (verified 2026-10-30, no alert from a synthetic burst): the mass-mailbox-
+    access analytics are Identity Analytics / behavioral detectors that need a per-mailbox baseline
+    plus volume over a test window, which a one-shot synthetic burst cannot satisfy. The record shape
+    is field-correct (matches real rows); the gap is the analytics prerequisite, not the data."""
+    # Field shapes verified against real msft_o365_exchange_online_raw MailItemsAccessed rows:
+    # UserType 0, OWA app/client ids, a 16-hex UserKey, AppAccessContext + TokenObjectId, and
+    # OperationProperties that are just MailAccessType (no IsThrottled) on an ordinary Bind.
     r = _common("MailItemsAccessed", owner, 50, "Succeeded", offset_s)
-    r.update({"UserType": 5, "ExternalAccess": False, "LogonType": 0, "InternalLogonType": 0,
+    r["UserKey"] = _userkey(owner["username"])
+    r.update({"UserType": 0, "ExternalAccess": False, "LogonType": 0, "InternalLogonType": 0,
               "MailboxOwnerUPN": owner["upn"], "MailboxOwnerSid": _sid(owner["username"]),
               "MailboxGuid": ac.user_oid("mbx:" + owner["username"]),
               "LogonUserSid": _sid(owner["username"]),
               "ClientIPAddress": ac.egress(owner)["ip"],
-              "ClientInfoString": "Client=REST;Client=RESTSystem;;",
-              "AppId": "00000003-0000-0000-c000-000000000000", "ClientAppId": _g(),
+              "ClientInfoString": "Client=OWA;Action=ViaProxy",
+              "AppId": _OWA_APP, "ClientAppId": _OWA_APP,
+              "AppAccessContext": _app_access_context(offset_s),
+              "TokenObjectId": ac.user_oid(owner["username"]),
               "OperationCount": count, "TokenTenantId": ORG_ID})
     if throttled:
+        # Microsoft stops per-item binds under heavy access (a documented mass-access indicator).
         r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Sync"},
                                     {"Name": "IsThrottled", "Value": "True"}]
     else:
-        r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Bind"},
-                                    {"Name": "IsThrottled", "Value": "False"}]
-        r["Folders"] = [{"Path": "\\Inbox", "FolderItems": [{"InternetMessageId": f"<{_g()}@{ORG_NAME}>"}
-                                                            for _ in range(count)]}]
+        r["OperationProperties"] = [{"Name": "MailAccessType", "Value": "Bind"}]
+        r["Folders"] = [{"FolderItems": [{"CreationTime": _now(offset_s), "Id": _b64id(),
+                                          "ImmutableId": _b64id(), "InternetMessageId": f"<{_g()}@{ORG_NAME}>",
+                                          "SizeInBytes": random.randint(1500, 90000)}
+                                         for _ in range(count)],
+                         "Path": "\\Inbox"}]
+    return r
+
+
+def item_group_action(operation, owner, actor=None, folder_path="\\Deleted Items", count=1, offset_s=0):
+    """RecordType 3 — ExchangeItemGroup (bulk move/soft-delete). Real SoftDelete/HardDelete rows
+    carry AffectedItems + a Folder object, Bearer auth and the OWA app ids."""
+    actor = actor or owner
+    r = _common(operation, actor, 3, "Succeeded", offset_s)
+    r["UserKey"] = _userkey(actor["username"])
+    folder = {"Id": _b64id(), "Path": folder_path}
+    r.update({"UserType": 0, "ExternalAccess": (actor["username"] != owner["username"]),
+              "CrossMailboxOperation": False, "LogonType": 0, "InternalLogonType": 0,
+              "AuthType": "Bearer", "TokenType": "V1AppActAs", "HostAppId": _API_ID,
+              "MailboxOwnerUPN": owner["upn"], "MailboxOwnerSid": _sid(owner["username"]),
+              "MailboxGuid": ac.user_oid("mbx:" + owner["username"]),
+              "LogonUserSid": _sid(actor["username"]),
+              "ClientIPAddress": ac.egress(actor)["ip"], "ClientIP": ac.egress(actor)["ip"],
+              "ClientInfoString": "Client=OWA;Action=ViaProxy",
+              "AppId": _OWA_APP, "ClientAppId": _OWA_APP,
+              "TokenObjectId": ac.user_oid(actor["username"]), "TokenTenantId": ORG_ID,
+              "AppAccessContext": _app_access_context(offset_s), "Folder": folder,
+              "AffectedItems": [{"Id": _b64id(), "InternetMessageId": f"<{_g()}@{ORG_NAME}>",
+                                 "ParentFolder": folder, "Subject": ac.email_subject()}
+                                for _ in range(count)]})
+    return r
+
+
+def dlp_rule_match(sender, offset_s=0):
+    """RecordType 13 — DlpRuleMatch: a sent message matched a DLP policy. Real rows carry
+    ExchangeMetaData + PolicyDetails and no ResultStatus/OriginatingServer.
+
+    WIP/prerequisite-gated (verified 2026-10-30, no alert): DLP alerts are raised by the tenant's own
+    DLP policy engine evaluating mail, so injecting a match record for a policy that is not configured
+    in the tenant will not raise the DLP analytic. The record shape is field-correct; firing needs a
+    real DLP policy in the tenant."""
+    r = _common("DlpRuleMatch", sender, 13, "", offset_s)
+    for k in ("ResultStatus", "OriginatingServer", "OrganizationName"):
+        r.pop(k, None)
+    r["UserKey"] = ac.user_oid(sender["username"])
+    server = random.choice(_SERVERS).split()[0]
+    msg_id = f"<{_g().replace('-', '')}@{server}.namprd22.prod.outlook.com>"
+    r.update({"UserType": 0, "ObjectId": msg_id, "IncidentId": _g(),
+              "SensitiveInfoDetectionIsIncluded": False,
+              "ExchangeMetaData": {"BCC": [], "CC": [], "FileSize": random.randint(2000, 200000),
+                  "From": sender["upn"], "IsViewableByExternalUsers": True, "MessageID": msg_id,
+                  "RecipientCount": 1, "SensitivityLabelIds": [], "SensitivityLabelNames": [],
+                  "Sent": _now(offset_s)},
+              "PolicyDetails": [{"PolicyId": _g(),
+                  "PolicyName": "Default HR & Privacy Info Protection Policy",
+                  "Rules": [{"ActionParameters": ["GenerateAlert:true"],
+                             "Actions": ["NotifyUser", "GenerateAlert"],
+                             "AlertProperties": [{"Name": "GenerateAlertCutTime", "Value": _now(offset_s)}],
+                             "RuleId": _g(), "RuleName": random.choice(["U.S. PII", "Credit Card Number",
+                                                                        "U.S. Social Security Number (SSN)"])}]}]})
     return r
 
 
@@ -145,8 +275,16 @@ def _b_send(cfg):
 
 def _b_move(cfg):
     u = ac.pick_user(cfg)
-    return mailbox_action(random.choice(["MoveToDeletedItems", "Move", "SoftDelete"]), u,
-                          item={"Subject": ac.email_subject(), "ParentFolder": {"Path": "\\Inbox"}})
+    op = random.choice(["MoveToDeletedItems", "Move", "SoftDelete", "HardDelete"])
+    # SoftDelete/HardDelete are logged as RecordType 3 (ExchangeItemGroup) with AffectedItems;
+    # Move/MoveToDeletedItems stay RecordType 2 single-item actions.
+    if op in ("SoftDelete", "HardDelete"):
+        return item_group_action(op, u, count=random.randint(1, 5))
+    return mailbox_action(op, u, item={"Subject": ac.email_subject(), "ParentFolder": {"Path": "\\Inbox"}})
+
+
+def _b_dlp_match(cfg):
+    return dlp_rule_match(ac.pick_user(cfg))
 
 
 def _b_benign_rule(cfg):
@@ -198,8 +336,8 @@ def _b_admin_benign(cfg):
                         target_user=tgt)
 
 
-_BENIGN = [(8, _b_mail_accessed), (7, _b_mailbox_op), (2, _b_benign_rule),
-           (2, _b_login), (1, _b_new_mailbox), (1, _b_admin_benign)]
+_BENIGN = [(8, _b_mail_accessed), (7, _b_mailbox_op), (3, _b_move), (2, _b_benign_rule),
+           (2, _b_login), (1, _b_new_mailbox), (1, _b_admin_benign), (1, _b_dlp_match)]
 _B_POOL = [fn for w, fn in _BENIGN for _ in range(w)]
 _HUMAN = {_b_mailbox_op, _b_benign_rule, _b_login, _b_new_mailbox, _b_admin_benign}
 
@@ -231,9 +369,11 @@ def generate_benign(config=None, context=None):
 # ── Exchange BEC detection scenarios ────────────────────────────────────────────────
 
 def scenario_inbox_forwarding_rule(config=None):
-    """New-InboxRule that forwards mail to an external address -> 'Exchange inbox forwarding rule configured'."""
+    """New-InboxRule that forwards the whole inbox to an external public mailbox (gmail) ->
+    'Exchange inbox forwarding rule configured' (public domain -> 'External ...' Low variant).
+    No filter condition, so the rule carries every incoming message out to the external account."""
     u = ac.pick_user(config)
-    ext = f"{u['username'].replace('.', '')}@{random.choice(_EXT_DOMAINS)}"
+    ext = f"{u['username'].replace('.', '')}@gmail.com"
     return [admin_cmdlet("New-InboxRule", u, _param(Name="Invoices", ForwardTo=ext,
                          StopProcessingRules="True"), target_user=u)]
 
@@ -519,6 +659,40 @@ SCENARIOS = {
     "mailbox_enumeration": scenario_mailbox_enumeration,
     "dlp_policy_disabled": scenario_dlp_policy_disabled,
     "audit_bypass": scenario_audit_bypass,
+}
+
+
+# Maps each scenario to the Cortex analytics alert its O365 Audit (RecordType 1) record is built to
+# raise, so threat_catalog can offer them on demand. The three forwarding detectors
+# (confirmed on the Cortex "alerts-by-name" pages) all read Office 365 Audit and carry a 14-day
+# activation + 30-day training window, so a freshly started feed sits in activation before firing.
+# Delegate / suspicious / external shapes roll up under the base detector name as documented variations.
+ANALYTIC_ALERTS = {
+    "inbox_forwarding_rule": "Exchange inbox forwarding rule configured",
+    "inbox_forwarding_delegate": "Exchange inbox forwarding rule configured",
+    "inbox_forwarding_suspicious": "Exchange inbox forwarding rule configured",
+    "mailbox_smtp_forwarding": "Exchange user mailbox forwarding",
+    "mailbox_smtp_forwarding_delegate": "Exchange user mailbox forwarding",
+    "transport_forwarding_rule": "Exchange transport forwarding rule configured",
+    "transport_forwarding_delegate": "Exchange transport forwarding rule configured",
+    "email_hiding_rule": "Exchange email-hiding inbox rule",
+    "catch_all_hiding_rule": "Exchange email-hiding inbox rule",
+    "email_hiding_transport_rule": "Exchange email-hiding transport rule",
+    "mailbox_delegation": "Exchange mailbox delegation permissions added",
+    "folder_permission_mod": "Exchange mailbox folder permission modification",
+    "mail_accessed_multi_ip_subnet": "User mail items accessed from multiple IPs",
+    "single_ip_multi_mailbox": "Single IP accessed mail items of multiple users",
+    "mailbox_enumeration": "Mailbox enumeration activity by Azure application",
+    "sent_to_deleted_scripted": "User moved sent items to deleted items",
+    "anti_phish_policy_disabled": "Exchange anti-phish policy disabled or removed",
+    "exchange_audit_log_disabled": "Exchange audit log disabled",
+    "compliance_search_created": "Exchange compliance search created",
+    "dkim_disabled": "Exchange DKIM signing configuration disabled",
+    "malware_filter_removed": "Exchange malware filter policy removed",
+    "safe_attachment_disabled": "Exchange Safe Attachment policy disabled or removed",
+    "safe_link_disabled": "Exchange Safe Link policy disabled or removed",
+    "sensitive_mail_external": "Sensitive Exchange mail sent to external users",
+    "dlp_policy_disabled": "Microsoft 365 DLP policy disabled or removed",
 }
 
 

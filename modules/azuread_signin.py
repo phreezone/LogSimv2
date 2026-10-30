@@ -52,6 +52,14 @@ def _tor_ip(config):
     return random.choice(RISKY_IPS)
 
 
+def _ext_src(config=None, src_ip=None):
+    """A non-TOR external source location (a real announced hosting/VPS IP, geolocated) for brute
+    force / spray / lockout. Those must NOT come from a TOR exit, or XSIAM raises the TOR sign-in
+    detector instead of the brute-force/spray analytics. src_ip overrides the IP but keeps the geo."""
+    loc = ac.rare_asn_loc()
+    return {**loc, "ip": src_ip} if src_ip else loc
+
+
 def _signin(user, loc, *, interactive=True, success=True, error_code=0,
             failure="Other.", risk_level="none", risk_state="none", risk_detail="none",
             risk_events=None, offset_s=0,
@@ -87,6 +95,9 @@ def _signin(user, loc, *, interactive=True, success=True, error_code=0,
         "riskLevelDuringSignIn": risk_level, "riskState": risk_state,
         "riskEventTypes": risk_events or [], "riskEventTypes_v2": risk_events or [],
         "resourceDisplayName": res_name, "resourceId": ac.resource_id(res_name),
+        "resourceTenantId": ac.HOME_TENANT_ID,
+        "servicePrincipalId": ac._stable_guid("sp:" + res_name),
+        "userAgent": ac.user_agent(user),
         "homeTenantId": ac.HOME_TENANT_ID, "userType": user_type, "crossTenantAccessType": cross_tenant,
         "incomingTokenType": "primaryRefreshToken" if not interactive else "none",
         "tokenIssuerType": "AzureAD", "clientCredentialType": "none",
@@ -285,13 +296,20 @@ def _benign_mix(config, user, loc):
 
 
 # ── attack scenarios ─────────────────────────────────────────────────────────────────
+# NOTE on the credential-attack scenarios (brute_force / password_spray /
+# account_lockout_spray / sso_spray_ip_rotation / impossible_travel): on the Azure AD sign-in feed
+# these are Cortex *Identity Analytics* detections, which require (per Cortex docs) Identity
+# Analytics enabled + the Cloud Identity Engine set up + a multi-day baseline (cloud audit logs >= 5
+# days). A one-shot synthetic fire does not satisfy that, so they do not raise an alert here
+# regardless of source IP -- verified 2026-10-30 (off-TOR, high volume, 109 victims / 76 IPs -> no
+# alert). This tenant's live login brute-force coverage is correlation rules scoped to Okta and
+# Cisco ASA, and the standalone spray/brute analytics are VPN/host-based, not Azure AD SSO. These
+# stay WIP until Identity Analytics + CIE + baseline are in place. The records are field-correct;
+# the gap is the analytics prerequisite, not the data.
 
 def scenario_brute_force(config=None, user=None, attempts=60, src_ip=None):
     u = ac.pick_user(config)
-    loc = ac.egress(u)
-    ip = src_ip or random.choice(RISKY_IPS)
-    bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 0, "longitude": 0}}
+    bad = _ext_src(config, src_ip)   # one non-TOR external source IP for the whole campaign
     offs = _burst_offsets(attempts)
     out = [_signin(u, bad, interactive=True, success=False, error_code=50126,
                    failure="Invalid username or password.", conditional="notApplied",
@@ -300,19 +318,38 @@ def scenario_brute_force(config=None, user=None, attempts=60, src_ip=None):
     return out
 
 
-def scenario_password_spray(config=None, victims=50, src_ip=None):
-    ip = src_ip or random.choice(RISKY_IPS)
-    bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 0, "longitude": 0}}
-    out = []
-    sprayed = []
-    offs = _burst_offsets(victims)
-    for i in range(victims):
+def _distinct_victims(config, n):
+    """n DISTINCT victim identities for a spray. Password spray is defined by ONE source hitting
+    MANY different accounts, so uniqueness is essential. Prefer the run's user roster; if it is
+    absent or too small (e.g. pick_user keeps returning the same stub), top up with synthetic
+    employee-style victims so the 'many users from one IP' signal always holds."""
+    seen, out = set(), []
+    for _ in range(n * 4):
+        if len(out) >= n:
+            break
         u = ac.pick_user(config)
-        sprayed.append(u)
-        out.append(_signin(u, bad, interactive=True, success=False, error_code=50126,
-                           failure="Invalid username or password.", conditional="notApplied",
-                           offset_s=offs[i]))
+        if u["username"] not in seen:
+            seen.add(u["username"]); out.append(u)
+    i = 0
+    while len(out) < n:
+        i += 1
+        uname = f"jdoe{i:04d}"
+        if uname in seen:
+            continue
+        seen.add(uname)
+        out.append({"username": uname, "upn": f"{uname}@{ac.UPN_DOMAIN}",
+                    "display_name": f"J Doe {i:04d}", "department": "Unknown",
+                    "os_type": "Windows", "os_version": "10"})
+    return out
+
+
+def scenario_password_spray(config=None, victims=50, src_ip=None):
+    bad = _ext_src(config, src_ip)   # one non-TOR external source IP, many distinct victims
+    sprayed = _distinct_victims(config, victims)
+    offs = _burst_offsets(victims)
+    out = [_signin(u, bad, interactive=True, success=False, error_code=50126,
+                   failure="Invalid username or password.", conditional="notApplied",
+                   offset_s=offs[i]) for i, u in enumerate(sprayed)]
     # The compromise lands on one of the sprayed accounts, so the "many failures then a success
     # from one IP" story resolves on a victim the spray actually touched (not a fresh identity).
     out.append(_signin(random.choice(sprayed), bad, interactive=True, offset_s=0))
@@ -376,16 +413,12 @@ def scenario_new_country_signin(config=None, user=None):
 def scenario_account_lockout_spray(config=None, victims=40, src_ip=None):
     """Many distinct users hit account lockout (errorCode 50053) from one source ->
     'Multiple user accounts failed login due to account lockouts' (Low)."""
-    ip = src_ip or random.choice(RISKY_IPS)
-    bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
-           "geoCoordinates": {"latitude": 0, "longitude": 0}}
-    out = []
+    bad = _ext_src(config, src_ip)   # non-TOR external source
     offs = _burst_offsets(victims)
-    for i in range(victims):
-        u = ac.pick_user(config)
-        out.append(_signin(u, bad, interactive=True, success=False, error_code=50053,
-                           failure="Account is locked because the user tried to sign in too many times with an incorrect user ID or password.",
-                           conditional="notApplied", offset_s=offs[i]))
+    out = [_signin(u, bad, interactive=True, success=False, error_code=50053,
+                   failure="Account is locked because the user tried to sign in too many times with an incorrect user ID or password.",
+                   conditional="notApplied", offset_s=offs[i])
+           for i, u in enumerate(_distinct_victims(config, victims))]
     return out
 
 
@@ -527,16 +560,13 @@ def scenario_machine_account_sso(config=None, user=None):
 def scenario_sso_spray_ip_rotation(config=None, victims=50):
     """Password spray with ROTATING source IPs across a subnet -> 'IP Rotation Pattern in SSO
     Spray' (evades per-IP lockout)."""
-    net = random.choice(["45.148", "193.218", "185.220"])
-    out = []
+    base = _ext_src(config)                       # a real non-TOR hosting block
+    net = ".".join(base["ip"].split(".")[:3])     # rotate IPs within its /24
     offs = _burst_offsets(victims)
-    for i in range(victims):
-        v = ac.pick_user(config)
-        ip = f"{net}.{random.randint(0, 255)}.{random.randint(2, 250)}"
-        out.append(_signin(v, {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
-                    "geoCoordinates": {"latitude": 0, "longitude": 0}}, interactive=True,
-                    success=False, error_code=50126, failure="Invalid username or password.",
-                    conditional="notApplied", offset_s=offs[i]))
+    out = [_signin(v, {**base, "ip": f"{net}.{random.randint(2, 250)}"}, interactive=True,
+                   success=False, error_code=50126, failure="Invalid username or password.",
+                   conditional="notApplied", offset_s=offs[i])
+           for i, v in enumerate(_distinct_victims(config, victims))]
     return out
 
 
@@ -850,9 +880,23 @@ SCENARIOS.update({
     "wip_unusual_cloud_identity_user_agent": scenario_sso_abnormal_user_agent,
     "wip_cloud_pentest_activity": scenario_pentest_tool_activity,
     "wip_multiple_risk_indicators": scenario_high_risk_signin,
+    # CIE / ITDR-dependent: these detectors infer the account's directory classification
+    # (disabled / honey / machine / service / dormant) from the Cloud Identity Engine identity map,
+    # not from the sign-in log alone, so they cannot fire without a CIE directory export loaded in
+    # the tenant. They stay WIP until a fire -> alert is observed with that map in place.
+    # (disabled_user_signin was tested 2026-10-30 with a dedicated former-employee UPN + errorCode
+    # 50057 and did not alert without CIE.)
+    "wip_disabled_user_sso": scenario_disabled_user_signin,
+    "wip_honey_user_sso": scenario_honey_user_signin,
+    "wip_service_account_sso": scenario_service_account_sso,
+    "wip_machine_account_sso": scenario_machine_account_sso,
+    "wip_dormant_account_sso": scenario_dormant_account_signin,
 })
 
 ANALYTIC_ALERTS = {
+    # Confirmed firing 2026-10-30 (fire -> alert observed on this feed's synthetic data).
+    "tor_signin": "A successful SSO sign-in from TOR",
+    "first_sso_resource_org": "Abnormal first access to a resource via SSO in the organization",
     "wip_unusual_country_api": "A cloud identity executed an API call from an unusual country",
     "wip_high_risk_ip_activity": "Cloud activity from a high-risk IP address",
     "wip_api_call_from_tor": "Suspicious API call from a Tor exit node",
@@ -879,6 +923,14 @@ ANALYTIC_ALERTS = {
     "wip_unusual_cloud_identity_user_agent": "Unusual user-agent for a cloud identity",
     "wip_cloud_pentest_activity": "Cloud penetration testing tool activity",
     "wip_multiple_risk_indicators": "Multiple risk indicators for a cloud identity",
+    # CIE / ITDR-dependent (unvalidated until a Cloud Identity Engine directory map is loaded that
+    # marks the account disabled/honey/machine/service/dormant). Names for disabled/honey/service are
+    # the published Cortex alerts; machine/dormant are provisional pending a confirmed fire.
+    "wip_disabled_user_sso": "A disabled user attempted to authenticate via SSO",
+    "wip_honey_user_sso": "SSO authentication attempt by a honey user",
+    "wip_service_account_sso": "SSO authentication by a service account",
+    "wip_machine_account_sso": "SSO authentication by a machine account",
+    "wip_dormant_account_sso": "Dormant account authenticated via SSO",
 }
 
 

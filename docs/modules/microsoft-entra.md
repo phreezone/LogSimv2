@@ -179,9 +179,31 @@ short-lived, federation change failed / federated-domain backdoor, unverified do
 added, security group created and deleted, and the cross-tenant set: trust abuse,
 outbound sync, default weakened, delegated admin partner abuse, multi-tenant org join.
 
-Confirmed firing in the tenant: `admin_role_add` raises *Suspicious Azure AD Administrator
-Role assignment*. `federated_domain_backdoor` raises *Rare unverified domain addition to
-Azure AD* and *A successful Azure domain federation settings modification*.
+Confirmed firing in the tenant (fire → alert observed, 2026-10-30; promoted in
+`ANALYTIC_ALERTS` with the exact observed names):
+
+| Scenario | Observed XSIAM alert | Severity |
+| --- | --- | --- |
+| `admin_role_add` | A cloud identity escalated its permissions to a high privilege role/policy | Low |
+| `consent_risky_app` | First seen Azure admin consent to an application | Low |
+| `unverified_domain_added` | Rare unverified domain addition to Azure AD | Low |
+| `federated_domain_backdoor` | A successful Azure domain federation settings modification | Medium |
+| `ca_policy_removed` | Conditional Access policy removed | Low |
+| `pim_alert_disabled` | Azure AD PIM alert disabled | Medium |
+| `pim_role_settings_change` | Azure AD PIM role settings change | Low |
+| `unusual_guest_invitation` | Rare successful guest invitation in the organization | Low |
+| `tor_signin` (sign-ins) | A successful SSO sign-in from TOR | High |
+| `first_sso_resource_org` (sign-ins) | Abnormal first access to a resource via SSO in the organization | Low |
+
+Every directory/sign-in record shape in this module was diffed field-by-field against real
+`*.onmicrosoft.com` tenant rows (2026-10-30) and matches. Scenarios whose records are
+field-correct but do not raise a standalone alert from a synthetic one-shot are marked WIP
+in-code with the reason: **Informational** severity (no standalone alert), **14-day activation
++ 30-day training**, **Identity Analytics + Cloud Identity Engine + baseline** (brute force /
+spray / lockout / impossible travel, disabled / honey / service / machine / dormant accounts),
+a **real tenant DLP policy** (DlpRuleMatch), or a **cross-tenant activation baseline**. This
+tenant's live login brute-force coverage is Okta / Cisco-ASA correlation rules, and the
+standalone spray/brute analytics are VPN/host-based rather than Azure AD SSO.
 
 ## `o365_azuread` — O365 Management Activity (Azure AD workload)
 
