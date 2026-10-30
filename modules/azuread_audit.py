@@ -83,8 +83,10 @@ def mp(name, old, new):
 
 def by_user(u, ip=None):
     ip = ip or ac.egress(u)["ip"]
+    # Real directoryAudits rows carry initiatedBy.user.userType = null (the "Member"/"Guest"
+    # distinction lives on the target, not the initiator). Verified against live tenant rows.
     return {"user": {"id": ac.user_oid(u["username"]), "displayName": None,
-                     "userPrincipalName": u["upn"], "ipAddress": ip, "userType": "Member",
+                     "userPrincipalName": u["upn"], "ipAddress": ip, "userType": None,
                      "agentType": "notAgentic", "homeTenantId": None, "homeTenantName": None},
             "app": None}
 
@@ -108,9 +110,12 @@ def audit(activity, category, service, op_type, initiator, targets,
           details=None, result="success", reason="", offset_s=0.0):
     corr = str(uuid.uuid4())
     pfx = _ID_PREFIX.get(service, "Directory")
+    # Real rows set resultReason only when there is a genuine reason (e.g. "Successfully completed
+    # reset."); for lifecycle ops (Delete/Update/Enable/Disable user) the field is null, not an echo
+    # of the activity name. Verified against live tenant rows.
     return {"id": f"{pfx}_{corr}_{_code()}_{random.randint(1000000, 999999999)}",
             "category": category, "correlationId": corr, "result": result,
-            "resultReason": reason or activity, "activityDisplayName": activity,
+            "resultReason": reason or None, "activityDisplayName": activity,
             "activityDateTime": _ts(offset_s), "loggedByService": service, "operationType": op_type,
             "initiatedBy": initiator, "targetResources": targets, "additionalDetails": details or []}
 
@@ -404,24 +409,27 @@ def scenario_cross_tenant_trust_abuse(config=None, rogue=None):
     user provisioning from the attacker tenant -> anomalous directory/trust change + privilege path."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
     rogue = rogue or _rogue(); dom, tid = rogue["domain"], rogue["tenant_id"]
-    tgt = t_obj("Other", dom)
-    tgt["modifiedProperties"] = [
-        mp("tenantId", None, tid),
-        mp("b2bCollaborationInbound.usersAndGroups", '{"accessType":"blocked"}',
-           '{"accessType":"allowed"}'),
-        mp("b2bDirectConnectInbound.usersAndGroups", '{"accessType":"blocked"}',
-           '{"accessType":"allowed"}'),
-        mp("inboundTrust.isMfaAccepted", "false", "true"),
-        mp("inboundTrust.isCompliantDeviceAccepted", "false", "true"),
-        mp("automaticUserConsentSettings.inboundAllowed", "false", "true")]
+    # Real cross-tenant access rows target a Policy object ("CrossTenantAccessPolicy for <ownTenant>"),
+    # not the partner domain: the Add carries only the partner tenantId, and the inbound B2B / trust /
+    # auto-consent changes arrive on the subsequent Update. Verified against live tenant rows.
+    def _xtap(mods):
+        t = t_obj("Policy", f"CrossTenantAccessPolicy for {ac.HOME_TENANT_ID}", mods)
+        t["id"] = ac._stable_guid("xtap:" + dom)
+        return t
     return [
         audit("Add a partner to cross-tenant access setting", "CrossTenantAccessSettings",
-              "Core Directory", "Add", by_user(admin), [tgt], [_ua(admin)]),
+              "Core Directory", "Add", by_user(admin),
+              [_xtap([mp("tenantId", None, tid)])], [_ua(admin)]),
         audit("Update a partner cross-tenant access setting", "CrossTenantAccessSettings",
               "Core Directory", "Update", by_user(admin),
-              [t_obj("Other", dom,
-                     [mp("inboundTrust.isMfaAccepted", "false", "true"),
-                      mp("automaticUserConsentSettings.inboundAllowed", "false", "true")])],
+              [_xtap([
+                  mp("b2bCollaborationInbound.usersAndGroups", '{"accessType":"blocked"}',
+                     '{"accessType":"allowed"}'),
+                  mp("b2bDirectConnectInbound.usersAndGroups", '{"accessType":"blocked"}',
+                     '{"accessType":"allowed"}'),
+                  mp("inboundTrust.isMfaAccepted", "false", "true"),
+                  mp("inboundTrust.isCompliantDeviceAccepted", "false", "true"),
+                  mp("automaticUserConsentSettings.inboundAllowed", "false", "true")])],
               [_ua(admin)]),
         audit("Create a partner cross-tenant identity sync setting", "CrossTenantIdentitySyncSettings",
               "Core Directory", "Add", by_user(admin),
@@ -705,7 +713,7 @@ def scenario_user_account_deleted(config=None):
     'Azure account deletion by a non-standard account' (destruction / covering tracks)."""
     actor = ac.pick_nonstandard_actor(config); tgt = ac.pick_user(config)
     return [audit("Delete user", "UserManagement", "Core Directory", "Delete", by_user(actor),
-                  [t_user(tgt)], [_ua(actor)])]
+                  [t_user(tgt, [mp("Is Hard Deleted", None, "False")])], [_ua(actor)])]
 
 
 def scenario_short_lived_account(config=None):
@@ -717,7 +725,7 @@ def scenario_short_lived_account(config=None):
     add = audit("Add user", "UserManagement", "Core Directory", "Add", by_user(actor),
                 [t_user(u, [mp("AccountEnabled", None, "True")])], [_ua(actor)])
     rem = audit("Delete user", "UserManagement", "Core Directory", "Delete", by_user(actor),
-                [t_user(u)], [_ua(actor)])
+                [t_user(u, [mp("Is Hard Deleted", None, "False")])], [_ua(actor)])
     return [add, rem]
 
 
