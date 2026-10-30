@@ -433,13 +433,20 @@ def scenario_consent_risky_app(config=None):
                    {"key": "ServicePrincipalProvisioningType", "value": "Other"}])]
 
 
+# The real Entra portal writes this activity with an EN DASH and a trailing space, not a hyphen;
+# matching it exactly keeps any activityDisplayName string match aligned. Verified against live rows.
+_CERT_MGMT_ACTIVITY = "Update application – Certificates and secrets management "
+
+
 def scenario_app_credential_added(config=None):
     """Certificate/secret added to an app -> 'Azure application credentials added'."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
-    return [audit("Update application - Certificates and secrets management", "ApplicationManagement",
+    app = "Internal Automation App"
+    return [audit(_CERT_MGMT_ACTIVITY, "ApplicationManagement",
                   "Core Directory", "Update", by_user(admin),
-                  [t_obj("Application", "Internal Automation App",
-                   [mp("KeyDescription", None, "[KeyType=AsymmetricX509Cert, KeyUsage=Verify]")])])]
+                  [t_obj("Application", app,
+                   [mp("KeyDescription", None, "[KeyType=AsymmetricX509Cert, KeyUsage=Verify]")])],
+                  [_ua(admin), {"key": "AppId", "value": ac.app_id(app)}])]
 
 
 def scenario_security_info_disabled(config=None):
@@ -1040,7 +1047,7 @@ _GRAPH_CALLS = {
     "Invite external user": ("POST", "/v1.0/invitations", 201, ga.WID_MEMBER),
     "Update conditional access policy": ("PATCH", "/v1.0/identity/conditionalAccess/policies/{t}", 204, ga.WID_SECURITY_ADMIN),
     "Delete conditional access policy": ("DELETE", "/v1.0/identity/conditionalAccess/policies/{t}", 204, ga.WID_SECURITY_ADMIN),
-    "Update application - Certificates and secrets management": ("POST", "/v1.0/applications/{t}/addPassword", 200, ga.WID_APP_ADMIN),
+    _CERT_MGMT_ACTIVITY: ("POST", "/v1.0/applications/{t}/addPassword", 200, ga.WID_APP_ADMIN),
     "Add owner to application": ("POST", "/v1.0/applications/{t}/owners/$ref", 204, ga.WID_APP_ADMIN),
     "Remove owner from application": ("DELETE", "/v1.0/applications/{t}/owners/{t2}/$ref", 204, ga.WID_APP_ADMIN),
     "Admin registered security info": ("POST", "/v1.0/users/{t}/authentication/phoneMethods", 201, ga.WID_USER_ADMIN),
