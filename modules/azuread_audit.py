@@ -561,7 +561,12 @@ def scenario_cross_tenant_trust_abuse(config=None, rogue=None):
     """Attacker trusts a rogue external tenant and opens inbound B2B + cross-tenant sync
     (the cloud 'rogue forest trust'): CrossTenantAccessSettings + CrossTenantIdentitySyncSettings
     changes granting inbound collaboration/direct-connect, MFA trust, auto-redemption and inbound
-    user provisioning from the attacker tenant -> anomalous directory/trust change + privilege path."""
+    user provisioning from the attacker tenant -> anomalous directory/trust change + privilege path.
+
+    WIP/prerequisite-gated (verified 2026-10-30, no alert from a synthetic fire): the cross-tenant
+    trust analytics need an activation baseline of what "normal" cross-tenant config looks like (and
+    likely correlation), so a one-shot synthetic change does not trip them. Record shapes are
+    field-correct (Policy-target Add/Update split matches real rows); the gap is the prerequisite."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
     rogue = rogue or _rogue(); dom, tid = rogue["domain"], rogue["tenant_id"]
     # Real cross-tenant access rows target a Policy object ("CrossTenantAccessPolicy for <ownTenant>"),
@@ -809,7 +814,9 @@ def scenario_owner_added_to_application(config=None):
 
 def scenario_sp_app_role_assigned(config=None):
     """A high-privilege app role (Graph app permission) is granted to a service principal ->
-    'Azure service principal assigned app role'."""
+    'Azure service principal assigned app role'. WIP/prerequisite-gated (verified 2026-10-30, no
+    alert from a synthetic fire): same class as the app-management family -- Informational / 14-day
+    activation + 30-day training. Record shape is field-correct; the gap is the analytics prerequisite."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
     sp = "External Reporting Connector"
     return [audit("Add app role assignment to service principal", "ApplicationManagement",

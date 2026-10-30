@@ -171,7 +171,12 @@ def mailbox_action(operation, owner, actor=None, logon_type=0, client="OWA",
 def mail_items_accessed(owner, count=1, offset_s=0, throttled=False):
     """RecordType 50 — MailItemsAccessed. throttled=True emits a sync-level throttled access
     (IsThrottled True) — Microsoft stops logging per-item binds under heavy access, which is itself
-    a documented mass-mailbox-access / compromise indicator."""
+    a documented mass-mailbox-access / compromise indicator.
+
+    WIP/prerequisite-gated (verified 2026-10-30, no alert from a synthetic burst): the mass-mailbox-
+    access analytics are Identity Analytics / behavioral detectors that need a per-mailbox baseline
+    plus volume over a test window, which a one-shot synthetic burst cannot satisfy. The record shape
+    is field-correct (matches real rows); the gap is the analytics prerequisite, not the data."""
     # Field shapes verified against real msft_o365_exchange_online_raw MailItemsAccessed rows:
     # UserType 0, OWA app/client ids, a 16-hex UserKey, AppAccessContext + TokenObjectId, and
     # OperationProperties that are just MailAccessType (no IsThrottled) on an ordinary Bind.
@@ -227,7 +232,12 @@ def item_group_action(operation, owner, actor=None, folder_path="\\Deleted Items
 
 def dlp_rule_match(sender, offset_s=0):
     """RecordType 13 — DlpRuleMatch: a sent message matched a DLP policy. Real rows carry
-    ExchangeMetaData + PolicyDetails and no ResultStatus/OriginatingServer."""
+    ExchangeMetaData + PolicyDetails and no ResultStatus/OriginatingServer.
+
+    WIP/prerequisite-gated (verified 2026-10-30, no alert): DLP alerts are raised by the tenant's own
+    DLP policy engine evaluating mail, so injecting a match record for a policy that is not configured
+    in the tenant will not raise the DLP analytic. The record shape is field-correct; firing needs a
+    real DLP policy in the tenant."""
     r = _common("DlpRuleMatch", sender, 13, "", offset_s)
     for k in ("ResultStatus", "OriginatingServer", "OrganizationName"):
         r.pop(k, None)
