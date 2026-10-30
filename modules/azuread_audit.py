@@ -106,6 +106,12 @@ def t_obj(kind, name, mods=None, group_type=None):
             "userPrincipalName": None, "groupType": group_type, "modifiedProperties": mods or []}
 
 
+def _add_user_mods(upn, name):
+    # Real "Add user" rows carry array-form attribute values. Verified against live tenant rows.
+    return [mp("AccountEnabled", [], [True]), mp("DisplayName", [], [name]),
+            mp("UserPrincipalName", [], [upn])]
+
+
 def audit(activity, category, service, op_type, initiator, targets,
           details=None, result="success", reason="", offset_s=0.0):
     corr = str(uuid.uuid4())
@@ -179,11 +185,13 @@ def _b_group_member(cfg):
     admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
     g = ac.group_name()
     add = random.random() < 0.6
-    mods = [mp("Group.DisplayName", None, g),
-            mp("Group.ObjectID", None, ac._stable_guid("Group:" + g))]
+    # Real rows: operationType Assign/Unassign, the Group.ObjectID/DisplayName mods ride on the User
+    # target (member), and the Group object follows with empty mods. Verified against live tenant rows.
+    gmods = [mp("Group.ObjectID", None, ac._stable_guid("Group:" + g)),
+             mp("Group.DisplayName", None, g)]
     return audit("Add member to group" if add else "Remove member from group", "GroupManagement",
-                 "Core Directory", "Add" if add else "Remove", by_user(admin),
-                 [t_obj("Group", g, mods, group_type="unifiedGroups"), t_user(tgt)], [_ua(admin)])
+                 "Core Directory", "Assign" if add else "Unassign", by_user(admin),
+                 [t_user(tgt, gmods), t_obj("Group", g, group_type="unknownFutureValue")], [_ua(admin)])
 
 
 def _b_app_role_assign(cfg):
@@ -276,6 +284,15 @@ def _b_update_sp(cfg):
                  _app_details(admin, app_id, owner_org=ac.HOME_TENANT_ID))
 
 
+def _b_update_password_profile(cfg):
+    # Directory-side record of an admin password reset (distinct from the SSPR "Reset password (by
+    # admin)" row): ForceChangePassword flips and Password is a null/null mod. Verified against real rows.
+    admin = ac.pick_by_role(cfg, HELPDESK_ROLES, ("IT",)); tgt = ac.pick_user(cfg)
+    return audit("Update PasswordProfile", "UserManagement", "Core Directory", "Update",
+                 by_user(admin), [t_user(tgt, [mp("ForceChangePassword", "False", "True"),
+                 mp("Password", None, None)])], [_ua(admin)])
+
+
 def _b_delegated_grant(cfg):
     # A delegated OAuth2 permission grant to Microsoft Graph (admin, AllPrincipals). Verified shape.
     admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",))
@@ -294,7 +311,7 @@ def _b_delegated_grant(cfg):
 # High-fidelity builders for the common activities (bespoke modifiedProperties/details).
 _B_HUMAN = [_b_update_user, _b_secinfo_register, _b_group_member, _b_self_password,
             _b_app_role_assign, _b_consent, _b_register_device, _b_admin_reset, _b_token_timestamp,
-            _b_enable_disable_account, _b_update_sp, _b_delegated_grant]
+            _b_enable_disable_account, _b_update_sp, _b_delegated_grant, _b_update_password_profile]
 
 _ROLES_T = ["Helpdesk Administrator", "User Administrator", "Security Reader",
             "Exchange Administrator", "Global Reader", "Application Administrator"]
@@ -412,9 +429,13 @@ def generate_benign(config=None, context=None):
 def scenario_admin_role_add(config=None):
     """Grant of a privileged directory role -> 'Identity assigned an Azure AD Administrator Role'."""
     admin = ac.pick_by_role(config, ("IT Director",), ("IT",)); tgt = ac.pick_user(config)
-    return [audit("Add member to role", "RoleManagement", "Core Directory", "Add", by_user(admin),
-                  [t_obj("Role", "Global Administrator", [mp("Role.DisplayName", None, "Global Administrator"),
-                   mp("Role.TemplateId", None, "62e90394-69f5-4237-9190-012177145e10")]), t_user(tgt)])]
+    # Real rows: operationType Assign; the Role.* mods ride on the User (member) target, the Role
+    # object follows. Verified against live tenant rows.
+    tmpl = "62e90394-69f5-4237-9190-012177145e10"   # Global Administrator template id
+    role_mods = [mp("Role.ObjectID", None, tmpl), mp("Role.DisplayName", None, "Global Administrator"),
+                 mp("Role.TemplateId", None, tmpl), mp("Role.WellKnownObjectName", None, "CompanyAdministrator")]
+    return [audit("Add member to role", "RoleManagement", "Core Directory", "Assign", by_user(admin),
+                  [t_user(tgt, role_mods), t_obj("Role", "Global Administrator")], [_ua(admin)])]
 
 
 def scenario_consent_risky_app(config=None):
@@ -794,11 +815,10 @@ def scenario_user_account_created(config=None):
     'Azure account creation by a non-standard account' (rogue account persistence)."""
     actor = ac.pick_nonstandard_actor(config)
     newu = f"svc_{random.randint(1000,9999)}"
+    upn = f"{newu}@examplecorp.com"
     return [audit("Add user", "UserManagement", "Core Directory", "Add", by_user(actor),
-                  [t_user({"username": newu, "upn": f"{newu}@examplecorp.com",
-                           "display_name": "Service Account"},
-                          [mp("AccountEnabled", None, "True"),
-                           mp("UserPrincipalName", None, f"{newu}@examplecorp.com")])], [_ua(actor)])]
+                  [t_user({"username": newu, "upn": upn, "display_name": "Service Account"},
+                          _add_user_mods(upn, "Service Account"))], [_ua(actor)])]
 
 
 def scenario_user_account_deleted(config=None):
@@ -816,7 +836,7 @@ def scenario_short_lived_account(config=None):
     burner = f"tmp_{random.randint(1000,9999)}"
     u = {"username": burner, "upn": f"{burner}@examplecorp.com", "display_name": "Temp Account"}
     add = audit("Add user", "UserManagement", "Core Directory", "Add", by_user(actor),
-                [t_user(u, [mp("AccountEnabled", None, "True")])], [_ua(actor)])
+                [t_user(u, _add_user_mods(u["upn"], u["display_name"]))], [_ua(actor)])
     rem = audit("Delete user", "UserManagement", "Core Directory", "Delete", by_user(actor),
                 [t_user(u, [mp("Is Hard Deleted", None, "False")])], [_ua(actor)])
     return [add, rem]
