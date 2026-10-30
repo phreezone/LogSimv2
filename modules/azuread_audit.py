@@ -699,24 +699,62 @@ def scenario_app_privilege_escalation(config=None):
                    t_user(tgt)])]
 
 
+def _ca_policy_obj(pid, name, state, mfa=True):
+    """A full Conditional Access policy object, matching the JSON the real
+    'ConditionalAccessPolicy' modifiedProperty carries (id/templateId/state/conditions/grantControls).
+    Verified against live msft_azure_ad_audit_raw rows."""
+    return {"id": pid, "templateId": ac._stable_guid("ca-tmpl:" + name), "displayName": name,
+            "createdDateTime": "2026-01-15T09:00:00+00:00", "state": state,
+            "conditions": {"applications": {"includeApplications": ["797f4846-ba00-4fd7-ba43-dac1f8f63013"],
+                                            "excludeApplications": []},
+                           "users": {"includeUsers": ["All"], "excludeUsers": []},
+                           "clientAppTypes": ["all"]},
+            "grantControls": {"operator": "OR", "builtInControls": (["mfa"] if mfa else [])}}
+
+
+def _ca_target(name, old_obj, new_obj):
+    pid = ac._stable_guid("ca:" + name)
+    tgt = t_obj("Policy", name, [mp("ConditionalAccessPolicy", old_obj, new_obj)])
+    tgt["id"] = pid
+    return pid, tgt
+
+
 def scenario_ca_policy_removed(config=None):
     """A Conditional Access policy is deleted -> 'Conditional Access policy removed' (guardrail
     removal)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
-    pol = random.choice(_CA_POLICIES)
+    name = random.choice(_CA_POLICIES)
+    pid = ac._stable_guid("ca:" + name)
+    old = _ca_policy_obj(pid, name, "enabled")
+    _, tgt = _ca_target(name, old, None)   # delete: old = policy JSON, new = null
     return [audit("Delete conditional access policy", "Policy", "Conditional Access", "Delete",
-                  by_user(admin), [t_obj("Policy", pol, [mp("ConditionalAccessPolicy", pol, None)])],
-                  [_ua(admin)])]
+                  by_user(admin), [tgt], [_ua(admin)])]
 
 
 def scenario_ca_operation_unusual(config=None):
     """A Conditional Access policy is weakened by an identity that doesn't normally touch CA ->
-    'Unusual Conditional Access operation for an identity'."""
+    'Unusual Conditional Access operation for an identity'. The weakening is MFA removed + state
+    flipped to disabled, carried in the full before/after policy JSON."""
     actor = ac.pick_nonstandard_actor(config)   # not a typical CA admin
-    pol = random.choice(_CA_POLICIES)
+    name = random.choice(_CA_POLICIES)
+    pid = ac._stable_guid("ca:" + name)
+    old = _ca_policy_obj(pid, name, "enabled", mfa=True)
+    new = _ca_policy_obj(pid, name, "disabled", mfa=False)
+    _, tgt = _ca_target(name, old, new)
     return [audit("Update conditional access policy", "Policy", "Conditional Access", "Update",
-                  by_user(actor), [t_obj("Policy", pol,
-                  [mp("ConditionalAccessPolicy", "[state=enabled]", "[state=disabled]")])], [_ua(actor)])]
+                  by_user(actor), [tgt], [_ua(actor)])]
+
+
+def scenario_ca_policy_created(config=None):
+    """A new Conditional Access policy is created -> 'Azure conditional access policy creation or
+    modification'. Created in report-only state, as the Entra portal does by default."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    name = random.choice(_CA_POLICIES)
+    pid = ac._stable_guid("ca:" + name)
+    new = _ca_policy_obj(pid, name, "enabledForReportingButNotEnforced")
+    _, tgt = _ca_target(name, None, new)   # add: old = null, new = policy JSON
+    return [audit("Add conditional access policy", "Policy", "Conditional Access", "Add",
+                  by_user(admin), [tgt], [_ua(admin)])]
 
 
 # Real admin security-info rows (Authentication Methods service) carry an app component in
@@ -1074,6 +1112,7 @@ SCENARIOS.update({
     "wip_auth_method_removed": scenario_auth_method_removed,
     "wip_role_assigned_outside_pim": scenario_role_assigned_outside_pim,
     "wip_conditional_access_change": scenario_ca_operation_unusual,
+    "wip_ca_policy_created": scenario_ca_policy_created,
     "wip_user_created": scenario_user_account_created,
     "wip_user_deleted": scenario_user_account_deleted,
     "wip_user_password_reset": scenario_account_unlock_password_reset,
@@ -1122,6 +1161,7 @@ ANALYTIC_ALERTS = {
     "wip_auth_method_removed": "Authentication method was removed from Azure account",
     "wip_role_assigned_outside_pim": "Azure AD role assigned outside of PIM",
     "wip_conditional_access_change": "Azure conditional access policy creation or modification",
+    "wip_ca_policy_created": "Azure conditional access policy creation or modification",
     "wip_user_created": "Azure user creation/deletion",
     "wip_user_deleted": "Azure user creation/deletion",
     "wip_user_password_reset": "Azure user password reset",
