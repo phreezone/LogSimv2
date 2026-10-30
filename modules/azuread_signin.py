@@ -303,19 +303,40 @@ def scenario_brute_force(config=None, user=None, attempts=60, src_ip=None):
     return out
 
 
+def _distinct_victims(config, n):
+    """n DISTINCT victim identities for a spray. Password spray is defined by ONE source hitting
+    MANY different accounts, so uniqueness is essential. Prefer the run's user roster; if it is
+    absent or too small (e.g. pick_user keeps returning the same stub), top up with synthetic
+    employee-style victims so the 'many users from one IP' signal always holds."""
+    seen, out = set(), []
+    for _ in range(n * 4):
+        if len(out) >= n:
+            break
+        u = ac.pick_user(config)
+        if u["username"] not in seen:
+            seen.add(u["username"]); out.append(u)
+    i = 0
+    while len(out) < n:
+        i += 1
+        uname = f"jdoe{i:04d}"
+        if uname in seen:
+            continue
+        seen.add(uname)
+        out.append({"username": uname, "upn": f"{uname}@{ac.UPN_DOMAIN}",
+                    "display_name": f"J Doe {i:04d}", "department": "Unknown",
+                    "os_type": "Windows", "os_version": "10"})
+    return out
+
+
 def scenario_password_spray(config=None, victims=50, src_ip=None):
     ip = src_ip or random.choice(RISKY_IPS)
     bad = {"ip": ip, "city": "Unknown", "state": "", "countryOrRegion": "US",
            "geoCoordinates": {"latitude": 0, "longitude": 0}}
-    out = []
-    sprayed = []
+    sprayed = _distinct_victims(config, victims)
     offs = _burst_offsets(victims)
-    for i in range(victims):
-        u = ac.pick_user(config)
-        sprayed.append(u)
-        out.append(_signin(u, bad, interactive=True, success=False, error_code=50126,
-                           failure="Invalid username or password.", conditional="notApplied",
-                           offset_s=offs[i]))
+    out = [_signin(u, bad, interactive=True, success=False, error_code=50126,
+                   failure="Invalid username or password.", conditional="notApplied",
+                   offset_s=offs[i]) for i, u in enumerate(sprayed)]
     # The compromise lands on one of the sprayed accounts, so the "many failures then a success
     # from one IP" story resolves on a victim the spray actually touched (not a fresh identity).
     out.append(_signin(random.choice(sprayed), bad, interactive=True, offset_s=0))
