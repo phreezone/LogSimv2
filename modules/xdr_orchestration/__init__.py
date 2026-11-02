@@ -35,11 +35,13 @@ from .executor import (
 )
 from .stories import (
     Story, Step, NetworkEvent,
-    get_reference_story, get_quick_story, get_intrusion_story, get_story,
-    list_stories, all_technique_ids,
+    get_reference_story, get_quick_story, get_intrusion_story,
+    get_lateral_story, get_persistence_story, get_fullchain_story,
+    get_story, list_stories, all_technique_ids, override_domain,
 )
 from .orchestrator import (
-    run_story, run_reference_story, run_quick_story, run_intrusion_story, run_story_id,
+    run_story, run_reference_story, run_quick_story, run_intrusion_story,
+    run_lateral_story, run_persistence_story, run_fullchain_story, run_story_id,
 )
 from .kickstarter import render_kickstarter, DEFAULT_TECHNIQUES
 
@@ -59,13 +61,20 @@ __all__ = [
     "get_reference_story",
     "get_quick_story",
     "get_intrusion_story",
+    "get_lateral_story",
+    "get_persistence_story",
+    "get_fullchain_story",
     "get_story",
     "list_stories",
     "all_technique_ids",
+    "override_domain",
     "run_story",
     "run_reference_story",
     "run_quick_story",
     "run_intrusion_story",
+    "run_lateral_story",
+    "run_persistence_story",
+    "run_fullchain_story",
     "run_story_id",
     "render_kickstarter",
     "DEFAULT_TECHNIQUES",

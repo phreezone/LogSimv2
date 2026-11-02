@@ -507,6 +507,22 @@
         </label>
         <button class="btn btn-sm" id="xdr-run-btn" onclick="xdrRun()">▶ Run story</button>
       </div>
+      <!-- Per-run options -->
+      <div style="display:flex;gap:14px;align-items:center;margin-top:10px;flex-wrap:wrap;font-size:13px;color:var(--text-muted);">
+        <label style="display:flex;align-items:center;gap:6px;">Pace
+          <select id="xdr-pace" style="padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+            <option value="1" selected>Normal</option>
+            <option value="0">Fast (no delays)</option>
+            <option value="2">Slow (2×)</option>
+          </select>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;">Domain override
+          <input type="text" id="xdr-domain" placeholder="e.g. my-c2.example.net" style="width:220px;padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;">Skip steps
+          <input type="text" id="xdr-skip" placeholder="e.g. 1,2" style="width:90px;padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+        </label>
+      </div>
       <div id="xdr-story-techs" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>
     </div>
 
@@ -1451,8 +1467,9 @@
       sel.innerHTML = stories.map(s => `<option value="${escHtml(s.id)}">${escHtml(s.name)} (${s.steps} steps)</option>`).join('');
       sel.onchange = () => {
         const s = stories.find(x => x.id === sel.value);
+        const tactics = (s && s.tactics && s.tactics.length) ? 'Tactics: ' + s.tactics.join(' → ') + '  ·  ' : '';
         document.getElementById('xdr-story-techs').textContent =
-          s ? 'Techniques: ' + s.techniques.join(', ') : '';
+          s ? tactics + 'Techniques: ' + s.techniques.join(', ') : '';
       };
       sel.onchange();
     } catch (e) { sel.innerHTML = `<option>Error: ${escHtml(e.message)}</option>`; }
@@ -1462,6 +1479,10 @@
     const story_id = document.getElementById('xdr-story-select').value;
     const dry_run = document.getElementById('xdr-dryrun').checked;
     const cleanup_prior_incidents = document.getElementById('xdr-cleanup').checked;
+    const pace = parseFloat(document.getElementById('xdr-pace').value);
+    const domain_override = document.getElementById('xdr-domain').value.trim();
+    const skip_steps = document.getElementById('xdr-skip').value
+      .split(',').map(x => parseInt(x.trim(), 10)).filter(n => Number.isInteger(n));
     const btn = document.getElementById('xdr-run-btn');
     const resWrap = document.getElementById('xdr-result');
     const statusEl = document.getElementById('xdr-result-status');
@@ -1471,7 +1492,11 @@
     statusEl.textContent = 'starting…'; statusEl.style.color = 'var(--text-muted)';
     bodyEl.innerHTML = '';
     try {
-      const start = await api('/api/attack/run', 'POST', { story_id, dry_run, cleanup_prior_incidents });
+      const start = await api('/api/attack/run', 'POST', {
+        story_id, dry_run, cleanup_prior_incidents, pace,
+        domain_override: domain_override || null,
+        skip_steps: skip_steps.length ? skip_steps : null,
+      });
       statusEl.textContent = 'running…';
       const runId = start.run_id;
       let done = false, tries = 0;
