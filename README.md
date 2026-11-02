@@ -458,6 +458,10 @@ external attacker, so it maps to `action_remote_ip`, not `action_local_ip`), use
 normalisation so `EXAMPLECORP\\user` and `user@examplecorp.com` group into one case, and
 `cs3`/`cs4` no longer mapped as interfaces on FireAMP rows where they mean disposition.
 
+A later audit of every live rule (2026-10-21) corrected 53 more. The fixes cover the
+issue's URL field, ASA rules that read connections backwards, substring private-IP tests,
+and fields mapped to nothing. See [docs/correlation-rule-fixes.md](docs/correlation-rule-fixes.md).
+
 Two authoring notes, learned the hard way and worth knowing if you write your own:
 
 - A **CUSTOM-mapped rule needs an explicit `| fields` stage**. Without one it saves,

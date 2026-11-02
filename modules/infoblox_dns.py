@@ -1512,11 +1512,15 @@ def _generate_fast_flux_dns(config, client_ip=None, session_context=None):
 
 def _generate_dns_rebinding(config, client_ip=None, session_context=None):
     """
-    Generates a DNS rebinding attack: external-named domain resolves to an internal RFC-1918 IP.
+    Generates a DNS rebinding attack: an external-named domain first resolves to the
+    attacker's public server, then -- once the browser has loaded the page -- rebinds
+    to an internal RFC-1918 IP.
 
-    Hunt signals: xdm.target.ip = RFC-1918 address for an externally-named domain;
-                  TTL=1 (minimal TTL allows rapid rebind before browser cache expires);
+    Hunt signals: the SAME domain answering a public and an RFC-1918 address in a short
+                  window (one private answer alone is indistinguishable from split-horizon
+                  DNS); TTL=1 (minimal TTL allows rapid rebind before browser cache expires);
                   client is a workstation (browser attack vector — cross-origin bypass).
+    Returns list (2 query+response pairs = 4 events).
     """
     if client_ip is None:
         internal_net = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
@@ -1525,10 +1529,15 @@ def _generate_dns_rebinding(config, client_ip=None, session_context=None):
     domain       = f"attacker-{random.randint(1000, 9999)}.{random.choice(['com', 'net', 'xyz', 'io'])}"
     int_net      = random.choice(config.get('internal_networks', ['192.168.1.0/24']))
     internal_ip  = rand_ip_from_network(ip_network(int_net))
-    resp_rr      = [f"{domain}. 1 IN A {internal_ip}"]   # TTL=1 = rebinding signal
+    public_ip    = rare_external_ip()
 
-    print(f"    - Infoblox Module simulating: DNS Rebinding -- {domain} -> {internal_ip} from {client_ip}")
-    return _build_dns_pair(config, client_ip, domain, "A", "NOERROR", resp_rr)
+    print(f"    - Infoblox Module simulating: DNS Rebinding -- {domain} -> {public_ip} -> "
+          f"{internal_ip} from {client_ip}")
+    logs = _build_dns_pair(config, client_ip, domain, "A", "NOERROR",
+                           [f"{domain}. 1 IN A {public_ip}"])     # TTL=1 = rebinding signal
+    logs.extend(_build_dns_pair(config, client_ip, domain, "A", "NOERROR",
+                                [f"{domain}. 1 IN A {internal_ip}"]))
+    return logs
 
 
 def _generate_ptr_sweep(config, client_ip=None, session_context=None):
