@@ -1,0 +1,46 @@
+[
+  {
+    "name": "Cisco Firepower \u2014 Web C2 Beacon (entity-mapped v2)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = cisco_firepower_raw\n| filter xdm.target.port in (80, 443) and xdm.source.ipv4 != null and xdm.target.ipv4 != null\n| alter u_nomail = arrayindex(regextract(xdm.source.user.username, \"^([^@]+)\"), 0)\n| alter bare_user = arrayindex(regextract(u_nomail, \"([A-Za-z0-9._-]+)$\"), 0)\n| bin _time span = 15m\n| comp count() as callbacks by xdm.source.ipv4, xdm.target.ipv4, xdm.target.port,\n       bare_user, xdm.source.host.hostname, xdm.network.application_protocol, _time\n| filter callbacks >= 8\n| alter c2_ip = xdm.target.ipv4, c2_port = xdm.target.port, beacon_user = bare_user,\n        src_host = xdm.source.host.hostname, app_proto = xdm.network.application_protocol\n| fields xdm.source.ipv4, c2_ip, c2_port, beacon_user, src_host, app_proto, callbacks\n",
+    "is_enabled": true,
+    "description": "Recurring HTTP/S callbacks from one client to one external address (>=8 in 15m), Firepower. The XSIAM Firepower parser maps no domain field and keeps no raw log, so this keys on the destination address; the C2 address still groups it with the DNS and proxy beacon alerts.",
+    "alert_name": "Cisco Firepower \u2014 Web C2 Beacon (entity-mapped v2)",
+    "alert_category": "OTHER",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "agent_hostname": "src_host",
+      "action_local_ip": "xdm.source.ipv4",
+      "action_remote_ip": "c2_ip",
+      "action_remote_port": "c2_port",
+      "action_app_protocol": "app_proto",
+      "actor_effective_username": "beacon_user"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "15 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4",
+      "c2_ip"
+    ],
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.001 - Application Layer Protocol: Web Protocols"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]

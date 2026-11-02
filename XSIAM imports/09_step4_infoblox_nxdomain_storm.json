@@ -8,11 +8,21 @@
     "alert_name": "Infoblox \u2014 DGA NXDOMAIN Storm (\u226520 NXDOMAINs From One Client)",
     "alert_category": "INFILTRATION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: \u226520 Infoblox DNS responses with outcome_reason = NXDOMAIN from one client within 10 minutes \u2014 DGA cycling indicating implant attempting many C2 candidates.\n\nWhy it matters: a host is communicating with known-bad or anomalous infrastructure (C2 / malicious domain). Assessed severity: High.\n\nMITRE ATT&CK: T1568.002 - Dynamic Resolution: Domain Generation Algorithms (TA0011 - Command and Control).\n\nInvestigate:\n  - Identify the internal client and the domain/IP contacted, and check reputation + resolution history.\n  - Look for the initial delivery vector (email/web/download) and any beaconing cadence or follow-on payloads from the same host.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_local_ip": "xdm.source.ipv4"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -25,16 +35,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

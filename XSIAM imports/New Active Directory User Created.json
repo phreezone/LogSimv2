@@ -1,0 +1,47 @@
+[
+  {
+    "name": "New Active Directory User Created",
+    "severity": "SEV_020_LOW",
+    "xql_query": "dataset = microsoft_windows_raw\r\n| filter event_id = \"4720\"\r\n| alter CreatedUser = json_extract_scalar(event_data ,\"$.SamAccountName\")\r\n| alter CreatingUser = json_extract_scalar(event_data , \"$.SubjectUserName\")\r\n| alter DomainName = json_extract_scalar(event_data , \"$.SubjectDomainName\")\r\n| alter DisplayUserName = json_extract_scalar(event_data , \"$.DisplayName\")",
+    "is_enabled": false,
+    "description": null,
+    "alert_name": "New Active Directory User Created",
+    "alert_category": "OTHER",
+    "alert_type": null,
+    "alert_description": "Creation of a Custom Alert to notify every time a new Active Directory account is created",
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "agent_device_domain": "DomainName",
+      "actor_effective_username": "CreatedUser",
+      "actor_process_image_name": "CreatingUser"
+    },
+    "execution_mode": "REAL_TIME",
+    "search_window": null,
+    "simple_schedule": null,
+    "timezone": null,
+    "crontab": null,
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null,
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1078 - Valid Accounts",
+        "T1078.002 - Valid Accounts: Domain Accounts"
+      ],
+      "TA0011 - Command and Control": [
+        "T1008 - Fallback Channels"
+      ],
+      "TA0004 - Privilege Escalation": [
+        "T1037.001 - Boot or Logon Initialization Scripts: Logon Script (Windows)"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]

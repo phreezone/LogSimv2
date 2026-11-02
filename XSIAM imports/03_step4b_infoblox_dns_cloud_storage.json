@@ -8,13 +8,24 @@
     "alert_name": "Infoblox \u2014 DNS Resolution of Unsanctioned Cloud Storage",
     "alert_category": "EXFILTRATION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Infoblox DNS query for mega.nz, anonfiles, pcloud, tresorit, wetransfer, filebin, transfer.sh, send.now, dropbox, drive.google, box.com, or pastebin \u2014 potential cloud-storage exfiltration target.\n\nWhy it matters: data may be leaving the environment through this channel. Assessed severity: Medium.\n\nMITRE ATT&CK: T1567.002 - Exfiltration Over Web Service: Cloud Storage (TA0010 - Exfiltration).\n\nInvestigate:\n  - Quantify the volume and destination, and identify the user/host/principal moving the data.\n  - Correlate with prior collection/staging and any defense-evasion steps; confirm the destination is not an approved service.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
+      "xdm_url": "bad_domains",
+      "fw_url_domain": "bad_domains",
       "action_local_ip": "xdm.source.ipv4",
-      "action_evtlog_message": "events_seen",
-      "xdm_url": "bad_domains"
+      "action_evtlog_message": "events_seen"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -27,16 +38,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

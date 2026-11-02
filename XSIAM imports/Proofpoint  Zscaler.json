@@ -1,0 +1,38 @@
+[
+  {
+    "name": "Proofpoint / Zscaler",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = proofpoint_tap_raw\r\n| filter _log_type = \"click-permitted\"\r\n| fields clickIP, senderIP, recipient, url, GUID, _time as pp_time\r\n| join (\r\n    dataset = zscaler_nssweblog_raw\r\n    | filter act = \"Block\"\r\n    | fields src as zs_src, dhost, request as blocked_url,\r\n             cat as threat_cat, reason, cn1 as threat_score,\r\n             suser, _time as zs_time) as zs\r\n  clickIP = zs.zs_src\r\n| filter zs_time >= pp_time\r\n| fields recipient, clickIP, url as phish_url, GUID, pp_time,\r\n         dhost, blocked_url, threat_cat, reason, threat_score, suser, zs_time",
+    "is_enabled": true,
+    "description": null,
+    "alert_name": "Proofpoint / Zscaler",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "xdm_url": "phish_url",
+      "fw_url_domain": "phish_url",
+      "action_local_ip": "clickIP",
+      "fw_email_recipient": "recipient",
+      "actor_effective_username": "recipient"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "2 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null,
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {},
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]

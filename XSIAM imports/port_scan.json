@@ -2,19 +2,29 @@
   {
     "name": "Cisco ASA \u2014 Internal Port Scan Against Internal Host",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter (cisco_asa_raw._raw_log contains \"302013\" or cisco_asa_raw._raw_log contains \"302014\" or cisco_asa_raw._raw_log contains \"106023\")\n| bin _time span = 10m\n| comp count_distinct(xdm.source.port) as distinct_ports,\n       values(xdm.source.port) as scanned_ports,\n       count() as connection_attempts\n       by xdm.target.ipv4, xdm.source.ipv4, _time\n| filter distinct_ports >= 168\n| fields xdm.target.ipv4, xdm.source.ipv4, scanned_ports\n",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"302014\"\n| filter xdm.source.interface = \"inside\" and xdm.target.interface = \"inside\"\n| bin _time span = 10m\n| comp count_distinct(xdm.target.port) as distinct_ports,\n       values(xdm.target.port) as scanned_ports,\n       count() as connection_attempts\n       by xdm.target.ipv4, xdm.source.ipv4, _time\n| filter distinct_ports >= 100\n| alter victim_ip = xdm.target.ipv4, scanner_ip = xdm.source.ipv4\n| fields victim_ip, scanner_ip, scanned_ports, distinct_ports, connection_attempts\n",
     "is_enabled": true,
     "description": "One source IP probing many distinct ports against a single target \u2014 internal port scan.",
     "alert_name": "Cisco ASA \u2014 Internal Port Scan Against Internal Host",
     "alert_category": "DISCOVERY",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: One source IP probing many distinct ports against a single target \u2014 internal port scan.\n\nWhy it matters: an actor is enumerating hosts, services, shares, or accounts to map the environment. Assessed severity: High.\n\nMITRE ATT&CK: T1046 - Network Service Discovery (TA0007 - Discovery).\n\nInvestigate:\n  - Identify the scanning source and the number/range of targets it touched.\n  - Confirm the source is not an authorized scanner/vuln tool; look for follow-on access to any enumerated target.\n  - Pivot on the alert's key entity (xdm.target.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_local_ip": "xdm.target.ipv4",
-      "action_remote_ip": "xdm.source.ipv4",
-      "action_remote_port": "scanned_ports"
+      "action_local_ip": "victim_ip",
+      "action_remote_ip": "scanner_ip",
+      "action_local_port": "scanned_ports"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "30 minutes",
+    "suppression_fields": [
+      "victim_ip"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -25,18 +35,8 @@
     },
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "10 minutes",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "30 minutes",
-    "suppression_fields": [
-      "xdm.target.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

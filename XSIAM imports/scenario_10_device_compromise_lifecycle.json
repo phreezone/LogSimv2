@@ -8,11 +8,21 @@
     "alert_name": "Device Compromise Lifecycle \u2014 RPZ Block + Threat-Protect DROP Same IP",
     "alert_category": "INFILTRATION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Same internal IP triggered both RPZ DNS block AND BloxOne Threat-Protect drop.\n\nWhy it matters: a host is communicating with known-bad or anomalous infrastructure (C2 / malicious domain). Assessed severity: Critical.\n\nMITRE ATT&CK: T1071.004 - Application Layer Protocol: DNS (TA0011 - Command and Control).\n\nInvestigate:\n  - Identify the internal client and the domain/IP contacted, and check reputation + resolution history.\n  - Look for the initial delivery vector (email/web/download) and any beaconing cadence or follow-on payloads from the same host.\n  - Pivot on the alert's key entity (src_ip) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_remote_ip": "src_ip"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "2 hours",
+    "suppression_fields": [
+      "src_ip"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -25,16 +35,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "2 hours",
-    "suppression_fields": [
-      "src_ip"
-    ]
+    "lookup_mapping": []
   }
 ]

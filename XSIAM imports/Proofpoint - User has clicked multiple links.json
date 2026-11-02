@@ -1,0 +1,43 @@
+[
+  {
+    "name": "Proofpoint - User has clicked multiple links",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "dataset = proofpoint_tap_raw\r\n| filter _log_type in (\"click-permitted\", \"click-blocked\")\r\n| comp count() as click_count,\r\n        values(url) as urls_clicked\r\n        by recipient\r\n| filter click_count >= 2",
+    "is_enabled": true,
+    "description": "The same user clicked 2+ malicious/monitored links (permitted or blocked) within the window - repeated risky click behavior.",
+    "alert_name": "Proofpoint - User has clicked bad links multiple times in a week",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": "What fired: one user clicked >=2 links flagged by Proofpoint URL Defense in the window.\n\nWhy it matters: repeated clicking on flagged links indicates a highly susceptible or actively-targeted user; if any click was PERMITTED they reached a malicious site.\n\nInvestigate:\n  - Review the mapped recipient and the list of clicked URLs on this alert.\n  - Determine which clicks were permitted vs blocked; check web proxy/EDR for successful connections.\n  - Review the user's authentication for compromise.\n\nMITRE ATT&CK: T1566.002 - Spearphishing Link (TA0001 - Initial Access).",
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "fw_url_domain": "urls_clicked",
+      "fw_email_recipient": "recipient",
+      "xdm_email_recipients": "recipient",
+      "actor_effective_username": "recipient"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "7 days",
+    "simple_schedule": "custom",
+    "timezone": "America/New_York",
+    "crontab": "15 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 days",
+    "suppression_fields": [
+      "recipient"
+    ],
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1566.002 - Spearphishing Link"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]

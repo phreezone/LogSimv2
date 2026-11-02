@@ -8,12 +8,22 @@
     "alert_name": "Okta \u2014 Internal Network Login (Baseline, Disabled)",
     "alert_category": "OTHER",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Okta user.session.start SUCCESS from RFC1918 source IP \u2014 every internal employee login. DISABLED by default; informational only for case timeline.\n\nWhy it matters: an actor may be gaining an initial foothold (phishing, exploit, or valid accounts). Assessed severity: Informational.\n\nMITRE ATT&CK: T1078 - Valid Accounts (TA0001 - Initial Access).\n\nInvestigate:\n  - Identify the entry vector, the targeted user/asset, and the source.\n  - Check for successful access and any follow-on execution or persistence from the same actor.\n  - Pivot on the alert's key entity (user_name) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "actor_effective_username": "user_name",
-      "action_remote_ip": "ip_list"
+      "action_remote_ip": "ip_list",
+      "actor_effective_username": "user_name"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -26,16 +36,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "user_name"
-    ]
+    "lookup_mapping": []
   }
 ]

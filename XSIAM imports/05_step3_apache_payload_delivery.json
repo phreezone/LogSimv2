@@ -8,15 +8,26 @@
     "alert_name": "Apache \u2014 Command Injection Pattern in HTTP Request",
     "alert_category": "EXECUTION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Apache request URL containing 'cmd=', 'exec=', 'shell_exec', 'passthru', 'system(', '/etc/passwd', 'wget', or 'curl' \u2014 command injection or LFI exploitation attempt.\n\nWhy it matters: this activity is anomalous and warrants review. Assessed severity: Medium.\n\nMITRE ATT&CK: T1059 - Command and Scripting Interpreter (TA0002 - Execution).\n\nInvestigate:\n  - Identify the primary entity and the behaviour that triggered the rule.\n  - Correlate related alerts and events for the same entity within this window before escalating.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_remote_ip": "xdm.source.ipv4",
-      "action_local_ip": "tgt_ips",
       "xdm_url": "payload_urls",
-      "action_evtlog_message": "methods",
-      "actor_process_image_name": "user_agents"
+      "user_agent": "user_agents",
+      "fw_url_domain": "payload_urls",
+      "action_local_ip": "tgt_ips",
+      "action_remote_ip": "xdm.source.ipv4",
+      "action_evtlog_message": "methods"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -29,16 +40,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

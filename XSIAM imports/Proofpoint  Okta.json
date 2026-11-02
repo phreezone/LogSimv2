@@ -1,0 +1,38 @@
+[
+  {
+    "name": "Proofpoint / Okta",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "dataset = proofpoint_tap_raw\r\n| filter _log_type = \"click-permitted\"\r\n| fields clickIP, recipient, url, GUID, _time as clickTime\r\n| join (\r\n    datamodel dataset = okta_sso_raw\r\n    | filter xdm.event.outcome = \"SUCCESS\"\r\n    | filter xdm.source.ipv4 != null\r\n    | fields xdm.source.ipv4 as loginIP,\r\n             xdm.source.user.upn as loginUser,\r\n             xdm.source.user.username as loginDisplayName,\r\n             xdm.source.location.country as loginCountry,\r\n             xdm.alert.risks as riskFlags,\r\n             _time as loginTime) as okta\r\n  clickIP = okta.loginIP\r\n| filter loginTime > clickTime\r\n| fields recipient, clickIP, url, GUID, clickTime,\r\n         loginUser, loginDisplayName, loginCountry, riskFlags, loginTime",
+    "is_enabled": true,
+    "description": null,
+    "alert_name": "Proofpoint / Okta",
+    "alert_category": "CREDENTIAL_ACCESS",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "xdm_url": "url",
+      "fw_url_domain": "url",
+      "action_remote_ip": "clickIP",
+      "fw_email_recipient": "recipient",
+      "actor_effective_username": "loginUser"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "6 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null,
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {},
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]

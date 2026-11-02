@@ -8,13 +8,23 @@
     "alert_name": "AWS \u2014 Security Hub Disabled Post-Compromise",
     "alert_category": "EVASION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: DisableSecurityHub, BatchDisableStandards, UpdateStandardsControl, or DeleteInsight event \u2014 defense evasion following session hijack.\n\nWhy it matters: security controls, logging, or data are being disabled, deleted, or altered to evade detection. Assessed severity: High.\n\nMITRE ATT&CK: T1562.001 - Impair Defenses: Disable or Modify Tools (TA0005 - Defense Evasion).\n\nInvestigate:\n  - Identify what control/log/resource was changed and the principal that changed it.\n  - Treat as high urgency: inspect the activity immediately BEFORE and AFTER the change \u2014 tampering usually hides something.\n  - Pivot on the alert's key entity (xdm.source.user.username) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_remote_ip": "source_ips",
-      "actor_effective_username": "xdm.source.user.username",
-      "action_evtlog_message": "events_seen"
+      "action_evtlog_message": "events_seen",
+      "actor_effective_username": "xdm.source.user.username"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.user.username"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -27,16 +37,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.user.username"
-    ]
+    "lookup_mapping": []
   }
 ]

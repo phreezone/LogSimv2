@@ -1,0 +1,32 @@
+[
+  {
+    "name": "Performance Monitoring Alert",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "preset = metrics_view \r\n| alter unique_id = concat(_collector_id, _collector_ip, _collector_name, _collector_type , _final_reporting_device_ip ,_final_reporting_device_name , _broker_device_id ,_vendor , _product )\r\n| comp avg(total_event_rate) as total_event_rate_avg by unique_id //, _collector_id, _collector_ip, _collector_name, _collector_type , _final_reporting_device_ip ,_final_reporting_device_name , _broker_device_id ,_vendor , _product\r\n| join conflict_strategy = both  (\r\n    preset = metrics_view |filter timestamp_diff(current_time(), _time ,\"minute\") <= 10\r\n    | alter unique_id = concat(_collector_id, _collector_ip, _collector_name, _collector_type , _final_reporting_device_ip ,_final_reporting_device_name , _broker_device_id ,_vendor , _product )\r\n    | comp latest(total_event_rate) as total_event_rate, latest(_time) as _time by unique_id ) as last_ten_m last_ten_m.unique_id = unique_id \r\n| filter total_event_rate < multiply(total_event_rate_avg, 0.5)",
+    "is_enabled": false,
+    "description": "Performance Monitoring Alert",
+    "alert_name": "Performance Monitoring Alert",
+    "alert_category": "OTHER",
+    "alert_type": null,
+    "alert_description": "Logs were below expectations",
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {},
+    "execution_mode": "SCHEDULED",
+    "search_window": "7 days",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null,
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {},
+    "investigation_query_link": null,
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": null
+  }
+]

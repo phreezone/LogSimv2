@@ -8,31 +8,16 @@
     "alert_name": "Apache \u2014 Suspicious POST to Server-Side Script Path",
     "alert_category": "INFILTRATION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Apache HTTP POST with 200/201/302 response to a path containing 'upload', 'shell', 'cmd', '.php?cmd', '/admin', or 'eval' \u2014 possible web shell installation.\n\nWhy it matters: an actor may be gaining an initial foothold (phishing, exploit, or valid accounts). Assessed severity: Medium.\n\nMITRE ATT&CK: T1190 - Exploit Public-Facing Application (TA0001 - Initial Access); T1505.003 - Server Software Component: Web Shell (TA0003 - Persistence).\n\nInvestigate:\n  - Identify the entry vector, the targeted user/asset, and the source.\n  - Check for successful access and any follow-on execution or persistence from the same actor.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_remote_ip": "xdm.source.ipv4",
-      "action_local_ip": "tgt_ips",
       "xdm_url": "posted_paths",
-      "actor_process_image_name": "user_agents",
+      "user_agent": "user_agents",
+      "fw_url_domain": "posted_paths",
+      "action_local_ip": "tgt_ips",
+      "action_remote_ip": "xdm.source.ipv4",
       "action_evtlog_message": "response_codes"
     },
-    "dataset": "alerts",
-    "user_defined_severity": null,
-    "user_defined_category": null,
-    "mitre_defs": {
-      "TA0001 - Initial Access": [
-        "T1190 - Exploit Public-Facing Application"
-      ],
-      "TA0003 - Persistence": [
-        "T1505.003 - Server Software Component: Web Shell"
-      ]
-    },
-    "investigation_query_link": "",
-    "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
-    "action": "ALERTS",
-    "lookup_mapping": [],
     "execution_mode": "SCHEDULED",
     "search_window": "1 hours",
     "simple_schedule": "10 minutes",
@@ -42,6 +27,22 @@
     "suppression_duration": "1 hours",
     "suppression_fields": [
       "xdm.source.ipv4"
-    ]
+    ],
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0003 - Persistence": [
+        "T1505.003 - Server Software Component: Web Shell"
+      ],
+      "TA0001 - Initial Access": [
+        "T1190 - Exploit Public-Facing Application"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": []
   }
 ]

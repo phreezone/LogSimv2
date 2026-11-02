@@ -2,7 +2,7 @@
   {
     "name": "Infoblox \u2014 DNS C2 Beacon (Recurring Domain Queries)",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| filter domain != null\n| bin _time span = 15m\n| comp count() as queries by xdm.source.ipv4, domain, _time\n| filter queries >= 10\n| join type = left (\n    dataset = microsoft_windows_raw\n    | filter _raw_log contains \"4624\" and _raw_log contains \"IpAddress\"\n    | alter logon_ip = arrayindex(regextract(_raw_log, \"Name='IpAddress'>([\\d\\.]+)<\"), 0),\n            user_name = arrayindex(regextract(_raw_log, \"Name='TargetUserName'>([^<]+)<\"), 0)\n    | filter logon_ip != null and user_name != null\n    | comp values(user_name) as user_name by logon_ip\n    | fields logon_ip, user_name\n  ) as wbind wbind.logon_ip = xdm.source.ipv4\n| fields xdm.source.ipv4, user_name, domain\n",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Response\"\n| filter xdm.source.ipv4 != null and xdm.network.dns.dns_question.name != null\n| alter domain = xdm.network.dns.dns_question.name\n| bin _time span = 15m\n| comp count() as queries, values(xdm.target.ipv4) as answers\n       by xdm.source.ipv4, domain, _time\n| filter queries >= 10\n| alter c2_ip = arrayindex(arrayfilter(answers, \"@element\" != null), 0)\n| alter dns_app = \"DNS\"\n| join type = left (\n    dataset = microsoft_windows_raw\n    | filter _raw_log contains \"4624\" and _raw_log contains \"IpAddress\"\n    | alter logon_ip = arrayindex(regextract(_raw_log, \"Name='IpAddress'>([\\d\\.]+)<\"), 0),\n            user_name = arrayindex(regextract(_raw_log, \"Name='TargetUserName'>([^<]+)<\"), 0),\n            host_name = arrayindex(regextract(_raw_log, \"Name='WorkstationName'>([^<]+)<\"), 0)\n    | filter logon_ip != null and user_name != null\n    | comp values(user_name) as user_name, values(host_name) as host_name by logon_ip\n    | fields logon_ip, user_name, host_name\n  ) as wbind wbind.logon_ip = xdm.source.ipv4\n| fields xdm.source.ipv4, c2_ip, user_name, host_name, domain, dns_app, queries\n",
     "is_enabled": true,
     "description": "Repeated DNS queries from one client to the same domain \u2014 beacon pattern.",
     "alert_name": "Infoblox \u2014 DNS C2 Beacon (Recurring Domain Queries)",
@@ -11,10 +11,24 @@
     "alert_description": null,
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
+      "xdm_url": "domain",
+      "fw_url_domain": "domain",
+      "agent_hostname": "host_name",
       "action_local_ip": "xdm.source.ipv4",
-      "actor_effective_username": "user_name",
-      "xdm_url": "domain"
+      "action_remote_ip": "c2_ip",
+      "action_app_protocol": "dns_app",
+      "actor_effective_username": "user_name"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "15 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -25,18 +39,8 @@
     },
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "15 minutes",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

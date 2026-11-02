@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Cisco Firepower \u2014 Web C2 Beacon (Recurring Uncommon-Domain Callbacks) [host/user-scoped]",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = cisco_firepower_raw\n| filter act = \"Allow\"\n| filter cs5Label = \"secIntelCategory\" and cs5 = \"Uncategorized\"\n| filter cs6Label = \"URLReputation\" and cs6 = \"Suspicious\"\n| filter src != null and suser != null and dhost != null\n| comp count() as beacon_count by suser, src, dhost, shost\n| filter beacon_count >= 8\n| alter user_name = suser, int_host = src, url = dhost, host_name = shost\n",
+    "is_enabled": true,
+    "description": "Repeated Allowed outbound connections from one internal host/user through the Cisco Firepower NGFW to a single Uncategorized / Suspicious-reputation domain \u2014 the perimeter-firewall signature of an HTTP C2 beacon. Deliberately HOST/USER-SCOPED: it carries suser (the exact box user) and the internal client IP as alert entities so XSIAM attributes the alert to the same asset/user the Cortex endpoint alerts are keyed on, letting endpoint + network fold into one case. Gated on the Security Intelligence category (Uncategorized) + URL reputation (Suspicious) so ambient browsing to known-good sites does not match.",
+    "alert_name": "Cisco Firepower \u2014 Web C2 Beacon (Recurring Uncommon-Domain Callbacks)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": "What fired: >=8 Allowed outbound connections from one internal host/user through the Firepower NGFW to a single Uncategorized, Suspicious-reputation domain within the search window \u2014 a low-and-slow HTTP C2 beacon to uncommon infrastructure.\n\nWhy it matters: a host is beaconing to rare/uncategorized web infrastructure at a regular cadence (classic C2 check-in). Assessed severity: High.\n\nMITRE ATT&CK: T1071.001 - Application Layer Protocol: Web Protocols (TA0011 - Command and Control).\n\nInvestigate:\n  - Identify the internal client (host_name/int_host) and user (user_name) and the beaconed domain (url); check domain reputation, registration age, and resolution history.\n  - Pivot to the endpoint on the same host/user for the process that opened the connection (correlate with Cortex agent alerts on that asset).\n  - Confirm the destination is not an expected/authorized service before escalating.",
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "xdm_url": "url",
+      "fw_url_domain": "url",
+      "action_local_ip": "int_host",
+      "actor_effective_username": "user_name"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": null,
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.001 - Application Layer Protocol: Web Protocols"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]

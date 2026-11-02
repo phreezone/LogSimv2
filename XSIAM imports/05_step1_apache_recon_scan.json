@@ -8,15 +8,26 @@
     "alert_name": "Apache \u2014 High-Volume 4xx Recon Scanning From Single Client",
     "alert_category": "RECONNAISSANCE",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Apache httpd showing \u226520 HTTP 4xx responses from a single client IP within one hour \u2014 vulnerability scanning or directory traversal recon.\n\nWhy it matters: an actor is enumerating hosts, services, shares, or accounts to map the environment. Assessed severity: Medium.\n\nMITRE ATT&CK: T1595.002 - Active Scanning: Vulnerability Scanning (TA0043 - Reconnaissance).\n\nInvestigate:\n  - Identify the scanning source and the number/range of targets it touched.\n  - Confirm the source is not an authorized scanner/vuln tool; look for follow-on access to any enumerated target.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_remote_ip": "xdm.source.ipv4",
-      "action_local_ip": "tgt_ips",
       "xdm_url": "scanned_paths",
-      "actor_process_image_name": "user_agents",
+      "user_agent": "user_agents",
+      "fw_url_domain": "scanned_paths",
+      "action_local_ip": "tgt_ips",
+      "action_remote_ip": "xdm.source.ipv4",
       "action_evtlog_message": "response_codes"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -29,16 +40,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

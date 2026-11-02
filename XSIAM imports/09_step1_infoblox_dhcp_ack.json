@@ -8,20 +8,11 @@
     "alert_name": "Infoblox \u2014 DHCP ACK Activity (Baseline, Disabled)",
     "alert_category": "OTHER",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Infoblox DHCPACK events grouped by hostname \u2014 informational baseline. DISABLED by default because DHCP fires on every device-join (5k+/day). Keep available as a pivot query for case investigation, but not as an active detection.\n\nWhy it matters: this activity is anomalous and warrants review. Assessed severity: Informational.\n\nInvestigate:\n  - Identify the primary entity and the behaviour that triggered the rule.\n  - Correlate related alerts and events for the same entity within this window before escalating.\n  - Pivot on the alert's key entity (hostname) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_local_ip": "tgt_ips"
     },
-    "dataset": "alerts",
-    "user_defined_severity": null,
-    "user_defined_category": null,
-    "mitre_defs": {},
-    "investigation_query_link": "",
-    "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
-    "action": "ALERTS",
-    "lookup_mapping": [],
     "execution_mode": "SCHEDULED",
     "search_window": "1 hours",
     "simple_schedule": "10 minutes",
@@ -31,6 +22,15 @@
     "suppression_duration": "1 hours",
     "suppression_fields": [
       "hostname"
-    ]
+    ],
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {},
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "AUTO",
+    "action": "ALERTS",
+    "lookup_mapping": []
   }
 ]

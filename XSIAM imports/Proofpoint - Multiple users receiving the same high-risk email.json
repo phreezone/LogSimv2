@@ -1,0 +1,44 @@
+[
+  {
+    "name": "Proofpoint - Multiple users receiving the same high-risk email",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = proofpoint_tap_raw \r\n| filter _log_type = \"message-blocked\"\r\n| filter classification = \"PHISHING\"\r\n| comp count_distinct(recipient) as target_count,\r\n        values(recipient) as all_recipients\r\n        by senderIP, campaignId, subject\r\n| filter target_count >= 4",
+    "is_enabled": true,
+    "description": "The same phishing email (same sender IP, campaign and subject) was blocked for 4+ distinct recipients - a coordinated phishing campaign against multiple users.",
+    "alert_name": "Proofpoint - Multiple users receiving the same high-risk email",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": "What fired: a single phishing campaign (same sender IP + campaign + subject) targeted >=4 distinct recipients.\n\nWhy it matters: coordinated multi-user targeting indicates an active campaign; other users may have received a DELIVERED (not blocked) copy.\n\nInvestigate:\n  - Review the mapped sender IP, subject, campaign and the recipient list on this alert.\n  - Confirm none of the targeted users received a delivered copy or clicked.\n  - Consider blocking the sender/campaign.\n\nMITRE ATT&CK: T1566 - Phishing (TA0001 - Initial Access).",
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "emailsenderip": "senderIP",
+      "action_remote_ip": "senderIP",
+      "xdm_email_subject": "subject",
+      "proofpointtapsubject": "subject",
+      "xdm_email_recipients": "all_recipients",
+      "proofpointtapsenderip": "senderIP",
+      "proofpointtapcampaignid": "campaignId"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 days",
+    "simple_schedule": "custom",
+    "timezone": "America/New_York",
+    "crontab": "15 * * * *",
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null,
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1566 - Phishing"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]

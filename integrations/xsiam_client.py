@@ -293,6 +293,26 @@ class XsiamClient:
                 return None
             time.sleep(interval)
 
+    # ── correlation rules ─────────────────────────────────────────────────────
+    def get_correlation_rules(self) -> List[Dict[str, Any]]:
+        """Every correlation rule in the tenant, enabled or not.
+
+        correlations/get pages like get_alerts_multi_events: at most 100 per call.
+        The reply's objects_count is the size of THIS page, not the total, so the
+        only end-of-list signal is a short page.
+        """
+        out: List[Dict[str, Any]] = []
+        offset = 0
+        while True:
+            res = self._post("correlations/get", {
+                "search_from": offset, "search_to": offset + _MAX_PAGE,
+            })
+            batch = (res.get("reply", res) or {}).get("objects", []) or []
+            out.extend(batch)
+            if len(batch) < _MAX_PAGE:
+                return out
+            offset += _MAX_PAGE
+
     # ── incident management ────────────────────────────────────────────────────
     # Needed so a purple-team run can guarantee a SINGLE open incident for the box
     # identity before it fires. XSIAM groups a correlation (network) alert into any

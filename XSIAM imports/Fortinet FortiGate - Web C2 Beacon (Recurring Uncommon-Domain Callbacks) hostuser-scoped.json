@@ -1,0 +1,41 @@
+[
+  {
+    "name": "Fortinet FortiGate \u2014 Web C2 Beacon (Recurring Uncommon-Domain Callbacks) [host/user-scoped]",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = fortinet_fortigate_raw\n| filter act = \"accept\" and FTNTFGTsubtype = \"forward\"\n| filter requestClientApplication != null and requestClientApplication not contains \"Mozilla\"\n| filter src != null and suser != null and dhost != null\n| comp count() as beacon_count by suser, src, dhost, shost\n| filter beacon_count >= 8\n| alter user_name = suser, int_host = src, url = dhost, host_name = shost\n",
+    "is_enabled": true,
+    "description": "Repeated Accepted outbound forward-traffic sessions from one internal host/user through the FortiGate to a single domain using a NON-BROWSER HTTP client (Go/python/curl/scanner user-agents, i.e. requestClientApplication that is not a Mozilla browser string) \u2014 the perimeter-firewall signature of a scripted HTTP C2 beacon. Deliberately HOST/USER-SCOPED: it carries suser (the exact box user) and the internal client IP as alert entities so XSIAM attributes the alert to the same asset/user the Cortex endpoint alerts are keyed on, letting endpoint + network fold into one case. FortiGate does not tag an Uncategorized web-reputation on forward traffic the way the other NGFWs do, so the non-browser user-agent is the discriminator that keeps ambient browsing out.",
+    "alert_name": "Fortinet FortiGate \u2014 Web C2 Beacon (Recurring Uncommon-Domain Callbacks)",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": "What fired: >=8 Accepted outbound sessions from one internal host/user through the FortiGate to a single domain, all using a non-browser HTTP client (Go/python/curl-class user-agent) within the search window \u2014 a low-and-slow scripted HTTP C2 beacon.\n\nWhy it matters: a host is beaconing to external web infrastructure at a regular cadence with a scripted (non-browser) client \u2014 classic automated C2 check-in. Assessed severity: High.\n\nMITRE ATT&CK: T1071.001 - Application Layer Protocol: Web Protocols (TA0011 - Command and Control).\n\nInvestigate:\n  - Identify the internal client (host_name/int_host) and user (user_name) and the beaconed domain (url); check domain reputation, registration age, and resolution history.\n  - Pivot to the endpoint on the same host/user for the process behind the non-browser client (correlate with Cortex agent alerts on that asset).\n  - Confirm the destination is not an expected/authorized automation endpoint before escalating.",
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "xdm_url": "url",
+      "fw_url_domain": "url",
+      "action_local_ip": "int_host",
+      "actor_effective_username": "user_name"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": null,
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.001 - Application Layer Protocol: Web Protocols"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]
