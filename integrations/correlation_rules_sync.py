@@ -51,7 +51,9 @@ def _load_repo():
     """{path: (doc, compact)} for every JSON file holding correlation rules."""
     out = {}
     for path in sorted(glob.glob(os.path.join(RULES_DIR, "*.json"))):
-        if path == IDS_FILE:
+        # rule_ids.json is an index, and tenant_export_*.json are point-in-time
+        # snapshots kept as restore sources; neither is a rule file to sync.
+        if path == IDS_FILE or os.path.basename(path).startswith("tenant_export_"):
             continue
         with io.open(path, encoding="utf-8") as fh:
             text = fh.read()

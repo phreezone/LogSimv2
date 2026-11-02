@@ -1,0 +1,628 @@
+{
+  "New Active Directory User Created": {
+    "old_id": 15,
+    "deleted": true,
+    "new_id": 1686
+  },
+  "Performance Monitoring Alert": {
+    "old_id": 29,
+    "deleted": true,
+    "new_id": 1687
+  },
+  "Alert Suppression": {
+    "old_id": 46,
+    "deleted": true,
+    "new_id": 1688
+  },
+  "Zscaler - Identify Hosts with Anomalous Firewall Denies": {
+    "old_id": 80,
+    "deleted": true,
+    "new_id": 1810,
+    "note": "restored with de5e809 query fix (77->15 fields); original query rejected by insert validation"
+  },
+  "Okta - Alert on User Account Lockouts": {
+    "old_id": 81,
+    "deleted": true,
+    "new_id": 1689
+  },
+  "Proofpoint / Okta": {
+    "old_id": 119,
+    "deleted": true,
+    "new_id": 1690
+  },
+  "Threat Hunting - Proofpoint clicked and then user had a login shortly after - Okta possible compromised account": {
+    "old_id": 121,
+    "deleted": true,
+    "new_id": 1691
+  },
+  "Proofpoint / Zscaler": {
+    "old_id": 122,
+    "deleted": true,
+    "new_id": 1692
+  },
+  "Threat Hunt - Proofpoint click permitted  - Cisco Firepower showing the connection after phishing click": {
+    "old_id": 123,
+    "deleted": true,
+    "new_id": 1693
+  },
+  "Okta \u2014 Internal Network Login (Baseline)": {
+    "old_id": 529,
+    "deleted": true,
+    "new_id": 1694
+  },
+  "Infoblox \u2014 DHCP ACK Activity (Baseline)": {
+    "old_id": 566,
+    "deleted": true,
+    "new_id": 1695
+  },
+  "Infoblox \u2014 Device Joined Network (DHCP ACK Baseline)": {
+    "old_id": 572,
+    "deleted": true,
+    "new_id": 1696
+  },
+  "Cisco ASA \u2014 High Volume of Denied Inbound Connections from One IP": {
+    "old_id": 1566,
+    "deleted": true,
+    "new_id": 1697
+  },
+  "Infoblox \u2014 DNS C2 Beacon (Recurring Domain Queries)": {
+    "old_id": 1567,
+    "deleted": true,
+    "new_id": 1698
+  },
+  "Infoblox \u2014 DHCP Starvation": {
+    "old_id": 1568,
+    "deleted": true,
+    "new_id": 1699
+  },
+  "Infoblox \u2014 DNS Query Flood From Single Client": {
+    "old_id": 1569,
+    "deleted": true,
+    "new_id": 1700
+  },
+  "Infoblox \u2014 DNS Rebinding Attempt": {
+    "old_id": 1570,
+    "deleted": true,
+    "new_id": 1701
+  },
+  "Infoblox \u2014 DNS Tunneling (TXT Query Burst)": {
+    "old_id": 1571,
+    "deleted": true,
+    "new_id": 1702
+  },
+  "Infoblox \u2014 Fast Flux DNS": {
+    "old_id": 1572,
+    "deleted": true,
+    "new_id": 1703
+  },
+  "Infoblox \u2014 NXDOMAIN Storm (DGA Indicator)": {
+    "old_id": 1573,
+    "deleted": true,
+    "new_id": 1704
+  },
+  "Infoblox \u2014 PTR Reverse-DNS Sweep": {
+    "old_id": 1574,
+    "deleted": true,
+    "new_id": 1705
+  },
+  "Infoblox \u2014 RPZ Threat-Intel DNS Blocks": {
+    "old_id": 1575,
+    "deleted": true,
+    "new_id": 1706
+  },
+  "Infoblox \u2014 Threat Protect DROP": {
+    "old_id": 1576,
+    "deleted": true,
+    "new_id": 1707
+  },
+  "Infoblox \u2014 DNS Zone Transfer Attempt": {
+    "old_id": 1577,
+    "deleted": true,
+    "new_id": 1708
+  },
+  "Cisco ASA \u2014 Internal Port Scan Against Internal Host": {
+    "old_id": 1578,
+    "deleted": true,
+    "new_id": 1709
+  },
+  "AWS \u2014 Cloud Pentest Kill Chain (Multi-Op Privilege Escalation + Defense Evasion)": {
+    "old_id": 1579,
+    "deleted": true,
+    "new_id": 1710
+  },
+  "Phishing Kill Chain \u2014 DNS Resolution of Known-Bad Domain": {
+    "old_id": 1580,
+    "deleted": true,
+    "new_id": 1711
+  },
+  "AWS \u2014 Insider Threat: Credential Access + Defense Evasion": {
+    "old_id": 1581,
+    "deleted": true,
+    "new_id": 1712
+  },
+  "GCP \u2014 Cloud Pentest (IAM Escalation + Logging Tamper)": {
+    "old_id": 1582,
+    "deleted": true,
+    "new_id": 1713
+  },
+  "Web Application Reconnaissance \u2014 High Volume of 4xx Responses": {
+    "old_id": 1583,
+    "deleted": true,
+    "new_id": 1714
+  },
+  "VPN Compromise Confirmed \u2014 Brute Force + Successful Login Same User": {
+    "old_id": 1584,
+    "deleted": true,
+    "new_id": 1715
+  },
+  "Ransomware Precursor \u2014 SMB Enumeration + Large Outbound Egress": {
+    "old_id": 1585,
+    "deleted": true,
+    "new_id": 1716
+  },
+  "Device Compromise Lifecycle \u2014 RPZ Block + Threat-Protect DROP Same IP": {
+    "old_id": 1587,
+    "deleted": true,
+    "new_id": 1717
+  },
+  "Cisco ASA \u2014 SMB Share Enumeration": {
+    "old_id": 1588,
+    "deleted": true,
+    "new_id": 1718
+  },
+  "Cisco ASA \u2014 Outbound SMTP Spam Bot Activity": {
+    "old_id": 1589,
+    "deleted": true,
+    "new_id": 1719
+  },
+  "Cisco ASA \u2014 SSH Proxy / Tunnel-Like Activity": {
+    "old_id": 1590,
+    "deleted": true,
+    "new_id": 1720
+  },
+  "Cisco ASA \u2014 VPN Credential Brute Force": {
+    "old_id": 1591,
+    "deleted": true,
+    "new_id": 1721
+  },
+  "AWS \u2014 Kali / Penetration-Testing AMI Launched": {
+    "old_id": 1592,
+    "deleted": true,
+    "new_id": 1722
+  },
+  "AWS \u2014 Console Login From Multiple External IPs": {
+    "old_id": 1593,
+    "deleted": true,
+    "new_id": 1723
+  },
+  "AWS \u2014 Administrator Privilege Granted via AttachUserPolicy": {
+    "old_id": 1594,
+    "deleted": true,
+    "new_id": 1724
+  },
+  "AWS \u2014 CloudTrail Logging Disabled": {
+    "old_id": 1595,
+    "deleted": true,
+    "new_id": 1725
+  },
+  "AWS \u2014 GuardDuty / Inspector / Security Hub Detector Disabled": {
+    "old_id": 1596,
+    "deleted": true,
+    "new_id": 1726
+  },
+  "AWS \u2014 S3 Bucket Made Publicly Accessible": {
+    "old_id": 1597,
+    "deleted": true,
+    "new_id": 1727
+  },
+  "Infoblox \u2014 DNS Resolution of Phishing or C2 Domain": {
+    "old_id": 1598,
+    "deleted": true,
+    "new_id": 1728
+  },
+  "Cisco ASA \u2014 Large Outbound C2 Callback Post-Click": {
+    "old_id": 1599,
+    "deleted": true,
+    "new_id": 1729
+  },
+  "Okta \u2014 Successful Login From Multiple External IPs": {
+    "old_id": 1600,
+    "deleted": true,
+    "new_id": 1730
+  },
+  "Okta \u2014 Internal Network Login (Baseline, Disabled)": {
+    "old_id": 1601,
+    "deleted": true,
+    "new_id": 1731
+  },
+  "AWS \u2014 Secret or Parameter Retrieval Targeting Credentials": {
+    "old_id": 1602,
+    "deleted": true,
+    "new_id": 1732
+  },
+  "AWS \u2014 Security Hub Disabled or Standards Removed": {
+    "old_id": 1603,
+    "deleted": true,
+    "new_id": 1733
+  },
+  "AWS \u2014 Config Recorder Stopped or Deleted": {
+    "old_id": 1604,
+    "deleted": true,
+    "new_id": 1734
+  },
+  "Infoblox \u2014 DNS Resolution of Unsanctioned Cloud Storage": {
+    "old_id": 1605,
+    "deleted": true,
+    "new_id": 1735
+  },
+  "Cisco ASA \u2014 Large Outbound TCP Egress (\u226550MB)": {
+    "old_id": 1606,
+    "deleted": true,
+    "new_id": 1736
+  },
+  "GCP \u2014 IAM Privilege Escalation via SetIamPolicy": {
+    "old_id": 1608,
+    "deleted": true,
+    "new_id": 1737
+  },
+  "GCP \u2014 Service Account Key Created (Persistence)": {
+    "old_id": 1609,
+    "deleted": true,
+    "new_id": 1738
+  },
+  "GCP \u2014 Cloud Logging Sink Modified or Deleted": {
+    "old_id": 1610,
+    "deleted": true,
+    "new_id": 1739
+  },
+  "GCP \u2014 Security Command Center Notification Disabled": {
+    "old_id": 1611,
+    "deleted": true,
+    "new_id": 1740
+  },
+  "GCP \u2014 Cloud Storage Bucket Made Publicly Accessible": {
+    "old_id": 1612,
+    "deleted": true,
+    "new_id": 1741
+  },
+  "GCP \u2014 Disk Snapshot or Instance Creation (Potential Data Staging)": {
+    "old_id": 1613,
+    "deleted": true,
+    "new_id": 1742
+  },
+  "Apache \u2014 High-Volume 4xx Recon Scanning From Single Client": {
+    "old_id": 1614,
+    "deleted": true,
+    "new_id": 1743
+  },
+  "Apache \u2014 Suspicious POST to Server-Side Script Path": {
+    "old_id": 1615,
+    "deleted": true,
+    "new_id": 1744
+  },
+  "Apache \u2014 Command Injection Pattern in HTTP Request": {
+    "old_id": 1616,
+    "deleted": true,
+    "new_id": 1745
+  },
+  "Cisco ASA \u2014 Internal Web Server Initiating Outbound Connection": {
+    "old_id": 1617,
+    "deleted": true,
+    "new_id": 1746
+  },
+  "Cisco ASA \u2014 VPN Authentication Brute Force From Single IP": {
+    "old_id": 1618,
+    "deleted": true,
+    "new_id": 1747
+  },
+  "Cisco ASA \u2014 VPN Login From \u22652 Distinct IPs for Same User": {
+    "old_id": 1619,
+    "deleted": true,
+    "new_id": 1748
+  },
+  "Cisco ASA \u2014 SMB Lateral Movement to Previously Unseen Internal Hosts": {
+    "old_id": 1620,
+    "deleted": true,
+    "new_id": 1749
+  },
+  "Okta \u2014 Same User Authenticated From \u22652 Countries": {
+    "old_id": 1621,
+    "deleted": true,
+    "new_id": 1750
+  },
+  "Okta \u2014 Adversary-in-the-Middle Authentication Indicator": {
+    "old_id": 1622,
+    "deleted": true,
+    "new_id": 1751
+  },
+  "Okta \u2014 OAuth Token Reuse Detected (Session Hijack)": {
+    "old_id": 1623,
+    "deleted": true,
+    "new_id": 1752
+  },
+  "Okta \u2014 Client Roaming Detected (Native AiTM Signal)": {
+    "old_id": 1624,
+    "deleted": true,
+    "new_id": 1753
+  },
+  "AWS \u2014 Cross-Source AssumeRole or Cross-Account Token Issuance": {
+    "old_id": 1625,
+    "deleted": true,
+    "new_id": 1754
+  },
+  "AWS \u2014 Security Hub Disabled Post-Compromise": {
+    "old_id": 1626,
+    "deleted": true,
+    "new_id": 1755
+  },
+  "Okta \u2014 Authentication Brute Force From Single IP": {
+    "old_id": 1627,
+    "deleted": true,
+    "new_id": 1756
+  },
+  "Okta \u2014 MFA Factor Reset or Deactivation": {
+    "old_id": 1628,
+    "deleted": true,
+    "new_id": 1757
+  },
+  "Cisco ASA \u2014 Large SMB Session (Pre-Encryption Data Staging)": {
+    "old_id": 1629,
+    "deleted": true,
+    "new_id": 1758
+  },
+  "AWS \u2014 Config Recorder Stopped (Pre-Ransomware Evasion)": {
+    "old_id": 1630,
+    "deleted": true,
+    "new_id": 1759
+  },
+  "AWS WAF \u2014 WebACL, Rule, or IPSet Deleted": {
+    "old_id": 1631,
+    "deleted": true,
+    "new_id": 1760
+  },
+  "Cisco ASA \u2014 Large Outbound Egress (Pre-Encryption Exfil)": {
+    "old_id": 1632,
+    "deleted": true,
+    "new_id": 1761
+  },
+  "Infoblox \u2014 DHCP ACK Activity (Baseline, Disabled)": {
+    "old_id": 1633,
+    "deleted": true,
+    "new_id": 1762
+  },
+  "Infoblox \u2014 RPZ NXDOMAIN Block (First C2 Domain Blocked at DNS)": {
+    "old_id": 1634,
+    "deleted": true,
+    "new_id": 1763
+  },
+  "Infoblox \u2014 DGA NXDOMAIN Storm (\u226520 NXDOMAINs From One Client)": {
+    "old_id": 1635,
+    "deleted": true,
+    "new_id": 1764
+  },
+  "Infoblox \u2014 C2 Domain Resolves NOERROR (New Infrastructure)": {
+    "old_id": 1636,
+    "deleted": true,
+    "new_id": 1765
+  },
+  "Cisco ASA \u2014 Outbound C2 Connection Allowed (Post DNS Resolve)": {
+    "old_id": 1637,
+    "deleted": true,
+    "new_id": 1766
+  },
+  "Infoblox \u2014 Device Joined Network (DHCP ACK Baseline, Disabled)": {
+    "old_id": 1638,
+    "deleted": true,
+    "new_id": 1767
+  },
+  "Infoblox \u2014 RPZ NXDOMAIN Block (Device C2 Attempt Blocked at DNS)": {
+    "old_id": 1639,
+    "deleted": true,
+    "new_id": 1768
+  },
+  "Infoblox \u2014 Third C2 Domain Resolves Successfully (New Infrastructure)": {
+    "old_id": 1640,
+    "deleted": true,
+    "new_id": 1769
+  },
+  "Infoblox \u2014 BloxOne Threat Protect DROP (Post-Connection C2 Detection)": {
+    "old_id": 1641,
+    "deleted": true,
+    "new_id": 1770
+  },
+  "Proofpoint \u2014 Phishing or Impostor Email Delivered": {
+    "old_id": 1642,
+    "deleted": true,
+    "new_id": 1771
+  },
+  "Proofpoint \u2014 Malicious URL Click Permitted": {
+    "old_id": 1643,
+    "deleted": true,
+    "new_id": 1772
+  },
+  "Zscaler \u2014 Malicious Web Content Blocked (Post-Phishing)": {
+    "old_id": 1644,
+    "deleted": true,
+    "new_id": 1773
+  },
+  "Okta \u2014 Victim Successful Login From External IP (Post-Phishing)": {
+    "old_id": 1645,
+    "deleted": true,
+    "new_id": 1774
+  },
+  "Zscaler \u2014 DLP Block on Upload to Cloud Storage (Insider Exfil)": {
+    "old_id": 1646,
+    "deleted": true,
+    "new_id": 1775
+  },
+  "Proofpoint \u2014 Image-Based (QR) Phishing Attachment Delivered": {
+    "old_id": 1647,
+    "deleted": true,
+    "new_id": 1776
+  },
+  "Proofpoint \u2014 Malware Attachment Delivered": {
+    "old_id": 1648,
+    "deleted": true,
+    "new_id": 1777
+  },
+  "Zscaler \u2014 C2 / Malicious Domain Blocked (Post-DNS Beacon)": {
+    "old_id": 1649,
+    "deleted": true,
+    "new_id": 1778
+  },
+  "Zscaler \u2014 Second C2 Domain Blocked (Web Proxy)": {
+    "old_id": 1650,
+    "deleted": true,
+    "new_id": 1779
+  },
+  "Proofpoint - High Volume of Blocked Emails from a Single IP": {
+    "old_id": 1651,
+    "deleted": true,
+    "new_id": 1780
+  },
+  "Proofpoint - Multiple users receiving the same high-risk email": {
+    "old_id": 1652,
+    "deleted": true,
+    "new_id": 1781
+  },
+  "Proofpoint - Same user receiving multiple risky emails": {
+    "old_id": 1653,
+    "deleted": true,
+    "new_id": 1782
+  },
+  "Proofpoint - User has clicked multiple links": {
+    "old_id": 1654,
+    "deleted": true,
+    "new_id": 1783
+  },
+  "Apache - Detect Web Reconnaissance Scanning": {
+    "old_id": 1655,
+    "deleted": true,
+    "new_id": 1784
+  },
+  "Apache - Detect Directory Access Violations": {
+    "old_id": 1656,
+    "deleted": true,
+    "new_id": 1785
+  },
+  "Apache - Detect Brute-Force on Protected Directories": {
+    "old_id": 1657,
+    "deleted": true,
+    "new_id": 1786
+  },
+  "Apache - Alert on Critical Server Errors": {
+    "old_id": 1658,
+    "deleted": true,
+    "new_id": 1787
+  },
+  "Apache - Identify High Volume of Server Errors": {
+    "old_id": 1659,
+    "deleted": true,
+    "new_id": 1788
+  },
+  "Proofpoint - Known Malicious Attachment in Mailbox": {
+    "old_id": 1660,
+    "deleted": true,
+    "new_id": 1789
+  },
+  "Proofpoint - User Clicked Malicious Link": {
+    "old_id": 1661,
+    "deleted": true,
+    "new_id": 1790
+  },
+  "Proofpoint - Click Permitted detected": {
+    "old_id": 1662,
+    "deleted": true,
+    "new_id": 1791
+  },
+  "Proofpoint - High PhishScore or high impostorScore event occured": {
+    "old_id": 1663,
+    "deleted": true,
+    "new_id": 1792
+  },
+  "Proofpoint - Malware was accidentally delivered": {
+    "old_id": 1664,
+    "deleted": true,
+    "new_id": 1793
+  },
+  "Proofpoint - Possible Business Email Compromise due to urgency requirements": {
+    "old_id": 1665,
+    "deleted": true,
+    "new_id": 1794
+  },
+  "Proofpoint - Possible BEC delivered to the users mailbox": {
+    "old_id": 1666,
+    "deleted": true,
+    "new_id": 1795
+  },
+  "Proofpoint - Possible QR code delivered malicious link": {
+    "old_id": 1667,
+    "deleted": true,
+    "new_id": 1796
+  },
+  "Zscaler \u2014 Web C2 Beacon (Recurring Uncommon-Domain Callbacks) [host/user-scoped]": {
+    "old_id": 1668,
+    "deleted": true,
+    "new_id": 1797
+  },
+  "Cisco Firepower \u2014 Web C2 Beacon (Recurring Uncommon-Domain Callbacks) [host/user-scoped]": {
+    "old_id": 1669,
+    "deleted": true,
+    "new_id": 1798
+  },
+  "Check Point \u2014 Web C2 Beacon (Recurring Uncommon-Domain Callbacks) [host/user-scoped]": {
+    "old_id": 1670,
+    "deleted": true,
+    "new_id": 1799
+  },
+  "Fortinet FortiGate \u2014 Web C2 Beacon (Recurring Uncommon-Domain Callbacks) [host/user-scoped]": {
+    "old_id": 1671,
+    "deleted": true,
+    "new_id": 1800
+  },
+  "Check Point \u2014 Web C2 Beacon (entity-mapped v2)": {
+    "old_id": 1672,
+    "deleted": true,
+    "new_id": 1801
+  },
+  "Fortinet FortiGate \u2014 Web C2 Beacon (entity-mapped v2)": {
+    "old_id": 1673,
+    "deleted": true,
+    "new_id": 1802
+  },
+  "Cisco Firepower \u2014 Web C2 Beacon (entity-mapped v2)": {
+    "old_id": 1674,
+    "deleted": true,
+    "new_id": 1803
+  },
+  "Zscaler \u2014 Web C2 Beacon (entity-mapped v2)": {
+    "old_id": 1675,
+    "deleted": true,
+    "new_id": 1804
+  },
+  "Cisco ASA \u2014 High Volume of Failed Inbound Connections from One IP (v2)": {
+    "old_id": 1676,
+    "deleted": true,
+    "new_id": 1805
+  },
+  "Cisco Firepower \u2014 IPS Event with Critical Severity (v2)": {
+    "old_id": 1677,
+    "deleted": true,
+    "new_id": 1806
+  },
+  "Cisco Firepower \u2014 Malicious File Transferred (v2)": {
+    "old_id": 1678,
+    "deleted": true,
+    "new_id": 1807
+  },
+  "DNS C2 Kill Chain \u2014 NXDOMAIN Storm + Outbound Firewall Activity (v2)": {
+    "old_id": 1679,
+    "deleted": true,
+    "new_id": 1808
+  },
+  "GCP \u2014 API Access From External / Non-Corporate IP (v2)": {
+    "old_id": 1680,
+    "deleted": true,
+    "new_id": 1809
+  }
+}
