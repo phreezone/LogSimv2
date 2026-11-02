@@ -822,13 +822,19 @@ def _generate_phishing_url(config, session_context=None):
     return json.dumps(msg, default=str)
 
 
-def _generate_malware_attachment(config, session_context=None):
-    """Malicious attachment — message-blocked, sandbox detonated, malwareScore high."""
+def _generate_malware_attachment(config, session_context=None, target_email=None,
+                                 sender_ip=None, delivered=False):
+    """Malicious attachment — message-blocked, sandbox detonated, malwareScore high.
+
+    Scenario mode: target_email / sender_ip pin the victim and the attacker so the
+    message stitches to the later steps, and delivered=True models the attachment
+    that reached the mailbox instead of the quarantined one.
+    """
     all_emails  = _get_all_emails(config, session_context)
-    recipients  = _pick_recipients(all_emails, count=random.randint(1, 3))
+    recipients  = [target_email] if target_email else _pick_recipients(all_emails, count=random.randint(1, 3))
     guid        = _make_guid()
     sender, subject = _themed_lure(config)
-    sender_ip   = _random_external_ip()
+    sender_ip   = sender_ip or _random_external_ip()
     camp_id     = _campaign_id(config)
 
     tmpl = _malicious_attachment_template()
@@ -844,6 +850,10 @@ def _generate_malware_attachment(config, session_context=None):
     msg["quarantineRule"]     = "module.sandbox.threat"
     msg["modulesRun"]         = ["spam", "urldefense", "pdr", "sandbox"]
     msg["messageParts"].append(att)
+    if delivered:
+        msg["_log_type"]        = "message-delivered"
+        msg["quarantineFolder"] = None
+        msg["quarantineRule"]   = None
 
     threat_sha             = att["sha256"]
     msg["classification"]  = tmpl.get("classification", "MALWARE")
@@ -1002,7 +1012,8 @@ def _generate_malicious_macro(config, session_context=None):
     return json.dumps(msg, default=str)
 
 
-def _generate_qr_code_phishing(config, session_context=None, target_email=None):
+def _generate_qr_code_phishing(config, session_context=None, target_email=None,
+                                sender_ip=None, delivered=False):
     """QR code phishing — image attachment contains URL opaque to URL scanners.
 
     Hunt: message-blocked where modulesRun contains 'qr-scanner' AND classification='PHISH'.
@@ -1010,12 +1021,13 @@ def _generate_qr_code_phishing(config, session_context=None, target_email=None):
 
     target_email: when set (scenario mode), deliver to that specific victim so the
     alert stitches to the same identity as the downstream Okta/AWS stages.
+    delivered=True is the AiTM scenario's case: the QR image got past the scanner.
     """
     all_emails = _get_all_emails(config, session_context)
     recipients  = [target_email] if target_email else _pick_recipients(all_emails, count=random.randint(1, 4))
     guid        = _make_guid()
     sender      = _threat_sender(config)
-    sender_ip   = _random_external_ip()
+    sender_ip   = sender_ip or _random_external_ip()
     subject     = _format_subject(random.choice([
         "Multi-Factor Authentication Required - Scan QR Code",
         "Secure Document Sharing - Scan to Access",
@@ -1046,6 +1058,10 @@ def _generate_qr_code_phishing(config, session_context=None, target_email=None):
     msg["threatStatus"]       = "active"
     msg["threatsInfoMap"]     = _make_threats_info_map(
         "PHISHING", threat_sha, "URL", guid, camp_id, url=url)
+    if delivered:
+        msg["_log_type"]        = "message-delivered"
+        msg["quarantineFolder"] = None
+        msg["quarantineRule"]   = None
 
     return json.dumps(msg, default=str)
 
@@ -1156,7 +1172,7 @@ def _generate_click_blocked(config, session_context=None, guid_override=None,
 
 def _generate_click_permitted(config, session_context=None, guid_override=None,
                                sender_override=None, sender_ip_override=None,
-                               subject_override=None, target_email=None):
+                               subject_override=None, target_email=None, url_override=None):
     """User clicked URL; TAP allowed it at time of click — later retroactively flagged.
 
     This is a critical signal: the user SUCCESSFULLY reached a phishing page.
@@ -1184,7 +1200,7 @@ def _generate_click_permitted(config, session_context=None, guid_override=None,
                     recipient_email = user_info.get("email", recipient_email)
     click_ip = click_ip or f"10.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
 
-    url         = _malicious_url(config)
+    url         = url_override or _malicious_url(config)
     threat_sha, _ = _generate_hashes()
 
     _sender   = sender_override or _threat_sender(config)
@@ -1319,6 +1335,12 @@ def _generate_scenario_event(scenario_event, config, context):
     target_email    = (context or {}).get("target_email")
     sender_ip_ctx   = (context or {}).get("sender_ip")
     shared_guid     = (context or {}).get("shared_guid")
+    # A click reuses the delivered message's url/sender/subject so the two events
+    # describe the same email, not just share a GUID.
+    url_ctx         = (context or {}).get("url")
+    sender_ctx      = (context or {}).get("sender")
+    subject_ctx     = (context or {}).get("subject")
+    delivered_ctx   = bool((context or {}).get("delivered"))
 
     if scenario_event == "PHISHING_DELIVERED":
         # Email slipped past TAP — low-enough scores, novel threat
@@ -1362,13 +1384,17 @@ def _generate_scenario_event(scenario_event, config, context):
         log = _generate_click_permitted(
             config, session_context,
             guid_override=shared_guid,
+            sender_override=sender_ctx,
             sender_ip_override=sender_ip_ctx,
+            subject_override=subject_ctx,
             target_email=target_email,
+            url_override=url_ctx,
         )
         return log, "CLICK_PERMITTED"
 
     elif scenario_event == "MALWARE_ATTACHMENT":
-        log = _generate_malware_attachment(config, session_context)
+        log = _generate_malware_attachment(config, session_context, target_email=target_email,
+                                           sender_ip=sender_ip_ctx, delivered=delivered_ctx)
         return log, "MALWARE_ATTACHMENT"
 
     elif scenario_event == "BEC_EMAIL":
@@ -1378,8 +1404,9 @@ def _generate_scenario_event(scenario_event, config, context):
     elif scenario_event == "qr_code_phishing":
         # Route through the target_email-aware path so the QR phish is delivered
         # to the scenario victim (not a random recipient) for identity stitching.
-        return _generate_qr_code_phishing(config, session_context,
-                                          target_email=target_email), "qr_code_phishing"
+        return _generate_qr_code_phishing(config, session_context, target_email=target_email,
+                                          sender_ip=sender_ip_ctx,
+                                          delivered=delivered_ctx), "qr_code_phishing"
 
     elif scenario_event in _THREAT_GENERATORS:
         return _THREAT_GENERATORS[scenario_event](config, session_context)
