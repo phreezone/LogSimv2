@@ -8,28 +8,12 @@
     "alert_name": "Okta \u2014 OAuth Token Reuse Detected (Session Hijack)",
     "alert_category": "CREDENTIAL_ACCESS",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Okta app.oauth2.as.token.detect_reuse event \u2014 Okta natively detected a one-time refresh token being replayed, indicating a stolen/hijacked session token.\n\nWhy it matters: an actor is attempting to obtain or brute-force credentials. Assessed severity: High.\n\nMITRE ATT&CK: T1539 - Steal Web Session Cookie (TA0006 - Credential Access); T1550.004 - Use Alternate Authentication Material: Web Session Cookie (TA0008 - Lateral Movement).\n\nInvestigate:\n  - Identify the targeted account(s) and the source IP, and check for a SUCCESSFUL authentication following the failures.\n  - Determine whether the source is expected; look for MFA prompts, password resets, or new sessions from the same source.\n  - Pivot on the alert's key entity (user_name) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "actor_effective_username": "user_name",
-      "action_remote_ip": "ip_list"
+      "action_remote_ip": "ip_list",
+      "actor_effective_username": "user_name"
     },
-    "dataset": "alerts",
-    "user_defined_severity": null,
-    "user_defined_category": null,
-    "mitre_defs": {
-      "TA0006 - Credential Access": [
-        "T1539 - Steal Web Session Cookie"
-      ],
-      "TA0008 - Lateral Movement": [
-        "T1550.004 - Use Alternate Authentication Material: Web Session Cookie"
-      ]
-    },
-    "investigation_query_link": "",
-    "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "CUSTOM",
-    "action": "ALERTS",
-    "lookup_mapping": [],
     "execution_mode": "SCHEDULED",
     "search_window": "1 hours",
     "simple_schedule": "10 minutes",
@@ -39,6 +23,22 @@
     "suppression_duration": "1 hours",
     "suppression_fields": [
       "user_name"
-    ]
+    ],
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0008 - Lateral Movement": [
+        "T1550.004 - Use Alternate Authentication Material: Web Session Cookie"
+      ],
+      "TA0006 - Credential Access": [
+        "T1539 - Steal Web Session Cookie"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
   }
 ]

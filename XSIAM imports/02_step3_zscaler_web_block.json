@@ -8,14 +8,23 @@
     "alert_name": "Zscaler \u2014 Malicious Web Content Blocked (Post-Phishing)",
     "alert_category": "INFILTRATION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Zscaler NSS web log Blocked action on malicious web content (Malicious Content / Malware / Spyware / Phishing / Adware / Botnet category) \u2014 victim browser reached the payload host after the phishing click. Correlated to the victim by src IP and suser.\n\nWhy it matters: a host is communicating with known-bad or anomalous infrastructure (C2 / malicious domain). Assessed severity: Medium.\n\nMITRE ATT&CK: T1071.001 - Application Layer Protocol: Web Protocols (TA0011 - Command and Control).\n\nInvestigate:\n  - Identify the internal client and the domain/IP contacted, and check reputation + resolution history.\n  - Look for the initial delivery vector (email/web/download) and any beaconing cadence or follow-on payloads from the same host.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_remote_ip": "src_ip",
-      "actor_effective_username": "user_name",
       "xdm_url": "url",
-      "action_local_ip": "dst_ip"
+      "fw_url_domain": "url",
+      "action_local_ip": "dst_ip",
+      "action_remote_ip": "src_ip",
+      "actor_effective_username": "user_name"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": null,
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -28,14 +37,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "REAL_TIME",
-    "search_window": null,
-    "simple_schedule": null,
-    "timezone": null,
-    "crontab": null,
-    "suppression_enabled": false,
-    "suppression_duration": null,
-    "suppression_fields": null
+    "lookup_mapping": []
   }
 ]

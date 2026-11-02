@@ -1,0 +1,40 @@
+[
+  {
+    "name": "Proofpoint - Same user receiving multiple risky emails",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "dataset = proofpoint_tap_raw\n| filter _log_type = \"message-blocked\"\n| filter classification = \"PHISHING\"\n| comp count(GUID) as email_count,\n        values(subject) as subjects,\n        values(senderIP) as sender_ips\n        by recipient\n| filter email_count >= 3",
+    "is_enabled": true,
+    "description": "The same recipient was targeted by 3+ risky (phishing) emails within the window - a user being singled out for repeated phishing.",
+    "alert_name": "Proofpoint - Same user receiving multiple risky emails",
+    "alert_category": "INFILTRATION",
+    "alert_type": null,
+    "alert_description": "What fired: one recipient received >=3 phishing emails (blocked) within the window - repeated targeting of a single user.\n\nWhy it matters: a user hit repeatedly is likely a deliberate target (VIP / finance / etc.); attackers vary lures until one lands.\n\nInvestigate:\n  - Review the mapped recipient and the set of subjects / sender IPs on this alert.\n  - Check whether any of the messages were DELIVERED (not blocked) or clicked.\n  - Consider tightening protection / awareness for that user.\n\nMITRE ATT&CK: T1566 - Phishing (TA0001 - Initial Access).",
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "fw_email_recipient": "recipient",
+      "xdm_email_recipients": "recipient",
+      "actor_effective_username": "recipient"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 days",
+    "simple_schedule": "custom",
+    "timezone": "America/New_York",
+    "crontab": "15 * * * *",
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null,
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0001 - Initial Access": [
+        "T1566 - Phishing"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]

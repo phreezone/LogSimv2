@@ -2,17 +2,29 @@
   {
     "name": "Cisco ASA \u2014 SSH Proxy / Tunnel-Like Activity",
     "severity": "SEV_040_HIGH",
-    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\"\n| alter proxy_host = _json -> generalCiscoLog.dst_ip,\n        ssh_tgt    = _json -> generalCiscoLog.src_ip,\n        svc_port   = to_integer(_json -> generalCiscoLog.src_port),\n        bytes_n    = to_integer(_json -> generalCiscoLog.transferred_bytes)\n| filter svc_port = 22\n| bin _time span = 30m\n| comp count_distinct(ssh_tgt) as victims, sum(bytes_n) as total_bytes by proxy_host, _time\n| filter victims >= 6 and total_bytes >= 10000000\n| fields proxy_host\n",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\"\n| alter src_host = _json -> generalCiscoLog.src_ip,\n        dst_host = _json -> generalCiscoLog.dst_ip,\n        src_port = to_integer(_json -> generalCiscoLog.src_port),\n        dst_port = to_integer(_json -> generalCiscoLog.dst_port),\n        src_if   = _json -> generalCiscoLog.src_interface,\n        dst_if   = _json -> generalCiscoLog.dst_interface,\n        proto    = _json -> generalCiscoLog.protocol,\n        bytes_n  = to_integer(_json -> generalCiscoLog.transferred_bytes)\n| filter dst_port = 22\n| alter proxy_host = src_host, ssh_tgt = dst_host\n| bin _time span = 30m\n| comp count_distinct(ssh_tgt) as victims,\n       values(ssh_tgt) as ssh_targets,\n       sum(bytes_n) as total_bytes\n       by proxy_host, _time\n| filter victims >= 5 and total_bytes >= 10000000\n| alter ssh_port = 22\n| fields proxy_host, ssh_targets, ssh_port, victims, total_bytes\n",
     "is_enabled": true,
     "description": "Single source SSH'ing to many internal targets with proxy-like byte volume.",
     "alert_name": "Cisco ASA \u2014 SSH Proxy / Tunnel-Like Activity",
     "alert_category": "LATERAL_MOVEMENT",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Single source SSH'ing to many internal targets with proxy-like byte volume.\n\nWhy it matters: an actor is pivoting from one host to others inside the network. Assessed severity: High.\n\nMITRE ATT&CK: T1021.004 - SSH (TA0008 - Lateral Movement).\n\nInvestigate:\n  - Map the source host, the internal targets reached, and the account used.\n  - Check for preceding credential access on the source and for new logons/sessions on the targets.\n  - Pivot on the alert's key entity (proxy_host) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_remote_ip": "proxy_host"
+      "action_local_ip": "proxy_host",
+      "action_remote_ip": "ssh_targets",
+      "action_remote_port": "ssh_port"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "proxy_host"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -25,16 +37,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "30 minutes",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "proxy_host"
-    ]
+    "lookup_mapping": []
   }
 ]

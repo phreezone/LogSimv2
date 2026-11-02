@@ -293,6 +293,43 @@ class XsiamClient:
                 return None
             time.sleep(interval)
 
+    # ── correlation rules ─────────────────────────────────────────────────────
+    def get_correlation_rules(self) -> List[Dict[str, Any]]:
+        """Every correlation rule in the tenant, enabled or not.
+
+        correlations/get pages like get_alerts_multi_events: at most 100 per call.
+        The reply's objects_count is the size of THIS page, not the total, so the
+        only end-of-list signal is a short page.
+        """
+        out: List[Dict[str, Any]] = []
+        offset = 0
+        while True:
+            res = self._post("correlations/get", {
+                "search_from": offset, "search_to": offset + _MAX_PAGE,
+            })
+            batch = (res.get("reply", res) or {}).get("objects", []) or []
+            out.extend(batch)
+            if len(batch) < _MAX_PAGE:
+                return out
+            offset += _MAX_PAGE
+
+    def insert_correlation_rules(self, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Create (no rule_id) or update (existing rule_id) rules. Returns the raw reply,
+        whose added_objects / updated_objects / errors say what happened to each."""
+        return self._post("correlations/insert", rules)  # request_data is the list itself
+
+    def delete_correlation_rule(self, name: str) -> List[int]:
+        """Delete the rule with exactly this name; returns the deleted rule ids.
+
+        correlations/delete has no rule_id filter, so name is the only exact key.
+        Names are unique in this tenant; callers should still check the returned ids.
+        """
+        res = self._post("correlations/delete", {
+            "filters": [{"field": "name", "operator": "EQ", "value": name}],
+        })
+        rep = res.get("reply", res) or {}
+        return list(rep.get("objects") or [])
+
     # ── incident management ────────────────────────────────────────────────────
     # Needed so a purple-team run can guarantee a SINGLE open incident for the box
     # identity before it fires. XSIAM groups a correlation (network) alert into any

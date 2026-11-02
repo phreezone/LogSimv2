@@ -2,19 +2,29 @@
   {
     "name": "GCP \u2014 IAM Privilege Escalation via SetIamPolicy",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type contains \"SetIamPolicy\" or xdm.event.operation_sub_type contains \"setIamPolicy\"\n| filter xdm.event.description contains \"roles/owner\" or xdm.event.description contains \"roles/editor\" or xdm.event.description contains \"roles/iam.serviceAccountUser\" or xdm.event.description contains \"roles/iam.serviceAccountTokenCreator\"\n| bin _time span = 1h\n| comp count() as priv_grants,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type contains \"SetIamPolicy\" or xdm.event.operation_sub_type contains \"setIamPolicy\"\n| filter xdm.event.description contains \"roles/owner\" or xdm.event.description contains \"roles/editor\" or xdm.event.description contains \"roles/iam.serviceAccountUser\" or xdm.event.description contains \"roles/iam.serviceAccountTokenCreator\" or xdm.event.description contains \"roles/iam.securityAdmin\"\n| bin _time span = 1h\n| comp count() as priv_grants,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
     "is_enabled": true,
     "description": "GCP SetIamPolicy or setIamPolicy method assigning roles/owner, roles/editor, roles/iam.serviceAccountUser, or roles/iam.serviceAccountTokenCreator.",
     "alert_name": "GCP \u2014 IAM Privilege Escalation via SetIamPolicy",
     "alert_category": "PRIVILEGE_ESCALATION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: GCP SetIamPolicy or setIamPolicy method assigning roles/owner, roles/editor, roles/iam.serviceAccountUser, or roles/iam.serviceAccountTokenCreator.\n\nWhy it matters: a principal is acquiring rights beyond its normal level. Assessed severity: High.\n\nMITRE ATT&CK: T1098.003 - Account Manipulation: Additional Cloud Roles (TA0004 - Privilege Escalation).\n\nInvestigate:\n  - Identify the principal and exactly what elevated role/policy/permission was granted, and by whom.\n  - Confirm the change was approved/change-managed; review the principal's recent logins and source IPs for signs of compromise.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_remote_ip": "xdm.source.ipv4",
-      "actor_effective_username": "users",
-      "action_evtlog_message": "events_seen"
+      "action_evtlog_message": "events_seen",
+      "actor_effective_username": "users"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -27,16 +37,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

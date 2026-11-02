@@ -8,12 +8,22 @@
     "alert_name": "Cisco ASA \u2014 VPN Login From \u22652 Distinct IPs for Same User",
     "alert_category": "INFILTRATION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: ASA 113039 AnyConnect parent session start events for the same xdm.source.user.username from \u22652 distinct source IPs within 30 minutes \u2014 impossible travel via VPN.\n\nWhy it matters: an actor may be gaining an initial foothold (phishing, exploit, or valid accounts). Assessed severity: High.\n\nMITRE ATT&CK: T1078 - Valid Accounts (TA0001 - Initial Access).\n\nInvestigate:\n  - Identify the entry vector, the targeted user/asset, and the source.\n  - Check for successful access and any follow-on execution or persistence from the same actor.\n  - Pivot on the alert's key entity (xdm.source.user.username) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_remote_ip": "ip_list",
       "actor_effective_username": "xdm.source.user.username"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.user.username"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -26,16 +36,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.user.username"
-    ]
+    "lookup_mapping": []
   }
 ]

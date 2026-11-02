@@ -1,0 +1,48 @@
+[
+  {
+    "name": "Zscaler \u2014 Web C2 Beacon (entity-mapped v2)",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "datamodel dataset = zscaler_nssweblog_raw\n| filter xdm.network.http.domain != null and xdm.source.host.hostname != null\n| alter u_nomail = arrayindex(regextract(xdm.source.user.username, \"^([^@]+)\"), 0)\n| alter bare_user = arrayindex(regextract(u_nomail, \"([A-Za-z0-9._-]+)$\"), 0)\n| bin _time span = 30m\n| comp count() as callbacks by xdm.source.host.hostname, xdm.network.http.domain,\n       xdm.target.ipv4, bare_user, xdm.source.ipv4, _time\n| filter callbacks >= 8\n| alter c2_ip = xdm.target.ipv4, domain = xdm.network.http.domain, beacon_user = bare_user,\n        src_host = xdm.source.host.hostname, egress_ip = xdm.source.ipv4,\n        app_proto = \"HTTPS\", c2_port = 443\n| fields src_host, c2_ip, c2_port, domain, beacon_user, egress_ip, app_proto, callbacks\n",
+    "is_enabled": true,
+    "description": "Recurring web callbacks from one device to one uncommon domain (>=8 in 30m), Zscaler NSS web log. The web log carries the Zscaler egress address rather than the client, so identity is device + normalised user; the egress address is reported separately.",
+    "alert_name": "Zscaler \u2014 Web C2 Beacon (entity-mapped v2)",
+    "alert_category": "OTHER",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "xdm_url": "domain",
+      "fw_url_domain": "domain",
+      "agent_hostname": "src_host",
+      "postnatsourceip": "egress_ip",
+      "action_remote_ip": "c2_ip",
+      "action_remote_port": "c2_port",
+      "action_app_protocol": "app_proto",
+      "actor_effective_username": "beacon_user"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_host",
+      "domain"
+    ],
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0011 - Command and Control": [
+        "T1071.001 - Application Layer Protocol: Web Protocols"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]

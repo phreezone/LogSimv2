@@ -2,18 +2,28 @@
   {
     "name": "Okta \u2014 Authentication Brute Force From Single IP",
     "severity": "SEV_040_HIGH",
-    "xql_query": "dataset = okta_sso_raw\n| filter eventType contains \"session.start\" or eventType contains \"authentication\"\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"FAILURE\" and ip != null and user_name != null\n| filter not (ip contains \"192.168.\" or ip contains \"10.\" or ip contains \"172.\")\n| bin _time span = 15m\n| comp count() as fails by ip, user_name, _time\n| filter fails >= 5\n| fields user_name, ip\n",
+    "xql_query": "dataset = okta_sso_raw\n| filter eventType contains \"session.start\" or eventType contains \"authentication\"\n| alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\n        user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\n| filter outcome_result = \"FAILURE\" and ip != null and user_name != null\n| filter not (incidr(ip, \"10.0.0.0/8\") or incidr(ip, \"172.16.0.0/12\") or incidr(ip, \"192.168.0.0/16\"))\n| bin _time span = 15m\n| comp count() as fails by ip, user_name, _time\n| filter fails >= 5\n| fields user_name, ip\n",
     "is_enabled": true,
     "description": "\u22655 Okta authentication FAILURE events from one source IP within 30 minutes \u2014 credential spraying / brute force.",
     "alert_name": "Okta \u2014 Authentication Brute Force From Single IP",
     "alert_category": "CREDENTIAL_ACCESS",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: \u22655 Okta authentication FAILURE events from one source IP within 30 minutes \u2014 credential spraying / brute force.\n\nWhy it matters: an actor is attempting to obtain or brute-force credentials. Assessed severity: High.\n\nMITRE ATT&CK: T1110 - Brute Force (TA0006 - Credential Access).\n\nInvestigate:\n  - Identify the targeted account(s) and the source IP, and check for a SUCCESSFUL authentication following the failures.\n  - Determine whether the source is expected; look for MFA prompts, password resets, or new sessions from the same source.\n  - Pivot on the alert's key entity (ip) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "actor_effective_username": "user_name",
-      "action_remote_ip": "ip"
+      "action_remote_ip": "ip",
+      "actor_effective_username": "user_name"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "ip"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -26,16 +36,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "ip"
-    ]
+    "lookup_mapping": []
   }
 ]

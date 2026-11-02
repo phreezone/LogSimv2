@@ -8,11 +8,21 @@
     "alert_name": "Okta \u2014 MFA Factor Reset or Deactivation",
     "alert_category": "CREDENTIAL_ACCESS",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: user.mfa.factor.deactivate, user.mfa.factor.reset_all, user.mfa.factor.suspend, or system.mfa.factor.deactivate event \u2014 MFA being bypassed or reset to enable account takeover.\n\nWhy it matters: an actor is attempting to obtain or brute-force credentials. Assessed severity: High.\n\nMITRE ATT&CK: T1556.006 - Modify Authentication Process: Multi-Factor Authentication (TA0006 - Credential Access).\n\nInvestigate:\n  - Identify the targeted account(s) and the source IP, and check for a SUCCESSFUL authentication following the failures.\n  - Determine whether the source is expected; look for MFA prompts, password resets, or new sessions from the same source.\n  - Pivot on the alert's key entity (user_name) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "actor_effective_username": "user_name"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "user_name"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -25,16 +35,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "user_name"
-    ]
+    "lookup_mapping": []
   }
 ]

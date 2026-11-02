@@ -2,18 +2,28 @@
   {
     "name": "Cisco ASA \u2014 VPN Credential Brute Force",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"109006\"\n| bin _time span = 30m\n| comp count() as fails,\n       values(xdm.source.user.username) as users,\n       count_distinct(xdm.source.user.username) as targeted_users\n       by xdm.source.ipv4, _time\n| filter fails >= 25\n| fields xdm.source.ipv4, users\n",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"109006\"\n| alter src_ip    = arrayindex(regextract(_raw_log, \"from (\\d+\\.\\d+\\.\\d+\\.\\d+)/\"), 0),\n        raw_user  = arrayindex(regextract(_raw_log, \"for user '(.+?)' from \"), 0)\n| alter user_name = arrayindex(regextract(raw_user, \"([A-Za-z0-9._@'-]+)$\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as fails,\n       values(user_name) as users,\n       count_distinct(user_name) as targeted_users\n       by src_ip, _time\n| filter fails >= 10\n| fields src_ip, users, fails, targeted_users\n",
     "is_enabled": true,
     "description": "Many 109006 auth failures from a single IP against the VPN gateway.",
     "alert_name": "Cisco ASA \u2014 VPN Credential Brute Force",
     "alert_category": "CREDENTIAL_ACCESS",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Many 109006 auth failures from a single IP against the VPN gateway.\n\nWhy it matters: an actor is attempting to obtain or brute-force credentials. Assessed severity: High.\n\nMITRE ATT&CK: T1110 - Brute Force (TA0006 - Credential Access); T1110.003 - Password Spraying (TA0006 - Credential Access).\n\nInvestigate:\n  - Identify the targeted account(s) and the source IP, and check for a SUCCESSFUL authentication following the failures.\n  - Determine whether the source is expected; look for MFA prompts, password resets, or new sessions from the same source.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_remote_ip": "xdm.source.ipv4",
+      "action_remote_ip": "src_ip",
       "actor_effective_username": "users"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "30 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -25,18 +35,8 @@
     },
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "30 minutes",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

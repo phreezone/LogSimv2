@@ -2,19 +2,30 @@
   {
     "name": "Infoblox \u2014 Threat Protect DROP",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"threat-protect-log\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        category = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"cat=\\\"([^\\\"]+)\\\"\"), 0),\n        qname = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"qname=(\\S+)\"), 0)\n| filter src_ip != null\n| bin _time span = 10m\n| comp count() as alerts,\n       count_distinct(category) as distinct_categories,\n       values(category) as categories,\n       values(qname) as blocked_domains\n       by src_ip, _time\n| filter alerts >= 30 and distinct_categories >= 3\n| fields src_ip, categories, blocked_domains\n",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"threat-protect-log\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        category = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"cat=\\\"([^\\\"]+)\\\"\"), 0),\n        qname = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"fqdn=(\\S+)\"), 0)\n| filter src_ip != null\n| bin _time span = 10m\n| comp count() as alerts,\n       count_distinct(category) as distinct_categories,\n       values(category) as categories,\n       values(qname) as blocked_domains\n       by src_ip, _time\n| filter alerts >= 30 and distinct_categories >= 3\n| fields src_ip, categories, blocked_domains\n",
     "is_enabled": true,
     "description": "Threat-Protect drops for one client \u2014 BloxOne C&C / malware category detection.",
     "alert_name": "Infoblox \u2014 Threat Protect DROP",
     "alert_category": "INFILTRATION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: Threat-Protect drops for one client \u2014 BloxOne C&C / malware category detection.\n\nWhy it matters: a host is communicating with known-bad or anomalous infrastructure (C2 / malicious domain). Assessed severity: High.\n\nMITRE ATT&CK: T1071.004 - Application Layer Protocol: DNS (TA0011 - Command and Control).\n\nInvestigate:\n  - Identify the internal client and the domain/IP contacted, and check reputation + resolution history.\n  - Look for the initial delivery vector (email/web/download) and any beaconing cadence or follow-on payloads from the same host.\n  - Pivot on the alert's key entity (src_ip) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
+      "xdm_url": "blocked_domains",
+      "fw_url_domain": "blocked_domains",
       "action_remote_ip": "src_ip",
-      "action_evtlog_message": "categories",
-      "xdm_url": "blocked_domains"
+      "action_evtlog_message": "categories"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "src_ip"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -27,16 +38,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "10 minutes",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "src_ip"
-    ]
+    "lookup_mapping": []
   }
 ]

@@ -8,12 +8,22 @@
     "alert_name": "Infoblox \u2014 DNS Zone Transfer Attempt",
     "alert_category": "DISCOVERY",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: AXFR or IXFR query observed \u2014 DNS zone transfer reconnaissance.\n\nWhy it matters: an actor is enumerating hosts, services, shares, or accounts to map the environment. Assessed severity: High.\n\nMITRE ATT&CK: T1018 - Remote System Discovery (TA0007 - Discovery).\n\nInvestigate:\n  - Identify the scanning source and the number/range of targets it touched.\n  - Confirm the source is not an authorized scanner/vuln tool; look for follow-on access to any enumerated target.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_local_ip": "xdm.source.ipv4",
       "actor_effective_username": "user_name"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "4 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -26,16 +36,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "4 hours",
-    "suppression_fields": [
-      "xdm.source.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

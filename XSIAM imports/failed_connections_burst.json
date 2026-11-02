@@ -3,12 +3,12 @@
     "name": "Cisco ASA \u2014 High Volume of Denied Inbound Connections from One IP",
     "severity": "SEV_030_MEDIUM",
     "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"106023\" and xdm.observer.action = \"Deny\"\n| bin _time span = 10m\n| comp count() as denies,\n       values(xdm.target.ipv4) as dst_ips,\n       values(xdm.target.port) as dst_ports,\n       values(xdm.network.ip_protocol) as protocols\n       by xdm.source.ipv4, _time\n| filter denies >= 138\n| fields dst_ips, xdm.source.ipv4, dst_ports, protocols\n",
-    "is_enabled": true,
+    "is_enabled": false,
     "description": "External IP generating an abnormal count of 106023 denies \u2014 scanner or attack pattern.",
     "alert_name": "Cisco ASA \u2014 High Volume of Denied Inbound Connections from One IP",
     "alert_category": "DISCOVERY",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: External IP generating an abnormal count of 106023 denies \u2014 scanner or attack pattern.\n\nWhy it matters: an actor is enumerating hosts, services, shares, or accounts to map the environment. Assessed severity: Medium.\n\nMITRE ATT&CK: T1046 - Network Service Discovery (TA0007 - Discovery).\n\nInvestigate:\n  - Identify the scanning source and the number/range of targets it touched.\n  - Confirm the source is not an authorized scanner/vuln tool; look for follow-on access to any enumerated target.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_local_ip": "dst_ips",
@@ -16,6 +16,16 @@
       "action_local_port": "dst_ports",
       "action_app_protocol": "protocols"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "10 minutes",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -28,16 +38,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "10 minutes",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

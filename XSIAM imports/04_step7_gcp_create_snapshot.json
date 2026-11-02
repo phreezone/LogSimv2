@@ -8,13 +8,23 @@
     "alert_name": "GCP \u2014 Disk Snapshot or Instance Creation (Potential Data Staging)",
     "alert_category": "EXFILTRATION",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: compute.disks.createSnapshot, compute.snapshots.insert, or compute.instances.insert method \u2014 disk imaging or new compute resource potentially used to exfiltrate data.\n\nWhy it matters: data may be leaving the environment through this channel. Assessed severity: High.\n\nMITRE ATT&CK: T1537 - Transfer Data to Cloud Account (TA0010 - Exfiltration).\n\nInvestigate:\n  - Quantify the volume and destination, and identify the user/host/principal moving the data.\n  - Correlate with prior collection/staging and any defense-evasion steps; confirm the destination is not an approved service.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_remote_ip": "xdm.source.ipv4",
-      "actor_effective_username": "users",
-      "action_evtlog_message": "events_seen"
+      "action_evtlog_message": "events_seen",
+      "actor_effective_username": "users"
     },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "xdm.source.ipv4"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,
@@ -27,16 +37,6 @@
     "drilldown_query_timeframe": "ALERT",
     "mapping_strategy": "AUTO",
     "action": "ALERTS",
-    "lookup_mapping": [],
-    "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
-    "simple_schedule": "10 minutes",
-    "timezone": "America/New_York",
-    "crontab": "*/10 * * * *",
-    "suppression_enabled": true,
-    "suppression_duration": "1 hours",
-    "suppression_fields": [
-      "xdm.source.ipv4"
-    ]
+    "lookup_mapping": []
   }
 ]

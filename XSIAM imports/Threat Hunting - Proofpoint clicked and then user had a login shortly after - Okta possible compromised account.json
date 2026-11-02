@@ -1,0 +1,40 @@
+[
+  {
+    "name": "Threat Hunting - Proofpoint clicked and then user had a login shortly after - Okta possible compromised account",
+    "severity": "SEV_050_CRITICAL",
+    "xql_query": "dataset = proofpoint_tap_raw\r\n| filter _log_type = \"click-permitted\"\r\n| fields clickIP, senderIP, recipient, url, GUID, _time as pp_time\r\n| join (\r\n    datamodel dataset = okta_sso_raw\r\n    | filter xdm.event.outcome = \"SUCCESS\"\r\n    | filter xdm.source.ipv4 != null\r\n    | fields xdm.source.ipv4 as loginIP,\r\n             xdm.source.user.upn as loginUser,\r\n             xdm.source.user.username as loginDisplayName,\r\n             xdm.source.location.country as loginCountry,\r\n             xdm.alert.risks as riskFlags,\r\n             _time as okta_time) as okta\r\n  senderIP = okta.loginIP\r\n| filter okta_time >= pp_time\r\n| fields recipient, senderIP, url, GUID, pp_time,\r\n         loginUser, loginDisplayName, loginCountry, riskFlags, okta_time",
+    "is_enabled": true,
+    "description": null,
+    "alert_name": "Threat Hunting - Proofpoint clicked and then user had a login shortly after - possible compromised account",
+    "alert_category": "OTHER",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "xdm_url": "url",
+      "usersdetails": "loginDisplayName",
+      "fw_url_domain": "url",
+      "action_remote_ip": "senderIP",
+      "proofpointtapguid": "GUID",
+      "fw_email_recipient": "recipient",
+      "actor_effective_username": "loginUser"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null,
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {},
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]

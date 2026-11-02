@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Threat Hunt - Proofpoint click permitted  - Cisco Firepower showing the connection after phishing click",
+    "severity": "SEV_040_HIGH",
+    "xql_query": "dataset = proofpoint_tap_raw\r\n| filter _log_type = \"click-permitted\"\r\n| fields clickIP, senderIP, recipient, url, GUID, _time as pp_time\r\n| join (\r\n    dataset = cisco_firepower_raw\r\n    | filter act = \"Allow\"\r\n    | filter bytesOut >= 10000000\r\n    | fields src as fp_src, dst as fp_dst, dpt,\r\n             bytesOut, suser as fp_user, shost as fp_host,\r\n             msg as fp_msg, _time as fp_time) as fp\r\n  clickIP = fp.fp_src\r\n| filter fp_time >= pp_time\r\n| fields recipient, clickIP, url, GUID, pp_time,\r\n         fp_dst, dpt, bytesOut, fp_user, fp_host, fp_msg, fp_time",
+    "is_enabled": true,
+    "description": null,
+    "alert_name": "Threat Hunt - Proofpoint click permitted  - Cisco Firepower showing the connection after phishing click",
+    "alert_category": "COLLECTION",
+    "alert_type": null,
+    "alert_description": null,
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "xdm_url": "url",
+      "appmessage": "fp_msg",
+      "fw_url_domain": "url",
+      "action_remote_ip": "fp_dst",
+      "proofpointtapguid": "GUID",
+      "action_remote_port": "dpt",
+      "agent_ip_addresses": "clickIP",
+      "fw_email_recipient": "recipient",
+      "actor_effective_username": "fp_user"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "4 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": false,
+    "suppression_duration": null,
+    "suppression_fields": null,
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {},
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]
