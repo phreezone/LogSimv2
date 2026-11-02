@@ -2135,6 +2135,11 @@ def _get_dc_short(config):
     return _get_dc_hostname(config).split(".")[0].upper()
 
 
+def _domain_dn(config):
+    """Base distinguished name for the simulated AD domain (DC=corp,DC=local)."""
+    return ",".join(f"DC={p}" for p in _get_dns_domain(config).split("."))
+
+
 def _fqdn(hostname, config):
     """Ensure a hostname is fully qualified — real Windows events always use FQDNs."""
     if "." in hostname:
@@ -3239,7 +3244,8 @@ def _build_4741(user_info, config, *, target_computer_name, target_sid,
 def _build_4742(user_info, config, *, target_computer_name, target_sid,
                 sam_account_name, dns_host_name="-", spns="-",
                 old_uac_value="-", new_uac_value="-", uac_control="-",
-                allowed_to_delegate="-", logon_id=None, ts=None) -> dict:
+                allowed_to_delegate="-", sid_history="-",
+                logon_id=None, ts=None) -> dict:
     """4742 – A computer account was changed (DC event).
 
     Generated alongside 5136 events when computer account attributes change.
@@ -3273,7 +3279,7 @@ def _build_4742(user_info, config, *, target_computer_name, target_sid,
         "NewUacValue":         new_uac_value,
         "UserAccountControl":  uac_control,
         "UserParameters":      "-",
-        "SidHistory":          "-",
+        "SidHistory":          sid_history,
         "LogonHours":          "-",
         "DnsHostName":         dns_host_name,
         "ServicePrincipalNames": spns,
@@ -3701,8 +3707,14 @@ def _dc_logon_event(user_info, config, *, logon_type=3, auth_pkg=_KRB_PACKAGE,
 
 def _build_4768(user_info, config, *, ip_override=None, encryption=None,
                 status="0x0", cert_issuer="", cert_serial="", cert_thumbprint="",
-                ts=None) -> dict:
-    """4768 – Kerberos TGT request (DC event, success=Status 0x0)."""
+                preauth_type="2", ts=None) -> dict:
+    """4768 – Kerberos TGT request (DC event, success=Status 0x0).
+
+    `preauth_type` is the Windows numeric pre-authentication type. The default
+    "2" is PA-ENC-TIMESTAMP (password). PKINIT is "16" (PA-PK-AS-REQ), which is
+    what the "PKINIT TGT authentication request" analytic keys on; callers using
+    it must also populate cert_issuer/cert_serial/cert_thumbprint.
+    """
     domain = _get_domain(config)
     dc_host = _get_dc_hostname(config)
     ip = ip_override if ip_override is not None else user_info.get("ip") or "-"
@@ -3724,7 +3736,7 @@ def _build_4768(user_info, config, *, ip_override=None, encryption=None,
         "TicketOptions":                    "0x40810010",
         "Status":                           status,
         "TicketEncryptionType":             enc,
-        "PreAuthType":                      "2",
+        "PreAuthType":                      preauth_type,
         "IpAddress":                        f"::ffff:{ip}" if ip and "." in str(ip) else ip,
         "IpPort":                           str(random.randint(49152, 65535)) if ip and ip != "-" else "0",
         "CertIssuerName":                   cert_issuer,
@@ -3962,7 +3974,7 @@ def _build_4726(user_info, config, *, target_username, target_sid,
 def _build_4738(user_info, config, *, target_username, target_sid,
                 sam_account_name=None, old_uac_value=_UAC_NORMAL_ACCOUNT,
                 new_uac_value=_UAC_NORMAL_ACCOUNT, uac_control="-",
-                allowed_to_delegate="-",
+                allowed_to_delegate="-", sid_history="-",
                 logon_id=None, ts=None) -> dict:
     """4738 – A user account was changed (DC event)."""
     dc_host = _get_dc_hostname(config)
@@ -3993,7 +4005,7 @@ def _build_4738(user_info, config, *, target_username, target_sid,
         "NewUacValue":         new_uac_value,
         "UserAccountControl":  uac_control,
         "UserParameters":      "-",
-        "SidHistory":          "-",
+        "SidHistory":          sid_history,
         "LogonHours":          "-",
     }
     return _build_event(4738, dc_host, event_data, success=True, ts=ts)
@@ -8870,6 +8882,688 @@ def _threat_malicious_service_install(config, session_context):
                                    image_path=image, start_type=2, ts=t + 0.01))]
 
 
+# --- AD CS / Kerberos relay / directory-attribute abuse ---------------------
+#
+# The seven generators below close the Windows Event Collector Low+ gaps that
+# had no producer: shadow credentials, PKINIT, SID-history injection, ADFS DKM
+# key access, Kerberos relay, machine-account SPN clearing and a suspicious
+# sAMAccountName rename.
+#
+# Which event actually reaches the XSIAM analytics is only partly documented.
+# The published analytic pages name the *signal* ("a user modified the
+# msDS-KeyCredentialLink attribute", "a user added SID history") but not the
+# Event ID or EventData fields. Repo notes elsewhere state that 5136 is not in
+# the tenant's analytics intake while 4662 is, and the dMSA generator only
+# started firing once a 4662 was added. Every attribute-change generator here
+# therefore emits BOTH:
+#   * 5136 old -> new pairs (the native AD audit record, kept for realism), and
+#   * 4662 Write Property (0x20) on the object naming the attribute schema GUID
+#     (the shape the dMSA/dcsync detectors are proven to consume), plus
+#   * the final-state 4738/4742 where Windows has a field for the attribute.
+# Attribute schema GUIDs below are the published System-Id-Guid values from
+# Microsoft Learn's AD schema pages (fetched 2026-11-01), not guesses.
+_GUID_CLASS_USER              = "%{bf967aba-0de6-11d0-a285-00aa003049e2}"
+_GUID_CLASS_COMPUTER          = "%{bf967a86-0de6-11d0-a285-00aa003049e2}"
+_GUID_ATTR_KEY_CREDENTIAL     = "{5b47d60f-6090-40b2-9f37-2a4de88f3063}"
+_GUID_ATTR_SID_HISTORY        = "{17eb4278-d167-11d0-b002-0000f80367c1}"
+_GUID_ATTR_SERVICE_PRINCIPAL  = "{f3a64788-5306-11d1-a9c5-0000f80367c1}"
+_GUID_ATTR_SAM_ACCOUNT_NAME   = "{3e0abfd0-126a-11d0-a060-00aa006c33ed}"
+_GUID_ATTR_THUMBNAIL_PHOTO    = "{8d3bca50-1d7e-11d0-a081-00aa006c33ed}"
+
+# PA-PK-AS-REQ. Windows records this as PreAuthType=16 on a PKINIT 4768; 2 is
+# PA-ENC-TIMESTAMP (password), the value every non-PKINIT generator uses.
+_PREAUTH_PKINIT = "16"
+
+
+def _pkinit_cert_fields(config, *, rogue=False):
+    """(CertIssuerName, CertSerialNumber, CertThumbprint) for a PKINIT 4768.
+
+    Field names are the published 4768 EventData names. The issuer is either the
+    simulated enterprise CA or, for the suspicious variant, an issuer outside
+    the organisation's PKI. NOT tenant-verified: no real PKINIT 4768 has been
+    captured from this environment yet (the XSIAM query quota was exhausted
+    while this was written), so diff against a genuine event before changing
+    anything else if the detector stays silent.
+    """
+    base = _domain_dn(config)
+    if rogue:
+        issuer = f"CN=ROGUE-CA,{base}"
+    else:
+        ca_short = _get_ca_hostname(config).split(".")[0].upper()
+        issuer = f"CN={ca_short}-Enterprise-CA,{base}"
+    return (issuer,
+            "%032X" % random.getrandbits(128),
+            "%040X" % random.getrandbits(160))
+
+
+def _pick_other_windows_user(session_context, actor):
+    """A Windows user other than `actor`, or None when the estate has only one."""
+    others = [x for x in _get_windows_users(session_context)
+              if x["username"] != actor["username"]]
+    return random.choice(others) if others else None
+
+
+def _attr_change_4662(actor, config, *, object_class, object_dn, attr_guid,
+                      logon_id=None, ts=None):
+    """4662 Write Property on an AD object naming one attribute schema GUID.
+
+    This is the corroborating shape the dMSA succession and DCSync detectors are
+    proven to read. AccessMask 0x20 is Write Property; ObjectType is the class
+    of the object written to; Properties carries the attribute GUID.
+    """
+    return _build_4662(actor, config,
+                       object_type=object_class,
+                       object_name=object_dn,
+                       access_mask="0x20",
+                       properties=f"{attr_guid}\n",
+                       operation_type="Object Access",
+                       logon_id=logon_id, ts=ts)
+
+
+def _threat_shadow_credentials(config, session_context):
+    """Shadow Credentials: write msDS-KeyCredentialLink on an account, then
+    authenticate as it with PKINIT.
+
+    XSIAM analytics targeted:
+      - "Key credential attribute modification" (Informational)
+        variations "Possible shadow credentials addition" (Medium) and
+        "Key credential attribute addition" (Low)
+      - the follow-on PKINIT TGT also feeds "PKINIT TGT authentication request"
+
+    Which event carries the signal is UNVERIFIED (see the block comment above):
+    both the 5136 Value Added pair and the 4662 Write Property are emitted, plus
+    a PKINIT 4768 for the modified identity. The target is deliberately a
+    different account from the actor so the higher "Possible shadow
+    credentials addition" variation is the one exercised.
+
+    Sequence:
+      1. Attacker authenticates -> DC 4624 + endpoint 4624 + 4672
+      2. 4688 Whisker / Certipy / PowerShell Add-KeyCredentialLink
+      3. 5136 msDS-KeyCredentialLink Value Added on the target
+      4. 4662 Write Property on the target (key-credential schema GUID)
+      5. 4768 PKINIT TGT for the target (PreAuthType 16, certificate fields)
+      6. 4769 service ticket for the target
+      7. 4689 process exit
+    """
+    actor = _pick_windows_user(session_context)
+    if not actor:
+        return None
+
+    target = _pick_other_windows_user(session_context, actor)
+    if not target:
+        target = {**actor, "username": "Administrator"}
+
+    dns_domain = _get_dns_domain(config)
+    base_dn = _domain_dn(config)
+    target_dn = f"CN={target['username']},CN=Users,{base_dn}"
+    target_guid = _new_logon_guid()
+    target_sid = _stable_user_sid(target["username"])
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    op_corr_id = _new_logon_guid()
+
+    events.append(json.dumps(_dc_logon_event(actor, config,
+                                             ip_override=actor.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(actor, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(actor, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+
+    tool = random.choice([
+        ("C:\\Users\\Public\\Whisker.exe",
+         f"Whisker.exe add /target:{target['username']} /domain:{dns_domain} "
+         f"/dc:{_get_dc_hostname(config)}"),
+        ("C:\\Users\\Public\\Certipy.exe",
+         f"Certipy.exe shadow auto -u {actor['username']}@{dns_domain} "
+         f"-p <password> -account {target['username']}"),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f"powershell.exe -ep bypass -c \"$c = New-Object "
+         f"System.Security.Cryptography.X509Certificates.X509Certificate2; "
+         f"Set-ADUser -Identity {target['username']} -Add "
+         f"@{{'msDS-KeyCredentialLink'=$c}}\""),
+    ])
+    events.append(json.dumps(_build_4688(actor, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+
+    # DN-Binary form real AD stores for msDS-KeyCredentialLink: B:<len>:<hex>:<DN>
+    key_hex = uuid.uuid4().hex + uuid.uuid4().hex
+    key_blob = f"B:{len(key_hex)}:{key_hex}:{target_dn}"
+    events.append(json.dumps(_build_5136(
+        actor, config,
+        object_dn=target_dn, object_class="user", object_guid=target_guid,
+        attribute_name="msDS-KeyCredentialLink",
+        attribute_value=key_blob,
+        attribute_syntax_oid="2.5.5.7",
+        operation_type="%%14674",
+        op_correlation_id=op_corr_id, logon_id=logon_id, ts=t)))
+    t += 0.01
+    events.append(json.dumps(_attr_change_4662(
+        actor, config, object_class=_GUID_CLASS_USER, object_dn=target_dn,
+        attr_guid=_GUID_ATTR_KEY_CREDENTIAL,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 3.0)
+
+    issuer, serial, thumb = _pkinit_cert_fields(config)
+    pkinit_user = {**target, "ip": actor.get("ip")}
+    events.append(json.dumps(_build_4768(
+        pkinit_user, config, ip_override=actor.get("ip"), encryption="0x12",
+        preauth_type=_PREAUTH_PKINIT, cert_issuer=issuer, cert_serial=serial,
+        cert_thumbprint=thumb, ts=t)))
+    t += random.uniform(0.5, 1.5)
+    events.append(json.dumps(_build_4769(
+        pkinit_user, config, service_spn=f"ldap/{_get_dc_hostname(config)}",
+        encryption="0x12", ip_override=actor.get("ip"), ts=t)))
+    t += random.uniform(0.5, 1.0)
+
+    events.append(json.dumps(_build_4689(actor, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_pkinit_auth(config, session_context):
+    """A user obtains a TGT with certificate (PKINIT) authentication.
+
+    Fires "PKINIT TGT authentication request" (Informational), with the
+    "Suspicious PKINIT TGT authentication request" (Medium) and "Abnormal
+    PKINIT TGT authentication request" (Low) variations.
+
+    Single-event detector: the only documented discriminator is that the TGT was
+    obtained with PKINIT. Windows records that on 4768 as PreAuthType=16
+    (PA-PK-AS-REQ) with CertIssuerName / CertSerialNumber / CertThumbprint
+    populated. Those field names are the published 4768 EventData names.
+    NOT tenant-verified — no genuine PKINIT 4768 has been captured here yet, so
+    if this fires nothing, diff a real event before changing anything else.
+
+    A rogue (non-enterprise) issuer is used half the time to exercise the
+    certificate-anomaly path that the "Suspicious" variation likely keys on;
+    the rest use the simulated enterprise CA.
+
+    Sequence:
+      1. 4768 PKINIT TGT for the user
+      2. DC-side 4624 + endpoint 4624 (Kerberos, type 2)
+      3. 4672 when the account is elevated
+      4. 4769 TGS for a service
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    rogue = random.random() < 0.5
+    issuer, serial, thumb = _pkinit_cert_fields(config, rogue=rogue)
+    src_ip = u.get("ip")
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+
+    events.append(json.dumps(_build_4768(
+        u, config, ip_override=src_ip, encryption="0x12",
+        preauth_type=_PREAUTH_PKINIT, cert_issuer=issuer, cert_serial=serial,
+        cert_thumbprint=thumb, ts=t)))
+    t += random.uniform(0.2, 0.8)
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=src_ip,
+                                             logon_id=logon_id, ts=t)))
+    t += random.uniform(0.8, 1.5)
+    events.append(json.dumps(_build_4624(u, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(1.0, 3.0)
+
+    spn = random.choice([s for s in _SERVICE_ACCOUNT_SPNS
+                         if s.lower().startswith(("cifs/", "ldap/", "http/"))])
+    events.append(json.dumps(_build_4769(u, config, service_spn=spn,
+                                         encryption="0x12",
+                                         ip_override=src_ip, ts=t)))
+    return events
+
+
+def _threat_sid_history_injection(config, session_context):
+    """SID-history injection: add a privileged domain SID to a controlled account.
+
+    Fires "User added SID History to an account" (Informational) and the
+    "Suspicious SID History Addition" (Medium) variation.
+
+    The injected SID is Domain Admins (RID 512) on the simulated domain, so the
+    account is not a migration case — which is what separates the "Suspicious"
+    variation from ordinary inter-domain migration.
+
+    Signal coverage is again deliberately redundant: 5136 sIDHistory Value
+    Added, 4662 Write Property naming the sIDHistory schema GUID, and the 4738
+    that carries the final SidHistory value (the only one of the three with a
+    first-class EventData field for it).
+
+    Sequence:
+      1. Attacker authenticates -> DC 4624 + endpoint 4624 + 4672
+      2. 4688 mimikatz sid::add / PowerShell Set-ADUser
+      3. 5136 sIDHistory Value Added
+      4. 4662 Write Property (sIDHistory schema GUID)
+      5. 4738 with SidHistory populated
+      6. 4768 TGT for the now-elevated account
+      7. 4689 process exit
+    """
+    actor = _pick_windows_user(session_context)
+    if not actor:
+        return None
+
+    target = _pick_other_windows_user(session_context, actor) or actor
+    base_dn = _domain_dn(config)
+    target_dn = f"CN={target['username']},CN=Users,{base_dn}"
+    target_guid = _new_logon_guid()
+    target_sid = _stable_user_sid(target["username"])
+    injected_sid = f"{_SYNTH_DOMAIN_SID}-512"
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    op_corr_id = _new_logon_guid()
+
+    events.append(json.dumps(_dc_logon_event(actor, config,
+                                             ip_override=actor.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(actor, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(actor, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+
+    tool = random.choice([
+        ("C:\\Users\\Public\\mimikatz.exe",
+         f"mimikatz.exe \"sid::add /sam:{target['username']} "
+         f"/new:{injected_sid}\" \"exit\""),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f"powershell.exe -ep bypass -c \"Set-ADUser -Identity "
+         f"{target['username']} -Add @{{'sIDHistory'='{injected_sid}'}}\""),
+    ])
+    events.append(json.dumps(_build_4688(actor, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+
+    events.append(json.dumps(_build_5136(
+        actor, config,
+        object_dn=target_dn, object_class="user", object_guid=target_guid,
+        attribute_name="sIDHistory", attribute_value=injected_sid,
+        attribute_syntax_oid="2.5.5.17",
+        operation_type="%%14674",
+        op_correlation_id=op_corr_id, logon_id=logon_id, ts=t)))
+    t += 0.01
+    events.append(json.dumps(_attr_change_4662(
+        actor, config, object_class=_GUID_CLASS_USER, object_dn=target_dn,
+        attr_guid=_GUID_ATTR_SID_HISTORY,
+        logon_id=logon_id, ts=t)))
+    t += 0.01
+    events.append(json.dumps(_build_4738(
+        actor, config, target_username=target["username"],
+        target_sid=target_sid, sam_account_name=target["username"],
+        sid_history=injected_sid, logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 3.0)
+
+    events.append(json.dumps(_build_4768(target, config,
+                                         ip_override=actor.get("ip"),
+                                         encryption="0x12", ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(actor, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_adfs_dkm_access(config, session_context):
+    """ADFS DKM key access — the first half of a Golden SAML attack.
+
+    Fires "ADFS DKM Key Access" (Low). The analytic description names the exact
+    signal: "ADFS DKM key attribute (thumbnailphoto) access in AD container".
+
+    Shape assumptions (NOT tenant-verified): the DC audit record is a 4662 read
+    of the DKM container, with ObjectType and Properties both the thumbnailPhoto
+    schema GUID ({8d3bca50-...}), ObjectName the DKM container DN, and
+    AccessMask 0x10 (Read Property). This matches public Golden SAML detection
+    content and the analytic's own wording; the published page does not list
+    EventData field names, so confirm against a real DKM read before changing
+    anything else if it stays silent.
+
+    Sequence:
+      1. Attacker authenticates -> DC 4624 + endpoint 4624 + 4672
+      2. 4688 AADInternals / mimikatz DKM export
+      3. 4662 Read Property on CN=DKM,CN=ADFS,CN=Microsoft,CN=Program Data
+      4. 4689 process exit
+    """
+    actor = _pick_windows_user(session_context)
+    if not actor:
+        return None
+
+    base_dn = _domain_dn(config)
+    dkm_dn = f"CN=DKM,CN=ADFS,CN=Microsoft,CN=Program Data,{base_dn}"
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+
+    events.append(json.dumps(_dc_logon_event(actor, config,
+                                             ip_override=actor.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(actor, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(actor, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+
+    tool = random.choice([
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         "powershell.exe -ep bypass -c \"Import-Module AADInternals; "
+         "Export-AADIntADFSConfiguration\""),
+        ("C:\\Users\\Public\\mimikatz.exe",
+         "mimikatz.exe \"lsadump::lsa /inject /name:adfs\" \"exit\""),
+    ])
+    events.append(json.dumps(_build_4688(actor, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+
+    events.append(json.dumps(_build_4662(
+        actor, config,
+        object_type="%" + _GUID_ATTR_THUMBNAIL_PHOTO,
+        object_name=dkm_dn,
+        access_mask="0x10",
+        properties=f"{_GUID_ATTR_THUMBNAIL_PHOTO}\n",
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+
+    events.append(json.dumps(_build_4689(actor, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_kerberos_relay(config, session_context):
+    """Kerberos relay: a machine account authenticates over the network to a
+    host from that host's own loopback address.
+
+    Fires "Possible Kerberos relay attack" (Low). The analytic is documented as
+    "a suspicious local network login" that can yield SYSTEM on the target.
+    A relayed machine-account authentication arrives as a type-3 Kerberos logon
+    whose source address is loopback (::1) and whose principal is the target's
+    own machine account — a combination normal workstations never produce.
+
+    Shape is inferred from the description and from how Windows logs relayed
+    machine auth; the page does not publish EventData fields. NOT
+    tenant-verified.
+
+    Sequence:
+      1. 4768 TGT for the target's machine account
+      2. DC-side 4624 for that machine account
+      3. 4769 TGS for cifs/<target>
+      4. 4624 type 3 Kerberos on the target, source ::1, principal <TARGET>$
+      5. 4672 (SYSTEM-equivalent privileges)
+      6. 4688 whoami /priv under the relayed logon
+      7. 4689 process exit
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    target_short = random.choice(["FS01", "FS02", "SQL01", "APP01", "DC01"])
+    target_fqdn = _fqdn(target_short, config)
+    machine_user = {**u, "username": f"{target_short}$", "hostname": target_fqdn}
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+
+    events.append(json.dumps(_build_4768(machine_user, config,
+                                         ip_override="::1",
+                                         encryption="0x12", ts=t)))
+    t += random.uniform(0.2, 0.6)
+    events.append(json.dumps(_dc_logon_event(machine_user, config,
+                                             ip_override="::1",
+                                             logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 0.8)
+    events.append(json.dumps(_build_4769(
+        machine_user, config, service_spn=f"cifs/{target_fqdn}",
+        encryption="0x12", ip_override="::1", ts=t)))
+    t += random.uniform(0.3, 0.8)
+
+    events.append(json.dumps(_build_4624(
+        machine_user, config, logon_type=3, auth_pkg=_KRB_PACKAGE,
+        workstation_override=target_fqdn, ip_override="::1",
+        target_logon_id=logon_id, elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(machine_user, config,
+                                         logon_id=logon_id, is_admin=True, ts=t)))
+    t += random.uniform(0.5, 1.5)
+
+    proc = "C:\\Windows\\System32\\cmd.exe"
+    events.append(json.dumps(_build_4688(machine_user, config,
+                                         process_name=proc,
+                                         command_line="cmd.exe /c whoami /priv",
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(machine_user, config,
+                                         process_name=proc,
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_spn_cleared(config, session_context):
+    """Service principal names cleared from a machine account.
+
+    Fires "SPNs cleared from a machine account" (Low) and the "for the first
+    time" (Medium) variation. This is the SPN half of noPac (CVE-2021-42278),
+    separated from the sAMAccountName rename so it can be exercised on its own.
+
+    Signal coverage: 5136 servicePrincipalName Value Deleted pairs, 4662 Write
+    Property naming the servicePrincipalName schema GUID, and a 4742 whose
+    ServicePrincipalNames field is "-" (the state-carrying event).
+
+    Sequence:
+      1. Attacker authenticates -> DC 4624 + endpoint 4624 + 4672
+      2. 4688 Set-ADComputer -ServicePrincipalName @{} / SetSPN -D
+      3. 5136 servicePrincipalName Value Deleted for each SPN
+      4. 4662 Write Property (servicePrincipalName schema GUID)
+      5. 4742 with ServicePrincipalNames="-"
+      6. 4689 process exit
+    """
+    actor = _pick_windows_user(session_context)
+    if not actor:
+        return None
+
+    dns_domain = _get_dns_domain(config)
+    base_dn = _domain_dn(config)
+    suffix = random.randint(100, 9999)
+    machine_name = random.choice(["WKSTMP", "DESKTOP", "CLIENT"]) + str(suffix)
+    machine_sam = f"{machine_name}$"
+    machine_dn = f"CN={machine_name},CN=Computers,{base_dn}"
+    machine_guid = _new_logon_guid()
+    machine_sid = _stable_user_sid(machine_name)
+    machine_fqdn = f"{machine_name.lower()}.{dns_domain}"
+    spns = [f"HOST/{machine_fqdn}", f"RestrictedKrbHost/{machine_fqdn}"]
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    op_corr_id = _new_logon_guid()
+
+    events.append(json.dumps(_dc_logon_event(actor, config,
+                                             ip_override=actor.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(actor, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(actor, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+
+    tool = random.choice([
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f"powershell.exe -ep bypass -c \"Set-ADComputer {machine_name} "
+         f"-ServicePrincipalName @{{}}\""),
+        ("C:\\Windows\\System32\\setspn.exe",
+         f"setspn.exe -D HOST/{machine_fqdn} {machine_sam}"),
+    ])
+    events.append(json.dumps(_build_4688(actor, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+
+    for spn in spns:
+        events.append(json.dumps(_build_5136(
+            actor, config,
+            object_dn=machine_dn, object_class="computer",
+            object_guid=machine_guid,
+            attribute_name="servicePrincipalName", attribute_value=spn,
+            attribute_syntax_oid="2.5.5.12",
+            operation_type="%%14675",
+            op_correlation_id=op_corr_id, logon_id=logon_id, ts=t)))
+        t += 0.001
+
+    events.append(json.dumps(_attr_change_4662(
+        actor, config, object_class=_GUID_CLASS_COMPUTER, object_dn=machine_dn,
+        attr_guid=_GUID_ATTR_SERVICE_PRINCIPAL,
+        logon_id=logon_id, ts=t)))
+    t += 0.01
+    events.append(json.dumps(_build_4742(
+        actor, config, target_computer_name=machine_sam, target_sid=machine_sid,
+        sam_account_name=machine_sam, dns_host_name=machine_fqdn, spns="-",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+
+    events.append(json.dumps(_build_4689(actor, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_suspicious_sam_change(config, session_context):
+    """Machine account renamed to a sAMAccountName with no trailing dollar sign.
+
+    Fires "Suspicious sAMAccountName change" (Low); when the new name is a
+    domain controller's hostname it also covers the "to DC hostname" (Medium)
+    variation. The rename is the other half of noPac, and a missing trailing "$"
+    is what lets the KDC resolve the principal as a user/DC rather than a
+    machine account.
+
+    Signal coverage: 5136 sAMAccountName Value Deleted/Added pair, 4662 Write
+    Property naming the sAMAccountName schema GUID, and a 4742 whose
+    SamAccountName field carries the new (dollar-less) name.
+
+    Sequence:
+      1. Attacker authenticates -> DC 4624 + endpoint 4624 + 4672
+      2. 4688 Set-ADComputer -SamAccountName / Rename-ADObject
+      3. 5136 sAMAccountName old -> new
+      4. 4662 Write Property (sAMAccountName schema GUID)
+      5. 4742 with the renamed SamAccountName
+      6. 4768 TGT for the renamed principal
+      7. 4689 process exit
+    """
+    actor = _pick_windows_user(session_context)
+    if not actor:
+        return None
+
+    dns_domain = _get_dns_domain(config)
+    base_dn = _domain_dn(config)
+    suffix = random.randint(100, 9999)
+    machine_name = random.choice(["WKSTMP", "DESKTOP", "CLIENT"]) + str(suffix)
+    machine_sam = f"{machine_name}$"
+    machine_dn = f"CN={machine_name},CN=Computers,{base_dn}"
+    machine_guid = _new_logon_guid()
+    machine_sid = _stable_user_sid(machine_name)
+    machine_fqdn = f"{machine_name.lower()}.{dns_domain}"
+
+    # 70% a generic dollar-less name (the base Low variation), 30% the DC's
+    # hostname (the Medium "to DC hostname" variation).
+    new_sam = _get_dc_short(config) if random.random() < 0.3 else machine_name
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    op_corr_id = _new_logon_guid()
+
+    events.append(json.dumps(_dc_logon_event(actor, config,
+                                             ip_override=actor.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(actor, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(actor, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(2.0, 5.0)
+
+    tool = random.choice([
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f"powershell.exe -ep bypass -c \"Set-ADComputer {machine_name} "
+         f"-SamAccountName '{new_sam}'\""),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f"powershell.exe -ep bypass -c \"Rename-ADObject -Identity "
+         f"'{machine_dn}' -NewName '{new_sam}'\""),
+    ])
+    events.append(json.dumps(_build_4688(actor, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.5)
+
+    events.append(json.dumps(_build_5136(
+        actor, config,
+        object_dn=machine_dn, object_class="computer", object_guid=machine_guid,
+        attribute_name="sAMAccountName", attribute_value=machine_sam,
+        attribute_syntax_oid="2.5.5.12",
+        operation_type="%%14675",
+        op_correlation_id=op_corr_id, logon_id=logon_id, ts=t)))
+    t += 0.001
+    events.append(json.dumps(_build_5136(
+        actor, config,
+        object_dn=machine_dn, object_class="computer", object_guid=machine_guid,
+        attribute_name="sAMAccountName", attribute_value=new_sam,
+        attribute_syntax_oid="2.5.5.12",
+        operation_type="%%14674",
+        op_correlation_id=op_corr_id, logon_id=logon_id, ts=t)))
+    t += 0.01
+    events.append(json.dumps(_attr_change_4662(
+        actor, config, object_class=_GUID_CLASS_COMPUTER, object_dn=machine_dn,
+        attr_guid=_GUID_ATTR_SAM_ACCOUNT_NAME,
+        logon_id=logon_id, ts=t)))
+    t += 0.01
+    events.append(json.dumps(_build_4742(
+        actor, config, target_computer_name=machine_sam, target_sid=machine_sid,
+        sam_account_name=new_sam, dns_host_name=machine_fqdn,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 0.8)
+
+    renamed_user = {**actor, "username": new_sam, "hostname": machine_fqdn}
+    events.append(json.dumps(_build_4768(renamed_user, config,
+                                         ip_override=actor.get("ip"),
+                                         encryption="0x12", ts=t)))
+    t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(actor, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
 _THREAT_WEIGHTS = {
     "rogue_forest_trust":                3,
     "existing_trust_sid_filter_downgrade": 3,
@@ -8912,6 +9606,14 @@ _THREAT_WEIGHTS = {
     "remote_scheduled_task":       3,
     "share_enumeration":           3,
     "malicious_service_install":   3,
+    # AD CS / Kerberos / directory-attribute abuse (added 2026-11-01)
+    "shadow_credentials":          3,
+    "pkinit_auth":                 3,
+    "sid_history_injection":       3,
+    "adfs_dkm_access":             2,
+    "kerberos_relay":              3,
+    "spn_cleared":                 3,
+    "suspicious_sam_change":       3,
 }
 
 _THREAT_GENERATORS = {
@@ -8954,6 +9656,13 @@ _THREAT_GENERATORS = {
     "remote_scheduled_task":            _threat_remote_scheduled_task,
     "share_enumeration":                _threat_share_enumeration,
     "malicious_service_install":        _threat_malicious_service_install,
+    "shadow_credentials":               _threat_shadow_credentials,
+    "pkinit_auth":                      _threat_pkinit_auth,
+    "sid_history_injection":            _threat_sid_history_injection,
+    "adfs_dkm_access":                  _threat_adfs_dkm_access,
+    "kerberos_relay":                   _threat_kerberos_relay,
+    "spn_cleared":                      _threat_spn_cleared,
+    "suspicious_sam_change":            _threat_suspicious_sam_change,
 }
 _THREAT_GENERATORS = {k: _ending_by_now(v) for k, v in _THREAT_GENERATORS.items()}
 
@@ -8997,6 +9706,16 @@ ANALYTIC_ALERTS = {
     "mailbox_export":              "PowerShell used to export mailbox contents",
     "mailbox_export_log_removal":  "PowerShell used to remove mailbox export request logs",
     "mailbox_cas_change":          "Mailbox Client Access Setting (CAS) changed",
+    # AD CS / Kerberos / directory-attribute abuse (added 2026-11-01).
+    # The primary name is the Low+ variation the generator is built to raise;
+    # the base Informational name and any sibling variation are in SECONDARY.
+    "shadow_credentials":          "Possible shadow credentials addition",
+    "pkinit_auth":                 "Suspicious PKINIT TGT authentication request",
+    "sid_history_injection":       "Suspicious SID History Addition",
+    "adfs_dkm_access":             "ADFS DKM Key Access",
+    "kerberos_relay":              "Possible Kerberos relay attack",
+    "spn_cleared":                 "SPNs cleared from a machine account for the first time",
+    "suspicious_sam_change":       "Suspicious sAMAccountName change to DC hostname",
 }
 
 # Further analytics a threat's events are built to satisfy, beyond its ANALYTIC_ALERTS
@@ -9007,6 +9726,43 @@ ANALYTIC_ALERTS_SECONDARY = {
         "Multiple suspicious user accounts were created",
         "Suspicious domain user account creation",
         "Local user account creation",
+    ],
+    # The noPac generators were already emitting every shape these analytics
+    # need; they were simply never declared, so coverage counted them as gaps.
+    "samaccountname_spoofing": [
+        "TGT request with a spoofed sAMAccountName - Event log",
+        "Suspicious sAMAccountName change",
+        "Suspicious sAMAccountName change to DC hostname",
+        "SPNs cleared from a machine account",
+        "SPNs cleared from a machine account for the first time",
+    ],
+    "dnshostname_spoofing": [
+        "Suspicious account attribute modification that matches that of another account",
+        "Suspicious account attribute modification that matches that of a sensitive machine account",
+    ],
+    "multiple_service_tickets": [
+        "A user requested multiple service tickets",
+        "Abnormal issuance of service tickets to a user",
+    ],
+    "shadow_credentials": [
+        "Key credential attribute modification",
+        "Key credential attribute addition",
+        "PKINIT TGT authentication request",
+        "Suspicious PKINIT TGT authentication request",
+        "Abnormal PKINIT TGT authentication request",
+    ],
+    "pkinit_auth": [
+        "PKINIT TGT authentication request",
+        "Abnormal PKINIT TGT authentication request",
+    ],
+    "sid_history_injection": [
+        "User added SID History to an account",
+    ],
+    "spn_cleared": [
+        "SPNs cleared from a machine account",
+    ],
+    "suspicious_sam_change": [
+        "Suspicious sAMAccountName change",
     ],
 }
 
@@ -9174,6 +9930,13 @@ def _generate_scenario_event(scenario_event, config, context):
         "REMOTE_SCHEDULED_TASK":            _threat_remote_scheduled_task,
         "SHARE_ENUMERATION":                _threat_share_enumeration,
         "MALICIOUS_SERVICE_INSTALL":        _threat_malicious_service_install,
+        "SHADOW_CREDENTIALS":               _threat_shadow_credentials,
+        "PKINIT_AUTH":                      _threat_pkinit_auth,
+        "SID_HISTORY_INJECTION":            _threat_sid_history_injection,
+        "ADFS_DKM_ACCESS":                  _threat_adfs_dkm_access,
+        "KERBEROS_RELAY":                   _threat_kerberos_relay,
+        "SPN_CLEARED":                      _threat_spn_cleared,
+        "SUSPICIOUS_SAM_CHANGE":            _threat_suspicious_sam_change,
     }
     if ev in _threat_dispatch:
         result = _end_by_now(_threat_dispatch[ev](config, session_context))
