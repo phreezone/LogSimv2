@@ -2,7 +2,7 @@
   {
     "name": "VPN Compromise Confirmed \u2014 Brute Force + Successful Login Same User",
     "severity": "SEV_050_CRITICAL",
-    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"109006\"\n| filter xdm.source.user.username != null\n| bin _time span = 30m\n| comp count() as vpn_fails,\n       values(xdm.source.ipv4) as source_ips\n       by xdm.source.user.username, _time\n| filter vpn_fails >= 3\n| join (\n    datamodel dataset = cisco_asa_raw\n    | filter _raw_log contains \"113039\"\n    | filter xdm.source.user.username != null\n    | comp count() as vpn_logins by xdm.source.user.username\n  ) as ok xdm.source.user.username = ok.xdm.source.user.username\n| fields source_ips, xdm.source.user.username\n",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"109006\"\n| alter src_ip    = arrayindex(regextract(_raw_log, \"from (\\d+\\.\\d+\\.\\d+\\.\\d+)/\"), 0),\n        raw_user  = arrayindex(regextract(_raw_log, \"for user '(.+?)' from \"), 0)\n| alter user_name = arrayindex(regextract(raw_user, \"([A-Za-z0-9._@'-]+)$\"), 0)\n| filter src_ip != null\n| filter user_name != null\n| bin _time span = 30m\n| comp count() as vpn_fails,\n       values(src_ip) as source_ips\n       by user_name, _time\n| filter vpn_fails >= 3\n| join type = inner (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"113039\"\n    | alter ok_user = arrayindex(regextract(_raw_log, \"User <([^>]+)>\"), 0)\n    | filter ok_user != null\n    | comp count() as vpn_logins by ok_user\n  ) as ok user_name = ok.ok_user\n| fields source_ips, user_name, vpn_fails, vpn_logins\n",
     "is_enabled": true,
     "description": "Same user has VPN auth failures AND successful AnyConnect login.",
     "alert_name": "VPN Compromise Confirmed \u2014 Brute Force + Successful Login Same User",
@@ -12,7 +12,7 @@
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_remote_ip": "source_ips",
-      "actor_effective_username": "xdm.source.user.username"
+      "actor_effective_username": "user_name"
     },
     "execution_mode": "SCHEDULED",
     "search_window": "30 minutes",
@@ -22,7 +22,7 @@
     "suppression_enabled": true,
     "suppression_duration": "1 hours",
     "suppression_fields": [
-      "xdm.source.user.username"
+      "user_name"
     ],
     "dataset": "alerts",
     "user_defined_severity": null,
@@ -37,7 +37,7 @@
     },
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
     "lookup_mapping": []
   }

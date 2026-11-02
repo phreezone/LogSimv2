@@ -411,7 +411,7 @@
   {
     "name": "Infoblox \u2014 Threat Protect DROP",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"threat-protect-log\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        category = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"cat=\\\"([^\\\"]+)\\\"\"), 0),\n        qname = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"qname=(\\S+)\"), 0)\n| filter src_ip != null\n| bin _time span = 10m\n| comp count() as alerts,\n       count_distinct(category) as distinct_categories,\n       values(category) as categories,\n       values(qname) as blocked_domains\n       by src_ip, _time\n| filter alerts >= 30 and distinct_categories >= 3\n| fields src_ip, categories, blocked_domains\n",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"threat-protect-log\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        category = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"cat=\\\"([^\\\"]+)\\\"\"), 0),\n        qname = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"fqdn=(\\S+)\"), 0)\n| filter src_ip != null\n| bin _time span = 10m\n| comp count() as alerts,\n       count_distinct(category) as distinct_categories,\n       values(category) as categories,\n       values(qname) as blocked_domains\n       by src_ip, _time\n| filter alerts >= 30 and distinct_categories >= 3\n| fields src_ip, categories, blocked_domains\n",
     "is_enabled": true,
     "description": "Threat-Protect drops for one client \u2014 BloxOne C&C / malware category detection.",
     "alert_name": "Infoblox \u2014 Threat Protect DROP",
@@ -693,7 +693,7 @@
   {
     "name": "Web Application Reconnaissance \u2014 High Volume of 4xx Responses",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = apache_httpd_raw\n| alter status = to_integer(xdm.network.http.response_code),\n        uri = xdm.network.http.url,\n        ua = xdm.source.user_agent,\n        method = xdm.network.http.method\n| filter xdm.source.ipv4 != null and status >= 400\n| filter uri contains \"/admin\"\n       or uri contains \"/login\"\n       or uri contains \"/wp-\"\n       or uri contains \"/phpmyadmin\"\n       or uri contains \"/.env\"\n       or uri contains \"/.git\"\n       or uri contains \"/config\"\n       or uri contains \"/backup\"\n       or uri contains \"/console\"\n       or uri contains \"/.aws\"\n       or uri contains \"/actuator\"\n| bin _time span = 30m\n| comp count() as recon_4xx,\n       count_distinct(uri) as distinct_paths,\n       values(uri) as scanned_paths,\n       values(ua) as user_agents,\n       values(xdm.target.ipv4) as tgt_ips\n       by xdm.source.ipv4, _time\n| filter recon_4xx >= 50 and distinct_paths >= 15\n| fields xdm.source.ipv4, tgt_ips, scanned_paths, user_agents\n",
+    "xql_query": "datamodel dataset = apache_httpd_raw\n| alter status = to_integer(xdm.network.http.response_code),\n        uri = xdm.network.http.url,\n        ua = xdm.source.user_agent,\n        method = xdm.network.http.method\n| filter xdm.source.ipv4 != null and status >= 400\n| filter uri contains \"/admin\"\n       or uri contains \"/login\"\n       or uri contains \"/wp-\"\n       or uri contains \"/phpmyadmin\"\n       or uri contains \"/.env\"\n       or uri contains \"/.git\"\n       or uri contains \"/config\"\n       or uri contains \"/backup\"\n       or uri contains \"/console\"\n       or uri contains \"/.aws\"\n       or uri contains \"/actuator\"\n| bin _time span = 30m\n| comp count() as recon_4xx,\n       count_distinct(uri) as distinct_paths,\n       values(uri) as scanned_paths,\n       values(ua) as user_agents,\n       values(xdm.target.ipv4) as tgt_ips\n       by xdm.source.ipv4, _time\n| filter recon_4xx >= 30 and distinct_paths >= 10\n| fields xdm.source.ipv4, tgt_ips, scanned_paths, user_agents\n",
     "is_enabled": true,
     "description": "External IP scanning Apache for vulnerabilities \u2014 many 4xx errors.",
     "alert_name": "Web Application Reconnaissance \u2014 High Volume of 4xx Responses",
@@ -735,7 +735,7 @@
   {
     "name": "VPN Compromise Confirmed \u2014 Brute Force + Successful Login Same User",
     "severity": "SEV_050_CRITICAL",
-    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"109006\"\n| filter xdm.source.user.username != null\n| bin _time span = 30m\n| comp count() as vpn_fails,\n       values(xdm.source.ipv4) as source_ips\n       by xdm.source.user.username, _time\n| filter vpn_fails >= 3\n| join (\n    datamodel dataset = cisco_asa_raw\n    | filter _raw_log contains \"113039\"\n    | filter xdm.source.user.username != null\n    | comp count() as vpn_logins by xdm.source.user.username\n  ) as ok xdm.source.user.username = ok.xdm.source.user.username\n| fields source_ips, xdm.source.user.username\n",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"109006\"\n| alter src_ip    = arrayindex(regextract(_raw_log, \"from (\\d+\\.\\d+\\.\\d+\\.\\d+)/\"), 0),\n        raw_user  = arrayindex(regextract(_raw_log, \"for user '(.+?)' from \"), 0)\n| alter user_name = arrayindex(regextract(raw_user, \"([A-Za-z0-9._@'-]+)$\"), 0)\n| filter src_ip != null\n| filter user_name != null\n| bin _time span = 30m\n| comp count() as vpn_fails,\n       values(src_ip) as source_ips\n       by user_name, _time\n| filter vpn_fails >= 3\n| join type = inner (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"113039\"\n    | alter ok_user = arrayindex(regextract(_raw_log, \"User <([^>]+)>\"), 0)\n    | filter ok_user != null\n    | comp count() as vpn_logins by ok_user\n  ) as ok user_name = ok.ok_user\n| fields source_ips, user_name, vpn_fails, vpn_logins\n",
     "is_enabled": true,
     "description": "Same user has VPN auth failures AND successful AnyConnect login.",
     "alert_name": "VPN Compromise Confirmed \u2014 Brute Force + Successful Login Same User",
@@ -745,7 +745,7 @@
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "action_remote_ip": "source_ips",
-      "actor_effective_username": "xdm.source.user.username"
+      "actor_effective_username": "user_name"
     },
     "execution_mode": "SCHEDULED",
     "search_window": "30 minutes",
@@ -755,7 +755,7 @@
     "suppression_enabled": true,
     "suppression_duration": "1 hours",
     "suppression_fields": [
-      "xdm.source.user.username"
+      "user_name"
     ],
     "dataset": "alerts",
     "user_defined_severity": null,
@@ -770,7 +770,7 @@
     },
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
     "lookup_mapping": []
   },
@@ -1017,7 +1017,7 @@
   {
     "name": "Cisco ASA \u2014 VPN Credential Brute Force",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"109006\"\n| bin _time span = 30m\n| comp count() as fails,\n       values(xdm.source.user.username) as users,\n       count_distinct(xdm.source.user.username) as targeted_users\n       by xdm.source.ipv4, _time\n| filter fails >= 25\n| fields xdm.source.ipv4, users\n",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"109006\"\n| alter src_ip    = arrayindex(regextract(_raw_log, \"from (\\d+\\.\\d+\\.\\d+\\.\\d+)/\"), 0),\n        raw_user  = arrayindex(regextract(_raw_log, \"for user '(.+?)' from \"), 0)\n| alter user_name = arrayindex(regextract(raw_user, \"([A-Za-z0-9._@'-]+)$\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as fails,\n       values(user_name) as users,\n       count_distinct(user_name) as targeted_users\n       by src_ip, _time\n| filter fails >= 10\n| fields src_ip, users, fails, targeted_users\n",
     "is_enabled": true,
     "description": "Many 109006 auth failures from a single IP against the VPN gateway.",
     "alert_name": "Cisco ASA \u2014 VPN Credential Brute Force",
@@ -1026,7 +1026,7 @@
     "alert_description": "What fired: Many 109006 auth failures from a single IP against the VPN gateway.\n\nWhy it matters: an actor is attempting to obtain or brute-force credentials. Assessed severity: High.\n\nMITRE ATT&CK: T1110 - Brute Force (TA0006 - Credential Access); T1110.003 - Password Spraying (TA0006 - Credential Access).\n\nInvestigate:\n  - Identify the targeted account(s) and the source IP, and check for a SUCCESSFUL authentication following the failures.\n  - Determine whether the source is expected; look for MFA prompts, password resets, or new sessions from the same source.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_remote_ip": "xdm.source.ipv4",
+      "action_remote_ip": "src_ip",
       "actor_effective_username": "users"
     },
     "execution_mode": "SCHEDULED",
@@ -1037,7 +1037,7 @@
     "suppression_enabled": true,
     "suppression_duration": "1 hours",
     "suppression_fields": [
-      "xdm.source.ipv4"
+      "src_ip"
     ],
     "dataset": "alerts",
     "user_defined_severity": null,
@@ -1050,7 +1050,7 @@
     },
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
     "lookup_mapping": []
   },
@@ -1804,7 +1804,7 @@
   {
     "name": "Infoblox \u2014 DNS Resolution of Unsanctioned Cloud Storage",
     "severity": "SEV_030_MEDIUM",
-    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.event.description contains \"mega.nz\" or xdm.event.description contains \"anonfiles\" or xdm.event.description contains \"pcloud\" or xdm.event.description contains \"tresorit\" or xdm.event.description contains \"wetransfer\" or xdm.event.description contains \"filebin\" or xdm.event.description contains \"transfer.sh\" or xdm.event.description contains \"send.now\" or xdm.event.description contains \"dropbox\" or xdm.event.description contains \"drive.google\" or xdm.event.description contains \"box.com\" or xdm.event.description contains \"pastebin\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| bin _time span = 1h\n| comp count_distinct(domain) as lookups,\n       values(domain) as bad_domains,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, events_seen, bad_domains\n",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DNS Query\"\n| filter xdm.event.description contains \"mega.nz\" or xdm.event.description contains \"anonfiles\" or xdm.event.description contains \"pcloud\" or xdm.event.description contains \"tresorit\" or xdm.event.description contains \"wetransfer\" or xdm.event.description contains \"filebin\" or xdm.event.description contains \"transfer.sh\" or xdm.event.description contains \"send.now\" or xdm.event.description contains \"dropbox\" or xdm.event.description contains \"drive.google\" or xdm.event.description contains \"box.com\" or xdm.event.description contains \"pastebin\" or xdm.event.description contains \"fileshare.io\"\n| filter xdm.source.ipv4 != null\n| alter domain = arrayindex(regextract(xdm.event.description, \"query: (\\S+) IN\"), 0)\n| bin _time span = 1h\n| comp count_distinct(domain) as lookups,\n       values(domain) as bad_domains,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, events_seen, bad_domains\n",
     "is_enabled": true,
     "description": "Infoblox DNS query for mega.nz, anonfiles, pcloud, tresorit, wetransfer, filebin, transfer.sh, send.now, dropbox, drive.google, box.com, or pastebin \u2014 potential cloud-storage exfiltration target.",
     "alert_name": "Infoblox \u2014 DNS Resolution of Unsanctioned Cloud Storage",
@@ -1969,7 +1969,7 @@
   {
     "name": "GCP \u2014 IAM Privilege Escalation via SetIamPolicy",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type contains \"SetIamPolicy\" or xdm.event.operation_sub_type contains \"setIamPolicy\"\n| filter xdm.event.description contains \"roles/owner\" or xdm.event.description contains \"roles/editor\" or xdm.event.description contains \"roles/iam.serviceAccountUser\" or xdm.event.description contains \"roles/iam.serviceAccountTokenCreator\"\n| bin _time span = 1h\n| comp count() as priv_grants,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
+    "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.event.operation_sub_type contains \"SetIamPolicy\" or xdm.event.operation_sub_type contains \"setIamPolicy\"\n| filter xdm.event.description contains \"roles/owner\" or xdm.event.description contains \"roles/editor\" or xdm.event.description contains \"roles/iam.serviceAccountUser\" or xdm.event.description contains \"roles/iam.serviceAccountTokenCreator\" or xdm.event.description contains \"roles/iam.securityAdmin\"\n| bin _time span = 1h\n| comp count() as priv_grants,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.type) as operations,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| fields xdm.source.ipv4, users, events_seen\n",
     "is_enabled": true,
     "description": "GCP SetIamPolicy or setIamPolicy method assigning roles/owner, roles/editor, roles/iam.serviceAccountUser, or roles/iam.serviceAccountTokenCreator.",
     "alert_name": "GCP \u2014 IAM Privilege Escalation via SetIamPolicy",
@@ -2209,7 +2209,7 @@
   {
     "name": "Apache \u2014 High-Volume 4xx Recon Scanning From Single Client",
     "severity": "SEV_030_MEDIUM",
-    "xql_query": "datamodel dataset = apache_httpd_raw\n| alter status = to_integer(xdm.network.http.response_code),\n        uri = xdm.network.http.url,\n        ua = xdm.source.user_agent,\n        method = xdm.network.http.method\n| filter xdm.source.ipv4 != null and status >= 400\n| filter uri contains \"/admin\"\n       or uri contains \"/login\"\n       or uri contains \"/wp-\"\n       or uri contains \"/phpmyadmin\"\n       or uri contains \"/.env\"\n       or uri contains \"/.git\"\n       or uri contains \"/config\"\n       or uri contains \"/backup\"\n       or uri contains \"/console\"\n       or uri contains \"/.aws\"\n       or uri contains \"/actuator\"\n| bin _time span = 30m\n| comp count() as recon_4xx,\n       count_distinct(uri) as distinct_paths,\n       values(uri) as scanned_paths,\n       values(ua) as user_agents,\n       values(method) as methods,\n       values(status) as response_codes,\n       values(xdm.target.ipv4) as tgt_ips\n       by xdm.source.ipv4, _time\n| filter recon_4xx >= 50 and distinct_paths >= 15\n| fields xdm.source.ipv4, tgt_ips, scanned_paths, user_agents, response_codes\n",
+    "xql_query": "datamodel dataset = apache_httpd_raw\n| alter status = to_integer(xdm.network.http.response_code),\n        uri = xdm.network.http.url,\n        ua = xdm.source.user_agent,\n        method = xdm.network.http.method\n| filter xdm.source.ipv4 != null and status >= 400\n| filter uri contains \"/admin\"\n       or uri contains \"/login\"\n       or uri contains \"/wp-\"\n       or uri contains \"/phpmyadmin\"\n       or uri contains \"/.env\"\n       or uri contains \"/.git\"\n       or uri contains \"/config\"\n       or uri contains \"/backup\"\n       or uri contains \"/console\"\n       or uri contains \"/.aws\"\n       or uri contains \"/actuator\"\n| bin _time span = 30m\n| comp count() as recon_4xx,\n       count_distinct(uri) as distinct_paths,\n       values(uri) as scanned_paths,\n       values(ua) as user_agents,\n       values(method) as methods,\n       values(status) as response_codes,\n       values(xdm.target.ipv4) as tgt_ips\n       by xdm.source.ipv4, _time\n| filter recon_4xx >= 30 and distinct_paths >= 10\n| fields xdm.source.ipv4, tgt_ips, scanned_paths, user_agents, response_codes\n",
     "is_enabled": true,
     "description": "Apache httpd showing \u226520 HTTP 4xx responses from a single client IP within one hour \u2014 vulnerability scanning or directory traversal recon.",
     "alert_name": "Apache \u2014 High-Volume 4xx Recon Scanning From Single Client",
@@ -2383,7 +2383,7 @@
   {
     "name": "Cisco ASA \u2014 VPN Authentication Brute Force From Single IP",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"109006\"\n| comp count() as fails,\n       values(xdm.source.user.username) as users,\n       count_distinct(xdm.source.user.username) as targeted_users\n       by xdm.source.ipv4\n| filter fails >= 3\n| fields xdm.source.ipv4, users\n",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"109006\"\n| alter src_ip    = arrayindex(regextract(_raw_log, \"from (\\d+\\.\\d+\\.\\d+\\.\\d+)/\"), 0),\n        raw_user  = arrayindex(regextract(_raw_log, \"for user '(.+?)' from \"), 0)\n| alter user_name = arrayindex(regextract(raw_user, \"([A-Za-z0-9._@'-]+)$\"), 0)\n| filter src_ip != null\n| comp count() as fails,\n       values(user_name) as users,\n       count_distinct(user_name) as targeted_users\n       by src_ip\n| filter fails >= 3\n| fields src_ip, users, fails, targeted_users\n",
     "is_enabled": true,
     "description": "\u22653 ASA 109006 authentication-failed events grouped by source IP within 30 minutes \u2014 VPN credential brute force / password spray.",
     "alert_name": "Cisco ASA \u2014 VPN Authentication Brute Force From Single IP",
@@ -2392,7 +2392,7 @@
     "alert_description": "What fired: \u22653 ASA 109006 authentication-failed events grouped by source IP within 30 minutes \u2014 VPN credential brute force / password spray.\n\nWhy it matters: an actor is attempting to obtain or brute-force credentials. Assessed severity: High.\n\nMITRE ATT&CK: T1110.003 - Brute Force: Password Spraying (TA0006 - Credential Access).\n\nInvestigate:\n  - Identify the targeted account(s) and the source IP, and check for a SUCCESSFUL authentication following the failures.\n  - Determine whether the source is expected; look for MFA prompts, password resets, or new sessions from the same source.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_remote_ip": "xdm.source.ipv4",
+      "action_remote_ip": "src_ip",
       "actor_effective_username": "users"
     },
     "execution_mode": "SCHEDULED",
@@ -2403,7 +2403,7 @@
     "suppression_enabled": true,
     "suppression_duration": "1 hours",
     "suppression_fields": [
-      "xdm.source.ipv4"
+      "src_ip"
     ],
     "dataset": "alerts",
     "user_defined_severity": null,
@@ -2415,7 +2415,7 @@
     },
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
     "lookup_mapping": []
   },
@@ -2461,7 +2461,7 @@
   {
     "name": "Cisco ASA \u2014 SMB Lateral Movement to Previously Unseen Internal Hosts",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"302013\" and xdm.target.port = 445\n| filter xdm.source.interface = \"inside\" and xdm.target.interface = \"inside\"\n| alter scanner_ip = xdm.source.ipv4\n| comp count_distinct(xdm.target.ipv4) as smb_hosts,\n       values(xdm.target.ipv4) as smb_targets\n       by scanner_ip\n| filter smb_hosts >= 5 and smb_hosts < 10\n| join type = left (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"722051\" and _raw_log contains \"assigned to session\"\n    | alter pool_ip = arrayindex(regextract(_raw_log, \"Address <(\\d+\\.\\d+\\.\\d+\\.\\d+)>\"), 0),\n            vpn_user = arrayindex(regextract(_raw_log, \"User <([^>]+)>\"), 0)\n    | filter pool_ip != null\n    | comp values(vpn_user) as vpn_user by pool_ip\n    | fields pool_ip, vpn_user\n  ) as vbind vbind.pool_ip = scanner_ip\n| alter user_name = arrayindex(vpn_user, 0)\n| fields scanner_ip, smb_targets, smb_hosts, user_name\n",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"302014\" and xdm.target.port = 445\n| filter xdm.source.interface = \"inside\" and xdm.target.interface = \"inside\"\n| filter to_integer(xdm.source.sent_bytes) >= 10000\n| alter scanner_ip = xdm.source.ipv4\n| comp count_distinct(xdm.target.ipv4) as smb_hosts,\n       values(xdm.target.ipv4) as smb_targets\n       by scanner_ip\n| filter smb_hosts >= 5\n| join type = left (\n    dataset = cisco_asa_raw\n    | filter _raw_log contains \"722051\" and _raw_log contains \"assigned to session\"\n    | alter pool_ip = arrayindex(regextract(_raw_log, \"Address <(\\d+\\.\\d+\\.\\d+\\.\\d+)>\"), 0),\n            vpn_user = arrayindex(regextract(_raw_log, \"User <([^>]+)>\"), 0)\n    | filter pool_ip != null\n    | comp values(vpn_user) as vpn_user by pool_ip\n    | fields pool_ip, vpn_user\n  ) as vbind vbind.pool_ip = scanner_ip\n| alter user_name = arrayindex(vpn_user, 0)\n| fields scanner_ip, smb_targets, smb_hosts, user_name\n",
     "is_enabled": true,
     "description": "Internal host establishing SMB/445 connections to 5\u20139 distinct internal hosts within 15 minutes \u2014 lateral movement after VPN compromise.",
     "alert_name": "Cisco ASA \u2014 SMB Lateral Movement to Previously Unseen Internal Hosts",
@@ -3157,7 +3157,7 @@
   {
     "name": "Infoblox \u2014 RPZ NXDOMAIN Block (First C2 Domain Blocked at DNS)",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"RPZ-QNAME\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        blocked_domain = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"qname=(\\S+)\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as rpz_nxd,\n       count_distinct(blocked_domain) as distinct_domains,\n       values(blocked_domain) as blocked_domains\n       by src_ip, _time\n| filter rpz_nxd >= 1\n| fields src_ip, blocked_domains\n",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"RPZ-QNAME\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        blocked_domain = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"rewrite (\\S+) \\[\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as rpz_nxd,\n       count_distinct(blocked_domain) as distinct_domains,\n       values(blocked_domain) as blocked_domains\n       by src_ip, _time\n| filter rpz_nxd >= 1\n| fields src_ip, blocked_domains\n",
     "is_enabled": true,
     "description": "Infoblox xdm.event.type = 'Threat' with RPZ-QNAME and NXDOMAIN markers \u2014 C2 domain matched RPZ threat intel and was returned NXDOMAIN.",
     "alert_name": "Infoblox \u2014 RPZ NXDOMAIN Block (First C2 Domain Blocked at DNS)",
@@ -3393,7 +3393,7 @@
   {
     "name": "Infoblox \u2014 RPZ NXDOMAIN Block (Device C2 Attempt Blocked at DNS)",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"RPZ-QNAME\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        blocked_domain = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"qname=(\\S+)\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as rpz_nxd,\n       count_distinct(blocked_domain) as distinct_domains,\n       values(blocked_domain) as blocked_domains\n       by src_ip, _time\n| filter rpz_nxd >= 1\n| fields src_ip, blocked_domains\n",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"Threat\"\n| filter infoblox_infoblox_raw._raw_log contains \"RPZ-QNAME\"\n| alter src_ip = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"src=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        blocked_domain = arrayindex(regextract(infoblox_infoblox_raw._raw_log, \"rewrite (\\S+) \\[\"), 0)\n| filter src_ip != null\n| bin _time span = 30m\n| comp count() as rpz_nxd,\n       count_distinct(blocked_domain) as distinct_domains,\n       values(blocked_domain) as blocked_domains\n       by src_ip, _time\n| filter rpz_nxd >= 1\n| fields src_ip, blocked_domains\n",
     "is_enabled": true,
     "description": "Infoblox xdm.event.type = 'Threat' with RPZ-QNAME and NXDOMAIN \u2014 compromised device's first C2 lookup blocked at DNS layer.",
     "alert_name": "Infoblox \u2014 RPZ NXDOMAIN Block (Device C2 Attempt Blocked at DNS)",
