@@ -2253,23 +2253,44 @@ def _run_health_checks() -> dict:
             })
 
     # ── 2. Syslog TCP connectivity ────────────────────────────────────────────
+    # Each plain-syslog source ships to SYSLOG_HOST on its OWN port — the broker
+    # separates feeds that carry no in-body routing key by port (Cisco ASA 1514,
+    # Apache 1515, Infoblox 1516, VMware ESXi 1518, …) — so a single probe of the
+    # default port is not enough: a listener can be up on 514 and absent on 1518.
+    # Probe every distinct port in use and name the sources that depend on it.
     syslog_host = os.getenv("SYSLOG_HOST", "")
-    syslog_port = CONFIG.get("syslog_port", 514)
     if syslog_host:
+        syslog_ports: dict = {}
         try:
-            with _socket.create_connection((syslog_host, syslog_port), timeout=3):
-                pass
-            results.append({
-                "group": "Syslog",
-                "check": f"TCP {syslog_host}:{syslog_port} reachable",
-                "status": "ok", "detail": "connected",
-            })
-        except Exception as exc:
-            results.append({
-                "group": "Syslog",
-                "check": f"TCP {syslog_host}:{syslog_port} reachable",
-                "status": "error", "detail": str(exc),
-            })
+            _gp = int(CONFIG.get("syslog_port", 514) or 514)
+        except (TypeError, ValueError):
+            _gp = 514
+        syslog_ports.setdefault(_gp, []).append("default")
+        for _k, _v in CONFIG.items():
+            if isinstance(_v, dict) and _v.get("syslog_port"):
+                try:
+                    _p = int(_v["syslog_port"])
+                except (TypeError, ValueError):
+                    continue
+                syslog_ports.setdefault(_p, []).append(
+                    _k[:-7] if _k.endswith("_config") else _k)
+        for _port in sorted(syslog_ports):
+            _srcs = ", ".join(sorted(syslog_ports[_port]))
+            try:
+                with _socket.create_connection((syslog_host, _port), timeout=3):
+                    pass
+                results.append({
+                    "group": "Syslog",
+                    "check": f"TCP {syslog_host}:{_port} reachable",
+                    "status": "ok", "detail": f"connected ({_srcs})",
+                })
+            except Exception as exc:
+                results.append({
+                    "group": "Syslog",
+                    "check": f"TCP {syslog_host}:{_port} reachable",
+                    "status": "error",
+                    "detail": f"{exc} — {_srcs} will not ingest",
+                })
     else:
         results.append({
             "group": "Syslog", "check": "TCP connectivity",
@@ -2436,6 +2457,50 @@ def _run_health_checks() -> dict:
         results.append({
             "group": "GCP Pub/Sub", "check": "credentials present",
             "status": "skip", "detail": f"not set: {', '.join(missing)}" if missing else "skipped",
+        })
+
+    # ── 6. Cribl receiver (direct-to-XSIAM) ───────────────────────────────────
+    # The integrated Cribl receiver is the transport for the Microsoft / Entra /
+    # O365 feeds (config transport: "cribl"): those modules POST gzipped NDJSON to
+    # CRIBL_COLLECTOR_URL with an Authorization: Bearer CRIBL_TOKEN header. With
+    # either var unset CriblDirectSender raises on first send and EVERY cribl-routed
+    # source goes silent — so whenever any module is routed to Cribl these are a
+    # REQUIRED source, reported as an error (not a warning) when missing.
+    cribl_sources = sorted(
+        _k[:-7] if _k.endswith("_config") else _k
+        for _k, _v in CONFIG.items()
+        if isinstance(_v, dict) and _v.get("transport") == "cribl"
+    )
+    cribl_url   = os.getenv("CRIBL_COLLECTOR_URL", "")
+    cribl_token = os.getenv("CRIBL_TOKEN", "")
+    if cribl_sources:
+        _missing = [n for n, val in (("CRIBL_COLLECTOR_URL", cribl_url),
+                                     ("CRIBL_TOKEN", cribl_token)) if not val]
+        if _missing:
+            results.append({
+                "group": "Cribl", "check": "credentials present",
+                "status": "error",
+                "detail": (f"{', '.join(_missing)} not set — required by "
+                           f"{len(cribl_sources)} source(s): "
+                           f"{', '.join(cribl_sources[:6])}"
+                           + (" …" if len(cribl_sources) > 6 else "")
+                           + ". These feeds cannot deliver."),
+            })
+        else:
+            results.append({
+                "group": "Cribl", "check": "credentials present",
+                "status": "ok",
+                "detail": (f"CRIBL_COLLECTOR_URL + CRIBL_TOKEN set; "
+                           f"{len(cribl_sources)} source(s) routed via Cribl"),
+            })
+            # Reachability: any HTTP response (even 401/403/405) means the integrated
+            # receiver endpoint is up and resolvable.
+            _check_http_url(cribl_url, "receiver endpoint", "Cribl")
+    else:
+        results.append({
+            "group": "Cribl", "check": "transport in use",
+            "status": "skip",
+            "detail": "no module is routed to the Cribl receiver",
         })
 
     # ── Windows parallel-mode workers ─────────────────────────────────────────
