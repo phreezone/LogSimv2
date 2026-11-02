@@ -3768,12 +3768,13 @@ def _simulate_vpn_abnormal_os(config, session_context=None):
     return [_format_fortinet_cef(config, "0101039424", "event", "vpn", "notice", fields)]
 
 
-def _simulate_external_port_scan(config):
+def _simulate_external_port_scan(config, attacker_ip=None):
     """
     External attacker IP scanning many ports on ONE internal host (inbound via WAN),
     denied by policy — external-facing port scan (complements the internal port_scan).
+    A scenario pins attacker_ip so the scan joins its later steps.
     """
-    ext_ip = _random_external_ip()
+    ext_ip = attacker_ip or _random_external_ip()
     print(f"    - Fortinet Module simulating: External port scan from {ext_ip}")
     forti_conf = _get_config(config)
     wan_iface  = forti_conf.get("interface_wan", "port1")
@@ -3844,7 +3845,7 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost):
 
 # Threat log dispatcher
 
-def _generate_threat_log(config, session_context=None, forced_event=None):
+def _generate_threat_log(config, session_context=None, forced_event=None, attacker_ip=None):
     """
     Dispatches a threat event based on event_mix.threat weights or hardcoded defaults.
     Multi-event generators (port_scan, auth_brute_force, etc.) return lists.
@@ -3953,7 +3954,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
         return (_simulate_vpn_abnormal_os(config, session_context), display_name)
 
     if chosen == "external_port_scan":
-        return (_simulate_external_port_scan(config), display_name)
+        return (_simulate_external_port_scan(config, attacker_ip), display_name)
 
     if chosen == "new_admin_behavior":
         user_info = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
@@ -4371,7 +4372,8 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         # Named threat from dashboard — dispatch to the specific event
         _MGMT_BACKDATE["on"] = bool(ctx.get("mgmt_backdate"))
         try:
-            return _generate_threat_log(config, session_context, forced_event=scenario_event)
+            return _generate_threat_log(config, session_context, forced_event=scenario_event,
+                                        attacker_ip=ctx.get("src_ip"))
         finally:
             _MGMT_BACKDATE["on"] = False
 

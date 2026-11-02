@@ -283,6 +283,18 @@ def _get_random_principal(config, context=None, force_service_account=False):
     """
     from modules.session_utils import get_random_user
 
+    # A scenario pins ONE actor across its steps (run_gcp_cloud_pentest_scenario passes
+    # principal_email + ip_address). Ignoring it gave every step a different user on a
+    # different IP, so no per-principal or per-caller-IP chain could ever form.
+    pinned_email = (context or {}).get('principal_email')
+    if pinned_email and not force_service_account:
+        return {
+            'email':              pinned_email,
+            'display_name':       pinned_email.split('@')[0],
+            'caller_ip':          (context or {}).get('ip_address') or _random_external_ip(),
+            'is_service_account': pinned_email.endswith('.iam.gserviceaccount.com'),
+        }
+
     session_context = (context or {}).get('session_context')
 
     # Try session_context first (real users from user_profiles)
@@ -2115,9 +2127,12 @@ def _gen_tor_api_access(config, context=None):
     tor_ip = _get_tor_ip(config)
     region = _random_region(config)
 
-    # Pick a random "victim" user email
+    # Pick a random "victim" user email -- unless a scenario pinned its attacker, whose
+    # later steps chain on this principal. The IP stays a Tor node: that is the step.
     session_context = (context or {}).get('session_context')
-    if session_context:
+    if (context or {}).get('principal_email'):
+        email = context['principal_email']
+    elif session_context:
         from modules.session_utils import get_random_user
         u = get_random_user(session_context)
         email = (u.get('gcp_iam_user') or u.get('email')) if u else f"admin@{project_id}.iam.gserviceaccount.com"

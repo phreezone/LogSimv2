@@ -1803,8 +1803,14 @@ def run_phishing_kill_chain_scenario(modules, config):
         time.sleep(2)
 
         print("[STEP 2] Proofpoint: Victim clicks malicious URL (click-permitted)...")
+        try:
+            _delivered = json.loads(log_content)
+        except (TypeError, ValueError):
+            _delivered = {}
         click_ctx = {**base_ctx, "target_email": victim_email,
-                     "sender_ip": attacker_ip, "shared_guid": shared_guid}
+                     "sender_ip": attacker_ip, "shared_guid": shared_guid,
+                     "url": _delivered.get("url"), "sender": _delivered.get("sender"),
+                     "subject": _delivered.get("subject")}
         result = pp_module.generate_log(config, scenario_event="CLICK_PERMITTED", context=click_ctx)
         if isinstance(result, tuple):
             log_content, event_name = result
@@ -2028,13 +2034,22 @@ def run_insider_threat_scenario(modules, config):
 
         print("[STEP 2] AWS: Insider accesses cloud credentials (Secrets Manager/SSM)...")
         aws_cred_ctx = {**base_ctx, "user_identity": aws_identity, "ip_address": insider_ip}
-        result = aws_module.generate_log(config, scenario_event="CREDENTIAL_FILE_ACCESS", context=aws_cred_ctx)
-        if isinstance(result, tuple):
-            log_content, event_name = result
-        else:
-            log_content, event_name = result, "CREDENTIAL_FILE_ACCESS"
-        if log_content:
-            process_and_send(log_content, aws_module, config, event_name)
+        # An insider harvesting credentials reads several, not one. A single read (and
+        # a rule-named secret only 55% of the time) never reached the credential-
+        # retrieval rule's >=5 reads / >=3 secrets, nor the insider rule's >=5 ops.
+        from modules import cloud_ids
+        aws_key = getattr(aws_module, 'CONFIG_KEY', 'aws_config')
+        for leaf in random.sample(cloud_ids.rule_secret_names(), 5):
+            cred_cfg = {**config, aws_key: {**config.get(aws_key, {}),
+                        "sensitive_credential_paths": [cloud_ids.sensitive_parameter(force_rule_token=leaf)]}}
+            result = aws_module.generate_log(cred_cfg, scenario_event="CREDENTIAL_FILE_ACCESS",
+                                             context=aws_cred_ctx)
+            if isinstance(result, tuple):
+                log_content, event_name = result
+            else:
+                log_content, event_name = result, "CREDENTIAL_FILE_ACCESS"
+            if log_content:
+                process_and_send(log_content, aws_module, config, event_name)
         time.sleep(2)
 
         print("[STEP 3] AWS: Insider disables Security Hub (defense evasion)...")
@@ -2197,34 +2212,55 @@ def host_mac(hostname, device_type=None, os_type=None):
     return _hm(hostname, device_type, os_type)
 
 
-def _send_to_all_fw(fw_modules, scenario_event, config, context, step_label):
-    """Sends a scenario event to every loaded firewall module.
+# Scenario-only events (not catalog threats) and the firewall modules that build them
+# from the scenario context. Verified against each module's generate_log on 2026-11-02:
+# Firepower's and Fortinet's "THREAT_BLOCK" output was an unrelated session or an
+# inbound IPS hit merely LABELLED threat_block, so they are not listed for it.
+# vpn_bruteforce is delisted from ASA's catalog (raw-only 109006) but still dispatched.
+_FW_SCENARIO_EVENTS = {
+    "LARGE_EGRESS": {"Cisco Firepower", "Cisco ASA Firewall", "Check Point Firewall",
+                     "Fortinet FortiGate", "Palo Alto Networks NGFW"},
+    "THREAT_BLOCK": {"Check Point Firewall", "Zscaler Web Gateway"},
+    "C2_EGRESS":    {"Cisco Firepower", "Check Point Firewall", "Fortinet FortiGate"},
+    "vpn_bruteforce": {"Cisco ASA Firewall"},
+}
 
-    Dispatch order:
-      1. scenario_event path — works for modules that handle it natively (Zscaler, Check Point LARGE_EGRESS, etc.)
-      2. event_mix config override — forces the named threat via the module's internal dispatcher
-         (works for cisco_asa, cisco_firepower, checkpoint, fortinet which use event_mix)
-      3. Random Insane-level threat fallback — ensures the dataset is populated even if the
-         threat name doesn't exist in that module's threat pool
+
+def _fw_event_for(fw_module, scenario_event):
+    """The module's own name for scenario_event, or None if it cannot produce it.
+
+    Catalog threats are matched against get_threat_names() ignoring case and
+    underscores (ASA vpn_bruteforce vs Zscaler vpn_brute_force), and the module's
+    spelling is what gets passed: Zscaler dispatches on the exact key.
+    """
+    if fw_module.NAME in _FW_SCENARIO_EVENTS.get(scenario_event, ()):
+        return scenario_event
+    if scenario_event.isupper():
+        return None
+    want = scenario_event.lower().replace("_", "")
+    names = fw_module.get_threat_names() if hasattr(fw_module, "get_threat_names") else []
+    return next((n for n in names if n.lower().replace("_", "") == want), None)
+
+
+def _send_to_all_fw(fw_modules, scenario_event, config, context, step_label):
+    """Sends a scenario event to every loaded firewall module that can produce it.
+
+    Modules that cannot are skipped, not substituted. The old fallbacks (an event_mix
+    override, then any random Insane threat) filled a DNS-C2 scenario with port scans,
+    SMB lateral movement and VPN brute force, and those set off unrelated correlation
+    rules. Several modules also label whatever they emit with the requested name, so
+    support is decided up front rather than from the result.
     """
     if not fw_modules:
         print(f"{step_label} No network firewall modules loaded — skipping.")
         return
     for fw_module in fw_modules:
-        result = fw_module.generate_log(config, scenario_event=scenario_event,
+        event = _fw_event_for(fw_module, scenario_event)
+        if event is None:
+            print(f"{step_label} {fw_module.NAME}: no {scenario_event} event — skipping.")
+            continue
+        result = fw_module.generate_log(config, scenario_event=event,
                                         context=context, threat_level="Insane")
-        if result is None:
-            # Fallback: override event_mix to force the named threat type
-            module_key = getattr(fw_module, 'CONFIG_KEY', None)
-            if module_key:
-                forced_config = copy.deepcopy(config)
-                forced_config.setdefault(module_key, {}).setdefault("event_mix", {})["threat"] = [
-                    {"event": scenario_event, "weight": 1}
-                ]
-                result = fw_module.generate_log(forced_config, threat_level="Insane",
-                                                benign_only=False, context=context)
-        if result is None:
-            result = fw_module.generate_log(config, threat_level="Insane", context=context)
         if isinstance(result, tuple):
             log_content, event_name = result
         else:
@@ -2436,8 +2472,11 @@ def run_device_compromise_scenario(all_modules, config):
         time.sleep(1)
 
         print("[STEP 6] Infoblox DNS: Third C2 domain resolves (NOERROR — new infra)...")
-        c2_domain = f"c2-infra-{random.randint(1000,9999)}.net"
-        dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, c2_domain)
+        # The step is "resolves (NOERROR)". Without an answer the resolver does not know
+        # this fresh name and returns NXDOMAIN; pin one as the DNS C2 scenario does.
+        c2_domain, c2_ip = _scenario_target(config, f"c2-infra-{random.randint(1000,9999)}.net")
+        dns_logs, dns_name = infoblox_module.generate_dns_pair(config, victim_ip, c2_domain,
+                                                               answer_ip=c2_ip)
         process_and_send(dns_logs, infoblox_module, config, dns_name)
         time.sleep(1)
 
@@ -2733,13 +2772,11 @@ def run_vpn_compromise_scenario(modules, config):
     print(f"  Firewall modules: {fw_names}")
 
     def _asa_threat(threat_name, ctx):
-        """Force a named ASA threat via event_mix override."""
-        asa_key = getattr(asa_module, 'CONFIG_KEY', 'cisco_asa_config')
-        forced   = copy.deepcopy(config)
-        forced.setdefault(asa_key, {}).setdefault("event_mix", {})["threat"] = [
-            {"event": threat_name, "weight": 1}
-        ]
-        return asa_module.generate_log(forced, threat_level="Insane", benign_only=False, context=ctx)
+        """Force a named ASA threat. Via scenario_event, not an event_mix override: the
+        override path runs ASA's management-plane checks first, so whenever the daily
+        config backup was due it was emitted instead of the brute force."""
+        return asa_module.generate_log(config, scenario_event=threat_name,
+                                       threat_level="Insane", context=ctx)
 
     try:
         print("\n[STEP 1] Cisco ASA: VPN credential brute-force (many failed auth attempts)...")
@@ -2851,7 +2888,7 @@ def run_aitm_session_hijack_scenario(modules, config):
             print("\n[STEP 1] Proofpoint: QR-code phishing email delivered to victim (bypasses link scan)...")
             result = pp_module.generate_log(config, scenario_event="qr_code_phishing",
                                             context={**base_ctx, "target_email": victim_email,
-                                                     "sender_ip": attacker_ip})
+                                                     "sender_ip": attacker_ip, "delivered": True})
             if isinstance(result, tuple):
                 log_content, event_name = result
             else:
@@ -3004,7 +3041,7 @@ def run_ransomware_precursor_scenario(modules, config):
             print("\n[STEP 1] Proofpoint: Malware attachment delivered to victim mailbox...")
             result = pp_module.generate_log(config, scenario_event="MALWARE_ATTACHMENT",
                                             context={**base_ctx, "target_email": victim_email,
-                                                     "sender_ip": attacker_ip})
+                                                     "sender_ip": attacker_ip, "delivered": True})
             if isinstance(result, tuple):
                 log_content, event_name = result
             else:
@@ -3087,8 +3124,11 @@ def run_ransomware_precursor_scenario(modules, config):
             print("[STEP 6-7] AWS module not loaded — skipping defense evasion steps.")
 
         print(f"[STEP 8] All firewall modules: Large egress sessions (data staging before encryption)...")
+        # > 50 MB is the step's definition (docs, and the ASA egress rules). Unpinned,
+        # ASA's LARGE_EGRESS draws 20-50 MB and the step never crossed it.
         _send_to_all_fw(fw_modules, "LARGE_EGRESS", config,
-                        {**base_ctx, "src_ip": victim_ip}, "[STEP 8]")
+                        {**base_ctx, "src_ip": victim_ip,
+                         "bytes": random.randint(60_000_000, 200_000_000)}, "[STEP 8]")
 
     except Exception as e:
         print(f"\nAn error occurred during scenario execution: {e}")
@@ -3625,7 +3665,9 @@ def run_perimeter_intrusion_scenario(all_modules, config):
         # STEP 1 — Port scan across the perimeter firewalls.
         if fw_modules:
             print("\n[STEP 1] Firewalls: external port scan against the perimeter...")
-            _send_to_all_fw(fw_modules, "port_scan", config,
+            # external_port_scan, not port_scan: port_scan is the INTERNAL scan, and fed
+            # this external attacker IP it logged an inside->inside scan.
+            _send_to_all_fw(fw_modules, "external_port_scan", config,
                             {"src_ip": attacker_ip}, "[STEP 1]")
             time.sleep(2)
 
