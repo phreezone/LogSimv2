@@ -1527,20 +1527,51 @@ def api_attack_run():
     if not story:
         return jsonify({"error": f"Unknown story '{story_id}'"}), 404
 
+    # Per-run options (all optional). only_steps/skip_steps are 1-based step numbers;
+    # pace scales delays; domain_override swaps the C2/exfil domain; anchors toggle
+    # the identity-anchor emission.
+    def _int_list(v):
+        if not isinstance(v, (list, tuple)):
+            return None
+        out = []
+        for x in v:
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                pass
+        return out or None
+
+    only_steps = _int_list(body.get("only_steps"))
+    skip_steps = _int_list(body.get("skip_steps"))
+    try:
+        pace = float(body["pace"]) if body.get("pace") is not None else None
+    except (TypeError, ValueError):
+        pace = None
+    domain_override = (body.get("domain_override") or "").strip() or None
+    anchor_dhcp = body.get("anchor_dhcp")
+    anchor_logon = body.get("anchor_logon")
+    anchor_dhcp = bool(anchor_dhcp) if anchor_dhcp is not None else None
+    anchor_logon = bool(anchor_logon) if anchor_logon is not None else None
+
     cfg = copy.deepcopy(CONFIG)
     modules = {name: state.module for name, state in MODULE_STATES.items()}
     run_id = _new_run(f"attack:{story_id}", story.name)
 
     def _func(mods, c):
         from modules.xdr_orchestration import run_story_id
-        _ATTACK_SUMMARIES[run_id] = run_story_id(mods, c, story_id, dry_run=dry_run,
-                                                 cleanup_prior_incidents=cleanup)
+        _ATTACK_SUMMARIES[run_id] = run_story_id(
+            mods, c, story_id, dry_run=dry_run, cleanup_prior_incidents=cleanup,
+            only_steps=only_steps, skip_steps=skip_steps, pace=pace,
+            domain_override=domain_override, anchor_dhcp=anchor_dhcp,
+            anchor_logon=anchor_logon)
 
     t = threading.Thread(target=_run_scenario_and_flush, args=(_func, modules, cfg, run_id),
                          daemon=True, name=f"attack-{story_id}-{run_id[:8]}")
     t.start()
     return jsonify({"started": True, "story": story.name, "story_id": story_id,
                     "dry_run": dry_run, "cleanup_prior_incidents": cleanup,
+                    "only_steps": only_steps, "skip_steps": skip_steps, "pace": pace,
+                    "domain_override": domain_override,
                     "run_id": run_id}), 202
 
 

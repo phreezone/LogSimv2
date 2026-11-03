@@ -17,7 +17,27 @@ from typing import Optional
 
 from .connection import WorkstationConnection, ConnectionError
 from .executor import build_executor
-from .stories import Story, get_reference_story, get_intrusion_story, get_story
+from .stories import (
+    Story, get_reference_story, get_intrusion_story, get_quick_story,
+    get_lateral_story, get_persistence_story, get_fullchain_story,
+    get_story, override_domain,
+)
+
+
+def _select_steps(steps, only_steps, skip_steps):
+    """Return [(orig_index_1based, step)] after applying the only/skip filters.
+
+    only_steps/skip_steps are 1-based step numbers (as the UI and the summary show
+    them). `only_steps` wins when both are given. Out-of-range numbers are ignored.
+    An empty/None filter keeps every step."""
+    pairs = list(enumerate(steps, 1))
+    if only_steps:
+        keep = {int(i) for i in only_steps}
+        return [(i, s) for (i, s) in pairs if i in keep]
+    if skip_steps:
+        drop = {int(i) for i in skip_steps}
+        return [(i, s) for (i, s) in pairs if i not in drop]
+    return pairs
 
 
 def _emit(all_modules, module_key, event, context, config, verbose=True):
@@ -109,7 +129,11 @@ def _resolve_prior_incidents(identity, verbose=True):
 def run_story(all_modules, config, story: Optional[Story] = None, *,
               connection: Optional[WorkstationConnection] = None,
               dry_run: Optional[bool] = None, verbose: bool = True,
-              cleanup_prior_incidents: bool = False) -> dict:
+              cleanup_prior_incidents: bool = False,
+              only_steps=None, skip_steps=None, pace: Optional[float] = None,
+              domain_override: Optional[str] = None,
+              anchor_dhcp: Optional[bool] = None,
+              anchor_logon: Optional[bool] = None) -> dict:
     """Run one story. Returns a summary dict {ok, identity, steps:[...], emitted, results}.
 
     Fail-closed on preflight. `dry_run` forces the DryRun executor (no technique
@@ -120,10 +144,30 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
     endpoint alerts reliably coalesce into a single fresh incident (see
     _resolve_prior_incidents). Best-effort — never aborts the run. Opt-in because it
     closes incidents on the tenant.
+
+    Per-run options (all optional, backward-compatible):
+      only_steps / skip_steps : 1-based step numbers to run exclusively / to drop.
+      pace                    : multiplier on every pre/post delay (and the anchor
+                                sleeps). 0 = fire as fast as possible; 2 = slower.
+      domain_override         : replace the story's C2/exfil domain for this run.
+      anchor_dhcp/anchor_logon: override the story's identity-anchor emission.
     """
     story = story or get_reference_story()
+    if domain_override:
+        override_domain(story, domain_override)
+    if anchor_dhcp is not None:
+        story.anchor_dhcp = anchor_dhcp
+    if anchor_logon is not None:
+        story.anchor_logon = anchor_logon
+    try:
+        pace = max(0.0, float(pace)) if pace is not None else 1.0
+    except (TypeError, ValueError):
+        pace = 1.0
+    selected = _select_steps(story.steps, only_steps, skip_steps)
     summary = {"story": story.name, "ok": False, "identity": None,
-               "results": [], "emitted": 0, "aborted": None}
+               "results": [], "emitted": 0, "aborted": None,
+               "selected_steps": [i for (i, _s) in selected],
+               "domain_override": domain_override or None, "pace": pace}
 
     # The preflight banner uses ✓/✗ glyphs; a cp1252-encoded stream (piped output,
     # some Windows consoles) would raise UnicodeEncodeError. Make output UTF-8 safe.
@@ -180,20 +224,21 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
             all_modules, "Infoblox NIOS", "DHCP_ACK",
             {"src_ip": host_ip, "client_mac": host_mac, "hostname": host_name},
             config, verbose)
-        time.sleep(1)
+        time.sleep(1 * pace)
     if story.anchor_logon:
         # IP <-> user (4624 type-3 network logon): "user logged on from host_ip".
         summary["emitted"] += _emit(
             all_modules, "Windows Event Log", "NETWORK_LOGON",
             {"user": user, "hostname": host_name, "src_ip": host_ip},
             config, verbose)
-        time.sleep(1)
+        time.sleep(1 * pace)
 
-    # 6) Steps.
-    for i, step in enumerate(story.steps, 1):
-        print(f"\n[XDR] STEP {i}: {step.narrative}")
+    # 6) Steps (filtered by only/skip; delays scaled by `pace`).
+    total = len(story.steps)
+    for i, step in selected:
+        print(f"\n[XDR] STEP {i}/{total}: {step.narrative}")
         if step.pre_delay:
-            time.sleep(step.pre_delay)
+            time.sleep(step.pre_delay * pace)
 
         # 6a) Fire the real technique.
         tech = step.technique
@@ -225,7 +270,7 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
             summary["results"].append(cr.to_dict())
 
         if step.post_delay:
-            time.sleep(step.post_delay)
+            time.sleep(step.post_delay * pace)
 
     _execs = [res for res in summary["results"] if res["action"] == "execute"]
     summary["ok"] = all(res["ok"] for res in _execs) if _execs else True
@@ -255,10 +300,33 @@ def run_intrusion_story(all_modules, config):
     return run_story(all_modules, config, get_intrusion_story())
 
 
+def run_lateral_story(all_modules, config):
+    """Scenario-registry entry point: credential-access → lateral-movement story
+    (LSASS dump + creds-in-files + synthetic SMB/RDP pivot)."""
+    return run_story(all_modules, config, get_lateral_story())
+
+
+def run_persistence_story(all_modules, config):
+    """Scenario-registry entry point: persistence + defense-evasion story (Run key +
+    scheduled task + indicator removal + callback beacon)."""
+    return run_story(all_modules, config, get_persistence_story())
+
+
+def run_fullchain_story(all_modules, config):
+    """Scenario-registry entry point: the extended end-to-end kill-chain (recon → C2
+    → ingress → cred theft → evasion → staging → exfil → persistence x2)."""
+    return run_story(all_modules, config, get_fullchain_story())
+
+
 def run_story_id(all_modules, config, story_id, *, dry_run=None,
-                 cleanup_prior_incidents=False):
+                 cleanup_prior_incidents=False, only_steps=None, skip_steps=None,
+                 pace=None, domain_override=None, anchor_dhcp=None, anchor_logon=None):
     """Run a story by id (used by the console /api/attack/run route). Falls back to
-    the reference story when the id is unknown."""
+    the reference story when the id is unknown. Threads the per-run options through
+    to run_story (see its docstring)."""
     story = get_story(story_id) or get_reference_story()
     return run_story(all_modules, config, story, dry_run=dry_run,
-                     cleanup_prior_incidents=cleanup_prior_incidents)
+                     cleanup_prior_incidents=cleanup_prior_incidents,
+                     only_steps=only_steps, skip_steps=skip_steps, pace=pace,
+                     domain_override=domain_override, anchor_dhcp=anchor_dhcp,
+                     anchor_logon=anchor_logon)

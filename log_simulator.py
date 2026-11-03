@@ -3916,6 +3916,18 @@ def get_scenarios():
             "name": "XDR Orchestration — CREDENTIAL THEFT: LOLBin ingress → LSASS dump → creds-in-files → evasion → staging → HTTP exfil [purple-team, requires target box]",
             "func": _run_xdr_intrusion_story
         },
+        "27": {
+            "name": "XDR Orchestration — LATERAL MOVEMENT: recon → LSASS dump → creds-in-files → SMB/RDP pivot [purple-team, requires target box]",
+            "func": _run_xdr_lateral_story
+        },
+        "28": {
+            "name": "XDR Orchestration — PERSISTENCE & EVASION: Run key → scheduled task → indicator removal → beacon [purple-team, requires target box]",
+            "func": _run_xdr_persistence_story
+        },
+        "29": {
+            "name": "XDR Orchestration — EXTENDED KILL-CHAIN: recon → C2 → ingress → LSASS → creds → evasion → staging → exfil → persistence x2 [purple-team, requires target box]",
+            "func": _run_xdr_fullchain_story
+        },
     }
     return scenarios
 
@@ -3938,6 +3950,25 @@ def _run_xdr_intrusion_story(all_modules, config):
     access / defense evasion / staging / exfil) so XDR sees more than discovery."""
     from modules.xdr_orchestration import run_intrusion_story
     return run_intrusion_story(all_modules, config)
+
+
+def _run_xdr_lateral_story(all_modules, config):
+    """LATERAL-MOVEMENT XDR story — credential access → synthetic SMB/RDP pivot."""
+    from modules.xdr_orchestration import run_lateral_story
+    return run_lateral_story(all_modules, config)
+
+
+def _run_xdr_persistence_story(all_modules, config):
+    """PERSISTENCE & EVASION XDR story — footholds + anti-forensics + callback beacon."""
+    from modules.xdr_orchestration import run_persistence_story
+    return run_persistence_story(all_modules, config)
+
+
+def _run_xdr_fullchain_story(all_modules, config):
+    """EXTENDED KILL-CHAIN XDR story — the maximal single-incident arc across seven
+    ATT&CK tactics."""
+    from modules.xdr_orchestration import run_fullchain_story
+    return run_fullchain_story(all_modules, config)
 
 
 def select_scenario_mode(all_modules, config):
