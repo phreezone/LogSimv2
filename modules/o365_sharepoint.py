@@ -614,8 +614,8 @@ SCENARIOS = {
     "malware_detected": scenario_malware_detected,
     "malware_suspicious_filename": scenario_malware_suspicious_filename,
     "site_collection_admin_added": scenario_site_collection_admin_added,
-    "site_collection_admin_removed": scenario_site_collection_admin_removed,
-    "sync_client_blocked": scenario_sync_client_blocked,
+    "wip_site_collection_admin_removed": scenario_site_collection_admin_removed,
+    "wip_sync_client_blocked": scenario_sync_client_blocked,
     "anon_link_used_external": scenario_anon_link_used_external,
     "external_sharing_unusual_domain": scenario_external_sharing_unusual_domain,
     "mass_file_deletion": scenario_mass_file_deletion,
@@ -652,6 +652,9 @@ ANALYTIC_ALERTS = {
     "wip_onedrive_file_download": "OneDrive file download",
     "wip_onedrive_file_upload": "OneDrive file upload",
     "wip_unusual_m365_storage_access": "Unusual access to Microsoft 365 storage services",
+    # Ported from feature/batched-sends; alert names unverified.
+    "wip_site_collection_admin_removed": "SharePoint site collection administrator removed",
+    "wip_sync_client_blocked": "Unmanaged device sync client blocked",
 }
 
 

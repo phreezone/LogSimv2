@@ -125,7 +125,8 @@ def admin_cmdlet(operation, actor, params, target_user=None, result="True",
         rule = next((p["Value"] for p in params if p["Name"] == "Name"), "")
         obj = f"{_mbx_oid_path(tgt)}\\{rule}"
         pool = _POOL_OWA
-    elif operation in ("New-TransportRule", "Set-TransportRule", "Remove-TransportRule"):
+    elif operation in ("New-TransportRule", "Set-TransportRule", "Remove-TransportRule",
+                       "Disable-TransportRule", "Enable-TransportRule"):
         obj = ""                                  # transport rules are org-scoped, no mailbox ObjectId
         pool = _POOL_ADMIN
     elif operation.startswith("Set-Mailbox") or operation in ("Set-CASMailbox", "Enable-Mailbox"):
@@ -630,6 +631,87 @@ def scenario_audit_bypass(config=None):
                          _param(Identity=tgt["upn"], AuditBypassEnabled="True"), target_user=tgt)]
 
 
+# ── scenarios ported from feature/batched-sends ─────────────────────────────────────────
+# Documentation-based (Exchange admin / mailbox activities reference); offered on demand under
+# wip_ keys until each alert is observed.
+
+def scenario_inbox_forwarding_sender_rule(config=None):
+    """New-InboxRule that forwards only mail from ONE sender (a targeted rule, as opposed to
+    whole-account forwarding) -> 'Exchange inbox forwarding rule configured' sender variant.
+    Matches the live-tenant shape: Parameters include From=<sender> alongside ForwardTo,
+    AlwaysDeleteOutlookRulesBlob=False, Force=False, StopProcessingRules=True."""
+    u = ac.pick_user(config)
+    ext = f"{u['username'].replace('.', '')}@{random.choice(_EXT_DOMAINS)}"
+    sender = random.choice(["MSSecurity-noreply@microsoft.com", "no-reply@dropbox.com",
+                            "notifications@github.com", "alerts@paypal.com",
+                            "security@microsoft.com"])
+    name = f"For all messages from {sender.split('@')[0]}"
+    return [admin_cmdlet("New-InboxRule", u,
+                         _param(AlwaysDeleteOutlookRulesBlob="False", Force="False",
+                                ForwardTo=ext, From=sender, Name=name,
+                                StopProcessingRules="True"))]
+
+def scenario_compliance_search_purge_action(config=None):
+    """New-ComplianceSearchAction with a Purge action on an existing search -> mass soft/
+    hard-delete of mailbox content from within a compliance search (T1070.002 email
+    anti-forensics). Mirrors scenario_compliance_search_created's record shape.
+    Wording verified as an Exchange admin cmdlet: the admin audit log records changes made
+    by running cmdlets in Exchange Online PowerShell -- 'The audit log doesn't record cmdlets
+    that begin with the verbs Get-, Search-, or Test-' (audit-log-activities, 'Exchange admin
+    activities'). Original ComplianceSearchAction op: New-ComplianceSearchAction."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    search = f"Search-{random.randint(1000, 9999)}"
+    return [admin_cmdlet("New-ComplianceSearchAction", admin,
+                         _param(SearchName=search, Purge=random.choice(["SoftDelete", "HardDelete"]),
+                                Confirm="False"))]
+
+def scenario_mailbox_permission_removed(config=None):
+    """Remove-MailboxPermission FullAccess from a victim -> 'removed delegate mailbox
+    permissions'; an attacker who finished with a delegate path deletes the trail.
+    Verified: 'Removed delegate mailbox permissions | Remove-MailboxPermission' in the
+    Exchange mailbox activities table (audit-log-activities)."""
+    attacker = ac.pick_user(config); victim = ac.pick_user(config)
+    return [admin_cmdlet("Remove-MailboxPermission", attacker, _param(Identity=victim["upn"],
+                          User=attacker["upn"], AccessRights="FullAccess"), target_user=victim)]
+
+def scenario_inbox_rule_modified(config=None):
+    """Set-InboxRule that adds external forwarding to an EXISTING rule -> 'modified inbox
+    rule' variant of the classic forwarding-down detector. Verified: 'Modified inbox rule
+    from Outlook web app | Set-InboxRule' in the Exchange mailbox activities table.
+    Same OWA admin-record shape as New-InboxRule (rule ObjectId, OWA app pool, no
+    ClientInfoString)."""
+    u = ac.pick_user(config)
+    ext = f"{u['username'].replace('.', '')}@{random.choice(_EXT_DOMAINS)}"
+    return [admin_cmdlet("Set-InboxRule", u,
+                          _param(AlwaysDeleteOutlookRulesBlob="False", Force="False",
+                                 ForwardTo=ext, Name="Invoices", StopProcessingRules="True"))]
+
+def scenario_transport_rule_disabled(config=None):
+    """Existing transport (mail-flow) rule disabled or edited off by a delegate -> mail-flow
+    protection removed. Parameters.Identity = the rule GUID; ObjectId and app pool follow main's transport-rule
+    family in admin_cmdlet."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    rule = random.choice(["Junk Filter", "Vendor Domains Valid", "Branding"])
+    rule_id = _g()
+    op = random.choice(["Disable-TransportRule", "Set-TransportRule"])
+    params = _param(Identity=rule_id) if op == "Disable-TransportRule" \
+        else _param(Identity=rule_id, Enabled="False")
+    return [admin_cmdlet(op, admin, params)]
+
+def scenario_recoverable_items_purge(config=None):
+    """Purged messages from the mailbox (HardDelete -- permanently removed from Recoverable
+    Items) in a short burst from OWA -> anti-forensic permanent deletion.
+    Verified: 'Purged messages from the mailbox | HardDelete' in the Exchange mailbox
+    activities table (audit-log-activities)."""
+    u = ac.pick_user(config)
+    return [mailbox_action("HardDelete", u, client="OWA",
+                           item={"Subject": random.choice(["Invoice overdue", "Wire transfer confirmation",
+                                                           "Password reset instructions"]),
+                                 "ParentFolder": {"Path": "\\Deleted Items"}},
+                           offset_s=-i * 7)
+            for i in range(random.randint(3, 6))]
+
+
 SCENARIOS = {
     "inbox_forwarding_rule": scenario_inbox_forwarding_rule,
     "inbox_forwarding_delegate": scenario_inbox_forwarding_delegate,
@@ -659,6 +741,12 @@ SCENARIOS = {
     "mailbox_enumeration": scenario_mailbox_enumeration,
     "dlp_policy_disabled": scenario_dlp_policy_disabled,
     "audit_bypass": scenario_audit_bypass,
+    "wip_inbox_forwarding_sender_rule": scenario_inbox_forwarding_sender_rule,
+    "wip_inbox_rule_modified": scenario_inbox_rule_modified,
+    "wip_compliance_search_purge_action": scenario_compliance_search_purge_action,
+    "wip_mailbox_permission_removed": scenario_mailbox_permission_removed,
+    "wip_transport_rule_disabled": scenario_transport_rule_disabled,
+    "wip_recoverable_items_purge": scenario_recoverable_items_purge,
 }
 
 
@@ -693,6 +781,13 @@ ANALYTIC_ALERTS = {
     "safe_link_disabled": "Exchange Safe Link policy disabled or removed",
     "sensitive_mail_external": "Sensitive Exchange mail sent to external users",
     "dlp_policy_disabled": "Microsoft 365 DLP policy disabled or removed",
+    # Ported from feature/batched-sends; alert names unverified.
+    "wip_inbox_forwarding_sender_rule": "Exchange inbox forwarding rule configured",
+    "wip_inbox_rule_modified": "Exchange inbox forwarding rule configured",
+    "wip_compliance_search_purge_action": "Exchange compliance search purge action",
+    "wip_mailbox_permission_removed": "Exchange mailbox delegation permissions removed",
+    "wip_transport_rule_disabled": "Exchange transport rule disabled",
+    "wip_recoverable_items_purge": "Exchange messages purged from mailbox",
 }
 
 
