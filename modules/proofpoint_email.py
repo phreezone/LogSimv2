@@ -49,6 +49,9 @@ DESCRIPTION = "Simulates Proofpoint TAP email security events (message and click
 XSIAM_VENDOR = "Proofpoint"
 XSIAM_PRODUCT = "Tap"
 CONFIG_KEY = "proofpoint_config"
+NATIVE_TRANSPORT = "http"
+SOURCE_IDENTIFIER = "3eefce0f791e4391a3643b8cf860a361"   # Cribl "Proofpoint TAP" -> proofpoint_tap_raw
+INTEGRATION_IDENTIFIER = "logsim:proofpoint_tap"
 
 # Constants
 

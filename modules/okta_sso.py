@@ -18,6 +18,9 @@ DESCRIPTION = "Simulates Okta System Log events in exact Okta REST API format."
 XSIAM_VENDOR = "Okta"
 XSIAM_PRODUCT = "Sso"
 CONFIG_KEY = "okta_config"
+NATIVE_TRANSPORT = "http"
+SOURCE_IDENTIFIER = "5faf4c1fdb8443d9920d6a54815432c1"   # Cribl "Okta SSO" -> okta_sso_raw
+INTEGRATION_IDENTIFIER = "logsim:okta_sso"
 
 last_threat_event_time = 0
 _okta_org_url = "https://examplecorp.okta.com"  # overridden from config in generate_log()

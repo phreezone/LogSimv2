@@ -25,6 +25,7 @@ NAME = "Identity Threat Campaigns"
 DESCRIPTION = ("Fires multi-stage cross-feed identity campaigns (BEC, ransomware, OAuth abuse, "
                "hybrid on-prem/cloud, RT->PRT) during a live run, self-sending via cribl_direct + WEC.")
 CONFIG_KEY = "azuread_campaigns_config"
+NATIVE_TRANSPORT = "cribl"   # self-sends; each record carries its own feed's route
 
 # A campaign is a whole incident, rarer than a single-feed scenario episode. 0.5 => campaigns fire at
 # half the per-module episode rate for the selected threat level.
@@ -65,7 +66,7 @@ CAMPAIGN_TITLES = {
 def run_campaign(name, config=None, context=None):
     """Send one campaign now (dashboard Run Attack Scenario). Raises if any cloud batch
     was rejected, so the run shows as failed instead of silently 'done'. Windows steps
-    are skipped, not failed, when WEC isn't configured."""
+    go via Cribl when WEC isn't configured, and are skipped, not failed, with neither."""
     results = seqs.fire(name, config, context=context)
     failed = []
     for _name, res in results:

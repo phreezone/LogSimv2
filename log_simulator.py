@@ -84,6 +84,11 @@ def _tprint(*args, **kwargs):
     with _print_lock:
         print(*args, **kwargs)
 
+
+# Native pipe when configured, else the Cribl receiver (integrations/transport.py).
+from integrations import transport as _transport
+_transport.set_logger(_tprint)
+
 def fetch_tor_exit_nodes():
     """Fetches the current list of Tor exit node IP addresses."""
     url = "https://check.torproject.org/torbulkexitlist"
@@ -234,6 +239,7 @@ def _syslog_write(payload: bytes, host: str, port: int) -> bool:
                 last_err = e
                 _close_syslog_sock(host, port)
                 break
+    _syslog_last_error[key] = last_err
     if isinstance(last_err, ConnectionRefusedError):
         _tprint(f"ERROR: Connection refused for Syslog. Is the Broker VM at {host}:{port} listening?")
     else:
@@ -241,26 +247,36 @@ def _syslog_write(payload: bytes, host: str, port: int) -> bool:
     return False
 
 
+_syslog_last_error: dict[tuple[str, int], Exception] = {}
+
+
 def send_syslog_message(message, host, port, app_name="LogSim"):
-    """Send a message over a persistent TCP syslog connection."""
-    if _syslog_write(f"{message}\n".encode('utf-8'), host, port) and not _quiet_sends:
+    """Send a message over a persistent TCP syslog connection. Returns True if written."""
+    ok = _syslog_write(f"{message}\n".encode('utf-8'), host, port)
+    if ok and not _quiet_sends:
         _tprint(f"Sending Syslog for {app_name}: {host}:{port}")
+    return ok
 
 
-def send_syslog_batch(messages, host, port, app_name="LogSim"):
+def send_syslog_batch(messages, host, port, app_name="LogSim", failed=None):
     """Send many messages over the persistent TCP syslog connection: newline-framed,
     whole lines packed into one sendall per ~_SYSLOG_CHUNK_BYTES. Returns the number of
-    messages in chunks that were written."""
+    messages in chunks that were written; messages in chunks that were not are appended
+    to *failed* when given."""
     sent = 0
     chunk: list[bytes] = []
+    pending: list = []
     size = 0
     oversize = 0
 
     def flush():
-        nonlocal sent, chunk, size
-        if chunk and _syslog_write(b"".join(chunk), host, port):
-            sent += len(chunk)
-        chunk, size = [], 0
+        nonlocal sent, chunk, pending, size
+        if chunk:
+            if _syslog_write(b"".join(chunk), host, port):
+                sent += len(chunk)
+            elif failed is not None:
+                failed.extend(pending)
+        chunk, pending, size = [], [], 0
 
     for m in messages:
         if not m:
@@ -271,6 +287,7 @@ def send_syslog_batch(messages, host, port, app_name="LogSim"):
         if size and size + len(line) > _SYSLOG_CHUNK_BYTES:
             flush()
         chunk.append(line)
+        pending.append(m)
         size += len(line)
     flush()
     if oversize:
@@ -284,12 +301,15 @@ def send_http_message(message, module, config):
     return send_http_batch([message], module, config)
 
 
-def send_http_batch(messages, module, config):
+def send_http_batch(messages, module, config, failed=None):
     """
     Sends events to the HTTP endpoint for this module's collector, many per request:
     newline-delimited, chunked to HTTP_BATCH_MAX_EVENTS / HTTP_BATCH_MAX_BYTES. Collector,
     auth and headers are resolved once per call; the circuit breaker applies per request.
-    Returns the number of events in requests the collector accepted.
+    Returns the number of events in requests the collector accepted. Events the collector
+    did not take are appended to *failed* when given, except after a timeout (the
+    collector may have taken them). A refused connection, unknown host, 401/403/404 or an
+    open circuit also marks the collector down (integrations/transport.py).
 
     All runtime values (URLs, keys, auth types) are read exclusively from
     environment variables — never from config.json.  config.json holds only
@@ -358,6 +378,7 @@ def send_http_batch(messages, module, config):
     # ── Build headers ─────────────────────────────────────────────────────────
     headers = {'Content-Type': collector_conf.get('content_type', 'application/json')}
     messages = [m if isinstance(m, str) else json.dumps(m, default=str) for m in messages if m]
+    originals = list(messages)   # what goes back to the caller in *failed*, before any wrapping
 
     if auth_type == 'xsiam':
         # Direct XSIAM HTTP Log Collector — bare token + PA vendor headers.
@@ -401,13 +422,24 @@ def send_http_batch(messages, module, config):
         _tprint(f"Warning: Unknown {auth_type_env_var}='{auth_type}' for '{collector_id}'. Skipping auth header.")
 
     sent = 0
-    for chunk in _chunked(messages):
+    chunks = list(_chunked(messages))
+    starts = [0]
+    for c in chunks:
+        starts.append(starts[-1] + len(c))
+
+    def _fail(first, last=None):
+        # Chunks first..last (inclusive; default first) go back unsent, as the caller gave them.
+        if failed is not None:
+            failed.extend(originals[starts[first]:starts[(first if last is None else last) + 1]])
+
+    for n, chunk in enumerate(chunks):
         # ── Circuit breaker check (per request) ──────────────────────────────
         cb = _http_cb_state.setdefault(collector_id, {"fails": 0, "open_since": None})
         now = time.time()
         if cb["open_since"] is not None:
             elapsed = now - cb["open_since"]
             if elapsed < HTTP_CB_COOLDOWN:
+                _fail(n, len(chunks) - 1)
                 return sent
             else:
                 _tprint(f"[HTTP] Circuit re-closing for {module.NAME} after {int(elapsed)}s cooldown — retrying...")
@@ -415,6 +447,7 @@ def send_http_batch(messages, module, config):
                 cb["open_since"] = None
 
         body = "\n".join(chunk)
+        hard = None   # why the collector cannot take events at all, if it cannot
         try:
             response = _http_session.post(url, headers=headers, data=body.encode("utf-8"),
                                           verify=False, timeout=HTTP_CB_POST_TIMEOUT)
@@ -422,6 +455,9 @@ def send_http_batch(messages, module, config):
                 _tprint(f"HTTP send error for {module.NAME}: status {response.status_code} "
                         f"({len(chunk)} events) — {response.text[:120]}")
                 cb["fails"] += 1
+                _fail(n)
+                if response.status_code in (401, 403, 404):
+                    hard = f"HTTP {response.status_code}"
             else:
                 cb["fails"] = 0
                 sent += len(chunk)
@@ -436,19 +472,28 @@ def send_http_batch(messages, module, config):
                         f"(failure {cb['fails']}/{HTTP_CB_THRESHOLD})")
         except requests.exceptions.ConnectionError as e:
             cb["fails"] += 1
+            _fail(n)
+            hard = f"connection failed: {type(e).__name__}"
             if cb["fails"] <= HTTP_CB_THRESHOLD:
                 _tprint(f"HTTP send error for {module.NAME}: {str(e).replace(chr(10), ' ')} "
                         f"(failure {cb['fails']}/{HTTP_CB_THRESHOLD})")
         except requests.exceptions.RequestException as e:
             cb["fails"] += 1
+            _fail(n)
             if cb["fails"] <= HTTP_CB_THRESHOLD:
                 _tprint(f"HTTP send error for {module.NAME}: {e} "
                         f"(failure {cb['fails']}/{HTTP_CB_THRESHOLD})")
 
         if cb["fails"] >= HTTP_CB_THRESHOLD and cb["open_since"] is None:
             cb["open_since"] = now
+            hard = hard or f"{HTTP_CB_THRESHOLD} failed requests"
             _tprint(f"[HTTP] Circuit OPEN for {module.NAME} after {HTTP_CB_THRESHOLD} failures. "
                     f"Suppressing errors for {HTTP_CB_COOLDOWN}s.")
+        if hard and _transport.can_fall_back(module, config):
+            _transport.mark_down("http", module, config, hard)
+            if n + 1 < len(chunks):
+                _fail(n + 1, len(chunks) - 1)
+            return sent
     return sent
 
 # ── Cached S3 client ────────────────────────────────────────────────────────
@@ -602,16 +647,34 @@ def flush_s3_batch():
         # CloudTrail: single {"Records":[...]} envelope.
         body = json.dumps({"Records": records}, default=str)
         merged = gzip.compress(body.encode("utf-8"))
-        send_s3_message(merged, module, config, f"batch:{len(records)} events")
+        status = send_s3_message(merged, module, config, f"batch:{len(records)} events")
+        if status != "ok" and _transport.can_fall_back(module, config):
+            # Every attempt failed, so nothing reached the bucket: deliver via Cribl.
+            send_cribl_batch(records, module, config)
+
+
+_S3_HARD_ERRORS = {"NoCredentialsError", "PartialCredentialsError"}
+_S3_HARD_CODES = {"AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch", "NoSuchBucket",
+                  "AllAccessDisabled", "ExpiredToken", "InvalidToken", "AccountProblem",
+                  "InvalidBucketName", "403", "404"}
+
+
+def _is_s3_hard_error(exc):
+    """A credential, permission or bucket error: retrying will not fix it."""
+    if any(cls.__name__ in _S3_HARD_ERRORS for cls in type(exc).__mro__):
+        return True
+    code = (getattr(exc, "response", None) or {}).get("Error", {}).get("Code", "")
+    return code in _S3_HARD_CODES
 
 
 def send_s3_message(content_bytes, module, config, event_name):
+    """Uploads a gzipped log file to S3. Returns "ok" or "error"; a credential, permission
+    or bucket error also marks S3 down (integrations/transport.py)."""
     event_str = f" ({event_name})" if event_name else ""
 
-    """Uploads a gzipped log file to S3."""
     conf_key = getattr(module, 'CONFIG_KEY', None)
     if not conf_key or conf_key not in config:
-        return
+        return "error"
 
     try:
         # Use timezone-aware datetime object
@@ -631,7 +694,7 @@ def send_s3_message(content_bytes, module, config, event_name):
 
         if not bucket_name:
             print(f"ERROR: S3 bucket is not defined (S3_BUCKET_NAME in .env / '{conf_key}' in config.json). Cannot upload log.")
-            return
+            return "error"
 
         # CloudTrail's native layout: a date-partitioned {"Records":[...]}.json.gz object.
         file_name = f"{account_id}_CloudTrail_{region}_{now.strftime('%Y%m%dT%H%MZ')}_{str(uuid.uuid4())[:6].upper()}.json.gz"
@@ -660,14 +723,32 @@ def send_s3_message(content_bytes, module, config, event_name):
                 time.sleep(0.5 * (_attempt + 1))
         if last_err is not None:
             _tprint(f"ERROR: S3 put failed after 3 attempts ({file_name}): {last_err}")
+            if _is_s3_hard_error(last_err) and _transport.can_fall_back(module, config):
+                code = (getattr(last_err, "response", None) or {}).get("Error", {}).get("Code")
+                _transport.mark_down("s3", module, config, code or type(last_err).__name__)
+            return "error"
+        return "ok"
 
     except ImportError:
         _tprint("ERROR: 'boto3' library not found. Please install it with 'pip install boto3' to use S3 transport.")
+        return "error"
+
+
+_PUBSUB_HARD_ERRORS = {"Unauthenticated", "PermissionDenied", "NotFound", "Forbidden",
+                       "RefreshError", "DefaultCredentialsError", "GoogleAuthError",
+                       "JSONDecodeError"}
+
+
+def _is_pubsub_hard_error(exc):
+    """A credential, permission or missing-topic error: retrying will not fix it."""
+    return any(cls.__name__ in _PUBSUB_HARD_ERRORS for cls in type(exc).__mro__)
 
 
 def send_pubsub_message(message_data, module, config, event_name=None):
     """
     Publishes a single log entry (JSON string) to a Google Cloud Pub/Sub topic.
+    Returns "ok", "down" (a credential, permission or missing-topic error, which also
+    marks Pub/Sub down in integrations/transport.py) or "error".
 
     Authentication uses one of two methods (checked in order):
       1. GCP_SERVICE_ACCOUNT_KEY_JSON env var — inline JSON key content
@@ -683,18 +764,14 @@ def send_pubsub_message(message_data, module, config, event_name=None):
     except ImportError:
         _tprint("ERROR: 'google-cloud-pubsub' not installed. "
                "Run: pip install google-cloud-pubsub")
-        return
+        return "error"
 
-    conf_key = getattr(module, 'CONFIG_KEY', None)
-    module_conf = config.get(conf_key, {}) if conf_key else {}
-
-    project_id = os.getenv('GCP_PROJECT_ID', module_conf.get('gcp_project_id', ''))
-    topic_id   = os.getenv('GCP_PUBSUB_TOPIC', module_conf.get('pubsub_topic', ''))
+    project_id, topic_id, _ = _transport.pubsub_settings(module, config)
 
     if not project_id or not topic_id:
         _tprint("WARNING: Pub/Sub not configured — set GCP_PROJECT_ID and "
                "GCP_PUBSUB_TOPIC in .env or config.json gcp_config section.")
-        return
+        return "error"
 
     event_str = f" ({event_name})" if event_name else ""
 
@@ -720,9 +797,15 @@ def send_pubsub_message(message_data, module, config, event_name=None):
 
         future = publisher.publish(topic_path, data)
         future.result(timeout=10)
+        return "ok"
 
     except Exception as e:
         _tprint(f"ERROR: Pub/Sub publish failed for {module.NAME}{event_str}: {e}")
+        if _is_pubsub_hard_error(e):
+            if _transport.can_fall_back(module, config):
+                _transport.mark_down("pubsub", module, config, type(e).__name__)
+            return "down"
+        return "error"
 
 
 # ── Throughput counter (shared across all calls to process_and_send) ─────────
@@ -771,7 +854,9 @@ _wec_executor = None
 _wec_executor_lock = threading.Lock()
 _wec_flush_pending = [False]
 WEC_STATS = {"sent_events": 0, "posts": 0, "retries": 0,
-             "failed_events": 0, "breaker_dropped": 0, "last_error": None}
+             "failed_events": 0, "breaker_dropped": 0, "cribl_events": 0, "last_error": None}
+# The module whose events are queued for WEC, for the Cribl fallback of a failed flush.
+_wec_module = [None]
 
 
 def _wec_cfg(config):
@@ -803,9 +888,7 @@ def wait_for_transport(module, config, stop_event=None):
     sender threads are shared by every module, so blocking them on a slow WEC broker
     would stall Okta, AWS and the firewalls too. Today only WEC buffers enough to need
     this; its threshold is windows_events_config.wec_max_pending (default 10000)."""
-    conf_key = getattr(module, "CONFIG_KEY", None)
-    transport = (config.get(conf_key) or {}).get("transport") if conf_key else None
-    if transport != "wec":
+    if _transport.resolve(module, config) != "wec":
         return
     limit = int(_wec_cfg(config).get("wec_max_pending", 10000))
     while wec_backlog() >= limit and not (stop_event and stop_event.is_set()):
@@ -857,6 +940,8 @@ def _flush_wec_batch(config):
         return
     client = _get_wec_client(config)
     if not client:
+        if _wec_to_cribl(batch, config, "WEC client unavailable"):
+            return
         with _wec_batch_lock:
             WEC_STATS["failed_events"] += len(batch)
             WEC_STATS["last_error"] = "WEC client unavailable"
@@ -883,19 +968,38 @@ def _flush_wec_batch(config):
                     time.sleep(backoff * (2 ** attempt))
                     continue
                 with _wec_batch_lock:
-                    WEC_STATS["failed_events"] += len(chunk)
                     WEC_STATS["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
                     _wec_cb_state["fails"] += 1
-                    if (_wec_cb_state["fails"] >= HTTP_CB_THRESHOLD
-                            and _wec_cb_state["open_since"] is None):
+                    opened = (_wec_cb_state["fails"] >= HTTP_CB_THRESHOLD
+                              and _wec_cb_state["open_since"] is None)
+                    if opened:
                         _wec_cb_state["open_since"] = time.time()
                         _tprint(f"WEC circuit breaker OPEN after {HTTP_CB_THRESHOLD} "
                                 f"failed sends ({retries} retries each): {exc}")
+                if not _wec_to_cribl(chunk, config, type(exc).__name__, mark=opened):
+                    with _wec_batch_lock:
+                        WEC_STATS["failed_events"] += len(chunk)
+
+
+def _wec_to_cribl(xml_events, config, reason, mark=True):
+    """Deliver WEC-rendered events the broker would not take via the Cribl receiver, as
+    the event XML a Cribl WEF source carries. *mark* also sends later Windows events to
+    Cribl until WEC is retried. Returns True if Cribl took them."""
+    module = _wec_module[0]
+    if module is None or not _transport.can_fall_back(module, config):
+        return False
+    if mark:
+        _transport.mark_down("wec", module, config, reason)
+    n = send_cribl_batch(list(xml_events), module, config)
+    with _wec_batch_lock:
+        WEC_STATS["cribl_events"] += n
+    return n == len(xml_events)
 
 
 def send_wec_message(message, module, config):
     """Queue a Windows event for WEC transport (batched delivery)."""
     global _wec_batch_timer
+    _wec_module[0] = module
     # Circuit breaker: while the broker is down, events cannot be delivered or held
     # indefinitely -- but they are counted (WEC_STATS["breaker_dropped"]), never silent.
     with _wec_batch_lock:
@@ -1208,48 +1312,49 @@ def send_cribl_message(record, module, config):
     return send_cribl_batch([record], module, config)
 
 
+_UNKNOWN_UUID_WARNED = set()
+
+
 def send_cribl_batch(records, module, config):
     """Push records into XSIAM's integrated Cribl receiver (cribl_direct transport), many
     per gzip NDJSON request -- the shape the real Cribl destination sends -- chunked to
     HTTP_BATCH_MAX_EVENTS / HTTP_BATCH_MAX_BYTES.
 
-    Records go under the module's dedicated Source-Identifier UUID so XSIAM parses them
-    into the native dataset (Fusion/analytics-eligible). No Cribl instance is involved;
-    CRIBL_COLLECTOR_URL + CRIBL_TOKEN come from the environment. Returns the number of
-    records in requests the receiver accepted.
+    Records go under the module's Source-Identifier: a dedicated catalog UUID, so XSIAM
+    parses them into the native dataset (Fusion/analytics-eligible), or the generic UUID
+    with a vendor/product for sources the catalog lacks. Any native payload is accepted
+    (syslog lines, HTTP JSON, S3 blobs, Pub/Sub JSON, Windows events): see
+    integrations/transport.py. No Cribl instance is involved; CRIBL_COLLECTOR_URL +
+    CRIBL_TOKEN come from the environment. Returns the number of records in requests the
+    receiver accepted.
     """
     src = getattr(module, 'SOURCE_IDENTIFIER', None)
     if not src:
         _tprint(f"Error: {getattr(module, 'NAME', '?')} cribl transport requires module.SOURCE_IDENTIFIER.")
         return 0
-    integ = getattr(module, 'INTEGRATION_IDENTIFIER', 'logsim:synthetic')
-    parsed, sizes = [], []
-    for record in records:
-        if isinstance(record, str):
-            text = record
-            try:
-                record = json.loads(record)
-            except (json.JSONDecodeError, TypeError):
-                _tprint(f"Warning: {module.NAME} cribl transport received non-JSON string. Skipping.")
-                continue
-        else:
-            text = None
-        if not isinstance(record, dict):
-            _tprint(f"Warning: {module.NAME} cribl transport expects a dict record. Skipping.")
-            continue
-        parsed.append(record)
-    # A record may name its own destination (cribl_direct.ROUTE_KEY), e.g. a Graph sign-in's
-    # Event Hub copy bound for msft_azure_raw; each destination gets its own requests.
-    from integrations.cribl_direct import split_routes
+    from integrations.cribl_direct import is_catalog_uuid
+    if not is_catalog_uuid(src) and src not in _UNKNOWN_UUID_WARNED:
+        _UNKNOWN_UUID_WARNED.add(src)
+        _tprint(f"Warning: {module.NAME} SOURCE_IDENTIFIER {src} is not in the Cribl catalog "
+                f"(cribl_direct.CATALOG); records may land raw or in the wrong dataset.")
+    try:
+        parsed = _transport.to_cribl_records(records, module)
+    except Exception as exc:
+        _tprint(f"Warning: {module.NAME} payload could not be converted for Cribl: {exc}")
+        return 0
     sent = 0
-    for (dst, dst_integ), group in split_routes(parsed, src, integ).items():
-        sizes = [json.dumps(r, default=str) for r in group]
+    # A record may name its own destination (cribl_direct.ROUTE_KEY), e.g. a Graph sign-in's
+    # Event Hub copy bound for msft_azure_raw; and each CEF vendor/product under the generic
+    # UUID is its own dataset. Each destination gets its own requests.
+    for (dst, dst_integ, vendor, product), group in _transport.group_records(parsed, module).items():
+        sizes = [r if isinstance(r, str) else json.dumps(r, default=str) for r in group]
         i = 0
         for chunk in _chunked(sizes):          # chunk boundaries from the serialized sizes
             batch = group[i:i + len(chunk)]
             i += len(chunk)
             try:
-                code, text, _ = _get_cribl_sender().send(batch, dst, dst_integ)
+                code, text, _ = _get_cribl_sender().send(batch, dst, dst_integ,
+                                                         vendor=vendor, product=product)
                 if code not in (200, 201, 202, 204):
                     _tprint(f"Cribl send error for {module.NAME}: HTTP {code} ({len(batch)} records) — {text[:120]}")
                 else:
@@ -1261,9 +1366,12 @@ def send_cribl_batch(records, module, config):
     return sent
 
 
+def _as_list(log_content):
+    return log_content if isinstance(log_content, list) else [log_content]
+
+
 def process_and_send(log_content, module, config, event_name=None):
     """Determines how to send the log and sends it. Counts logs for throughput reporting."""
-    transport = "syslog"
     if not log_content:
         return
 
@@ -1283,80 +1391,77 @@ def process_and_send(log_content, module, config, event_name=None):
         _bulk_collector.append((module, log_content, event_name))
         return
 
-    conf_key = getattr(module, 'CONFIG_KEY', None)
-    module_config = {}
-    if conf_key and conf_key in config:
-        module_config = config.get(conf_key, {})
-        transport = module_config.get("transport", "syslog")
+    # The module's native pipe when it is set up and working, else the Cribl receiver.
+    transport = _transport.resolve(module, config)
+    module_config = _transport.module_conf(module, config)
+    event_str = f" ({event_name})" if event_name else ""
 
-    if transport == "s3":
+    if transport == "cribl":
+        if isinstance(log_content, (list, dict, str, bytes)):
+            # One gzip NDJSON request per chunk, not per record (send_cribl_batch).
+            items = _as_list(log_content)
+            send_cribl_batch(items, module, config)
+            _increment_throughput(len(items))
+        else:
+            _tprint(f"Warning: Module {module.NAME}{event_str} wants cribl transport but did not return a dict/str/list. Skipping.")
+    elif transport == "s3":
         if isinstance(log_content, bytes):
             # Buffer for one batched upload per run (see flush_s3_batch).
             _enqueue_s3(log_content, module, config)
             _increment_throughput()
         else:
-            event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} is configured for S3 but did not return bytes content. Skipping.")
     elif transport == "http":
-        if isinstance(log_content, list):
+        if isinstance(log_content, (list, str)):
             # One request per chunk, not per event (send_http_batch).
-            send_http_batch(log_content, module, config)
-            _increment_throughput(len(log_content))
-        elif isinstance(log_content, str):
-            send_http_message(log_content, module, config)
-            _increment_throughput()
+            items = _as_list(log_content)
+            failed = []
+            send_http_batch(items, module, config, failed=failed)
+            _fall_back(failed, module, config)
+            _increment_throughput(len(items))
         else:
-            event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} wants HTTP transport but did not return a string or list of strings. Skipping.")
     elif transport == "wec":
-        if isinstance(log_content, list):
-            for msg in log_content:
+        if isinstance(log_content, (list, str)):
+            for msg in _as_list(log_content):
                 send_wec_message(msg, module, config)
                 _increment_throughput()
-        elif isinstance(log_content, str):
-            send_wec_message(log_content, module, config)
-            _increment_throughput()
         else:
-            event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} wants WEC transport but did not return a string or list of strings. Skipping.")
     elif transport == "pubsub":
-        if isinstance(log_content, list):
-            for msg in log_content:
-                send_pubsub_message(msg, module, config, event_name)
+        if isinstance(log_content, (list, str)):
+            for msg in _as_list(log_content):
+                if send_pubsub_message(msg, module, config, event_name) == "down":
+                    _fall_back([msg], module, config)
                 _increment_throughput()
-        elif isinstance(log_content, str):
-            send_pubsub_message(log_content, module, config, event_name)
-            _increment_throughput()
         else:
-            event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} wants Pub/Sub transport but did not return a string or list of strings. Skipping.")
-    elif transport == "cribl":
-        if isinstance(log_content, list):
-            # One gzip NDJSON request per chunk, not per record (send_cribl_batch).
-            send_cribl_batch(log_content, module, config)
-            _increment_throughput(len(log_content))
-        elif isinstance(log_content, (dict, str)):
-            send_cribl_message(log_content, module, config)
-            _increment_throughput()
-        else:
-            event_str = f" ({event_name})" if event_name else ""
-            _tprint(f"Warning: Module {module.NAME}{event_str} wants cribl transport but did not return a dict/str/list. Skipping.")
-    else:  # Default to syslog
+    else:  # syslog
         syslog_host = os.getenv('SYSLOG_HOST')
         syslog_port = int(module_config.get("syslog_port", config.get('SYSLOG_PORT', '514')))
-        if isinstance(log_content, list):
+        if isinstance(log_content, (list, str)):
             # Many newline-framed lines per write, not one write per event (send_syslog_batch).
-            send_syslog_batch(log_content, syslog_host, syslog_port, app_name=module.NAME)
-            _increment_throughput(len(log_content))
-        elif isinstance(log_content, str):
-            send_syslog_message(log_content, syslog_host, syslog_port, app_name=module.NAME)
-            _increment_throughput()
+            items = _as_list(log_content)
+            failed = []
+            send_syslog_batch(items, syslog_host, syslog_port, app_name=module.NAME, failed=failed)
+            if failed and _transport.can_fall_back(module, config):
+                err = _syslog_last_error.get((syslog_host, syslog_port))
+                _transport.mark_down("syslog", module, config,
+                                     type(err).__name__ if err else "write failed")
+            _fall_back(failed, module, config)
+            _increment_throughput(len(items))
         else:
-            event_str = f" ({event_name})" if event_name else ""
             _tprint(f"Warning: Module {module.NAME}{event_str} wants Syslog transport but did not return a string or list of strings. Skipping.")
 
     _maybe_report_throughput()
-        
+
+
+def _fall_back(failed, module, config):
+    """Resend payloads the native pipe did not take via the Cribl receiver, if allowed."""
+    if failed and _transport.can_fall_back(module, config):
+        send_cribl_batch(failed, module, config)
+
+
 def select_product_log_mode(all_modules):
     """Handles the independent log generation mode."""
     print("\nAvailable Log Modules:")

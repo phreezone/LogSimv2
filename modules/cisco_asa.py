@@ -97,6 +97,9 @@ NAME        = "Cisco ASA Firewall"
 DESCRIPTION = "Simulates Cisco ASA syslog messages for the XSIAM cisco_asa_raw dataset."
 XSIAM_PARSER = "Cisco ASA"
 CONFIG_KEY  = "cisco_asa_config"
+SOURCE_IDENTIFIER = "af01292940d7426594d3d3e55ae17ee0"   # Cribl generic UUID -> <vendor>_<product>_raw
+XSIAM_VENDOR = "Cisco"
+XSIAM_PRODUCT = "ASA"
 
 # Single source of truth for threat event names used both as the generate_log fallback
 # and by get_threat_names(). Add new threat names here when adding dispatch cases below.

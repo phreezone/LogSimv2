@@ -36,6 +36,9 @@ XSIAM_PARSER = "check_point_vpn_1_firewall_1_raw"
 # completion to determine if separate log generation paths are required for full XDM coverage of
 # the URL Filtering and Identity Awareness models.
 CONFIG_KEY = "checkpoint_config"
+SOURCE_IDENTIFIER = "af01292940d7426594d3d3e55ae17ee0"   # Cribl generic UUID -> <vendor>_<product>_raw
+XSIAM_VENDOR = "Check Point"
+XSIAM_PRODUCT = "VPN-1 & FireWall-1"
 
 # Single source of truth for threat event names and their default weights.
 # Used as the fallback in _generate_threat_log and by get_threat_names().

@@ -599,19 +599,30 @@ def _with_eventhub(steps, config):
     return out
 
 
-def _send_windows(win_events, source_host="logsim.examplecorp.local"):
+def _send_windows(win_events, source_host="logsim.examplecorp.local", sender=None):
     """Deliver on-prem Windows event dicts via the WEC transport (mirrors the harness on-prem path).
-    No-op (returns a skip marker) when WEC env/credentials aren't configured."""
+    When WEC isn't configured or fails, they go to the Cribl receiver under the Windows Event
+    Logs UUID (integrations/transport.py) and the Cribl (code, text, n) is returned; with
+    neither, a skip marker."""
     import os
+    from integrations import transport
     broker = os.getenv("WEC_BROKER_URL"); pfx = os.getenv("WEC_PFX_PATH"); pw = os.getenv("WEC_PFX_PASSWORD")
-    if not (broker and pfx):
-        return ("__wec__", "skipped: WEC_BROKER_URL/WEC_PFX_PATH not set", 0)
-    from modules.wec_transport import WecClient
-    client = WecClient(broker, pfx, pw, source_host)
-    client.enumerate()
     xmls = [winev._render_event_xml(e) for e in win_events]
-    client.deliver_events(xmls)
-    return ("__wec__", "delivered", len(xmls))
+    why = "WEC_BROKER_URL/WEC_PFX_PATH not set"
+    if broker and pfx:
+        try:
+            from modules.wec_transport import WecClient
+            client = WecClient(broker, pfx, pw, source_host)
+            client.enumerate()
+            client.deliver_events(xmls)
+            return ("__wec__", "delivered", len(xmls))
+        except Exception as exc:
+            why = f"WEC failed: {type(exc).__name__}: {exc}"
+    if transport.cribl_configured():
+        from integrations.cribl_direct import CriblDirectSender
+        return (sender or CriblDirectSender()).send(
+            xmls, winev.SOURCE_IDENTIFIER, winev.INTEGRATION_IDENTIFIER)
+    return ("__wec__", f"skipped: {why}", 0)
 
 
 def fire(name, config=None, sender=None, context=None):
@@ -633,7 +644,7 @@ def fire(name, config=None, sender=None, context=None):
         for (src, integ), recs in groups.items():
             results.append((name, sender.send(recs, src, integ)))
     if win_events:
-        results.append((name, _send_windows(win_events)))
+        results.append((name, _send_windows(win_events, sender=sender)))
     return results
 
 

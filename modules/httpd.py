@@ -16,6 +16,7 @@ DESCRIPTION = "Simulates Apache Web Server access and error logs in formats for 
 XSIAM_VENDOR = "apache"
 XSIAM_PRODUCT = "httpd"
 CONFIG_KEY = "apache_config"
+SOURCE_IDENTIFIER = "af01292940d7426594d3d3e55ae17ee0"   # Cribl generic UUID -> <vendor>_<product>_raw
 
 # --- Module-level state for throttling ---
 last_threat_event_time = 0

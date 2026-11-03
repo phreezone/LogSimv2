@@ -128,6 +128,9 @@ DESCRIPTION = "Simulates Windows Security channel events (4624/4625/4634/4647/46
 XSIAM_VENDOR  = "Microsoft"
 XSIAM_PRODUCT = "Windows"
 CONFIG_KEY    = "windows_events_config"
+NATIVE_TRANSPORT = "wec"
+SOURCE_IDENTIFIER = "63b0fbeb501e4650896e7064d3412e14"   # Cribl "Windows Event Logs" -> microsoft_windows_raw
+INTEGRATION_IDENTIFIER = "logsim:windows_events"
 # generate_log() only DRAINS what the per-host workers buffered; the dashboard rate sets
 # Windows VOLUME through set_event_interval() below, not through how often it calls.
 # Draining faster than this adds nothing, and at the dashboard's 10,000 calls/s the drain
@@ -2383,6 +2386,17 @@ def _render_event_xml(event: dict) -> str:
     xml_str = _etree.tostring(root, encoding="unicode", xml_declaration=False)
     xml_str = re.sub(r'="([^"]*)"', lambda m: "='" + m.group(1) + "'", xml_str)
     return xml_str
+
+
+def cribl_record(payload):
+    """One event as the Cribl receiver gets it: the <Event> XML a Cribl WEF source carries
+    (the Cortex docs require XML event format), the same bytes WEC delivers. Already
+    rendered XML passes through."""
+    if isinstance(payload, str):
+        if payload.lstrip().startswith("<"):
+            return payload
+        payload = json.loads(payload)
+    return _render_event_xml(payload)
 
 
 # Per-EventID constructors

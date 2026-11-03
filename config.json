@@ -1,6 +1,8 @@
 {
   "syslog_port": 514,
   "base_event_interval_seconds": 1.0,
+  "cribl_fallback": true,
+  "transport_retry_s": 300,
   "o365_azure_ad_config": {
     "transport": "cribl"
   },

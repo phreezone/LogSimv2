@@ -12,6 +12,9 @@ DESCRIPTION = "Simulates GCP Cloud Audit Log events to trigger XSIAM analytics."
 XSIAM_VENDOR = "Google Cloud"
 XSIAM_PRODUCT = "Cloud Audit Logs"
 CONFIG_KEY = "gcp_config"
+NATIVE_TRANSPORT = "pubsub"
+SOURCE_IDENTIFIER = "00a8322c85e14beabfa7ad5f3d62db73"   # Cribl "Cloud Logging" -> google_cloud_logging_raw
+INTEGRATION_IDENTIFIER = "logsim:gcp_cloud_logging"
 last_threat_event_time = 0
 
 

@@ -9,6 +9,7 @@ A modular, high-fidelity log simulation tool for **Palo Alto Networks Cortex XSI
 - **Centralized Configuration** — all settings (IPs, users, hostnames, threat intel, transport) in a single `config.json`
 - **Generated High-Cardinality Values** — threat domains, file names, cloud resource identifiers and browser user-agents are *composed* per event rather than drawn from fixed lists, so a month-long run never recycles the same 25 C2 domains or 26 EC2 instance IDs. The curated `config.json` pools remain in circulation as a recognisable head for manual hunting — see [docs/value-cardinality.md](docs/value-cardinality.md)
 - **Multiple Transports** — Syslog (TCP with persistent connections), HTTP Collector, AWS S3 (cached client), Google Cloud Pub/Sub, WEC (Windows Event Collector via WS-Management), and the **XSIAM Cribl receiver** for the Microsoft Entra ID / Office 365 feeds (direct, no Cribl Stream instance or Microsoft tenant needed — see [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md#transport-the-cribl-receiver-no-cribl-instance-needed))
+- **Cribl fallback** — every module uses its native pipe when it is configured, and otherwise (or when that pipe fails) goes to the Cribl receiver under its data source's catalog UUID, so `CRIBL_COLLECTOR_URL` + `CRIBL_TOKEN` alone run every module — see [docs/transports.md](docs/transports.md)
 - **Microsoft Entra ID & Office 365** — seven native-shaped feeds (Graph sign-ins and directory audit, O365 Azure AD, Exchange Online, SharePoint/OneDrive, DLP, General) plus cross-feed identity campaigns, all on the same users as every other module
 - **Dynamic Threat Levels** — six levels from Benign Traffic Only to Insane; controls threat event frequency per module
 - **XSIAM Detection-Ready Sequences** — attack generators produce complete detection patterns (e.g., failed logins followed by success) that trigger XSIAM UEBA analytics out of the box
@@ -219,6 +220,7 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 |---|---|
 | Installation & `.env` setup | [docs/getting-started.md](docs/getting-started.md) |
 | `config.json` reference (all sections) | [docs/configuration.md](docs/configuration.md) |
+| Transports — native pipes and the Cribl fallback | [docs/transports.md](docs/transports.md) |
 | Running modes & available modules | [docs/how-to-run.md](docs/how-to-run.md) |
 | Attack scenarios (23 kill chains) | [docs/attack-scenarios.md](docs/attack-scenarios.md) |
 | Training Mode (deterministic bulk stage + live stream) | [docs/training-mode.md](docs/training-mode.md) |

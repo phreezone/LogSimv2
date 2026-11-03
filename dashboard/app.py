@@ -834,10 +834,12 @@ _BATCH_MAX_EVENTS = max(1, int(os.getenv("HTTP_BATCH_MAX_EVENTS", "1000")))
 
 
 def _lane_queue(item):
-    """The queue for this event's transport: a batched lane for HTTP/Cribl/syslog, else default."""
+    """The queue for this event's transport: a batched lane for HTTP/Cribl/syslog, else default.
+    The transport is the one the send will use, so a module falling back to the Cribl
+    receiver rides the Cribl lane."""
     _msg, module, config, _name = item
-    key = getattr(module, "CONFIG_KEY", None)
-    transport = ((config or {}).get(key, {}) or {}).get("transport", "syslog") if key else "syslog"
+    from integrations import transport as _transport
+    transport = _transport.resolve(module, config)
     if transport in _UNBATCHED_TRANSPORTS:
         return _SEND_QUEUE
     return _BATCH_QUEUES.get(transport, _BATCH_QUEUES["syslog"])
@@ -2122,7 +2124,7 @@ def _run_health_checks() -> dict:
             "group": group,
             "check": f"{var} defined",
             "status": "ok" if val else "warn",
-            "detail": "set" if val else "not set — transport will be skipped",
+            "detail": "set" if val else "not set — its sources fall back to Cribl (see Transport routing)",
         })
 
     # ── Tor exit node list ────────────────────────────────────────────────────
@@ -2461,16 +2463,33 @@ def _run_health_checks() -> dict:
 
     # ── 6. Cribl receiver (direct-to-XSIAM) ───────────────────────────────────
     # The integrated Cribl receiver is the transport for the Microsoft / Entra /
-    # O365 feeds (config transport: "cribl"): those modules POST gzipped NDJSON to
+    # O365 feeds (config transport: "cribl"), and the fallback for every other module
+    # whose native pipe (Broker syslog, HTTP collector, S3, Pub/Sub, WEC) is not set up
+    # or is failing (integrations/transport.py). Those modules POST gzipped NDJSON to
     # CRIBL_COLLECTOR_URL with an Authorization: Bearer CRIBL_TOKEN header. With
     # either var unset CriblDirectSender raises on first send and EVERY cribl-routed
     # source goes silent — so whenever any module is routed to Cribl these are a
     # REQUIRED source, reported as an error (not a warning) when missing.
-    cribl_sources = sorted(
-        _k[:-7] if _k.endswith("_config") else _k
-        for _k, _v in CONFIG.items()
-        if isinstance(_v, dict) and _v.get("transport") == "cribl"
-    )
+    from integrations import transport as _transport
+    _routes = [_transport.describe(_m, CONFIG) for _m in MODULES.values()]
+    cribl_sources = sorted(r["module"] for r in _routes
+                           if r["preferred"] == "cribl"
+                           or (not r["native_ready"] and r["fallback_enabled"]
+                               and r["cribl_route"]))
+    for r in sorted(_routes, key=lambda r: r["module"]):
+        if r["preferred"] == "cribl":
+            status, detail = "ok", f"Cribl receiver ({r['cribl_route'] or 'per-record routes'})"
+        elif r["native_ready"]:
+            status, detail = "ok", f"{r['preferred']} (Cribl fallback: " + (
+                r["cribl_route"] if r["fallback_enabled"] and r["cribl_route"] else "off") + ")"
+        elif r["effective"] == "cribl":
+            status, detail = "ok", (f"{r['preferred']} unavailable ({r['reason']}) — "
+                                    f"falling back to Cribl ({r['cribl_route']})")
+        else:
+            status, detail = "warn", (f"{r['preferred']} unavailable ({r['reason']}) and no "
+                                      "Cribl fallback — this source cannot deliver")
+        results.append({"group": "Transport routing", "check": r["module"],
+                        "status": status, "detail": detail})
     cribl_url   = os.getenv("CRIBL_COLLECTOR_URL", "")
     cribl_token = os.getenv("CRIBL_TOKEN", "")
     if cribl_sources:
