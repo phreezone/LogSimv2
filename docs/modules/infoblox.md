@@ -385,7 +385,7 @@ All 11 types are available as named `scenario_event` strings (usable in Mode 2 o
 | `DNS_FLOOD` | 6 | `infoblox_infoblox_raw` | 20–50 query-only events | > 20 queries/10s from one src IP; mixed A/AAAA/MX/NS/TXT/SOA types |
 | `ZONE_TRANSFER` | 8 | `infoblox_infoblox_raw` | 1 AXFR or IXFR query + 1 REFUSED response | `q_type=AXFR/IXFR` from non-DNS-server IP; `dns_response_code=REFUSED` |
 | `FAST_FLUX_DNS` | 7 | `infoblox_infoblox_raw` | 3–6 query+NOERROR pairs, same domain, different IPs | Same `xdm.target.hostname` → different `xdm.target.ip` per query; `TTL=0` in every response RR |
-| `DNS_REBINDING` | 5 | `infoblox_infoblox_raw` | 1 query + 1 NOERROR response with internal RFC-1918 IP | Response IP = private range for external-named domain; `TTL=1` |
+| `DNS_REBINDING` | 5 | `infoblox_infoblox_raw` | 2 query + NOERROR response pairs for one domain: public IP, then internal RFC-1918 IP | Same external-named domain answers public and private within minutes; `TTL=1` |
 | `DHCP_STARVATION` | 4 | `infoblox_infoblox_raw` | 20–50 DHCPDISCOVER events from fully-random MACs | All-different MACs with no OUI prefix pattern; no DHCPACK follows; burst volume |
 | `PTR_SWEEP` | 4 | `infoblox_infoblox_raw` | 20–40 sequential in-addr.arpa PTR query+response pairs | Sequential arpa labels from one src IP; ~75% NXDOMAIN; burst timing |
 
