@@ -15,19 +15,36 @@ no content pack install is required.
 
 ```
 CEF:0|PANW|NGFW_CEF|<sw_version>|<subtype>|<type>|1| __firewall_type=firewall.traffic
-    __timestamp=<iso> __tz=+00:00 log_type=TRAFFIC subtype=end log_time=<iso>
-    time_generated=<iso> rt=<epoch-ms> source_ip=.. dest_ip=.. source_port=.. dest_port=..
-    protocol=.. action=.. app=.. app_category=.. app_sub_category=.. technology_of_app=..
-    risk_of_app=.. rule_matched=.. from_zone=.. to_zone=.. inbound_if=.. outbound_if=..
+    __timestamp=<session-start> __tz=<high-res> log_type=traffic type=TRAFFIC
+    subtype=end sub_type=end log_time=<iso> time_generated=<iso>
+    receive_time=<iso> high_res_timestamp=<high-res>
+    session_start_time=<iso> serial=<firewall-serial> log_source_id=<firewall-serial>
+    log_source_name=<hostname> device_name=<hostname>
+    src=.. dst=.. sport=.. dport=.. proto=.. rule=.. from=.. to=.. sessionid=..
+    source_ip=.. dest_ip=.. source_port=.. dest_port=.. protocol=.. rule_matched=..
+    action=.. app=.. app_category=.. app_sub_category=.. technology_of_app=..
+    risk_of_app=.. from_zone=.. to_zone=.. inbound_if=.. outbound_if=..
     session_id=.. bytes_sent=.. bytes_received=.. packets_sent=.. packets_received=..
     total_time_elapsed=.. session_end_reason=.. source_user=.. source_device_host=.. ..
 ```
 
+The official [Traffic Log Fields](https://docs.paloaltonetworks.com/ngfw/administration/monitoring/use-syslog-for-monitoring/syslog-field-descriptions/traffic-log-fields)
+list is the source of truth for which keys exist. Both the documented PAN key (`serial`,
+`src`, `dst`, `sport`, `dport`, `proto`, `rule`, `from`, `to`, `sessionid`, …) and the
+dataset column (`log_source_id`, `source_ip`, `dest_ip`, `source_port`, `dest_port`,
+`protocol`, `rule_matched`, `from_zone`, `to_zone`, `session_id`, …) are emitted. The
+collector does not rewrite the body, so this keeps the wire line schema-faithful while
+preserving the existing dataset mappings. Fields that were added only because the live
+CLCS rows carry them — and which have no documented equivalent — are not generated.
+
 Unlike ArcSight CEF, PAN-OS does **not** use numbered extension keys (`cs1`/`flexNumber1`).
-Its custom log format emits **literal key names** (`source_ip`, `dest_port`, `app`,
-`bytes_sent`, …) that match the `panw_ngfw_traffic_raw` columns 1:1. The header's product is
-`NGFW_CEF` and the native parser routes the event by the `__firewall_type` discriminator plus
-`log_type`/`subtype`.
+The documented custom format emits **literal key names** (`serial`, `receive_time`, `src`,
+`dst`, `sport`, `dport`, `proto`, `rule`, `from`, `to`, …), while `panw_ngfw_traffic_raw`
+stores **normalized columns** (`log_source_id`, `source_ip`, `dest_ip`, `source_port`,
+`dest_port`, `protocol`, `rule_matched`, `from_zone`, `to_zone`, …). The collector does not
+rewrite the body, so the module sends both (see `_PAN_ALIASES` in the module). The header's
+product is `NGFW_CEF` and the native parser routes the event by the `__firewall_type`
+discriminator plus `log_type`/`subtype`.
 
 > **Routing caveat.** `NGFW_CEF` here is the **native Syslog-Collector custom format** routed
 > by `__firewall_type`. Do **not** confuse it with the *derived* ingest route (CEF vendor
@@ -45,34 +62,71 @@ What the collector does with the body (measured in-tenant, 2026-10-22):
   `url_domain` alongside `uri` on URL logs, and lowercases `log_type` as in the CLCS rows.
 - **No back-dating.** `_time` is always the ingestion time. Neither `rt` nor `__timestamp`
   (tried as epoch ms, `YYYY/MM/DD HH:MM:SS`, ISO-8601 `Z`, and PAN's cef-formatted time)
-  moves it; the intended time survives only in `time_generated` / `rt`. Anything a detector
-  must see on **separate days** has to be emitted on real days while the module runs (see
-  *Daily events* below).
+  moves it; the intended time survives only in the event-time fields (`log_time`,
+  `time_generated`, `high_res_timestamp`, `session_start_time`). `rt` is a CEF
+  device-receipt convention, **not** a PAN traffic-log field (the live CLCS rows have
+  `rt=null`), so it is omitted unless `panw_ngfw_config.emit_rt` is set to `true`. Anything a
+  detector must see on **separate days** has to be emitted on real days while the module runs
+  (see *Daily events* below).
 
 Syslog PRI is `<14>` (facility `LOG_USER`=1×8 + notice=6), matching PAN-OS's default syslog
 facility.
 
+### CEF header severity slot
+
+The header's severity slot is the numeric severity the CEF spec requires (integer 0-10). The
+traffic rows keep the live feed's literal `1` body value — which passes through as `1`, the
+CEF "unrated" default. Documented THREAT severity words (Threat Log Fields: informational,
+low, medium, high, critical) map onto the 0-10 scale — `informational`=0, `low`=3, `medium`=6,
+`high`=8, `critical`=10 — and `_format_cef` derives the header slot from the same `severity`
+value the body carries, so the two can never disagree. The URL log's body
+`severity=Informational` (the live URL rows' value) therefore carries `|0|` in the header.
+
 ### Field coverage vs. the documented format
 
-Every key of the Syslog Collector's Traffic custom format is emitted, plus the columns the
-dataset's modeling rule and the live CLCS rows carry. Checked field by field 2026-10-22:
+Every documented traffic-log field this simulator has a real source for is emitted, plus the
+dataset columns the modeling rule reads. Checked against the official Traffic Log Fields
+page on 2026-10-27:
 
-| Documented / live key | Emitted as |
+| Documented key | Emitted as |
 |---|---|
-| `__firewall_type` `log_type` `subtype` | `firewall.traffic` / `firewall.url`; `log_type` lowercase as in the live rows; `subtype` **and** `sub_type` (the column the modeling rule reads) |
-| `__timestamp=$start`, `__tz=$high_res_timestamp` | session start; high-res timestamp (`…ss.mmm+00:00`), also as `time_generated_high_res` |
-| `log_time`, `time_generated`, `session_start_time` | ISO-8601 (the dataset types `time_generated` as a timestamp) |
-| `log_source_id` / `log_source_name` / `sequence_no` / `vsys` / `vsys_name` | from `panw_ngfw_config` |
-| `source_ip/port`, `dest_ip/port`, `nat_source/dest(_port)`, `protocol`, `action` | as documented; NAT only toward the internet |
-| `source_user`, `dest_user`, `users` | `EXAMPLECORP\user`; `users` falls back to the source address (as the live rows do without User-ID) |
-| `app`, `app_category`, `app_sub_category` (+ live `technology_of_app`, `risk_of_app`) | from the App-ID table, cross-checked against the live feed |
-| `rule_matched`, `rule_matched_uuid`, `from_zone`, `to_zone`, `inbound_if`, `outbound_if`, `session_id` | as documented |
-| `source_device_category/profile/model/vendor/osfamily/osversion/mac` | one stable Device-ID profile per host, from the session identity's `os_type`/`os_version`/`device_type` (internet sources get none) |
-| `dest_device_category/profile/model/vendor/osfamily/osversion/mac` | for internal destinations (DCs and servers get server profiles) |
-| `bytes_sent/received`, `packets_sent/received`, `total_time_elapsed`, `session_end_reason`, `url_category` | as documented; denies/drops are zero-byte |
-| live: `log_source`, `is_nat`, `is_proxy`, `source_location`, `dest_location`, `is_non_std_dest_port`, `non_standard_dest_port`, `bytes_total` | added |
+| `__firewall_type` `log_type` `subtype` `type` | routing keys; `log_type` lowercase as in the live rows, `type=TRAFFIC`/`THREAT`; `subtype` **and** `sub_type` (the dataset column the modeling rule reads) |
+| `__timestamp=$start`, `__tz=$high_res_timestamp` | session start; high-res timestamp (`…ss.mmm+00:00`), also as `high_res_timestamp` |
+| `receive_time` | ISO-8601. The doc defines Receive Time as `receive_time **or** cef-formatted-receive_time` (alternatives, plain vs CEF-escaped), so only `receive_time` is emitted |
+| `time_generated` | ISO-8601 (the dataset types it as a timestamp). The doc defines it as `time_generated **or** cef-formatted-time_generated`; only the plain form is emitted |
+| `log_time`, `session_start_time` | ISO-8601 (dataset columns, kept for the modeling rule) |
+| `serial` / `log_source_id` / `log_source_name` / `device_name` / `sequence_no` / `vsys` / `vsys_name` | from `panw_ngfw_config` (`serial` and `log_source_id` carry the same value) |
+| `src`/`dst`/`sport`/`dport`/`proto`/`rule`/`rule_uuid`/`from`/`to`/`sessionid`/`seqno` | documented aliases of `source_ip`/`dest_ip`/`source_port`/`dest_port`/`protocol`/`rule_matched`/`rule_matched_uuid`/`from_zone`/`to_zone`/`session_id`/`sequence_no` |
+| `natsrc`/`natdst`/`natsport`/`natdport` | aliases of `nat_source`/`nat_dest`/`nat_source_port`/`nat_dest_port`; NAT only toward the internet |
+| `srcuser`/`dstuser` | aliases of `source_user`/`dest_user`; `EXAMPLECORP\user` |
+| `app`, `category_of_app`, `subcategory_of_app`, `technology_of_app`, `risk_of_app`, `characteristic_of_app` | from the App-ID table, cross-checked against the live feed (`characteristic_of_app` carries the App-ID's sub-category) |
+| `container_of_app`, `tunneled_app`, `is_saas_of_app`, `sanctioned_state_of_app` | derived from the App-ID (`container_of_app` drops a `-base` suffix and folds `ms-ds-smb*`; `tunneled_app` is the App-ID itself) |
+| `bytes`, `packets`, `pkts_sent`, `pkts_received`, `start`, `elapsed`, `category`, `srcloc`, `dstloc` | aliases of `bytes_total`, `packets_sent + packets_received`, `packets_sent`, `packets_received`, `session_start_time`, `total_time_elapsed`, `url_category`, `source_location`, `dest_location` |
+| `action`, `action_source`, `actionflags`, `logset`, `repeatcnt`, `flags` | as documented (`logset` from `panw_ngfw_config.log_set`, `repeatcnt=1`, `flags`/`actionflags` = 0) |
+| `bytes_sent/received`, `packets_sent/received`, `total_time_elapsed`, `session_end_reason` | as documented; denies/drops are zero-byte (`packets_sent=1`, `packets_received=0`) |
+| `rule_matched`, `rule_matched_uuid`, `from_zone`, `to_zone`, `inbound_if`, `outbound_if`, `session_id` | dataset columns (the modeling rule reads these) |
+| Dataset-only columns the modeling rule also reads | `users`, `log_source`, `is_nat`, `is_proxy`, `source_location`, `dest_location`, `is_non_std_dest_port`, `non_standard_dest_port`, `bytes_total` (kept because the collector does not rename the body; not documented PAN fields) |
+| `src_category/profile/model/vendor/osfamily/osversion/host/mac` | one stable Device-ID profile per host, from the session identity's `os_type`/`os_version`/`device_type` (internet sources get none); also as dataset `source_device_*` |
+| `dst_category/profile/model/vendor/osfamily/osversion/host/mac` | for internal destinations (DCs and servers get server profiles); also as dataset `dest_device_*` |
+| `hostid` / `serialnumber` | GlobalProtect Host ID and user-device serial for a known source device (stable per host) |
+| `offloaded`, `flow_type`, `ai_traffic`, `ai_fwd_error` | `offloaded=0`, `flow_type=NonProxyTraffic`, `ai_traffic=false`, `ai_fwd_error=false` |
+| `src_adv_dev_id`, `dst_adv_dev_id` | Advanced Device IDs (PAN-OS 12.1.2+); the module stamps `12.1.12` and emits them for known internal endpoints |
+| `rt` | **omitted by default** — not a PAN traffic-log field and ignored for `_time` on this route; set `panw_ngfw_config.emit_rt=true` to emit it (CEF receipt-time convention) |
 | `xff_ip` | omitted (no proxy in front of the clients) |
-| URL format: `uri`, `url_category`, `url_category_list`, `http_method`, `threat_id`, `direction`, `user_agent`, `content_type`, `referer`, `http2_connection` | all emitted, plus live `url_domain`, `direction_of_attack`, `severity` |
+| `threatid`, `misc` (Threat / URL Filtering Log Fields) | documented alias keys of the URL log's `threat_id`/`uri` live columns (Threat/Content Name; URL/Filename — "the actual URI when the subtype is url"), emitted on URL logs |
+| `thr_category`, `contentver`, `pcap_id`, `url_idx` (URL Filtering / Threat Log Fields) | emitted on URL logs: `thr_category=URL filtering` (the threat class of subtype url); `contentver` (config `content_version`, default `8872-8916` — no live CLCS column); `pcap_id=0` — a live-anchored dataset column: every populated url row shows 0 (no associated pcap for an alert); `url_idx=0` — the live per-session URL-entry counter starts at 0 |
+| URL format: `uri`, `url_category`, `url_category_list`, `http_method`, `threat_id`, `direction`, `user_agent`, `content_type`, `referer`, `http2_connection` | all emitted, plus live `url_domain`, `direction_of_attack`, `severity`; URL logs share the traffic session's addresses, app metadata, Device-ID, `hostid`/`serialnumber` and advanced Device ID |
+
+Fields documented for the Traffic log but **not generated** because this simulator has no
+source for them: device-group hierarchy (`dg_hier_level_1..4`), VM UUIDs, tunnel/IMSI/IMEI,
+parent session, SCTP counters, app flap count, SD-WAN fields, dynamic user group, container
+/ POD / K8S fields, EDL and DAG names, session owner, network-slice fields, `cluster_name`,
+and the internal-use `tcp_*` telemetry fields. Threat-documentation fields that need a
+subtype this module does not generate are likewise not emitted (`filetype`, `cloud`,
+`filedigest`, `reportid`, `partial_hash` are WildFire/Data-Filtering fields; `sender`,
+`subject`, `recipient` are email fields), and `request_headers`/`response_headers`/
+`http_status_code` stay omitted because the simulated URL-filtering profile does not enable
+header or response-code logging (the docs note they are populated only then).
 
 ## Key field → XDM mappings (native PAN-OS traffic modeling rule)
 
@@ -113,9 +167,11 @@ PAN traffic logs carry addresses only; the domain lives in the URL-filtering log
 writes one for web sessions, keyed to the traffic log by `session_id`:
 
 ```
-CEF:0|PANW|NGFW_CEF|<sw>|url|threat|1| __firewall_type=firewall.url log_type=threat
-    subtype=url sub_type=url action=alert uri=<host><path> url_domain=<host>
-    url_category=.. url_category_list=<cat>,<low|high>-risk http_method=unknown threat_id=9999 ..
+CEF:0|PANW|NGFW_CEF|<sw>|url|threat|0| __firewall_type=firewall.url log_type=threat
+    subtype=url sub_type=url action=alert uri=<host><path> misc=<host><path>
+    url_domain=<host> url_category=.. url_category_list=<cat>,<low|high>-risk
+    http_method=unknown threat_id=9999 threatid=9999 thr_category=URL filtering
+    contentver=<content_version> pcap_id=0 url_idx=0 ..
 ```
 
 Shape learned from the live `panw_ngfw_url_raw` rows (`action=alert` for an allowed, logged
@@ -147,7 +203,12 @@ Dispatched from `_generate_benign_log`:
   `benign_egress_destinations`, named via `resolver` so the DNS answer and the firewall
   destination agree. The App-ID is coherent with the destination/port (`_app_for_dest`), and
   the source NATs behind `panw_ngfw_config.nat_pool_cidr` — or, when the user has a correlated
-  cloud sign-in on the activity bus, behind that sign-in's egress IP.
+  cloud sign-in on the activity bus, behind that sign-in's egress IP. The egress catalog is
+  35 destinations: the infrastructure/update/SaaS names plus streaming (YouTube, Netflix,
+  Spotify), social (LinkedIn, Facebook), storage (Dropbox, Box, Google Drive) — each mapped to
+  a specific App-ID (`dropbox-base`, `youtube-base`, …) and, for browser-based apps, to the
+  domain-coherent URL category (`streaming-media`, `social-networking`,
+  `online-storage-and-backup`) that both the traffic log and its URL log carry.
 - **Internal east-west (30%)** — `_benign_internal`: workstation → internal server on
   DNS / Kerberos / LDAP / SMB / RPC / RDP, so the AD/file/RDP baselines the analytics profile
   against exist. Client DNS always goes to the client's own Infoblox grid member.
@@ -178,6 +239,30 @@ that CEF cannot represent remain hunt/correlation-only.
 Targets name the alert the tenant actually raises. Informational alerts never reach the
 alerts table, so where a detector's base name is Informational and the shape produces a Low
 variation, the variation is the target (Port Scan fires as *Suspicious port scan*).
+
+### Rare-event budgeting
+
+The classic fixed weights made event rarity independent of runtime: at the Realistic gate
+(one threat event per 2 h) a 30-day month has ~360 threat slots, so `port_scan` fired ~18×
+and `rare_rdp`-class events ~9× — nothing was rare in the "at most once per month" sense a
+UEBA rollout needs, no matter how broad the address pools are. Budgeting (added 2026-10-27)
+re-allocates the same pie: every analytic event **not** in `_HIGH_VOLUME_EVENTS`
+(`port_scan`, `port_sweep`, `failed_connections`, large-upload https/smtp/ftp, `spam_bot`,
+`crypto_miner`, `torrent`) is capped so its **expected count ≤ 1 per
+`panw_ngfw_config.rarity_horizon_days` (default 30)** at the Realistic gate cadence, and the
+freed probability mass (≈16% of threat slots) flows to the high-volume vectors in proportion
+to their classic weights — a month is still 360 threat events, dealt as ~1 each to every
+analytic scenario plus a dozen-odd port scans/failed-connection volleys.
+
+- The six `_DAILY_EVENTS` (`recurring_rare_*`, `ddns_access`) are exempt: their cadence is
+  the once-per-UTC-day claim (`_due_daily`), which is the beacon-recurrence signal their
+  detectors key on; they are no longer in the weighted draw at all.
+- The cap is a probability (1/anchor-slots), so shorter intervals scale every event's
+  expected count proportionally (Extreme ≈ 12×/month, High ≈ 4×) — predictable, not magic.
+- `Insane` (80% of every call a threat, ~20.7M threat slots/30 days) **cannot** be budgeted
+  mathematically and always keeps the classic weights: it is a stress-test mode, not a
+  realism level.
+- `rarity_horizon_days: 0` restores the classic fixed-weight draw.
 
 **Status** is the in-tenant result of the 2026-10-22 detector test (each event fired at the
 broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag and host):
@@ -318,12 +403,17 @@ these values.
 | Key | Default | Meaning |
 |---|---|---|
 | `syslog_port` | `514` | Broker VM Syslog Collector port |
-| `serial_number` | `007051000012345` | firewall serial (`log_source_id`) |
+| `serial_number` | `007051000012345` | firewall serial — emitted as both `serial` (documented) and `log_source_id` (dataset column) |
 | `hostname` | `PA-VM-01` | firewall name (`log_source_name` / `device_name`, and the syslog header host when `syslog_hostname_format=hostname`) |
 | `mgmt_ip` | `10.0.0.1` | firewall management/source IP (used as the syslog header host when `syslog_hostname_format=ipv4-address`) |
 | `syslog_hostname_format` | `hostname` | what PAN stamps in the syslog header HOSTNAME field: `hostname` or `ipv4-address` (uses `mgmt_ip`) |
-| `sw_version` | `11.1.4` | PAN-OS release in the CEF device-version slot |
+| `sw_version` | `12.1.12` | PAN-OS release in the CEF device-version slot |
+| `content_version` | `8872-8916` | Apps and Threats content version stamped in the threat (url) logs' `contentver` field |
+| `rarity_horizon_days` | `30` | Rare-event budgeting horizon: each non-high-volume analytic event's expected count ≤1 per this many days at the Realistic gate; `0` = classic fixed weights (see *Rare-event budgeting* above). Insane always uses classic weights. |
 | `vsys` | `vsys1` | virtual system |
+| `emit_rt` | `false` | emit the CEF `rt` receipt-time key; not a PAN traffic-log field and ignored for `_time` here |
+| `log_set` | `Full EAL Logging` | value of the documented `logset` (Log Action) field |
+| `action_source` | `from-policy` | `action_source` (matches the live CLCS rows) |
 | `interface_lan` / `interface_wan` | `ethernet1/2` / `ethernet1/1` | inbound / outbound interfaces |
 | `default_rule` | `Allow-Users-Outbound` | benign `rule_matched` |
 | `nat_pool_cidr` | `203.0.113.0/27` | source-NAT egress pool |

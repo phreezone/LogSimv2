@@ -5012,7 +5012,16 @@
     "interface_dmz": "ethernet1/3",
     "default_rule": "Allow-Users-Outbound",
     "nat_pool_cidr": "203.0.113.0/27",
-    "domain_controllers": ["10.0.10.10", "10.0.20.10"]
+    "domain_controllers": [
+      "10.0.10.10",
+      "10.0.20.10"
+    ],
+    "rarity_horizon_days": 30,
+    "_comment_rarity_horizon_days": "Rare-event budgeting: every analytic NOT high-volume threat event is capped so its EXPECTED count is <=1 per this many days at the Realistic gate cadence (threat_generation_levels.Realistic seconds = 360 threat slots per 30 days); the freed probability mass flows to _HIGH_VOLUME_EVENTS (port_scan, port_sweep, failed_connections, large_upload https/smtp/ftp, spam_bot, crypto_miner, torrent) in proportion to their classic weights, so the threat pie stays the same size. The six recurring_/ddns daily events are exempt (they are claimed once per UTC day via _due_daily by design, not weight-sampled). Realistic yields <=1 per event per horizon; Extreme (4320 slots/30d) scales every cap proportionally to ~12. 0 disables budgeting and restores the classic fixed weights. Insane always keeps classic weights -- it is a stress mode.",
+    "emit_rt": false,
+    "_comment_emit_rt": "Emit the CEF rt receipt-time key. Not a PAN traffic-log field (live CLCS rows have rt=null) and ignored for _time on the Syslog-Collector custom-format path; opt in only for consumers that read rt.",
+    "log_set": "Full EAL Logging",
+    "action_source": "from-policy"
   },
   "firepower_config": {
     "hostname": "DC1-FTD-01",
