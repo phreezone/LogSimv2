@@ -58,7 +58,11 @@ These settings control the simulator's overall behavior.
 
 ## B. Transport Configuration
 
-This section defines *how* logs are sent. Each module uses one of four transport mechanisms: Syslog TCP, HTTP Collector, AWS S3, or Google Cloud Pub/Sub.
+This section defines *how* logs are sent. Each module has a native transport — Syslog TCP, HTTP Collector, AWS S3, Google Cloud Pub/Sub, WEC, or the XSIAM Cribl receiver — and falls back to the Cribl receiver when that transport is not configured or fails. See [Transports](transports.md).
+
+**`cribl_fallback`** (top level, default `true`) — set `false` to keep every module on its native transport. A module's own section can set it too.
+
+**`transport_retry_s`** (top level, default `300`) — after a native transport fails, how long its sends go to Cribl before it is tried again.
 
 ```json
 "http_collectors": {

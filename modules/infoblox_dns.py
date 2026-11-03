@@ -26,6 +26,7 @@ DESCRIPTION = "Simulates Infoblox DNS, DHCP, Audit, RPZ, and Threat Protect logs
 XSIAM_VENDOR = "infoblox"
 XSIAM_PRODUCT = "infoblox"
 CONFIG_KEY = "infoblox_config"
+SOURCE_IDENTIFIER = "af01292940d7426594d3d3e55ae17ee0"   # Cribl generic UUID -> <vendor>_<product>_raw
 
 # No threat here is offered for on-demand firing (modules/threat_catalog.py): Cortex
 # publishes no analytics for Infoblox data, and none has fired from it in the tenant --

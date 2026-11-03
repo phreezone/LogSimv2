@@ -95,6 +95,9 @@ NAME        = "Palo Alto Networks NGFW"
 DESCRIPTION = "Simulates Palo Alto Networks NGFW (PAN-OS) traffic logs in CEF syslog format."
 XSIAM_PARSER = "panw_ngfw_traffic_raw"
 CONFIG_KEY   = "panw_ngfw_config"
+SOURCE_IDENTIFIER = "af01292940d7426594d3d3e55ae17ee0"   # Cribl generic UUID -> <vendor>_<product>_raw
+XSIAM_VENDOR = "PANW"
+XSIAM_PRODUCT = "NGFW_CEF"
 
 last_threat_event_time = 0
 

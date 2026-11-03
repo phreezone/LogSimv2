@@ -91,6 +91,9 @@ NAME        = "Fortinet FortiGate"
 DESCRIPTION = "Simulates Fortinet FortiGate traffic, UTM, and event logs in CEF syslog format."
 XSIAM_PARSER = "fortinet_fortigate_raw"
 CONFIG_KEY   = "fortinet_config"
+SOURCE_IDENTIFIER = "af01292940d7426594d3d3e55ae17ee0"   # Cribl generic UUID -> <vendor>_<product>_raw
+XSIAM_VENDOR = "Fortinet"
+XSIAM_PRODUCT = "Fortigate"
 
 # Single source of truth for threat event names and their default weights.
 # Used as the fallback in _generate_threat_log and by get_threat_names().

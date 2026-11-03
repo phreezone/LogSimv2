@@ -78,6 +78,9 @@ NAME        = "Cisco Firepower"
 DESCRIPTION = "Simulates Cisco FTD/FMC CEF syslog events for the XSIAM cisco_firepower_raw dataset."
 XSIAM_PARSER = "cisco_firepower_raw"
 CONFIG_KEY   = "firepower_config"
+SOURCE_IDENTIFIER = "af01292940d7426594d3d3e55ae17ee0"   # Cribl generic UUID -> <vendor>_<product>_raw
+XSIAM_VENDOR = "Cisco"
+XSIAM_PRODUCT = "Firepower"
 
 # Single source of truth for threat event names and their default weights.
 # Used as the fallback in _generate_threat_log and by get_threat_names().

@@ -44,6 +44,9 @@ DESCRIPTION = "Simulates various AWS CloudTrail events to trigger XSIAM analytic
 XSIAM_VENDOR = "AWS"
 XSIAM_PRODUCT = "CloudTrail"
 CONFIG_KEY = "aws_config"
+NATIVE_TRANSPORT = "s3"
+SOURCE_IDENTIFIER = "c19f87b6262f48259b3d5d2a2c691802"   # Cribl "AWS audit logs" -> amazon_aws_raw
+INTEGRATION_IDENTIFIER = "logsim:aws_cloudtrail"
 last_threat_event_time = 0
 
 

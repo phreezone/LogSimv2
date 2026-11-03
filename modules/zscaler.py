@@ -97,6 +97,9 @@ DESCRIPTION = (
 )
 XSIAM_PARSER = "zscaler"
 CONFIG_KEY = "zscaler_config"
+SOURCE_IDENTIFIER = "af01292940d7426594d3d3e55ae17ee0"   # Cribl generic UUID -> <vendor>_<product>_raw
+XSIAM_VENDOR = "Zscaler"
+XSIAM_PRODUCT = "NSSWeblog"
 
 last_threat_event_time = 0
 

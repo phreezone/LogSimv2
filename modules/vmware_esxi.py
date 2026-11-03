@@ -61,6 +61,9 @@ NAME         = "VMware ESXi"
 DESCRIPTION  = "Simulates VMware ESXi host syslog for the XSIAM vmware_esxi_raw dataset."
 XSIAM_PARSER = "vmware_esxi_raw"
 CONFIG_KEY   = "vmware_esxi_config"
+SOURCE_IDENTIFIER = "af01292940d7426594d3d3e55ae17ee0"   # Cribl generic UUID -> <vendor>_<product>_raw
+XSIAM_VENDOR = "VMware"
+XSIAM_PRODUCT = "ESXi"
 
 # A real ESXi host is QUIET: outside the ambient vpxa poll it changes state rarely, so
 # the default cadence is far below the usual 1/s — ~0.01 events/s (one every 100 s). The
