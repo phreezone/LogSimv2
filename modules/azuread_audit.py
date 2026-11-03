@@ -245,21 +245,7 @@ def _b_admin_consent(cfg, app=None):
         app = new[0] if new else ac.admin_consent_app()
         _consented.add(app)
     admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",), owner_of=app)
-    app_id = ac.app_id(app)
-    mods = [mp("ConsentContext.IsAdminConsent", None, "True"),
-            mp("ConsentContext.OnBehalfOfAll", None, "True"),
-            mp("ConsentContext.Tags", None, "[]"),
-            mp("TargetId.ServicePrincipalNames", None, app_id),
-            mp("ServicePrincipal.AppId", None, app_id),
-            mp("ConsentAction.Permissions", None,
-               random.choice(["User.Read.All Group.Read.All openid profile offline_access",
-                              "User.Read.All Directory.Read.All openid profile",
-                              "User.Read openid profile email offline_access"]))]
-    return audit("Consent to application", "ApplicationManagement", "Core Directory", "Assign",
-                 by_user(admin), [t_obj("ServicePrincipal", app, mods)],
-                 [{"key": "User-Agent", "value": "EvoSTS"},
-                  {"key": "AppId", "value": app_id},
-                  {"key": "ServicePrincipalProvisioningType", "value": "Other"}])
+    return _app_lifecycle_record(cfg, "Consent to application", admin=admin, app=app)
 
 
 def _b_register_device(cfg):
@@ -446,6 +432,10 @@ def _catalog_record(config, entry):
         u = ac.pick_user(config)
         return audit(activity, category, service, op_type, by_user(u), [t_user(u)],
                      [_ua(u)], reason=activity)
+    if activity == "Consent to application":
+        # Tenant-wide admin consent comes only from the gated _b_admin_consent (rate + owner
+        # admin); a catalog draw of this activity is an ordinary user consent.
+        return _b_consent(config)
     if category == "ApplicationManagement":
         rec = _app_lifecycle_record(config, activity)
         if rec is not None:
@@ -468,10 +458,10 @@ def _catalog_record(config, entry):
 _CERT_MGMT_CREATE_ACTIVITY = "Create application – Certificates and secrets management "
 
 
-def _app_lifecycle_record(config, activity):
+def _app_lifecycle_record(config, activity, admin=None, app=None):
     """Faithful record for a calibrated ApplicationManagement activity, else None."""
-    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
-    app = _saas_app()
+    admin = admin or ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    app = app or _saas_app()
     app_id = ac.app_id(app)
     app_oid = ac._stable_guid("Application:" + app)
     sp_oid = ac._stable_guid("ServicePrincipal:" + app)
