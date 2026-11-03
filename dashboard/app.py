@@ -2331,18 +2331,29 @@ def _run_health_checks() -> dict:
     # independently, and the DNS-to-connection network story cannot be built.
     _rs = resolver.RESOLVER_STATE
     if _rs.get("ok"):
-        _synthetic_only = _rs.get("live", 0) == 0
+        # Degraded only when the curated zone is backed by NEITHER a live lookup NOR
+        # the cache (source == "synthetic") — then every curated address is a
+        # deterministic CIDR stand-in. A fresh cache of real IPs is healthy even when
+        # no NEW name resolved live this run (live == 0), and a handful of synthetic
+        # names is normal: internal (.local) and placeholder tenant domains
+        # (examplecorp.service-now.com, …) never resolve publicly by design.
+        _synth = _rs.get("synthetic", 0)
+        _degraded = _rs.get("source") == "synthetic"
         results.append({
             "group": "Threat Intel",
             "check": "Shared name resolution loaded",
-            "status": "warn" if _synthetic_only else "ok",
+            "status": "warn" if _degraded else "ok",
             "detail": (
                 f"{_rs.get('internal', 0)} internal ({_rs.get('ad_domain')}) + "
                 f"{_rs.get('curated', 0)}/{_rs.get('curated_total', 0)} curated names "
-                f"[{_rs.get('source')}]: {_rs.get('live', 0)} resolved live, "
-                f"{_rs.get('synthetic', 0)} synthetic"
-                + (" — no live DNS, addresses are synthetic (the DNS/firewall join "
-                   "still holds, the addresses just are not real)" if _synthetic_only else "")
+                f"[{_rs.get('source')}]: {_rs.get('live', 0)} resolved live this run, "
+                f"{_synth} synthetic"
+                + (" — no cache and no live DNS: ALL curated addresses are synthetic "
+                   "stand-ins (the DNS/firewall join still holds, the addresses just "
+                   "are not real). Restart once DNS is reachable." if _degraded
+                   else (f" (the {_synth} synthetic name(s) are internal/placeholder "
+                         "domains that do not resolve publicly — expected)"
+                         if _synth else ""))
             ),
         })
     else:

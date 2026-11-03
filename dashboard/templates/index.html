@@ -293,7 +293,7 @@
     .health-row { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 8px; padding: 7px 14px; border-bottom: 1px solid rgba(48,54,61,.5); font-size: 13px; }
     .health-row:last-child { border-bottom: none; }
     .health-icon { font-size: 14px; text-align: center; }
-    .health-detail { font-size: 11px; color: var(--text-muted); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
+    .health-detail { font-size: 11px; color: var(--text-muted); text-align: right; white-space: normal; overflow-wrap: anywhere; max-width: 360px; line-height: 1.4; }
 
     /* ── Bad User mode ──────────────────────────────────────────────────────── */
     .baduser-banner {
@@ -2024,7 +2024,7 @@
           <div class="health-row">
             <div class="health-icon" style="color:${statusColor[c.status]}">${statusIcon[c.status]}</div>
             <div style="font-size:13px;">${escHtml(c.check)}</div>
-            <div class="health-detail">${escHtml(c.detail)}</div>
+            <div class="health-detail" title="${escHtml(c.detail)}">${escHtml(c.detail)}</div>
           </div>`).join('');
 
         const card = document.createElement('div');
