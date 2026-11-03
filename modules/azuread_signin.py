@@ -813,6 +813,24 @@ def scenario_email_service_abuse(config=None, user=None):
     return ga.burst(app, calls, roles="Mail.Send User.Read.All", span_s=150)
 
 
+def scenario_app_credential_first_use(config=None, user=None):
+    """Cross-feed chain with azuread_audit `app_credential_added`: that feed adds a certificate/
+    secret to 'Internal Automation App' (Core Directory audit record); detectors then look for the
+    credential's FIRST use as an app-only sign-in. Here the SP signs in with the freshly added
+    credential (clientSecret/cert) shaped like the audit record's KeyType, from external egress."""
+    loc = ac.rare_asn_loc()                            # credential read offline -> odd egress
+    rec = _sp_signin(loc)
+    rec["appId"] = ac.app_id("Internal Automation App")
+    rec["appDisplayName"] = "Internal Automation App"
+    rec["servicePrincipalId"] = ac.user_oid("sp:Internal Automation App")
+    rec["servicePrincipalName"] = "Internal Automation App"
+    rec["clientCredentialType"] = random.choice(["clientSecret", "certificate"])
+    rec["riskState"] = "atRisk"
+    rec["riskLevelDuringSignIn"] = "medium"
+    rec["riskEventTypes_v2"] = ["unfamiliarFeatures"]
+    return [rec]
+
+
 SCENARIOS = {
     "brute_force": scenario_brute_force,
     "password_spray": scenario_password_spray,
@@ -891,6 +909,7 @@ SCENARIOS.update({
     "wip_service_account_sso": scenario_service_account_sso,
     "wip_machine_account_sso": scenario_machine_account_sso,
     "wip_dormant_account_sso": scenario_dormant_account_signin,
+    "wip_app_credential_first_use": scenario_app_credential_first_use,
 })
 
 ANALYTIC_ALERTS = {
@@ -931,6 +950,8 @@ ANALYTIC_ALERTS = {
     "wip_service_account_sso": "SSO authentication by a service account",
     "wip_machine_account_sso": "SSO authentication by a machine account",
     "wip_dormant_account_sso": "Dormant account authenticated via SSO",
+    # Ported from feature/batched-sends (documentation-based); alert name unverified.
+    "wip_app_credential_first_use": "First use of a newly added Azure application credential",
 }
 
 

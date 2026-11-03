@@ -292,6 +292,23 @@ def scenario_admin_role_removals(config=None):
             for _ in range(4)]
 
 
+def scenario_admin_password_reset(config=None, user=None):
+    """An attacker controlling an admin account RESETS a victim user's password ('Reset user
+    password.', verified in the audit-log activities doc, User administration activities
+    (https://learn.microsoft.com/en-us/purview/audit-log-activities)) and then signs in as
+    the victim from a risky IP -- the takeover chain: reset -> victim's RT15 login from the
+    attacker IP (never the victim's usual egress)."""
+    actor = ac.pick_by_role(config, _PRIV_ROLES, ("IT", "Security"))
+    victim = ac.pick_user(config)
+    ip = random.choice(RISKY_IPS)
+    # The takeover sign-in follows 45 s after the reset: stamped then, and held until then.
+    t0 = time.time()
+    return [_audit("Reset user password.", actor, ip, target_name=victim["upn"],
+                   modified=[{"Name": "User.Password", "NewValue": "****", "OldValue": ""}],
+                   offset_s=0),
+            deferred.at(_signin("UserLoggedIn", victim, ip, offset_s=45), t0 + 45)]
+
+
 SCENARIOS = {
     "password_spray": scenario_password_spray,
     "brute_force": scenario_brute_force,
@@ -307,6 +324,7 @@ SCENARIOS = {
     "user_deletion": scenario_user_deletion,
     "pim_role_change": scenario_pim_role_change,
     "admin_role_removals": scenario_admin_role_removals,
+    "admin_password_reset": scenario_admin_password_reset,
 }
 
 

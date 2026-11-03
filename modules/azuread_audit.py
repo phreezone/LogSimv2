@@ -134,8 +134,8 @@ def _add_user_mods(upn, name):
 
 
 def audit(activity, category, service, op_type, initiator, targets,
-          details=None, result="success", reason="", offset_s=0.0):
-    corr = str(uuid.uuid4())
+          details=None, result="success", reason="", offset_s=0.0, corr=None):
+    corr = corr or str(uuid.uuid4())
     pfx = _ID_PREFIX.get(service, "Directory")
     # Real rows set resultReason only when there is a genuine reason (e.g. "Successfully completed
     # reset."); for lifecycle ops (Delete/Update/Enable/Disable user) the field is null, not an echo
@@ -1302,6 +1302,127 @@ def scenario_group_created_deleted(config=None):
     return [add, rem]
 
 
+# ── scenarios added against the official activity reference (feature/batched-sends) ──────
+# Activity names follow the Microsoft Entra audit activity reference (fetched 2026-10-28);
+# record shapes are documentation-based and not yet confirmed against tenant rows. Offered
+# on demand under wip_ keys until each alert is observed.
+
+def scenario_domain_authentication_change(config=None, dom=None):
+    """Convert a domain to/from federated auth -> 'Set domain authentication' (DirectoryManagement).
+    Same family as 'Set federation settings on domain': Sentinel's NRT_ADFSDomainTrustMods
+    matches BOTH strings under Azure domain federation settings modification, and real
+    directoryAudit rows carry the 'DomainAuthentication' modifiedProperty."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    dom = dom or random.choice(
+        ["cloudwidgets.com", "redlisted-vendor.net", "boxhill-logistics.co.uk",
+         "meridian-holdings.dev", "northgate-partners.io"])
+    return [audit("Set domain authentication", "DirectoryManagement", "Core Directory", "Update",
+                  by_user(admin),
+                  [t_obj("Directory", dom,
+                         [mp("DomainAuthentication", "Managed", "Federated")])],
+                  [_ua(admin)])]
+
+
+def scenario_account_disabled(config=None):
+    """A standard user account is disabled by an identity that doesn't normally manage
+    account state -> 'Azure AD account disabled' (attacker cover-tracks / denial of
+    access). Op name 'Disable account' VERIFIED (UserManagement, Core Directory)."""
+    actor = ac.pick_nonstandard_actor(config); tgt = ac.pick_user(config)
+    return [audit("Disable account", "UserManagement", "Core Directory", "Update",
+                  by_user(actor), [t_user(tgt, [mp("AccountEnabled", "True", "False")])],
+                  [_ua(actor)])]
+
+
+def scenario_mfa_state_disabled(config=None):
+    """Per-user MFA is flipped to disabled on a victim account (authentication downgrade
+    before a password-spray / replay attack) -> 'Azure AD per-user MFA state change'.
+    Op name 'Update per-user multifactor authentication state' VERIFIED (UserManagement,
+    Authentication Methods table). Service 'Authentication Methods' is module-consistent;
+    modifiedProperties values are representative (not doc-published)."""
+    actor = ac.pick_nonstandard_actor(config); tgt = ac.pick_user(config)
+    return [audit("Update per-user multifactor authentication state", "UserManagement",
+                  "Authentication Methods", "Update", by_user(actor),
+                  [t_user(tgt, [mp("State", "Enabled", "Disabled")])], [_ua(actor)])]
+
+
+def scenario_delegated_permission_grant(config=None):
+    """A high-privilege delegated Graph scope is granted to a rogue service principal
+    (OAuth consent abuse) -> 'Azure AD delegated permission grant'. Op name
+    'Add delegated permission grant' VERIFIED (ApplicationManagement, Core Directory)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    app = ac.rare_app_name()
+    return [audit("Add delegated permission grant", "ApplicationManagement", "Core Directory",
+                  "Assign", by_user(admin), [t_obj("ServicePrincipal", app,
+                  [mp("ConsentAction.Permissions", None, "User.ReadWrite.All Mail.ReadWrite"),
+                   mp("ConsentContext.IsAdminConsent", None, "True")])], [_ua(admin)])]
+
+
+def _rogue_app_chain(config):
+    """Shared chainer: 'Add application' -> 'Add service principal' -> 'Update application -
+    Certificates and secrets management' -> 'Delete application', one correlationId
+    (rogue app registered, seeded with a credential, then removed to hide the trail).
+    All four op names VERIFIED (ApplicationManagement, Core Directory)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    app = ac.rare_app_name()
+    corr = str(uuid.uuid4())
+    app_obj = t_obj("Application", app, [mp("AppId", None, ac.app_id(app)),
+                                         mp("DisplayName", None, app)])
+    out = [
+        audit("Add application", "ApplicationManagement", "Core Directory", "Add",
+              by_user(admin), [app_obj], [_ua(admin)], corr=corr),
+        audit("Add service principal", "ApplicationManagement", "Core Directory", "Add",
+              by_user(admin), [app_obj], [_ua(admin)], corr=corr),
+        audit(_CERT_MGMT_ACTIVITY,
+              "ApplicationManagement", "Core Directory", "Update", by_user(admin),
+              [app_obj, t_obj("None", None)], [_ua(admin)], corr=corr),
+        audit("Delete application", "ApplicationManagement", "Core Directory", "Delete",
+              by_user(admin), [app_obj], [_ua(admin)], corr=corr)]
+    offsets, t = [], 0
+    for _ in out:                     # 30-150 s between steps, always in order
+        offsets.append(t)
+        t += random.randint(30, 150)
+    return _sequence(out, offsets)
+
+
+def scenario_rogue_app_lifecycle(config=None):
+    """Rogue application registered with a service principal, a credential is seeded and
+    the app is hard-removed to leave no app object behind -> 'Azure rogue application
+    lifecycle' (multi-stage persistence story on one correlationId)."""
+    return _rogue_app_chain(config)
+
+
+def scenario_rogue_app_persists(config=None):
+    """Rogue application registered with a service principal and credential seeded, but
+    the Delete is NOT executed (the app identity persists for future abuse)."""
+    return _rogue_app_chain(config)[:3]
+
+
+def scenario_named_location_modified(config=None):
+    """A trusted named location's IP range is widened to include attacker infrastructure
+    (Condition Access 'trusted location' abuse -> downstream MFA skipped for those IPs)
+    -> 'Azure AD named location modified'. Op name 'Update named location' VERIFIED
+    (Policy, Conditional Access table); targetResource type 'Policy' and properties are
+    representative. # modifiedProperties wording unverified."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",))
+    return [audit("Update named location", "Policy", "Conditional Access", "Update",
+                  by_user(admin), [t_obj("Policy", "HQ Corporate Network",
+                  [mp("NamedLocation.CountryLookupMethod", None, None),
+                   mp("NamedLocation.IpRanges", None,
+                      "203.0.113.0/24,185.199.108.0/22")])], [_ua(admin)])]
+
+
+def scenario_sp_owner_granted(config=None):
+    """An owner is added to a service principal (persistence: the owner can then roll the
+    principal's credential and add itself to privileged app roles) -> 'Azure service
+    principal owner added'. Op name 'Add owner to service principal' VERIFIED
+    (ApplicationManagement, Core Directory)."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT",)); tgt = ac.pick_user(config)
+    return [audit("Add owner to service principal", "ApplicationManagement",
+                  "Core Directory", "Add", by_user(admin),
+                  [t_obj("ServicePrincipal", "External Reporting Connector"),
+                   t_user(tgt)], [_ua(admin)])]
+
+
 SCENARIOS = {
     "admin_role_add": scenario_admin_role_add,
     "consent_risky_app": scenario_consent_risky_app,
@@ -1367,6 +1488,14 @@ SCENARIOS.update({
     "wip_application_removed": scenario_sp_removed,
     "wip_service_principal_application_created": scenario_sp_created,
     "wip_azure_domain_verification": scenario_unverified_domain_added,
+    "wip_domain_authentication_change": scenario_domain_authentication_change,
+    "wip_account_disabled": scenario_account_disabled,
+    "wip_mfa_state_disabled": scenario_mfa_state_disabled,
+    "wip_delegated_permission_grant": scenario_delegated_permission_grant,
+    "wip_rogue_app_lifecycle": scenario_rogue_app_lifecycle,
+    "wip_rogue_app_persists": scenario_rogue_app_persists,
+    "wip_named_location_modified": scenario_named_location_modified,
+    "wip_sp_owner_granted": scenario_sp_owner_granted,
 })
 
 # On-demand threats (threat_catalog): only scenarios whose analytic has been SEEN firing
@@ -1419,6 +1548,15 @@ ANALYTIC_ALERTS = {
     "wip_application_removed": "Azure application removed",
     "wip_service_principal_application_created": "Azure Service principal/Application creation",
     "wip_azure_domain_verification": "A new Azure email domain verification was requested",
+    # Ported from feature/batched-sends; alert names from the scenarios' docstrings, unverified.
+    "wip_domain_authentication_change": "Azure domain federation settings modification",
+    "wip_account_disabled": "Azure AD account disabled",
+    "wip_mfa_state_disabled": "Azure AD per-user MFA state change",
+    "wip_delegated_permission_grant": "Azure AD delegated permission grant",
+    "wip_rogue_app_lifecycle": "Azure rogue application lifecycle",
+    "wip_rogue_app_persists": "Azure rogue application lifecycle",
+    "wip_named_location_modified": "Azure AD named location modified",
+    "wip_sp_owner_granted": "Azure service principal owner added",
 }
 
 
