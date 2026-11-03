@@ -14,6 +14,7 @@ import time
 import uuid
 
 from modules import azure_common as ac
+from modules import deferred
 from modules import azure_audit_catalog as _auditcat
 
 # O365 Management Activity directory operations (RecordType 8), derived from the Entra audit
@@ -90,12 +91,13 @@ def _signin(operation, user, ip, *, result_status="Success", error_number="0",
     }
 
 
-def _audit(operation, actor, ip, target_name=None, modified=None, result_status="Success"):
+def _audit(operation, actor, ip, target_name=None, modified=None, result_status="Success",
+           offset_s=0):
     """Audit.AzureActiveDirectory directory-change record (RecordType 8 = AzureActiveDirectory)."""
     upn = actor["upn"]
     rid = _g()
     return {
-        "CreationTime": _now(), "Id": rid, "Operation": operation, "OrganizationId": ORG_ID,
+        "CreationTime": _now(offset_s), "Id": rid, "Operation": operation, "OrganizationId": ORG_ID,
         "RecordType": 8, "ResultStatus": result_status,
         "UserKey": ac.user_oid(actor["username"]), "UserType": 0,
         "Version": 1, "Workload": "AzureActiveDirectory", "ObjectId": target_name or _g(),
@@ -268,9 +270,11 @@ def scenario_user_create_delete_short(config=None, user=None):
     'Azure AD user created and deleted in a short time period'."""
     actor = ac.pick_user(config); ip = ac.egress(actor)["ip"]
     burner = f"temp_{random.randint(1000, 9999)}@{ac.UPN_DOMAIN}"
+    gap = random.randint(60, 600)   # deleted minutes later; sent when it happens (deferred)
     return [_audit("Add user.", actor, ip, target_name=burner,
                    modified=[{"Name": "AccountEnabled", "NewValue": "True", "OldValue": ""}]),
-            _audit("Delete user.", actor, ip, target_name=burner)]
+            deferred.at(_audit("Delete user.", actor, ip, target_name=burner, offset_s=gap),
+                        time.time() + gap)]
 
 
 def scenario_pim_role_change(config=None, user=None):

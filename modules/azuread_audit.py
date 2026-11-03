@@ -25,6 +25,7 @@ import time
 import uuid
 
 from modules import azure_common as ac
+from modules import deferred
 from modules import azure_audit_catalog as cat
 from modules import graph_activity as ga
 
@@ -69,6 +70,24 @@ _CA_POLICIES = [n for n, _ in ac.CA_POLICIES]
 def _ts(offset_s=0.0):
     d = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=min(0.0, offset_s))
     return f"{d:%Y-%m-%dT%H:%M:%S}.{d.microsecond:06d}{random.randint(0, 9)}Z"
+
+
+def _ts_at(at):
+    """activityDateTime for epoch `at`."""
+    d = datetime.datetime.fromtimestamp(at, datetime.timezone.utc)
+    return f"{d:%Y-%m-%dT%H:%M:%S}.{d.microsecond:06d}{random.randint(0, 9)}Z"
+
+
+def _sequence(out, offsets, start=None):
+    """Time a multi-step scenario: step i happens offsets[i] seconds after `start` (default
+    now). Each step is stamped with its own time and a step still in the future is held by
+    the sender until then (modules.deferred), so it is never sent before it happened.
+    Callers that embed the steps in a back-dated story pass an earlier `start`."""
+    t0 = time.time() if start is None else start
+    for i, (rec, off) in enumerate(zip(out, offsets)):
+        rec["activityDateTime"] = _ts_at(t0 + off)
+        out[i] = deferred.at(rec, t0 + off)
+    return out
 
 
 def _code():
@@ -753,7 +772,7 @@ def _rogue():
     return ac.rare_tenant()
 
 
-def scenario_cross_tenant_trust_abuse(config=None, rogue=None):
+def scenario_cross_tenant_trust_abuse(config=None, rogue=None, start=None):
     """Attacker trusts a rogue external tenant and opens inbound B2B + cross-tenant sync
     (the cloud 'rogue forest trust'): CrossTenantAccessSettings + CrossTenantIdentitySyncSettings
     changes granting inbound collaboration/direct-connect, MFA trust, auto-redemption and inbound
@@ -772,7 +791,7 @@ def scenario_cross_tenant_trust_abuse(config=None, rogue=None):
         t = t_obj("Policy", f"CrossTenantAccessPolicy for {ac.HOME_TENANT_ID}", mods)
         t["id"] = ac._stable_guid("xtap:" + dom)
         return t
-    return [
+    out = [
         audit("Add a partner to cross-tenant access setting", "CrossTenantAccessSettings",
               "Core Directory", "Add", by_user(admin),
               [_xtap([mp("tenantId", None, tid)])], [_ua(admin)]),
@@ -793,14 +812,15 @@ def scenario_cross_tenant_trust_abuse(config=None, rogue=None):
                      [mp("tenantId", None, tid),
                       mp("userSyncInbound.isSyncAllowed", "false", "true")])],
               [_ua(admin)])]
+    return _sequence(out, [0, 20, random.randint(120, 600)], start)
 
 
-def scenario_cross_tenant_sync_outbound(config=None, rogue=None):
+def scenario_cross_tenant_sync_outbound(config=None, rogue=None, start=None):
     """Outbound cross-tenant sync: OUR users are provisioned OUT to the rogue tenant (user/data
     exfiltration via the identity fabric, T1537)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
     rogue = rogue or _rogue(); dom, tid = rogue["domain"], rogue["tenant_id"]
-    return [
+    out = [
         audit("Update a partner cross-tenant access setting", "CrossTenantAccessSettings",
               "Core Directory", "Update", by_user(admin),
               [t_obj("Other", dom,
@@ -812,30 +832,32 @@ def scenario_cross_tenant_sync_outbound(config=None, rogue=None):
               [t_obj("Other", dom,
                      [mp("tenantId", None, tid),
                       mp("userSyncOutbound.isSyncAllowed", "false", "true")])], [_ua(admin)])]
+    return _sequence(out, [0, random.randint(120, 900)], start)
 
 
-def scenario_delegated_admin_partner_abuse(config=None, rogue=None):
+def scenario_delegated_admin_partner_abuse(config=None, rogue=None, start=None):
     """External delegated-admin (GDAP/DAP) partner promoted with Global Admin over the tenant —
     partner-tenant takeover (T1098 Account Manipulation / abuse of delegated administration)."""
     admin = ac.pick_by_role(config, ("IT Director",), ("IT",))
     partner = (rogue or _rogue())["domain"]
     pid = ac._stable_guid("gdap:" + partner)
-    return [
+    out = [
         audit("Add partner to company", "DirectoryManagement", "Core Directory", "Add",
               by_user(admin), [t_obj("Directory", partner, [mp("PartnerTenantId", None, pid)])], [_ua(admin)]),
         audit("Promote company to partner", "DirectoryManagement", "Core Directory", "Add",
               by_user(admin), [t_obj("Directory", partner,
                      [mp("DelegatedAdminRelationship", None, "Global Administrator"),
                       mp("AccessAssignment", None, "Microsoft Entra Global Administrator")])], [_ua(admin)])]
+    return _sequence(out, [0, random.randint(60, 300)], start)
 
 
-def scenario_multitenant_org_join(config=None, rogue=None):
+def scenario_multitenant_org_join(config=None, rogue=None, start=None):
     """Tenant joined into an attacker-run multi-tenant org with identity sync — cloud cross-tenant
     fabric persistence (the cloud analog of joining a rogue forest)."""
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
     rogue = rogue or _rogue()
     mto = rogue["domain"].split(".")[0].replace("-", " ").title() + " MTO"
-    return [
+    out = [
         audit("Create a MultiTenantOrg", "MultiTenantOrg", "Core Directory", "Add", by_user(admin),
               [t_obj("Other", mto, [mp("tenantId", None, rogue["tenant_id"]),
                                     mp("role", None, "owner"), mp("state", None, "active")])], [_ua(admin)]),
@@ -843,6 +865,7 @@ def scenario_multitenant_org_join(config=None, rogue=None):
               "MultiTenantOrgIdentitySyncPolicyUpdate", "Core Directory", "Update", by_user(admin),
               [t_obj("Other", mto, [mp("templateApplicationLevel", None, "MemberAndOwnerTenants"),
                                     mp("userSyncInbound.isSyncAllowed", "false", "true")])], [_ua(admin)])]
+    return _sequence(out, [0, random.randint(120, 900)], start)
 
 
 def scenario_cross_tenant_default_weakened(config=None):
@@ -1470,7 +1493,8 @@ def _with_eventhub(records, benign):
         out.append(r)
         if (isinstance(r, dict) and "activityDisplayName" in r and not ac.is_eventhub_copy(r)
                 and not (benign and cat.is_cloud_alerting(r["activityDisplayName"]))):
-            out.append(ac.eventhub_audit(r))
+            # The copy carries the step's time, so it is held with the step (modules.deferred).
+            out.append(deferred.at(ac.eventhub_audit(r), deferred.release_at(r)))
     return out
 
 
