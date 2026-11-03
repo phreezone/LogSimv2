@@ -8,25 +8,33 @@
 # Format=CEF.  The header and extension layout are PAN-OS's own "Custom Log Format" for
 # the Syslog Collector (Cortex XDR/XSIAM "Ingest NGFW logs using the Syslog collector"):
 #
-#   CEF:0|PANW|NGFW_CEF|<sw_version>|<subtype>|<type>|1| __firewall_type=firewall.traffic
-#       __timestamp=<start> __tz=<high_res_ts> log_type=TRAFFIC subtype=end
-#       log_time=.. time_generated=.. source_ip=.. dest_ip=.. ... <literal key=value> ..
+#   CEF:0|PANW|NGFW_CEF|<sw_version>|<subtype>|<type>|<severity>| __firewall_type=firewall.traffic
+#       __timestamp=<start> __tz=<high_res_ts> log_type=traffic type=TRAFFIC subtype=end
+#       log_time=.. time_generated=.. receive_time=.. source_ip=.. src=.. ... <literal key=value> ..
 #
 # IMPORTANT: PAN-OS does NOT use the ArcSight numbered extension keys (cs1/cs4/flexNumber1).
-# Its CEF custom format emits LITERAL key names (source_ip, dest_port, app, bytes_sent, ...)
-# that match the panw_ngfw_traffic_raw column names 1:1.  The native Cortex PAN-OS parser
-# reads `__firewall_type` + `log_type`/`subtype` to land the event in panw_ngfw_traffic_raw;
+# The documented custom format uses LITERAL names (serial, receive_time, src, dst, sport,
+# dport, proto, rule, from, to, ...), while panw_ngfw_traffic_raw stores normalized columns
+# (log_source_id, source_ip, dest_ip, source_port, dest_port, protocol, rule_matched,
+# from_zone, to_zone, ...).  The collector does not rewrite the body, so the module sends
+# BOTH: the documented key for schema fidelity and the dataset column for existing
+# parser/detector mappings (see _PAN_ALIASES).  The native Cortex PAN-OS parser reads
+# `__firewall_type` + `log_type`/`subtype` to land the event in panw_ngfw_traffic_raw;
 # no content pack install is required (Cortex parses PAN-OS natively).
 #
 # Do NOT send product=ngfw_cef on the *derived* ingest route — that lands in
 # panw_ngfw_cef_raw with no_hit=drop and is discarded.  The NGFW_CEF product here is the
 # native Syslog-Collector custom format, routed by `__firewall_type`, which is the
 # supported path.  The collector routes on that key but does not rewrite the body: every
-# key lands as a column of the same name, so keys must use the dataset's column names.
+# key lands as a column of the same name, which is why the dataset columns (sub_type,
+# source_ip, ...) are still sent alongside their documented PAN equivalents.
 #
 # NO BACK-DATING on this path (measured 2026-10-22): _time is always the ingestion time.
 # Neither `rt` nor `__timestamp` (epoch ms, "YYYY/MM/DD HH:MM:SS", ISO-Z, or PAN's
-# cef-formatted time) moves it; the intended time survives only in time_generated / rt.
+# cef-formatted time) moves it; the intended time survives only in the event-time fields
+# (log_time / time_generated / high_res_timestamp / session_start_time).  `rt` is a
+# CEF convention, NOT a PAN traffic-log field, and is emitted only when
+# panw_ngfw_config.emit_rt is true (default false; the live CLCS rows have rt=null).
 # So anything a detector must see on SEPARATE DAYS (recurring beacons, an SSH habit) has to
 # be emitted on real days while the module runs: see _DAILY_EVENTS and _ssh_habit_users().
 #
@@ -158,6 +166,15 @@ _APP = {
     "dns-over-https":  ("general-internet", "internet-utility",  "browser-based",   "Medium",        [443]),
     "tftp":            ("general-internet", "file-sharing",      "client-server",   "High",          [69]),
     "telnet":          ("networking",       "remote-access",     "client-server",   "High",          [23]),
+    # Consumer / SaaS App-IDs for the broadened benign egress catalog (Applipedia names;
+    # see the benign_egress_destinations entries that map to them via _DOMAIN_APP).
+    "dropbox-base":    ("collaboration",    "file-sharing",      "client-server",   "Low",           [443]),
+    "box-base":        ("collaboration",    "file-sharing",      "client-server",   "Low",           [443]),
+    "youtube-base":    ("media",            "streaming",         "browser-based",   "Low",           [443]),
+    "netflix-base":    ("media",            "streaming",         "browser-based",   "Low",           [443]),
+    "spotify-base":    ("media",            "streaming",         "browser-based",   "Low",           [443]),
+    "linkedin-base":   ("business-systems", "social-business",   "browser-based",   "Low",           [443]),
+    "facebook-base":   ("general-internet", "social-business",   "browser-based",   "Medium",        [443]),
 }
 
 # Benign external destination-domain -> the App-ID that destination's traffic is
@@ -170,6 +187,9 @@ _DOMAIN_APP = [
     ("googleapis", "google-base"), ("google", "google-base"),
     ("zoom", "zoom-base"), ("slack", "slack-base"), ("salesforce", "salesforce-base"),
     ("github", "ssl"), ("gmail", "gmail-base"),
+    ("dropbox", "dropbox-base"), ("box.com", "box-base"),
+    ("youtube", "youtube-base"), ("netflix", "netflix-base"), ("spotify", "spotify-base"),
+    ("linkedin", "linkedin-base"), ("facebook", "facebook-base"),
     ("paloaltonetworks", "paloalto-updates"), ("apple", "apple-update"),
     ("okta", "ssl"), ("service-now", "ssl"), ("zendesk", "ssl"), ("atlassian", "ssl"),
     ("docusign", "ssl"), ("workday", "ssl"), ("twilio", "ssl"), ("stripe", "ssl"),
@@ -193,6 +213,23 @@ def _app_for_dest(domain, port):
         return "web-browsing"
     return random.choice(["ssl", "ssl", "web-browsing", "quic-base"])
 
+
+def _app_container(app):
+    """Parent application for an App-ID (the dataset's container_of_app column).
+
+    PAN reports the containing application separately from the App-ID itself; for the
+    names in this catalog the convention is to drop a trailing ``-base`` (dns-base ->
+    dns) and to fold the SMB dialect suffixes back to ms-ds-smb.
+    """
+    app = str(app or "")
+    if not app:
+        return ""
+    if app.endswith("-base"):
+        return app[:-5]
+    if app.startswith("ms-ds-smb"):
+        return "ms-ds-smb"
+    return app
+
 # Internal east-west benign apps (host -> internal server), so AD/file/RDP baselines exist.
 _INTERNAL_APP_MIX = [
     ("dns-base", 20), ("kerberos", 16), ("ldap", 12), ("ms-ds-smbv3", 14),
@@ -215,8 +252,46 @@ _URL_CAT_RISKY   = ["malware", "command-and-control", "phishing", "proxy-avoidan
                     "dynamic-dns", "newly-registered-domain", "hacking", "unknown",
                     "peer-to-peer", "questionable", "grayware"]
 
-_SW_VERSION = "11.1.4"       # PAN-OS release stamped in the CEF device-version slot
+# The URL category the firewall's URL-filtering verdict assigns to a benign destination by
+# domain, so a streaming visit is not labelled "health-and-medicine": _traffic_fields picks
+# a random benign category for browser-based apps (line: url_category), which is right for
+# most destinations but not for a known streaming/social/storage one.  Consulted in
+# _benign_external and passed to BOTH the traffic fields and the url record so a
+# session's two logs carry the same category.  Unmapped destinations keep the previous
+# behavior (random benign category for browser-based apps, url default otherwise).
+_DOMAIN_URLCAT = [
+    ("youtube", "streaming-media"), ("netflix", "streaming-media"), ("spotify", "streaming-media"),
+    ("facebook", "social-networking"), ("linkedin", "social-networking"),
+    ("drive", "online-storage-and-backup"),
+]
+
+_SW_VERSION = "12.1.12"      # PAN-OS release stamped in the CEF device-version slot
+# Apps and Threats content version stamped in the THREAT (url) log's `contentver` field
+# ("Content Version (contentver) — Applications and Threats version on your firewall when
+# the log was generated", threat-log-fields).  Not a live CLCS column; a stable pair the
+# way a firewall reports it between content releases.
+_CONTENT_VERSION = "8872-8916"
+_SEVERITY_CEF = {"informational": 0, "low": 3, "medium": 6, "high": 8, "critical": 10}
+
+
+def _cef_severity_slot(severity):
+    """Numeric CEF header severity for the body `severity` value.
+
+    The CEF header's severity slot is an integer (0-10, CEF spec).  Traffic rows keep the
+    live feed's literal "1" body value, which passes through as 1 (the CEF "unrated"
+    default).  Documented threat severity words (threat-log-fields: informational, low,
+    medium, high, critical) map onto the scale, so the header slot always agrees with the
+    body instead of being hardcoded.
+    """
+    try:
+        return int(str(severity))
+    except ValueError:
+        return _SEVERITY_CEF.get(str(severity).lower(), 1)
+
+
 _SYSLOG_PRI = 14             # facility LOG_USER(1)*8 + notice(6)=14 (PAN syslog default LOG_USER)
+_DEFAULT_LOG_SET = "Full EAL Logging"
+_DEFAULT_ACTION_SOURCE = "from-policy"
 
 # Device-ID OS families seen on endpoints, for source_device_osfamily.
 _SRC_OSFAMILY = [("Windows", 60), ("Mac", 18), ("Linux", 12), ("iOS", 6), ("Android", 4)]
@@ -309,6 +384,26 @@ _PROFILES = {"Windows": "Windows Workstation", "Mac": "Apple Mac", "Linux": "Lin
 
 def _h(s):
     return int(hashlib.sha256(str(s).encode()).hexdigest(), 16)
+
+
+def _device_serial(host_or_ip):
+    """Stable synthetic machine serial for Device-ID (serialnumber).
+
+    The live TAP feed leaves this null, but PAN populates it when the endpoint is known to
+    GlobalProtect/Device-ID.  Deriving it from the host keeps every log for that host on the
+    same serial without inventing a per-event value.
+    """
+    return f"{_h(f'devserial|{host_or_ip}') % 10**12:012d}"
+
+
+def _host_id(host_or_ip):
+    """Stable GlobalProtect Host ID (hostid) for a known device."""
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"panw-hostid|{host_or_ip}"))
+
+
+def _adv_dev_id(host_or_ip):
+    """Stable Advanced Device ID (src_adv_dev_id / dst_adv_dev_id, PAN-OS 12.1.2+)."""
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"panw-advdevid|{host_or_ip}"))
 
 
 def _remember(info):
@@ -432,17 +527,83 @@ def _zone_if(forti, zone):
 # ---------------------------------------------------------------------------
 # CEF builder
 # ---------------------------------------------------------------------------
+# The official PAN-OS Traffic Log Fields list is the source of truth for which keys
+# exist: https://docs.paloaltonetworks.com/.../traffic-log-fields
+# The Syslog Collector routes on __firewall_type but does NOT rename the body, so the
+# module also keeps the dataset column names the parser/modeling rule already read
+# (source_ip, dest_ip, ...).  `_PAN_ALIASES` maps each documented key to that column.
+# CLCS-only columns that have no documented equivalent are NOT generated.
+_PAN_ALIASES = {
+    # Addresses, ports, protocol, policy
+    "src": "source_ip",
+    "dst": "dest_ip",
+    "sport": "source_port",
+    "dport": "dest_port",
+    "natsrc": "nat_source",
+    "natdst": "nat_dest",
+    "natsport": "nat_source_port",
+    "natdport": "nat_dest_port",
+    "proto": "protocol",
+    "rule": "rule_matched",
+    "rule_uuid": "rule_matched_uuid",
+    "from": "from_zone",
+    "to": "to_zone",
+    "sessionid": "session_id",
+    # Users
+    "srcuser": "source_user",
+    "dstuser": "dest_user",
+    # Volume and timing
+    "bytes": "bytes_total",
+    "start": "session_start_time",
+    "elapsed": "total_time_elapsed",
+    "pkts_sent": "packets_sent",
+    "pkts_received": "packets_received",
+    # Log / URL / application metadata
+    "category": "url_category",
+    "seqno": "sequence_no",
+    "srcloc": "source_location",
+    "dstloc": "dest_location",
+    "category_of_app": "app_category",
+    "subcategory_of_app": "app_sub_category",
+    # Device-ID (documented src_*/dst_* -> dataset source_device_*/dest_device_*)
+    "src_category": "source_device_category",
+    "src_profile": "source_device_profile",
+    "src_model": "source_device_model",
+    "src_vendor": "source_device_vendor",
+    "src_osfamily": "source_device_osfamily",
+    "src_osversion": "source_device_osversion",
+    "src_host": "source_device_host",
+    "src_mac": "source_device_mac",
+    "dst_category": "dest_device_category",
+    "dst_profile": "dest_device_profile",
+    "dst_model": "dest_device_model",
+    "dst_vendor": "dest_device_vendor",
+    "dst_osfamily": "dest_device_osfamily",
+    "dst_osversion": "dest_device_osversion",
+    "dst_host": "dest_device_host",
+    "dst_mac": "dest_device_mac",
+    # Documented threat-log key names (threat-log-fields / url-filtering-log-fields) for
+    # columns the URL log caries: Threat/Content Name (threatid) and URL/Filename (misc,
+    # "the actual URI when the subtype is url").  threat_id/uri exist only on URL logs.
+    "threatid": "threat_id",
+    "misc": "uri",
+}
+
+
 def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None, fw_type=None):
     """Build one PAN-OS NGFW_CEF syslog line.
 
     Header:  CEF:0|PANW|NGFW_CEF|<sw>|<subtype>|<type>|<sev>|
     Body:    literal key=value pairs (PAN custom log format), space separated.
-    `ts` is the event epoch seconds (defaults to now); it drives log_time/time_generated/rt.
+    `ts` is the event epoch seconds (defaults to now); it drives log_time/time_generated/
+    receive_time.  `rt` is NOT a PAN field: it is emitted only when
+    panw_ngfw_config.emit_rt is true, and it does not drive XSIAM _time on this route.
     `fw_type` overrides the __firewall_type routing key: a URL log is log_type THREAT but
     routes as firewall.url (into panw_ngfw_url_raw).
     """
     t = ts if ts is not None else time.time()
     serial, name = _serial(config), _fw_name(config)
+    sw = _get_config(config).get("sw_version", _SW_VERSION)
     iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t))
     # The documented __timestamp is $start (session START) and __tz is $high_res_timestamp;
     # time_generated is when the log was written, i.e. the session end.
@@ -461,13 +622,17 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
         # `sub_type`, the column the dataset (and its modeling rule's FAILED-on-deny/drop
         # outcome) actually reads, and log_type is lowercase as in the live CLCS rows.
         "log_type":        log_type.lower(),
+        "type":            log_type.upper(),
         "subtype":         subtype,
         "sub_type":        subtype,
         "log_time":        iso,
         "time_generated":  iso,
-        "rt":              str(int(t * 1000)),   # event time; _time is still the ingest time
-        "time_generated_high_res": hires,
+        # Documented as "receive_time or cef-formatted-receive_time": they are alternatives
+        # for the same value (plain vs CEF-escaped form), so only receive_time is emitted.
+        "receive_time":    iso,
+        "high_res_timestamp": hires,
         "session_start_time": start_iso,
+        "serial":          serial,
         "log_source_id":   serial,
         "log_source_name": name,
         "sequence_no":     _seqno(),
@@ -475,7 +640,22 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
         "vsys_name":       _get_config(config).get("vsys", "vsys1"),
         "device_name":     name,
         "severity":        str(severity),
+        # Documented traffic-log fields this module can derive for every event.
+        "logset":          _get_config(config).get("log_set", _DEFAULT_LOG_SET),
+        "action_source":   _get_config(config).get("action_source", _DEFAULT_ACTION_SOURCE),
+        "repeatcnt":       1,
+        "flags":           0,
+        "actionflags":     0,
+        "flow_type":       "NonProxyTraffic",
+        "offloaded":       0,
+        "ai_traffic":      "false",
+        "ai_fwd_error":    "false",
     }
+    if _get_config(config).get("emit_rt", False):
+        # CEF/ArcSight device-receipt-time convention.  Not a PAN field and ignored for
+        # _time on the Syslog-Collector custom-format path; opt-in only for consumers that
+        # still read rt.
+        base["rt"] = str(int(t * 1000))
     merged = {**base, **fields}
     # AD-qualify bare usernames so XSIAM Identity stitches firewall users with cloud users.
     keep_bare = merged.pop("_no_user_qualify", False)
@@ -485,9 +665,16 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
             continue                    # no User-ID: the column holds the address
         if uv and "\\" not in str(uv) and "@" not in str(uv) and not keep_bare:
             merged[uf] = f"EXAMPLECORP\\{uv}"
+    # Add the documented PAN key for each dataset column we already emit.  Done after the
+    # username qualification so srcuser/dstuser carry the same qualified value.
+    for pan_key, ds_key in _PAN_ALIASES.items():
+        if pan_key in merged:
+            continue
+        value = merged.get(ds_key)
+        if value is not None and value != "":
+            merged[pan_key] = value
     ext = " ".join(f"{k}={_cef_escape(v)}" for k, v in merged.items() if v is not None and v != "")
-    sw = _get_config(config).get("sw_version", _SW_VERSION)
-    header = f"CEF:0|PANW|NGFW_CEF|{sw}|{subtype}|{log_type.lower()}|{severity}|"
+    header = f"CEF:0|PANW|NGFW_CEF|{sw}|{subtype}|{log_type.lower()}|{_cef_severity_slot(severity)}|"
     syslog_ts = time.strftime("%b %d %H:%M:%S", time.gmtime(t))
     return f"<{_SYSLOG_PRI}>{syslog_ts} {_syslog_host(config)} {header} {ext}"
 
@@ -519,6 +706,10 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
         # outbound packet, nothing back. Both deny and drop carry the policy-block end reason.
         bytes_sent, bytes_received, duration_s = 0, 0, 0
         end_reason = "policy-deny"
+    # A packet count is 0 when that direction carried no bytes (a blocked SYN gets one
+    # sent packet and no reply), else at least one.
+    pkts_sent = 1 if denied else (max(1, bytes_sent // 600) if bytes_sent else 0)
+    pkts_recv = 0 if denied else (max(1, bytes_received // 1200) if bytes_received else 0)
     f = {
         "source_ip":        src_ip,
         "source_port":      spt,
@@ -531,6 +722,11 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
         "app_sub_category": meta[1],
         "technology_of_app":meta[2],
         "risk_of_app":      meta[3],
+        "container_of_app": _app_container(app),
+        "tunneled_app":     app,
+        "characteristic_of_app": meta[1],
+        "is_saas_of_app":   1 if meta[0] == "saas" else 0,
+        "sanctioned_state_of_app": 0,
         "from_zone":        from_zone,
         "to_zone":          to_zone,
         "inbound_if":       in_if,
@@ -541,10 +737,9 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
         "bytes_sent":       bytes_sent,
         "bytes_received":   bytes_received,
         "bytes_total":      bytes_sent + bytes_received,
-        # A packet count is 0 when that direction carried no bytes (a blocked SYN gets one
-        # sent packet and no reply), else at least one.
-        "packets_sent":     (1 if denied else (max(1, bytes_sent // 600) if bytes_sent else 0)),
-        "packets_received": (0 if denied else (max(1, bytes_received // 1200) if bytes_received else 0)),
+        "packets_sent":     pkts_sent,
+        "packets_received": pkts_recv,
+        "packets":          pkts_sent + pkts_recv,
         "total_time_elapsed": duration_s,
         "session_end_reason": end_reason,
         "source_user":      suser,
@@ -567,10 +762,22 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
     nonstd = bool(defaults) and dpt not in defaults and app not in ("incomplete", "insufficient-data")
     f["is_non_std_dest_port"] = 1 if nonstd else 0
     f["non_standard_dest_port"] = dpt if nonstd else 0
-    for k, v in _src_device(src_ip, shost, src_category).items():
+    src_dev = _src_device(src_ip, shost, src_category)
+    for k, v in src_dev.items():
         f[f"source_device_{k}"] = v
-    for k, v in _dst_device(config, dst_ip, dhost).items():
+    if src_dev.get("category") not in (None, "unknown"):
+        # PAN exposes the user's machine serial, GlobalProtect host ID and (12.1.2+) the
+        # advanced Device-ID when Device-ID knows the endpoint.
+        ident = src_dev.get("host") or src_ip
+        f["serialnumber"] = _device_serial(ident)
+        f["hostid"] = _host_id(ident)
+        f["src_adv_dev_id"] = _adv_dev_id(ident)
+    dst_dev = _dst_device(config, dst_ip, dhost)
+    for k, v in dst_dev.items():
         f[f"dest_device_{k}"] = v
+    if dst_dev.get("category") not in (None, "unknown"):
+        ident = dst_dev.get("host") or dst_ip
+        f["dst_adv_dev_id"] = _adv_dev_id(ident)
     # dest_device_host also names EXTERNAL destinations (the resolved FQDN): the modeling
     # rule maps it to xdm.target.host.hostname, the only hostname a traffic log can carry.
     f["dest_device_host"] = dhost
@@ -606,12 +813,15 @@ def _location(ip, config):
 _URL_SHARED_KEYS = ("source_ip", "source_port", "dest_ip", "dest_port", "nat_source",
                     "nat_source_port", "nat_dest", "nat_dest_port", "protocol", "source_user",
                     "dest_user", "users", "app", "app_category", "app_sub_category",
-                    "technology_of_app", "risk_of_app", "rule_matched", "rule_matched_uuid",
+                    "technology_of_app", "risk_of_app", "container_of_app", "tunneled_app",
+                    "characteristic_of_app", "is_saas_of_app", "sanctioned_state_of_app",
+                    "rule_matched", "rule_matched_uuid",
                     "from_zone", "to_zone", "inbound_if", "outbound_if", "session_id",
                     "log_source", "is_nat", "is_proxy", "source_location", "dest_location",
                     "source_device_category", "source_device_profile", "source_device_model",
                     "source_device_vendor", "source_device_osfamily", "source_device_osversion",
-                    "source_device_mac", "source_device_host")
+                    "source_device_mac", "source_device_host", "serialnumber", "hostid",
+                    "src_adv_dev_id")
 
 
 _UA_TOKEN = {"Windows": "Windows NT", "Mac": "Macintosh", "Linux": "X11; Linux",
@@ -668,6 +878,15 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
         "direction_of_attack": "client to server",   # the live column (doc key: direction)
         "severity":          "Informational",          # the live column's value
         "http2_connection":  0,
+        # Documented threat-log fields the URL filtering log carries (URL Filtering Log
+        # Fields / Threat Log Fields).  thr_category and contentver are doc-only values
+        # (no live CLCS column); pcap_id and url_idx ARE live columns — all url rows show
+        # pcap_id=0 (no associated pcap) and url_idx is the per-session entry counter
+        # starting at 0, summed over 7 days: 0 61%, then 1, 2, 3...
+        "thr_category":      "URL filtering",               # threat class for subtype url
+        "contentver":        _get_config(config).get("content_version", _CONTENT_VERSION),
+        "pcap_id":           0,
+        "url_idx":           0,
     })
     if clear:
         f["http_method"] = method or "get"
@@ -681,7 +900,8 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
         f["http_method"] = "unknown"
         if user_agent:                 # caller explicitly supplied one (decrypted/inspected)
             f["user_agent"] = user_agent
-    return _format_cef(config, "url", f, log_type="THREAT", severity=1, ts=ts, fw_type="firewall.url")
+    return _format_cef(config, "url", f, log_type="THREAT", severity="Informational",
+                       ts=ts, fw_type="firewall.url")
 
 
 # ---------------------------------------------------------------------------
@@ -729,13 +949,15 @@ def _benign_external(config, session_context):
                             bytes_sent=random.randint(60, 140), bytes_received=random.randint(80, 400),
                             duration_s=0)
         return _format_cef(config, "end", f)
+    cat = next((c for t, c in _DOMAIN_URLCAT if t in (domain or "").lower()), None)
     f = _traffic_fields(config, src_ip, dst_ip, dpt, app, shost=shost, suser=user, dhost=domain,
-                        nat_src=_bus_egress_for(user))
+                        nat_src=_bus_egress_for(user), url_cat=cat)
     line = _format_cef(config, "end", dict(f))
     # Web sessions also get the URL log the URL-filtering profile writes (~1 in 6 traffic
     # logs in the live feed), so the domain baseline exists on this firewall too.
     if dpt in (80, 443, 8080) and random.random() < 0.35:
-        return [line, _url_record(config, f, domain, path=random.choice(["/", "/", "/api/", "/login"]))]
+        return [line, _url_record(config, f, domain,
+                                  path=random.choice(["/", "/", "/api/", "/login"]), category=cat)]
     return line
 
 
@@ -2130,14 +2352,135 @@ _THREAT_DISPATCH = {
 }
 
 
-def _generate_threat_log(config, session_context=None, forced_event=None):
-    """Dispatch a threat scenario.  Returns (log_or_list, display_name)."""
+# ---------------------------------------------------------------------------
+# Rare-event budgeting (2026-10-27)
+# ---------------------------------------------------------------------------
+# The classic fixed weights above made event rarity independent of runtime: at the
+# Realistic gate one threat event fires every 2 hours, so over a 30-day month
+# ~360 threat slots are dealt out and w=8 port_scan took ~18 of them while the
+# "rare_rdp" family (w=4) fired ~9 times and the w=1 variants twice. Nothing in
+# the classic scheme was rare in the sense a UEBA rollout needs -- an analytic
+# event should be expected at most ONCE per horizon.
+#
+# Budgeting re-allocates that fixed pie instead of inflating rarity by dividing
+# the weights down (which converges to the same 18x port_scan): every event NOT
+# in _HIGH_VOLUME_EVENTS is capped so its expected count over the horizon is 1
+# (p = slots_horizon^-... see _budgeted_threat_probs), and the probability mass
+# that implies (59/360 ≈ 16% of threat slots) overflow to the high-volume
+# engine vectors in proportion to their classic weights. The pie is still 360
+# slices a month; where the classic weights dealt 18 to port_scan and 9 each to
+# every w=4 event, the budget deals 1 each to every analytic scenario and lets
+# the perimeter vectors absorb the rest.
+#
+# The six _DAILY_EVENTS are exempt from the weighted draw entirely here: their
+# cadence is the UTC-day claim (_due_daily), by design, and a weighted draw on
+# top of the claim would double-count the beacon recurrence those detections key
+# on. (Classic-weight draws keep them, preserving pre-budgeting behaviour.)
+#
+# "Insane" (no per-interval gate, 80% of every call is a threat) cannot be
+# budgeted -- no event could stay ≤1/horizon across ~20M threat slots -- so it
+# keeps the classic weights as an explicit stress-test mode. Budgeting is
+# anchored to the Realistic gate and controls itself by that anchor: the cap is
+# a probability (1/anchor slots), so at a shorter interval each event's expected
+# 30-day count rises proportionally (Extreme ≈ 12, High ≈ 4) while staying a
+# bounded, deliberate amount, and at the anchor itself it is exactly ≤1.
+#
+# Knobs:
+#   panw_ngfw_config.rarity_horizon_days   horizon for the ≤1 expectation
+#                                          (default 30; 0/absent -> classic
+#                                          fixed-weight behaviour)
+_RARITY_ANCHOR_LEVEL = "Realistic"
+
+# Events deliberately allowed to recur many times per month. These are the
+# vectors whose real-world base rate is "any port scanner on the internet", not
+# "this host did something unusual for the first time" -- they are also the ones
+# the volume/velocity detectors need frequent true positives from.
+_HIGH_VOLUME_EVENTS = {"port_scan", "port_sweep", "failed_connections",
+                       "large_upload_https", "large_upload_smtp", "large_upload_ftp",
+                       "spam_bot", "crypto_miner", "torrent"}
+
+_RARITY_PROB_CACHE = {}
+
+
+def _budgeted_threat_probs(config):
+    """Probability table for the weighted threat draw, budgeted so each
+    non-high-volume event is expected ≤1 per rarity_horizon_days at the anchor
+    (Realistic) cadence. Returns a list aligned with _DEFAULT_THREAT_EVENTS, or
+    None when the knob disables budgeting (classic fixed weights)."""
+    horizon = _get_config(config).get("rarity_horizon_days", 30)
+    try:
+        horizon = int(horizon) if horizon is not None else 30
+    except (TypeError, ValueError):
+        horizon = 30
+    if horizon <= 0:
+        return None
+    cached = _RARITY_PROB_CACHE.get(horizon)
+    if cached is not None:
+        return cached
+
+    levels = (config or {}).get("threat_generation_levels") or {}
+    cadence = levels.get(_RARITY_ANCHOR_LEVEL) or 7200    # seconds per threat slot
+    try:
+        cadence = float(cadence) or 7200.0
+    except (TypeError, ValueError):
+        cadence = 7200.0
+    anchor_slots = horizon * 86400.0 / cadence            # e.g. 360 at 30d/Realistic
+
+    events = [e["event"] for e in _DEFAULT_THREAT_EVENTS]
+    weights = [float(e["weight"]) for e in _DEFAULT_THREAT_EVENTS]
+    daily = set(_DAILY_EVENTS)
+    probs = [0.0] * len(events)
+    # Cap: expected count == 1 over the horizon. p = 1/anchor_slots, one shot.
+    cap = 1.0 / anchor_slots
+    cap_sum = 0.0
+    free = []
+    free_w_sum = 0.0
+    for i, name in enumerate(events):
+        if name in _HIGH_VOLUME_EVENTS:
+            free.append(i)
+            free_w_sum += weights[i]
+        elif name in daily:
+            continue    # claimed via _due_daily; never in the weighted draw
+        else:
+            probs[i] = cap
+            cap_sum += probs[i]
+    if cap_sum >= 1.0:      # more events than the horizon has slots: scale all
+        scale = 0.5 / cap_sum
+        cap_sum = 0.0
+        for i, name in enumerate(events):
+            if name not in _HIGH_VOLUME_EVENTS and name not in daily:
+                probs[i] *= scale
+                cap_sum += probs[i]
+    overflow = 1.0 - cap_sum
+    for i in free:
+        probs[i] = overflow * weights[i] / (free_w_sum or 1.0)
+    total = sum(probs)
+    probs = [p / total for p in probs]
+    _RARITY_PROB_CACHE.clear()
+    _RARITY_PROB_CACHE[horizon] = probs
+    return probs
+
+
+
+
+def _generate_threat_log(config, session_context=None, forced_event=None, threat_level=None):
+    """Dispatch a threat scenario.  Returns (log_or_list, display_name).
+
+    Unforced picks come from _budgeted_threat_probs(config) -- every analytic
+    event expected ≤1 per rarity_horizon_days, overflow to _HIGH_VOLUME_EVENTS --
+    unless the knob is off or the caller is the 'Insane' stress level, which
+    keeps the classic fixed weights (it cannot be budgeted; see that function).
+    """
     if forced_event:
         chosen = _DISPLAY_TO_EVENT.get(forced_event, _DISPLAY_TO_EVENT.get(forced_event.lower(), forced_event.lower()))
     else:
         events = [e["event"] for e in _DEFAULT_THREAT_EVENTS]
-        weights = [e["weight"] for e in _DEFAULT_THREAT_EVENTS]
-        chosen = random.choices(events, weights=weights, k=1)[0]
+        probs = _budgeted_threat_probs(config)
+        if probs is not None and threat_level != "Insane":
+            chosen = random.choices(events, weights=probs, k=1)[0]
+        else:
+            weights = [e["weight"] for e in _DEFAULT_THREAT_EVENTS]
+            chosen = random.choices(events, weights=weights, k=1)[0]
     fn = _THREAT_DISPATCH.get(chosen)
     if not fn:
         fn = _sim_port_scan
@@ -2171,10 +2514,12 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     interval = _get_threat_interval(threat_level, config)
     now = time.time()
     if threat_level == "Insane" and random.random() < 0.8:
-        return _generate_threat_log(config, session_context, forced_event=_due_daily(now))
+        return _generate_threat_log(config, session_context, forced_event=_due_daily(now),
+                                    threat_level=threat_level)
     if interval > 0 and (now - last_threat_event_time) > interval:
         last_threat_event_time = now
-        return _generate_threat_log(config, session_context, forced_event=_due_daily(now))
+        return _generate_threat_log(config, session_context, forced_event=_due_daily(now),
+                                    threat_level=threat_level)
     return _generate_benign_log(config, session_context)
 
 

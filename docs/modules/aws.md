@@ -52,7 +52,7 @@ Normal operational traffic establishing a clean baseline across all major AWS se
 | Service | Events Generated |
 |---|---|
 | **IAM** | ListRoles, ListUsers, GetUser, ListPolicies, GetRole, CreateRole |
-| **STS** | GetCallerIdentity, AssumeRole (same-account, routine service automation) |
+| **STS** | GetCallerIdentity, AssumeRole (same-account: service roles — Lambda/ECS/EC2 — assumed only by their `AWSService` principal; deploy/CI roles assumed by people and pipelines) |
 
 ### Networking & Infrastructure
 
@@ -123,7 +123,7 @@ Context-dependent events that are common in legitimate admin workflows but also 
 * **`TOR_LOGIN`** — Successful `ConsoleLogin` event from a known Tor exit node IP.
 * **`API_CALL_FROM_TOR`** — Read API call (`ListUsers`) from a Tor exit node via an AssumedRole identity — lower confidence than console login.
 * **`LAMBDA_UPDATE_CODE`** — `UpdateFunctionCode20150331v2` replacing a live function's deployment package via S3 or inline zip. Attacker injects a backdoor into an existing function that continues operating normally. *Signal: code update from an unusual identity or external IP.*
-* **`LAMBDA_ROLE_REMOTE`** — Lambda execution using a remote or cross-account role — function running with an identity it was not originally configured with.
+* **`LAMBDA_ROLE_REMOTE`** — An IAM user assumes `LambdaExecutionRole` from a non-AWS IP with `aws-cli` and a Lambda-style session name (`lambda-NNNN`), then uses the issued `ASIA` credentials for GetCallerIdentity → ListBuckets → ListSecrets → GetSecretValue. *Signal: a role that only `lambda.amazonaws.com` assumes in the baseline, assumed by a person from outside the cloud.* Fires **Remote command line usage of AWS Lambda's role** [High].
 * **`IAM_CREATE_ACCESS_KEY`** — Programmatic access key creation for an existing user (also in Suspicious pool).
 
 ### Defense Evasion
@@ -334,7 +334,7 @@ The following scenario keys can be passed as `scenario_event` in coordinated sim
 | `SSM_START_SESSION` | StartSession | Remote access |
 | `SSM_SEND_COMMAND` | SendCommand | Remote execution |
 | `RDS_SHARE_SNAPSHOT` | ModifyDBSnapshotAttribute | Data exfiltration |
-| `LAMBDA_ROLE_REMOTE` | Lambda invocation with remote role | Lateral movement |
+| `LAMBDA_ROLE_REMOTE` | AssumeRole of the Lambda role via CLI from outside AWS + CLI chain | Credential access |
 | `BEDROCK_DELETE_LOGGING` | DeleteModelInvocationLoggingConfiguration | Defense evasion |
 | `CROSS_ACCOUNT_ASSUME_ROLE` | AssumeRole (cross-account) | Lateral movement |
 | `DISABLE_SECURITY_HUB` | DisableSecurityHub | Defense evasion |
@@ -425,7 +425,7 @@ The following scenario keys can be passed as `scenario_event` in coordinated sim
 | `lambda_function_names` | Lambda functions targeted in Lambda scenarios |
 | `lambda_role_names` | IAM roles used in Lambda remote-role scenarios |
 | `foreign_account_ids` | External account IDs used in cross-account/exfil scenarios |
-| `cross_account_role_names` | Role names used in AssumeRole (both benign and threat) |
+| `cross_account_role_names` | Role names used in AssumeRole: the human/CI pool of the benign AssumeRole (service roles are filtered out) and the cross-account threat |
 | `dynamodb_tables` | Table names for DynamoDB read/write events |
 | `sqs_queues` | Queue names for SQS events |
 | `sns_topics` | Topic names for SNS events |
