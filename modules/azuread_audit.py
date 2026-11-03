@@ -18,8 +18,10 @@ the Azure AD side.
 """
 import datetime
 import json
+import math
 import random
 import string
+import time
 import uuid
 
 from modules import azure_common as ac
@@ -212,13 +214,37 @@ def _b_consent(cfg):
                   {"key": "ServicePrincipalProvisioningType", "value": "Other"}])
 
 
+_ADMIN_CONSENT_PER_HOUR = 0.15  # ~3-4 tenant-wide admin consents a day
+_consent_last = None
+_consented = set()
+
+
+def _admin_consent_due(now=None):
+    """Wall-clock Poisson gate for benign admin consent. A per-record share would scale with the
+    module interval (1.5% of records was ~40 consents/hour at the default rate)."""
+    global _consent_last
+    t = now if now is not None else time.time()
+    last, _consent_last = _consent_last, t
+    if last is None:
+        return False
+    dt = min(max(0.0, t - last), 300.0)
+    return random.random() < 1.0 - math.exp(-(_ADMIN_CONSENT_PER_HOUR / 3600.0) * dt)
+
+
 def _b_admin_consent(cfg, app=None):
     # Tenant-wide admin consent by a privileged admin -> baselines XSIAM's
-    # "First seen Azure admin consent to an application" first-seen detector.
-    # The target app is pinned: a stable appId + SP objectId per app name, drawn from a
-    # varied roster, so repeated consents reference a consistent application identity.
-    admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",))
-    app = app or ac.admin_consent_app()   # onboarded estate (grows on a wall-clock schedule)
+    # "First seen Azure admin consent to an application" first-seen detector, which keys on the
+    # (admin, app) pair. The target app is pinned (stable appId + SP objectId per app name) and so
+    # is its consenting admin (one owner per app), so re-consents recur as the same pair. A newly
+    # onboarded app is consented first -- the one organic first-seen per onboarding.
+    if app is None:
+        ob = ac.onboarded_apps()
+        if not _consented:
+            _consented.update(ob)                 # the base estate was consented before this run
+        new = [a for a in ob if a not in _consented]
+        app = new[0] if new else ac.admin_consent_app()
+        _consented.add(app)
+    admin = ac.pick_by_role(cfg, ADMIN_ROLES, ("IT",), owner_of=app)
     app_id = ac.app_id(app)
     mods = [mp("ConsentContext.IsAdminConsent", None, "True"),
             mp("ConsentContext.OnBehalfOfAll", None, "True"),
@@ -657,7 +683,7 @@ def generate_benign(config=None, context=None):
         return [_b_provisioning(config)]
     # Tenant-wide admin consent is a legitimate but rare IT operation; keep it infrequent so it
     # behaves like the real "first seen" event (baselines, then only occasional recurrence).
-    if random.random() < 0.015:
+    if _admin_consent_due():
         return [_b_admin_consent(config)]
     # Business hours: mostly full-catalog coverage, with high-fidelity common activities mixed in.
     # A realistic minority of human-driven admin operations fail (permissions/config/policy).

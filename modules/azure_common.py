@@ -887,12 +887,13 @@ def _norm(uname, p):
 _ROLE_POOLS = {}
 
 
-def pick_by_role(config, roles, departments=None):
+def pick_by_role(config, roles, departments=None, owner_of=None):
     """Pick an actor whose profile role is in `roles` (e.g. Help Desk, IT Administrator).
 
     Admin actions in a real tenant come from a small, stable set of admins — the analytics
     baseline 'who normally does this', so a non-admin doing it reads as anomalous. Falls back
-    to IT-department users, then to pick_user()."""
+    to IT-department users, then to pick_user(). `owner_of` pins the pick to one stable admin
+    per entity (the app's owner), so per-(admin, entity) first-seen detectors can baseline."""
     profiles = (config or {}).get("user_profiles") or {}
     key = (tuple(roles), tuple(departments or ()))
     if key not in _ROLE_POOLS:
@@ -907,7 +908,7 @@ def pick_by_role(config, roles, departments=None):
     pool = _ROLE_POOLS[key]
     if not pool:
         return pick_user(config)
-    u = random.choice(pool)
+    u = pool[_h(f"owner:{owner_of}") % len(pool)] if owner_of is not None else random.choice(pool)
     return _norm(u, profiles[u])
 
 
