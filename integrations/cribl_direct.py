@@ -21,6 +21,10 @@ token, all return HTTP 200 but land in _raw_log and never parse — that cost us
 Portability: a user needs only the FREE XSIAM Cribl integration (Settings -> Data Sources
 -> add Cribl -> generate token). No Entra account, no Cribl Stream instance.
 
+The generic UUID's vendor and product go in Vendor / Product headers: without both the
+receiver answers 400 "must signal both vendor and product for non-xsiam integrations",
+with them 200 (measured 2026-11-02; header names are case-insensitive).
+
 Catalog Source-Identifier UUIDs are per data source; see CATALOG below, copied from the
 Cortex XSIAM "Data source UUIDs" page.
 
@@ -198,6 +202,41 @@ class CriblDirectSender:
         resp = self._session.post(self.url, headers=headers, data=body,
                                   verify=self.verify_tls, timeout=self.timeout)
         return resp.status_code, resp.text[:200], len(records)
+
+
+def probe(source_identifier: str, vendor: Optional[str] = None, product: Optional[str] = None,
+          url: Optional[str] = None, token: Optional[str] = None,
+          timeout: float = 10.0) -> Tuple[int, str]:
+    """POST an empty batch: checks the URL, token and Source-Identifier while ingesting
+    nothing. Returns (http_status, response_text); status 0 means no response.
+
+    What the receiver answers (measured 2026-11-02):
+      200 {"num_records":0}  URL, token and UUID (+ vendor/product for the generic) good
+      401                    token missing or rejected
+      404                    wrong URL path
+      400 "missing or unknown UUID ..."     Source-Identifier not in the tenant catalog
+      400 "must signal both vendor and product ..."  generic UUID without Vendor/Product
+    """
+    url = url or os.getenv("CRIBL_COLLECTOR_URL")
+    token = token or os.getenv("CRIBL_TOKEN")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Content-Encoding": "gzip",
+        "Format": "json",
+        "Source-Identifier": source_identifier,
+        "Integration-Identifier": "logsim:healthcheck",
+    }
+    if vendor:
+        headers["Vendor"] = vendor
+    if product:
+        headers["Product"] = product
+    try:
+        resp = requests.post(url, headers=headers, data=gzip.compress(b""),
+                             verify=False, timeout=timeout)
+    except requests.exceptions.RequestException as exc:
+        return 0, f"{type(exc).__name__}: {exc}"
+    return resp.status_code, resp.text[:200]
 
 
 def send_batch(records: Sequence[Dict[str, Any]], source_identifier: str,

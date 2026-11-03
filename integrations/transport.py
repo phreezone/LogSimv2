@@ -272,6 +272,22 @@ def describe(module, config) -> Dict[str, Any]:
     }
 
 
+def cribl_routes(modules) -> Dict[Tuple[str, Optional[str], Optional[str]], List[str]]:
+    """{(source_identifier, vendor, product): [module names]} for every module with a
+    Cribl route, for checking each route against the receiver. CEF lines that name
+    another product of the same vendor are not listed."""
+    out: Dict[Tuple[str, Optional[str], Optional[str]], List[str]] = {}
+    for m in modules:
+        if not has_cribl_route(m):
+            continue
+        src = getattr(m, "SOURCE_IDENTIFIER")
+        generic = src == cribl_direct.GENERIC_UUID
+        key = (src, getattr(m, "XSIAM_VENDOR", None) if generic else None,
+               getattr(m, "XSIAM_PRODUCT", None) if generic else None)
+        out.setdefault(key, []).append(getattr(m, "NAME", "?"))
+    return out
+
+
 def cribl_label(module) -> str:
     src = getattr(module, "SOURCE_IDENTIFIER", None) or ""
     if src == cribl_direct.GENERIC_UUID:

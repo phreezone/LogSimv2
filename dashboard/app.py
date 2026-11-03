@@ -1956,6 +1956,117 @@ _WEC_SILENT_GRACE_S = 180.0
 _WEC_ACTIVE_SINCE = {"ts": None}
 
 
+_CRIBL_PATH = "/logs/v1/integrated/cribl/data"
+_CRIBL_ROUTE_CACHE_S = 900.0
+_cribl_route_cache: dict = {"key": None, "ts": 0.0, "bad": []}
+
+
+def _cribl_checks(cribl_sources, routes) -> list:
+    """The Cribl receiver's health, shown whether or not anything routes there now.
+
+    It is the transport for the Microsoft feeds and the fallback for every other module,
+    so a missing or wrong URL or token is an ERROR when some source needs Cribl right
+    now (*cribl_sources*) and a WARNING otherwise: nothing is lost yet, but a native pipe
+    that fails would have nowhere to fall back to. Every probe POSTs an EMPTY batch
+    (cribl_direct.probe), which checks the URL, token and Source-Identifier but ingests
+    nothing."""
+    from integrations import cribl_direct as _cd
+    from integrations import transport as _transport
+    out = []
+    url = os.getenv("CRIBL_COLLECTOR_URL", "").strip()
+    token = os.getenv("CRIBL_TOKEN", "").strip()
+    fallback = sorted(r["module"] for r in routes
+                      if r["preferred"] != "cribl" and r["fallback_enabled"] and r["cribl_route"])
+    if cribl_sources:
+        sev = "error"
+        impact = (f"{len(cribl_sources)} source(s) need Cribl now and cannot deliver: "
+                  + ", ".join(cribl_sources[:6]) + (" …" if len(cribl_sources) > 6 else ""))
+    else:
+        sev = "warn"
+        impact = (f"no source needs Cribl now, but the fallback for {len(fallback)} "
+                  "source(s) is unavailable: if their native pipe fails, events are lost")
+
+    def add(check, status, detail):
+        out.append({"group": "Cribl", "check": check, "status": status, "detail": detail})
+
+    def placeholder(v):
+        return not v or "<" in v or "your-tenant" in v.lower() or v.upper().startswith("PLACEHOLDER")
+
+    # ── CRIBL_COLLECTOR_URL ──────────────────────────────────────────────────
+    url_ok = False
+    if not url:
+        add("CRIBL_COLLECTOR_URL defined", sev, f"not set — {impact}")
+    elif placeholder(url):
+        add("CRIBL_COLLECTOR_URL defined", sev, f"still the .env.example placeholder — {impact}")
+    elif not url.startswith("https://") or not url.rstrip("/").endswith(_CRIBL_PATH):
+        add("CRIBL_COLLECTOR_URL defined", sev,
+            f"'{url}' is not the Cribl integration's API URL "
+            f"(https://api-<tenant>.xdr.<region>.paloaltonetworks.com{_CRIBL_PATH}) — {impact}")
+    else:
+        url_ok = True
+        add("CRIBL_COLLECTOR_URL defined", "ok", url)
+
+    # ── CRIBL_TOKEN ──────────────────────────────────────────────────────────
+    token_ok = False
+    if not token:
+        add("CRIBL_TOKEN defined", sev, f"not set — {impact}")
+    elif placeholder(token):
+        add("CRIBL_TOKEN defined", sev, f"still a placeholder — {impact}")
+    elif token.lower().startswith("bearer "):
+        add("CRIBL_TOKEN defined", sev,
+            "starts with 'Bearer ' — LogSim adds that prefix itself, so the receiver would "
+            f"get 'Bearer Bearer …' and reject it. Remove it — {impact}")
+    else:
+        token_ok = True
+        add("CRIBL_TOKEN defined", "ok", f"set ({len(token)} characters)")
+
+    if not (url_ok and token_ok):
+        add("receiver accepts the token", "skip", "fix the URL / token above first")
+        return out
+
+    # ── URL + token: one empty batch under a dedicated UUID ──────────────────
+    code, text = _cd.probe(_cd.DEDICATED_UUIDS["okta_sso"], url=url, token=token)
+    if code == 200:
+        add("receiver accepts the token", "ok", "empty test batch accepted (HTTP 200, nothing ingested)")
+    elif code in (401, 403):
+        add("receiver accepts the token", sev,
+            f"HTTP {code}: token rejected — regenerate it on the tenant's Cribl integration — {impact}")
+        return out
+    elif code == 404:
+        add("receiver accepts the token", sev,
+            f"HTTP 404: no Cribl receiver at this URL — copy the integration's API URL — {impact}")
+        return out
+    elif code == 0:
+        add("receiver accepts the token", sev, f"unreachable: {text} — {impact}")
+        return out
+    else:
+        add("receiver accepts the token", sev, f"HTTP {code}: {text} — {impact}")
+        return out
+
+    # ── Every Source-Identifier (+ vendor/product) LogSim sends under ────────
+    # Cached: the catalog changes rarely and this is one POST per route.
+    route_map = _transport.cribl_routes(MODULES.values())
+    key = (url, hash(token), tuple(sorted(map(str, route_map))))
+    now = time.time()
+    if _cribl_route_cache["key"] != key or now - _cribl_route_cache["ts"] > _CRIBL_ROUTE_CACHE_S:
+        bad = []
+        for (src, vendor, product), names in route_map.items():
+            c, t = _cd.probe(src, vendor, product, url=url, token=token)
+            if c != 200:
+                bad.append(f"{', '.join(names)} ({src[:8]}…"
+                           + (f" {vendor}/{product}" if vendor else "") + f"): HTTP {c} {t[:80]}")
+        _cribl_route_cache.update(key=key, ts=now, bad=bad)
+    bad = _cribl_route_cache["bad"]
+    if bad:
+        add("source UUIDs recognised", "error",
+            f"{len(bad)} of {len(route_map)} route(s) refused — " + "; ".join(bad[:4]))
+    else:
+        add("source UUIDs recognised", "ok",
+            f"all {len(route_map)} route(s) accepted ({len(cribl_sources)} source(s) on Cribl now, "
+            f"{len(fallback)} with Cribl as fallback)")
+    return out
+
+
 def _wec_module():
     """The loaded windows_events module, found by capability not by name."""
     return next((m for m in MODULES.values() if hasattr(m, "get_worker_stats")), None)
@@ -2490,37 +2601,7 @@ def _run_health_checks() -> dict:
                                       "Cribl fallback — this source cannot deliver")
         results.append({"group": "Transport routing", "check": r["module"],
                         "status": status, "detail": detail})
-    cribl_url   = os.getenv("CRIBL_COLLECTOR_URL", "")
-    cribl_token = os.getenv("CRIBL_TOKEN", "")
-    if cribl_sources:
-        _missing = [n for n, val in (("CRIBL_COLLECTOR_URL", cribl_url),
-                                     ("CRIBL_TOKEN", cribl_token)) if not val]
-        if _missing:
-            results.append({
-                "group": "Cribl", "check": "credentials present",
-                "status": "error",
-                "detail": (f"{', '.join(_missing)} not set — required by "
-                           f"{len(cribl_sources)} source(s): "
-                           f"{', '.join(cribl_sources[:6])}"
-                           + (" …" if len(cribl_sources) > 6 else "")
-                           + ". These feeds cannot deliver."),
-            })
-        else:
-            results.append({
-                "group": "Cribl", "check": "credentials present",
-                "status": "ok",
-                "detail": (f"CRIBL_COLLECTOR_URL + CRIBL_TOKEN set; "
-                           f"{len(cribl_sources)} source(s) routed via Cribl"),
-            })
-            # Reachability: any HTTP response (even 401/403/405) means the integrated
-            # receiver endpoint is up and resolvable.
-            _check_http_url(cribl_url, "receiver endpoint", "Cribl")
-    else:
-        results.append({
-            "group": "Cribl", "check": "transport in use",
-            "status": "skip",
-            "detail": "no module is routed to the Cribl receiver",
-        })
+    results.extend(_cribl_checks(cribl_sources, _routes))
 
     # ── Windows parallel-mode workers ─────────────────────────────────────────
     results.extend(_wec_worker_checks())

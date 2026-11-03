@@ -48,6 +48,21 @@ module's own `NATIVE_TRANSPORT`, else syslog. `"tcp"` means syslog.
 The dashboard's **Transport routing** health group shows each module's pipe, whether it is
 set up, and where it is sending now.
 
+The **Cribl** health group is always shown, because Cribl is every module's fallback even
+when nothing is using it:
+
+| Check | Fails when |
+|---|---|
+| `CRIBL_COLLECTOR_URL defined` | unset, still the `.env.example` placeholder, or not an `https://…/logs/v1/integrated/cribl/data` URL (e.g. the HTTP collector URL pasted by mistake) |
+| `CRIBL_TOKEN defined` | unset, a placeholder, or starts with `Bearer ` (LogSim adds that itself) |
+| `receiver accepts the token` | the receiver answers 401/403 (token rejected), 404 (wrong URL) or not at all |
+| `source UUIDs recognised` | the receiver refuses a module's Source-Identifier, or a generic route's vendor/product (re-checked every 15 minutes) |
+
+The last two POST an **empty** batch, which the receiver validates but which ingests
+nothing. A failure is an **error** when some source is on Cribl now (the Microsoft feeds,
+or a module whose native pipe is down) and a **warning** otherwise: nothing is lost yet,
+but a native pipe that fails would have nowhere to fall back to.
+
 ## Turning it off
 
 ```json
@@ -90,7 +105,8 @@ and firewall logs each reach their own dataset), else from the module's `XSIAM_V
   Windows landed over Cribl, parsed, and raised their analytics (TOR sign-in, CloudTrail
   stopped, logging sink deletion, privileged group addition). Windows event XML as raw
   `data` under the Windows UUID parses.
-- **Not yet verified:** Proofpoint, and how the receiver wants the generic UUID's
-  vendor/product (sent as `Vendor` / `Product` headers) and raw text (`Format: raw`, the
-  line as `data`). The receiver accepts them; whether they land in
-  `<vendor>_<product>_raw` and parse is still to be checked.
+- **Generic UUID vendor/product:** the receiver requires both, as `Vendor` / `Product`
+  headers (without them: 400 "must signal both vendor and product"). Every LogSim route,
+  dedicated and generic, is accepted by the tenant's receiver.
+- **Not yet verified:** that Proofpoint and the generic-UUID syslog lines (`Format: raw`,
+  the line as `data`) land in their datasets and parse.
