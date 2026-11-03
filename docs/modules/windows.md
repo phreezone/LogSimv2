@@ -29,7 +29,7 @@ Generates native Windows Security-channel Event XML targeting XSIAM's Identity A
 
 ## AD / Identity Threat Scenarios
 
-Named threat generators (via `scenario_event` = the key below, or fired individually). 13 trigger XSIAM Identity Analytics detections out of the box; 8 (`wip_` prefix) generate correct events but depend on an identity-graph baseline or are still under investigation.
+Named threat generators (via `scenario_event` = the key below, or fired individually). The 19 in the table below are confirmed firing on the tenant; 7 more were added on 2026-11-01, built to published analytics but **not yet tenant-verified**; 5 (`wip_` prefix) generate correct events but depend on an identity-graph baseline or are still under investigation.
 
 **Confirmed detections:**
 
@@ -74,6 +74,43 @@ above plus the four remaining `WIP_` detections, which target published analytic
 offered, background-only: `WIP_IRREGULAR_SERVICE_TGS`, `LSASS_HANDLE_ACCESS` (an XDR-agent
 detection, not a Windows Event Collector analytic) and `ACCOUNT_ACCESS_REMOVAL` (no
 matching published analytic).
+
+### New AD Identity Generators (Added 2026-11-01)
+
+Seven generators cover AD identity attacks that previously had no producer. All are
+**NOT tenant-verified**: the event shapes follow Microsoft's documented field layout and
+the AD schema GUIDs were read from Microsoft Learn on 2026-11-01, but whether each event
+is the discriminator the XSIAM analytic keys on has not been confirmed against the tenant.
+
+Attribute-change detectors emit **both** the 5136 old→new pair and the 4662
+write-property event (with the attribute's schema GUID), plus a state-carrying 4738/4742
+where one exists. This is deliberate: repo notes disagree on whether 5136 reaches XSIAM's
+WEC intake, so the 4662 corroboration keeps the signal alive either way.
+
+| Generator (`scenario_event`) | Event sequence | Target analytic |
+|---|---|---|
+| `shadow_credentials` | 4624 ×2, 4672, 4688 (Whisker/Certipy), 5136 `msDS-KeyCredentialLink` added, 4662 write-property, 4768 PKINIT TGT, 4769, 4689 | Possible shadow credentials addition (Medium) |
+| `pkinit_auth` | 4768 with `Pre-Authentication Type: 16` and certificate issuer/serial/thumbprint fields, 4624 ×2, 4672, 4769 | Suspicious PKINIT TGT authentication request |
+| `sid_history_injection` | 4624 ×2, 4672, 4688, 5136 `sIDHistory` added, 4662 write-property, 4738 carrying `SID History`, 4768, 4689 | Suspicious SID History Addition |
+| `adfs_dkm_access` | 4624 ×2, 4672, 4688, 4662 read of `CN=DKM,CN=ADFS,CN=Microsoft,CN=Program Data` (`thumbnailPhoto` GUID, `AccessMask 0x10`), 4689 | ADFS DKM Key Access |
+| `kerberos_relay` | 4768 for `<HOST>$` from `::1`, 4624 ×2 (type 3), 4769, 4672, 4688, 4689 | Possible Kerberos relay attack |
+| `spn_cleared` | 4624 ×2, 4672, 4688, 5136 ×2 (SPNs cleared on a machine account), 4662, 4742, 4689 | SPNs cleared from a machine account for the first time |
+| `suspicious_sam_change` | 4624 ×2, 4672, 4688, 5136 ×2 (sAMAccountName → DC hostname), 4662, 4742, 4768, 4689 | Suspicious sAMAccountName change to DC hostname |
+
+Verified AD schema GUIDs used by the 4662 events: key credential
+`5b47d60f-6090-40b2-9f37-2a4de88f3063`, sIDHistory
+`17eb4278-d167-11d0-b002-0000f80367c1`, servicePrincipalName
+`f3a64788-5306-11d1-a9c5-0000f80367c1`, sAMAccountName
+`3e0abfd0-126a-11d0-a060-00aa006c33ed`, thumbnailPhoto
+`8d3bca50-1d7e-11d0-a081-00aa006c33ed`.
+
+Two shapes are inferred rather than documented and are the most likely to need revision
+after a sweep: the Kerberos relay sequence (type-3 logon as `<HOST>$` from `::1`) and the
+ADFS DKM 4662 (`thumbnailPhoto` GUID with `AccessMask 0x10`).
+
+`samaccountname_spoofing` and `dnshostname_spoofing` also gained secondary claims for the
+attribute-change analytics above, and `multiple_service_tickets` now lists
+"A user requested multiple service tickets" alongside its weak-encryption primary.
 
 ---
 

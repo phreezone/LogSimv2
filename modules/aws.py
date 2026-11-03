@@ -9,9 +9,17 @@ from ipaddress import ip_network, ip_address # Added for IP generation
 import base64 # Added for UserData simulation
 
 try:
-    from modules.session_utils import get_random_anon_ip_ctx, get_random_vpn_ip_ctx
+    from modules.session_utils import (
+        get_random_anon_ip_ctx,
+        get_random_vpn_ip_ctx,
+        rand_ip_from_network,
+    )
 except ImportError:
-    from session_utils import get_random_anon_ip_ctx, get_random_vpn_ip_ctx
+    from session_utils import (
+        get_random_anon_ip_ctx,
+        get_random_vpn_ip_ctx,
+        rand_ip_from_network,
+    )
 
 # Realistic AWS SDK/CLI user agents for CloudTrail events.
 # CloudTrail records the SDK/CLI used by the caller, NOT browser user agents.
@@ -8616,7 +8624,8 @@ def _generate_traffic_mirroring(config, context=None):
             "description": "capture production traffic",
             "ingressFilterRules": [], "egressFilterRules": [],
         }},
-        "resources": [{"type": "AWS::EC2::TrafficMirrorFilter", "ARN": filter_id,
+        "resources": [{"type": "AWS::EC2::TrafficMirrorFilter",
+                       "ARN": f"arn:aws:ec2:{region}:{account_id}:traffic-mirror-filter/{filter_id}",
                        "accountId": account_id}],
     })
     events.append(ev)
@@ -8632,7 +8641,8 @@ def _generate_traffic_mirroring(config, context=None):
             "type": "network-interface",
             "description": "collector",
         }},
-        "resources": [{"type": "AWS::EC2::TrafficMirrorTarget", "ARN": target_id,
+        "resources": [{"type": "AWS::EC2::TrafficMirrorTarget",
+                       "ARN": f"arn:aws:ec2:{region}:{account_id}:traffic-mirror-target/{target_id}",
                        "accountId": account_id}],
     })
     events.append(ev2)
@@ -8655,7 +8665,8 @@ def _generate_traffic_mirroring(config, context=None):
             "networkInterfaceId": eni,
             "ownerId": account_id,
         }},
-        "resources": [{"type": "AWS::EC2::TrafficMirrorSession", "ARN": session_id,
+        "resources": [{"type": "AWS::EC2::TrafficMirrorSession",
+                       "ARN": f"arn:aws:ec2:{region}:{account_id}:traffic-mirror-session/{session_id}",
                        "accountId": account_id},
                       {"type": "AWS::EC2::Instance",
                        "ARN": f"arn:aws:ec2:{region}:{account_id}:instance/{instance}",
@@ -9100,6 +9111,209 @@ def _generate_new_iam_user_resource_mod(config, context=None):
     return events
 
 
+# -- Geographic and behavioural aggregates ---------------------------------
+#
+# The last four Low+ AWS targets are not single API shapes: they are identity-
+# scoped baselines (first-seen country, impossible travel) or org-scoped
+# aggregates (multiple unusual activities, multiple risk indicators). The
+# generators below emit the burst a baseline would eventually classify; they
+# are the least certain in this batch and every docstring says so.
+#
+# Country selection: source IPs come from config['external_traffic_sources']
+# (the 35-country ambient attacker pool), NEVER from config['vpn_novel_country_pool'].
+# The reserve pool exists so the ORG-SCOPED "first successful VPN access from a
+# country in organization" analytic keeps a 70-day novelty cycle; spending it on
+# cloud API calls would re-saturate the org baseline and silence that detector.
+# Using the ambient pool gives identity-scoped novelty without that side effect.
+
+# Pairs of countries far enough apart that no plausible travel time connects
+# them inside the window below. Codes are all present in external_traffic_sources.
+_FAR_TRAVEL_PAIRS = [
+    ("US", "JP"), ("US", "SG"), ("GB", "AU"), ("DE", "BR"),
+    ("CA", "IN"), ("US", "ZA"), ("GB", "KR"), ("CA", "JP"),
+]
+
+
+def _ip_from_country(config, code=None, pool='external_traffic_sources'):
+    """A probed host IP from one of the curated country pools.
+
+    `code` selects one country's range; None picks any. `pool` is either
+    'external_traffic_sources' (ambient attacker countries) or
+    'benign_ingress_sources' (the identity's home countries). Falls back to the
+    documentation range only if the pool is empty.
+    """
+    sources = [s for s in config.get(pool, []) if s.get('ip_range')]
+    if code:
+        sources = [s for s in sources if s.get('country') == code] or sources
+    if not sources:
+        return "203.0.113.%d" % random.randint(1, 254)
+    return rand_ip_from_network(random.choice(sources)['ip_range'])
+
+
+def _at(offset_minutes):
+    """CloudTrail eventTime string for now + offset (negative = in the past)."""
+    ts = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=offset_minutes)
+    return ts.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _generate_unusual_country_api_call(config, context=None):
+    """(Threat) An AWS identity calls the API from a country it has never used.
+
+    Triggers XSIAM: "A cloud identity executed an API call from an unusual
+    country" (base Informational; the Medium variation "A suspicious cloud
+    identity executed an API call from an unusual country" is the one the
+    tenant can actually raise). Identity-scoped: the country is already in the
+    org's ambient pool, so this does NOT burn the org-scoped VPN novelty pool.
+    NOT tenant-verified -- depends on XSIAM having baselined the identity first.
+    """
+    user_identity, _, region, account_id = _gap_ctx(config, context, external=False)
+    novel_ip = _ip_from_country(config)
+    events = []
+    calls = [
+        ("DescribeInstances", "ec2.amazonaws.com", "2016-11-15", True, {}),
+        ("ListBuckets", "s3.amazonaws.com", "2006-03-01", True, {}),
+        ("GetCallerIdentity", "sts.amazonaws.com", "2011-06-15", True, {}),
+    ]
+    for i, (name, src, ver, ro, params) in enumerate(calls):
+        ev = _get_base_event(config, user_identity, novel_ip, region, name, src,
+                             api_version=ver, read_only=ro)
+        ev.update({"requestParameters": params or None, "responseElements": None,
+                   "resources": []})
+        ev["eventTime"] = _at(-2 + i)
+        events.append(ev)
+    return events
+
+
+def _generate_impossible_travel_cloud(config, context=None):
+    """(Threat) One identity calls the API from two distant countries minutes apart.
+
+    Triggers XSIAM: "Impossible travel by a cloud identity" (base Informational;
+    Low+ variation "Impossible travel by an unusual cloud identity"). The first
+    event is from a home-country address (benign_ingress_sources), the second
+    from the far side of an _FAR_TRAVEL_PAIRS pair 8 minutes later -- well under
+    any plausible flight time. NOT tenant-verified: the analytic needs geo-IP
+    enrichment of sourceIPAddress plus a per-identity baseline.
+    """
+    user_identity, _, region, account_id = _gap_ctx(config, context, external=False)
+    from_code, to_code = random.choice(_FAR_TRAVEL_PAIRS)
+    home_ip = _ip_from_country(config, from_code, pool='benign_ingress_sources')
+    far_ip = _ip_from_country(config, to_code)
+    events = []
+    ev1 = _get_base_event(config, user_identity, home_ip, region, "DescribeInstances",
+                          "ec2.amazonaws.com", api_version="2016-11-15", read_only=True)
+    ev1.update({"requestParameters": {}, "responseElements": None, "resources": []})
+    ev1["eventTime"] = _at(-10)
+    events.append(ev1)
+    ev2 = _get_base_event(config, user_identity, far_ip, region, "ListBuckets",
+                          "s3.amazonaws.com", api_version="2006-03-01", read_only=True)
+    ev2.update({"requestParameters": {}, "responseElements": None, "resources": []})
+    ev2["eventTime"] = _at(-2)
+    events.append(ev2)
+    return events
+
+
+def _generate_multiple_unusual_activities(config, context=None):
+    """(Threat) One identity performs several uncommon operations across services.
+
+    Triggers XSIAM: "A cloud identity performed multiple unusual activities"
+    (base Medium) and "A cloud identity performed multiple suspicious
+    activities" (Low). The shape is a short burst of distinct, individually
+    uncommon calls -- credential creation, bucket policy, ingress, secret read,
+    log tamper -- from one identity and one address. NOT tenant-verified: the
+    analytic is an org-scoped aggregate that also needs the calls to be rare for
+    that identity, which only a long-running baseline can establish.
+    """
+    user_identity, ip_address, region, account_id = _gap_ctx(config, context)
+    aws_conf = config.get(CONFIG_KEY, {})
+    bucket = random.choice(aws_conf.get('s3_buckets', ['prod-customer-data-us-east-1']))
+    sg = random.choice(aws_conf.get('security_groups', ['sg-00000000000000000']))
+    secret = random.choice(aws_conf.get('sensitive_credential_paths',
+                                        ['/credentials/aws-access-key']))
+    new_user = f"svc-{_rand_hex(4)}"
+    user_arn = f"arn:aws:iam::{account_id}:user/{new_user}"
+    events = []
+
+    def _ev(name, src, ver, params, ro=False, resources=None):
+        ev = _get_base_event(config, user_identity, ip_address, region, name, src,
+                             api_version=ver, read_only=ro)
+        ev.update({"requestParameters": params or None,
+                   "responseElements": None if ro else {},
+                   "resources": resources or []})
+        return ev
+
+    calls = [
+        ("CreateAccessKey", "iam.amazonaws.com", "2010-05-08",
+         {"userName": new_user}, False,
+         [{"type": "AWS::IAM::User", "ARN": user_arn, "accountId": account_id}]),
+        ("PutBucketPolicy", "s3.amazonaws.com", "2006-03-01",
+         {"bucketName": bucket,
+          "policy": _policy_doc([{"Effect": "Allow", "Principal": "*",
+                                  "Action": "s3:GetObject",
+                                  "Resource": f"arn:aws:s3:::{bucket}/*"}])},
+         False, [{"type": "AWS::S3::Bucket", "ARN": f"arn:aws:s3:::{bucket}",
+                  "accountId": account_id}]),
+        ("AuthorizeSecurityGroupIngress", "ec2.amazonaws.com", "2016-11-15",
+         {"groupId": sg, "ipPermissions": {"items": [{
+             "ipProtocol": "tcp", "fromPort": 22, "toPort": 22,
+             "ipRanges": {"items": [{"cidrIp": "0.0.0.0/0"}]}}]}},
+         False, [{"type": "AWS::EC2::SecurityGroup",
+                  "ARN": f"arn:aws:ec2:{region}:{account_id}:security-group/{sg}",
+                  "accountId": account_id}]),
+        ("GetSecretValue", "secretsmanager.amazonaws.com", "2017-10-17",
+         {"secretId": f"arn:aws:secretsmanager:{region}:{account_id}:secret:{secret.lstrip('/')}"},
+         True, []),
+        ("DeleteTrail", "cloudtrail.amazonaws.com", "2013-11-01",
+         {"name": random.choice(aws_conf.get('cloudtrails', ['security-audit-trail-central']))},
+         False, []),
+        ("GetCallerIdentity", "sts.amazonaws.com", "2011-06-15", {}, True, []),
+    ]
+    for i, (name, src, ver, params, ro, resources) in enumerate(calls):
+        ev = _ev(name, src, ver, params, ro, resources)
+        ev["eventTime"] = _at(-6 + i)
+        events.append(ev)
+    return events
+
+
+def _generate_multiple_risk_indicators(config, context=None):
+    """(Threat) One identity combines a high-risk IP, a novel country and IAM abuse.
+
+    Triggers XSIAM: "Multiple risk indicators for a cloud identity" [High] --
+    described as "combining unusual activity with activity from unusual
+    geolocation or high-risk IP". The burst therefore carries all three: an
+    anonymizer (commercial VPN / Tor mix) address, a country outside the
+    identity's home set, and privilege changes. NOT tenant-verified: this is the
+    most aggregate target in the batch.
+    """
+    user_identity, _, region, account_id = _gap_ctx(config, context, external=False)
+    tor_ip = _get_random_ip(config, use_anon=True)
+    far_ip = _ip_from_country(config)
+    aws_conf = config.get(CONFIG_KEY, {})
+    new_user = f"backup-svc-{_rand_hex(4)}"
+    user_arn = f"arn:aws:iam::{account_id}:user/{new_user}"
+    admin_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+    events = []
+    plan = [
+        ("GetCallerIdentity", "sts.amazonaws.com", "2011-06-15", {}, True, tor_ip),
+        ("ListBuckets", "s3.amazonaws.com", "2006-03-01", {}, True, tor_ip),
+        ("CreateUser", "iam.amazonaws.com", "2010-05-08",
+         {"userName": new_user, "path": "/"}, False, far_ip),
+        ("AttachUserPolicy", "iam.amazonaws.com", "2010-05-08",
+         {"userName": new_user, "policyArn": admin_arn}, False, far_ip),
+        ("CreateAccessKey", "iam.amazonaws.com", "2010-05-08",
+         {"userName": new_user}, False, far_ip),
+    ]
+    for i, (name, src, ver, params, ro, ip) in enumerate(plan):
+        ev = _get_base_event(config, user_identity, ip, region, name, src,
+                             api_version=ver, read_only=ro)
+        ev.update({"requestParameters": params or None,
+                   "responseElements": None if ro else {},
+                   "resources": [{"type": "AWS::IAM::User", "ARN": user_arn,
+                                  "accountId": account_id}] if 'User' in name or 'Policy' in name else []})
+        ev["eventTime"] = _at(-8 + i)
+        events.append(ev)
+    return events
+
+
 # --- Scenario-specific functions map ---
 # Maps scenario_event strings to the corresponding function
 SCENARIO_FUNCTIONS = {
@@ -9243,6 +9457,12 @@ SCENARIO_FUNCTIONS = {
     "BACKUP_STORAGE_ACCESS": _generate_backup_storage_access,
     "IAM_UNUSUAL_ACTIVITY": _generate_iam_unusual_activity,
     "NEW_IAM_USER_RESOURCE_MOD": _generate_new_iam_user_resource_mod,
+    # Geographic/behavioural aggregates (added 2026-11-01). Lowest-confidence
+    # generators in the batch -- see their docstrings.
+    "UNUSUAL_COUNTRY_API": _generate_unusual_country_api_call,
+    "IMPOSSIBLE_TRAVEL_CLOUD": _generate_impossible_travel_cloud,
+    "MULTIPLE_UNUSUAL_ACTIVITIES": _generate_multiple_unusual_activities,
+    "MULTIPLE_RISK_INDICATORS": _generate_multiple_risk_indicators,
 }
 
 
@@ -9369,8 +9589,16 @@ ANALYTIC_ALERTS = {
     "SES_PRODUCTION_REQUEST":          "SES Production Access Requested",
     "SES_PHISHING_CHAIN":              "Suspicious activity indicating a potential abuse of a cloud-native email service",
     "BACKUP_STORAGE_ACCESS":           "An identity accessed a backup cloud storage",
-    "IAM_UNUSUAL_ACTIVITY":            "Unusual Identity and Access Management (IAM) activity",
+    # IAM_UNUSUAL_ACTIVITY has a generator (see _generate_iam_unusual_activity) but no
+    # on-demand claim: the target was tried before and dropped 2026-10-08 after 90 days
+    # of history showed it never fires in this tenant (Informational base, 14-day
+    # activation). The new shape is a closer match for the Low+ "Internet facing
+    # instance" variation, but until the tenant sweep credits it, leave the claim off.
     "NEW_IAM_USER_RESOURCE_MOD":       "Unusual resource modification by newly seen IAM user",
+    "UNUSUAL_COUNTRY_API":             "A cloud identity executed an API call from an unusual country",
+    "IMPOSSIBLE_TRAVEL_CLOUD":         "Impossible travel by a cloud identity",
+    "MULTIPLE_UNUSUAL_ACTIVITIES":     "A cloud identity performed multiple unusual activities",
+    "MULTIPLE_RISK_INDICATORS":        "Multiple risk indicators for a cloud identity",
 }
 
 # Additional analytics the SAME events already satisfy, beyond each threat's primary
@@ -9573,12 +9801,23 @@ ANALYTIC_ALERTS_SECONDARY = {
     "BACKUP_STORAGE_ACCESS": [
         "An identity accessed a backup cloud storage which wasn't read recently",
     ],
-    "IAM_UNUSUAL_ACTIVITY": [
-        "Unusual Identity and Access Management (IAM) activity executed from a cloud Internet facing instance",
-    ],
+    # IAM_UNUSUAL_ACTIVITY secondary withheld with its primary -- see the ANALYTIC_ALERTS
+    # comment. Re-add both together if the tenant sweep ever credits the variation.
     "NEW_IAM_USER_RESOURCE_MOD": [
         "Unusual IAM resource modification by newly seen IAM user",
         "Unusual resource modification by newly seen IAM user from an uncommon IP",
+    ],
+    "UNUSUAL_COUNTRY_API": [
+        "A suspicious cloud identity executed an API call from an unusual country",
+        "A cloud identity executed an API call from a country that was not seen in the organization",
+        "A cloud API call was executed from an unusual country",
+        "A cloud identity executed an API call from an unusual country using a compromised AWS access key",
+    ],
+    "IMPOSSIBLE_TRAVEL_CLOUD": [
+        "Impossible travel by an unusual cloud identity",
+    ],
+    "MULTIPLE_UNUSUAL_ACTIVITIES": [
+        "A cloud identity performed multiple suspicious activities",
     ],
 }
 
@@ -9805,6 +10044,11 @@ THREAT_SCENARIOS = {
     _generate_backup_storage_access: 1,
     _generate_iam_unusual_activity: 1,
     _generate_new_iam_user_resource_mod: 1,
+    # Geographic/behavioural aggregates (added 2026-11-01).
+    _generate_unusual_country_api_call: 1,
+    _generate_impossible_travel_cloud: 1,
+    _generate_multiple_unusual_activities: 1,
+    _generate_multiple_risk_indicators: 1,
 }
 
 

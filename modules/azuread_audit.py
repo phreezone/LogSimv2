@@ -420,11 +420,191 @@ def _catalog_record(config, entry):
         u = ac.pick_user(config)
         return audit(activity, category, service, op_type, by_user(u), [t_user(u)],
                      [_ua(u)], reason=activity)
+    if category == "ApplicationManagement":
+        rec = _app_lifecycle_record(config, activity)
+        if rec is not None:
+            return rec
     admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
     tgt = _target_for(ttype, config, admin)
     tgt["modifiedProperties"] = _generic_mods(category, op_type)
     return audit(activity, category, service, op_type, by_user(admin), [tgt],
                  [_ua(admin)], reason=activity)
+
+
+# ── app-lifecycle shapes (verified against live tenant rows, 2026-10-30) ────────────
+#
+# The generic ApplicationManagement builder above wrote one invented AppRole mod and
+# no AppId additionalDetails. Real rows are richer and differ per activity, so each
+# calibrated activity below reproduces the target set, modifiedProperties and
+# additionalDetails observed in the tenant. Anything not in this table falls back to
+# the generic builder.
+
+_CERT_MGMT_CREATE_ACTIVITY = "Create application – Certificates and secrets management "
+
+
+def _app_lifecycle_record(config, activity):
+    """Faithful record for a calibrated ApplicationManagement activity, else None."""
+    admin = ac.pick_by_role(config, ADMIN_ROLES, ("IT", "Security"))
+    app = _saas_app()
+    app_id = ac.app_id(app)
+    app_oid = ac._stable_guid("Application:" + app)
+    sp_oid = ac._stable_guid("ServicePrincipal:" + app)
+    ua = _ua(admin)
+    app_details = [ua, {"key": "AppId", "value": app_id}]
+    sp_details = [ua, {"key": "AppId", "value": app_id},
+                  {"key": "AppOwnerOrganizationId", "value": ac.HOME_TENANT_ID},
+                  {"key": "ServicePrincipalProvisioningType", "value": "Other"}]
+    graph_id = "00000003-0000-0000-c000-000000000000"
+
+    def _app_target(mods):
+        return {"id": app_oid, "displayName": app, "type": "Application",
+                "userPrincipalName": None, "groupType": None, "modifiedProperties": mods}
+
+    def _sp_target(mods=None):
+        return {"id": sp_oid, "displayName": app, "type": "ServicePrincipal",
+                "userPrincipalName": None, "groupType": None,
+                "modifiedProperties": mods or []}
+
+    if activity == "Add application":
+        mods = [
+            mp("AppId", [], [app_id]),
+            mp("AvailableToOtherTenants", [], [False]),
+            mp("DisplayName", [], [app]),
+            mp("RequiredResourceAccess", [], [{
+                "ResourceAppId": graph_id,
+                "RequiredAppPermissions": [{
+                    "EntitlementId": "e1fe6dd8-ba31-4d61-89e7-88639da4683d",
+                    "DirectAccessGrant": False,
+                    "ImpersonationAccessGrants": [20],
+                }],
+                "EncodingVersion": 1,
+            }]),
+            mp("PublisherDomain", [], [ac.UPN_DOMAIN]),
+            mp("ServicePrincipalLockConfiguration", [], [{
+                "IsEnabled": True, "AllProperties": True,
+                "CredentialsWithUsageVerify": True, "CredentialsWithUsageSign": True,
+                "IdentifierUris": False, "TokenEncryptionKeyId": True,
+                "ServicePrincipalLockExtension": "AQIAAAA=",
+            }]),
+            mp("SignInAudience", [], ["AzureADMyOrg"]),
+            mp("Included Updated Properties", None,
+               "AppId, AvailableToOtherTenants, DisplayName, RequiredResourceAccess, "
+               "PublisherDomain, ServicePrincipalLockConfiguration, SignInAudience"),
+        ]
+        return audit(activity, "ApplicationManagement", "Core Directory", "Add",
+                     by_user(admin), [_app_target(mods)], app_details)
+
+    if activity == "Add service principal":
+        mods = [
+            mp("AccountEnabled", [], [True]),
+            mp("AppPrincipalId", [], [app_id]),
+            mp("DisplayName", [], [app]),
+            mp("ServicePrincipalName", [], [app_id]),
+            mp("Credential", [], [{"CredentialType": 2,
+                                   "KeyStoreId": ac._stable_guid("KeyStore:" + app),
+                                   "KeyGroupId": ac._stable_guid("KeyStore:" + app)}]),
+            mp("ServicePrincipalTag", [], ["WindowsAzureActiveDirectoryIntegratedApp", "HideApp"]),
+            mp("Included Updated Properties", None,
+               "AccountEnabled, AppPrincipalId, DisplayName, ServicePrincipalName, "
+               "Credential, ServicePrincipalTag"),
+        ]
+        return audit(activity, "ApplicationManagement", "Core Directory", "Add",
+                     by_user(admin), [_sp_target(mods)], sp_details)
+
+    if activity == "Update service principal":
+        # Real rows carry only an empty Included Updated Properties entry.
+        return audit(activity, "ApplicationManagement", "Core Directory", "Update",
+                     by_user(admin),
+                     [_sp_target([mp("Included Updated Properties", None, "")])],
+                     sp_details)
+
+    if activity == "Update application":
+        old_rra = [{"ResourceAppId": graph_id, "RequiredAppPermissions": [{
+            "EntitlementId": "e1fe6dd8-ba31-4d61-89e7-88639da4683d",
+            "DirectAccessGrant": False,
+            "ImpersonationAccessGrants": [20],
+        }], "EncodingVersion": 1}]
+        new_rra = [{"ResourceAppId": graph_id, "RequiredAppPermissions": [{
+            "EntitlementId": "e1fe6dd8-ba31-4d61-89e7-88639da4683d",
+            "DirectAccessGrant": True,
+            "ImpersonationAccessGrants": [20],
+        }], "EncodingVersion": 1}]
+        mods = [mp("RequiredResourceAccess", old_rra, new_rra),
+                mp("Included Updated Properties", None, "RequiredResourceAccess")]
+        return audit(activity, "ApplicationManagement", "Core Directory", "Update",
+                     by_user(admin), [_app_target(mods)], app_details)
+
+    if activity == _CERT_MGMT_ACTIVITY:
+        key = (f"[KeyIdentifier={uuid.uuid4()},KeyType=Password,KeyUsage=Verify,"
+               f"DisplayName=Password uploaded on {datetime.datetime.now(datetime.timezone.utc):%a %b %d %Y}]")
+        mods = [mp("KeyDescription", [], [key]),
+                mp("Included Updated Properties", None, "KeyDescription")]
+        return audit(activity, "ApplicationManagement", "Core Directory", "Update",
+                     by_user(admin), [_app_target(mods)], app_details)
+
+    if activity == _CERT_MGMT_CREATE_ACTIVITY:
+        mods = [mp("KeyDescription", [], []),
+                mp("Included Updated Properties", None, "KeyDescription")]
+        return audit(activity, "ApplicationManagement", "Core Directory", "Add",
+                     by_user(admin), [_app_target(mods)], app_details)
+
+    if activity == "Add delegated permission grant":
+        graph_oid = ac._stable_guid("ServicePrincipal:Microsoft Graph")
+        names = (f"{graph_id}/ags.windows.net;{graph_id};https://canary.graph.microsoft.com;"
+                 f"https://graph.microsoft.com")
+        grant_mods = [
+            mp("DelegatedPermissionGrant.Scope", None, "User.Read"),
+            mp("DelegatedPermissionGrant.ConsentType", None, "AllPrincipals"),
+            mp("ServicePrincipal.ObjectID", None, sp_oid),
+            mp("ServicePrincipal.DisplayName", None, None),
+            mp("ServicePrincipal.AppId", None, None),
+            mp("ServicePrincipal.Name", None, None),
+            mp("TargetId.ServicePrincipalNames", None, names),
+        ]
+        graph_target = {"id": graph_oid, "displayName": "Microsoft Graph",
+                        "type": "ServicePrincipal", "userPrincipalName": None,
+                        "groupType": None, "modifiedProperties": grant_mods}
+        return audit(activity, "ApplicationManagement", "Core Directory", "Assign",
+                     by_user(admin), [graph_target, _sp_target()],
+                     [ua, {"key": "AppId", "value": graph_id},
+                      {"key": "ServicePrincipalProvisioningType", "value": "Other"}])
+
+    if activity == "Consent to application":
+        mods = [
+            mp("ConsentContext.IsAdminConsent", None, "True"),
+            mp("ConsentContext.IsAppOnly", None, "False"),
+            mp("ConsentContext.OnBehalfOfAll", None, "True"),
+            mp("ConsentContext.Tags", None, ""),
+            mp("ConsentAction.Permissions", None,
+               f"[] => [[Id: {uuid.uuid4().hex}, ClientId: {sp_oid}, PrincipalId: , "
+               f"ResourceId: {graph_id}, ConsentType: AllPrincipals, Scope: User.Read]]"),
+        ]
+        return audit(activity, "ApplicationManagement", "Core Directory", "Assign",
+                     by_user(admin), [_sp_target(mods)],
+                     [ua, {"key": "AppId", "value": app_id},
+                      {"key": "ServicePrincipalProvisioningType", "value": "Other"}])
+
+    if activity in ("Add owner to application", "Remove owner from application"):
+        add = activity.startswith("Add")
+        owner = ac.pick_user(config)
+        owner_mods = [
+            mp("Application.ObjectID", None if add else app_oid, app_oid if add else None),
+            mp("Application.DisplayName", None if add else app, app if add else None),
+            # Real Remove rows still carry the app id as the new value.
+            mp("Application.AppId", None, app_id),
+        ]
+        owner_target = {"id": ac.user_oid(owner["username"]),
+                        "displayName": owner.get("display_name"),
+                        "type": "User", "userPrincipalName": owner["upn"],
+                        "groupType": None, "modifiedProperties": owner_mods}
+        app_target = {"id": app_oid, "displayName": None, "type": "Application",
+                      "userPrincipalName": None, "groupType": None,
+                      "modifiedProperties": []}
+        return audit(activity, "ApplicationManagement", "Core Directory",
+                     "Assign" if add else "Unassign", by_user(admin),
+                     [owner_target, app_target], [ua])
+
+    return None
 
 
 # Authentic Entra directory-audit failure reasons (result="failure"), keyed by category. Real

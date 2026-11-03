@@ -205,6 +205,22 @@ a **real tenant DLP policy** (DlpRuleMatch), or a **cross-tenant activation base
 tenant's live login brute-force coverage is Okta / Cisco-ASA correlation rules, and the
 standalone spray/brute analytics are VPN/host-based rather than Azure AD SSO.
 
+**App-lifecycle calibration (2026-10-30).** The ten `ApplicationManagement` activities the
+Entra portal actually emits — `Add application`, `Add service principal`,
+`Update service principal`, `Update application`, `Update application – Certificates and
+secrets management `, `Create application – Certificates and secrets management `,
+`Add delegated permission grant`, `Consent to application`, `Add owner to application` and
+`Remove owner from application` — now reproduce the captured target set,
+`modifiedProperties` and `additionalDetails` per activity (`_app_lifecycle_record` in
+`azuread_audit.py`). Notable real shapes: application-targeted ops use `type:
+"Application"` (not `ServicePrincipal`); only SP-targeted ops carry
+`ServicePrincipalProvisioningType`; `Add service principal` also carries
+`AppOwnerOrganizationId`; owner add/remove carries **only** the User-Agent and two targets
+(owner `User` first with `Application.*` mods, then the `Application` object); the
+certificate activities use an **en dash** and a trailing space in the activity name, not a
+hyphen. `azure_audit_catalog.CLOUD_ALERTING_ACTIVITIES` was updated to suppress the en-dash
+variants on the event-hub copy.
+
 ## `o365_azuread` — O365 Management Activity (Azure AD workload)
 
 `Audit.AzureActiveDirectory` records in the `manage.office.com` shape. RecordType 15 is

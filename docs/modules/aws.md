@@ -102,7 +102,7 @@ Context-dependent events that are common in legitimate admin workflows but also 
 
 ---
 
-## Threat Scenarios (37 Types)
+## Threat Scenarios (111 Types)
 
 ### Reconnaissance
 
@@ -189,6 +189,134 @@ Context-dependent events that are common in legitimate admin workflows but also 
 
 ---
 
+## Analytics-Gap Batch (55 Scenarios, Added 2026-11-01)
+
+These scenarios close Low-or-higher "AWS Audit Log" analytics that previously had no
+producer. Each emits a real CloudTrail call with AWS-API-accurate
+`requestParameters` / `responseElements` field names; the mapping from event shape to
+detector is the published analytic description, not a tenant-verified XQL.
+
+> **Verification status:** every scenario in this section is **NOT tenant-verified**.
+> The shapes are real AWS calls, but whether each is the exact discriminator the XSIAM
+> analytic keys on is unproven until `_local_validation/aws_detector_sweep.py` credits
+> it. The primary name in `ANALYTIC_ALERTS` is the published base analytic; sibling
+> Low+ variation names live in `ANALYTIC_ALERTS_SECONDARY`.
+
+### Identity, Trust & Cross-Account
+
+| Key | Events | Target analytic |
+|---|---|---|
+| `IAM_CROSS_ACCOUNT_ROLE` | `CreateRole` with a foreign-account trust policy | AWS IAM Role Created with Cross-Account Access |
+| `IAM_TRUST_POLICY_FOREIGN` | `UpdateAssumeRolePolicy` adding a foreign principal | AWS IAM Role's Trusted Policy Modification Allows Cross-Account Access |
+| `LAMBDA_CROSS_ACCOUNT_PERMISSION` | `AddPermission` granting a foreign account or `*` | AWS Lambda Cross-Account sensitive permissions configured |
+| `FAILED_ASSUME_ROLE` | 5–8 `AssumeRole` calls returning `AccessDenied` | Multiple failed AWS assume role attempts |
+
+### Backup & Logging
+
+| Key | Events | Target analytic |
+|---|---|---|
+| `BACKUP_VAULT_POLICY` | `PutBackupVaultAccessPolicy` granting a foreign account | A Backup vault policy was modified |
+| `BACKUP_VAULT_DELETED` | `DeleteBackupVault` | AWS Backup vault was deleted |
+| `BACKUP_STORAGE_ACCESS` | `GetObject` on backup/archive/config buckets | An identity accessed a backup cloud storage |
+| `ROUTE53_RESOLVER_LOGGING_DELETED` | `DeleteResolverQueryLogConfig` | AWS Route53 DNS Resolver query logging configuration deletion |
+| `LOG_ENUMERATION` | `DescribeTrails` + `DescribeLogGroups` + `ListTrails` + `DescribeConfigurationRecorders` | Log enumeration via cloud native logging service |
+| `LOGGING_EXTERNAL_KMS` | `UpdateTrail` + `AssociateKmsKey` pointing at a foreign KMS key | Logging was impaired via external encryption key |
+| `LOGGING_BUCKET_DELETION` | `DeleteObjects` against a CloudTrail/access-log bucket | Suspicious activity on logging bucket |
+
+### Encryption & Resource Policy
+
+| Key | Events | Target analytic |
+|---|---|---|
+| `DISABLE_ENCRYPTION` | `DisableEbsEncryptionByDefault` + `ModifyEbsDefaultKmsKeyId` | Disable encryption operations |
+| `KMS_KEY_POLICY_FOREIGN` | `PutKeyPolicy` adding a foreign principal | KMS key policy was changed |
+| `S3_FOREIGN_BUCKET_POLICY` | `PutBucketPolicy` granting a foreign account | Foreign account was granted permissions to S3 bucket via resource-based policy |
+| `SG_REMOTE_ACCESS_UNKNOWN` | `AuthorizeSecurityGroupIngress` SSH/RDP from an unknown /32 | AWS Security Group remote access allowed from an unknown external IP address |
+| `PUBLIC_SNAPSHOT_SHARE` | `ModifySnapshotAttribute` / `ModifyDBSnapshotAttribute` → `all` | Cloud snapshot of a database or storage instance was publicly shared |
+
+### Snapshots, Volumes & Exfiltration
+
+| Key | Events | Target analytic |
+|---|---|---|
+| `EBS_SNAPSHOT_BLOCK_DOWNLOAD` | `ListSnapshotBlocks` + `GetSnapshotBlock` ×3 | An EBS snapshot block was downloaded |
+| `MULTIPLE_SNAPSHOT_EXPORT` | 3 × `StartExportTask` to unknown buckets | Multiple cloud snapshots export |
+| `RDS_SNAPSHOT_EXPORT_UNKNOWN` | `StartExportTask` to an unknown bucket | An RDS snapshot was exported to an unknown S3 bucket |
+| `EBS_SNAPSHOT_DELETION` | 4–6 × `DeleteSnapshot` | Suspicious EBS snapshots deletion |
+| `EBS_VOLUME_ATTACH` | `AttachVolume` | EBS volume attachment attempt |
+| `EBS_SNAPSHOT_CREATED` | 2–3 × `CreateSnapshot` from one volume | EBS snapshots were created from an EC2 instance |
+| `SECRETS_MASS_DUMP` | 6 × `GetSecretValue` across two regions | An identity successfully extracted multiple secrets within the organization |
+| `SSM_PARAMETERS_DUMP` | `GetParameters` (`withDecryption=true`) in batches | Suspicious AWS SSM parameters retrieval activity |
+| `RDS_MASTER_PASSWORD_CHANGE` | `ModifyDBInstance` with `masterUserPassword=****` | An AWS database service master user password was changed |
+
+### Compute & Discovery
+
+| Key | Events | Target analytic |
+|---|---|---|
+| `MULTI_REGION_COMPUTE` | `RunInstances` with large/GPU types in 4 regions | Abnormal Allocation of compute resources in multiple regions |
+| `MULTI_REGION_DISCOVERY` | Describe/List calls across 4 regions | Cloud infrastructure discovery across multiple regions |
+| `COMPUTE_OUTSIDE_REGION` | EC2 instance-role credentials used from an external IP in another region | A compute-attached identity executed API calls outside the instance's region |
+| `DORMANT_REGION_COMPUTE` | `RunInstances` in a region the account never uses | Compute activity in dormant cloud region |
+| `SERIAL_CONSOLE_ACCESS` | `SendSerialConsoleSSHPublicKey` | Cloud compute serial console access |
+| `EC2_USER_DATA_READ` | `DescribeInstanceAttribute(attribute=userData)` | Retrieval of cloud compute EC2 instance user data |
+| `SSH_KEY_MODIFICATION` | `SendSSHPublicKey` + `ImportKeyPair` with attacker key material | Suspicious cloud compute instance SSH keys modification attempt |
+| `USER_DATA_MODIFY_REBOOT` | `ModifyInstanceAttribute(userData)` → `RebootInstances` | Suspicious cloud user data modification attempt followed by VM restart |
+| `EC2_BACKDOOR_PUBLIC` | `RunInstances` with admin profile + public IP, then open SSH/RDP to `0.0.0.0/0` | EC2 backdoor created with newly added external SSH or RDP access |
+| `TRAFFIC_MIRRORING` | `CreateTrafficMirrorFilter` + `Target` + `Session` | Network sniffing detected in Cloud environment |
+| `API_THROTTLING` | 12–18 calls returning `ThrottlingException`/`RequestLimitExceeded` | Cloud identity reached a throttling API rate |
+
+### AI / ML
+
+| Key | Events | Target analytic |
+|---|---|---|
+| `BEDROCK_MODEL_SHARE` | RAM `CreateResourceShare` with `allowExternalPrincipals=true` | Bedrock model shared with a foreign account |
+| `AI_AGENT_MODIFIED` | `UpdateAgent` changing model/instructions | Cloud AI agent was modified |
+| `AI_SAFEGUARDS_MODIFIED` | `UpdateGuardrail` setting filters to `NONE` | AI safeguards were modified |
+| `ML_ARTIFACT_DESTRUCTION` | `DeleteEndpoint` + `DeleteModel` + `DeleteFeatureGroup` + `DeleteModelPackage` | ML artifacts destruction |
+| `AI_DATASET_DOWNLOAD` | 3–5 × `GetObject` of training-data shards | Suspicious AI Dataset Download |
+| `ML_MODEL_DOWNLOAD` | 2–4 × `GetObject` of model weight shards | Suspicious ML Model Download |
+
+### Email (SES), SSM & Transfer
+
+| Key | Events | Target analytic |
+|---|---|---|
+| `SES_SENDING_ENABLED` | `UpdateAccountSendingEnabled(true)` | Cloud email sending was enabled |
+| `SES_ACTIVITY` | `VerifyEmailIdentity` + `CreateConfigurationSet` + `SendEmail` | Cloud email service activity |
+| `SES_PRODUCTION_REQUEST` | `PutAccountDetails` requesting production access | SES Production Access Requested |
+| `SES_PHISHING_CHAIN` | identity verify → permissive identity policy → bulk send | Suspicious activity indicating a potential abuse of a cloud-native email service |
+| `SSM_INVENTORY_ASSOCIATION` | `CreateAssociation` with `AWS-GatherSoftwareInventory` | AWS SSM association created with inventory collection document |
+| `TRANSFER_FAMILY_SERVER` | `CreateServer` + `CreateUser` (SFTP, PUBLIC endpoint) | AWS Transfer Family server created |
+| `IAM_UNUSUAL_ACTIVITY` | EC2-role `CreateUser` + `AttachUserPolicy(AdministratorAccess)` + `CreateAccessKey` from an external IP | Unusual Identity and Access Management (IAM) activity — **generator only; claim withheld**, see below |
+
+### Behavioural & Geographic Aggregates
+
+These four are not single API shapes. They emit the burst a per-identity baseline or
+org-scoped aggregate would eventually classify, and are the least certain in the batch.
+
+| Key | Events | Target analytic |
+|---|---|---|
+| `UNUSUAL_COUNTRY_API` | 3 read calls from an ambient attacker-pool country the identity has not used | A cloud identity executed an API call from an unusual country |
+| `IMPOSSIBLE_TRAVEL_CLOUD` | Same identity, home country then a far-pair country 8 minutes later | Impossible travel by a cloud identity |
+| `MULTIPLE_UNUSUAL_ACTIVITIES` | 6 distinct uncommon calls (credential, policy, ingress, secret, log, recon) in one burst | A cloud identity performed multiple unusual activities |
+| `MULTIPLE_RISK_INDICATORS` | Anonymizer IP + novel country + `CreateUser`/`AttachUserPolicy`/`CreateAccessKey` | Multiple risk indicators for a cloud identity |
+
+Country selection for these four uses `config['external_traffic_sources']`, never
+`config['vpn_novel_country_pool']`. The reserve pool exists so the org-scoped
+"First successful VPN access from a country in organization" analytic keeps its
+70-day novelty cycle; spending it on cloud API calls would re-saturate the org
+baseline and silence that detector.
+
+### Residual AWS Gaps (No Generator)
+
+Four Low+ targets still have no producer, for the reasons given:
+
+| Target | Why no generator |
+|---|---|
+| An operation was performed by an identity from a domain that was not seen in the tenant | CloudTrail carries no identity-provider **domain** field; this is an Entra/Okta concept that happens to list AWS Audit Log as an alternative source |
+| Cloud impersonation attempt by unusual identity type | Tried 2026-10-08 and dropped: Informational base + 14-day activation, never fired in 90 days of tenant history |
+| Unusual cloud identity impersonation | Same 2026-10-08 decision as above |
+| Unusual Identity and Access Management (IAM) activity | Generator exists (`IAM_UNUSUAL_ACTIVITY`) but the claim is withheld for the same 90-day evidence; re-add the primary and secondary together if a sweep credits the "Internet facing instance" variation |
+
+---
+
 ## SCENARIO_FUNCTIONS Reference
 
 The following scenario keys can be passed as `scenario_event` in coordinated simulator scenarios:
@@ -229,6 +357,59 @@ The following scenario keys can be passed as `scenario_event` in coordinated sim
 | `EVENTBRIDGE_RULE_DELETED` | DeleteRule / DisableRule | Defense evasion |
 | `GLUE_JOB_EXFIL` | glue:CreateJob (external output) | Data exfiltration |
 | `ATHENA_QUERY_EXFIL` | StartQueryExecution (external output) | Data exfiltration |
+| `IAM_CROSS_ACCOUNT_ROLE` | CreateRole (foreign trust) | Cross-account access |
+| `IAM_TRUST_POLICY_FOREIGN` | UpdateAssumeRolePolicy (foreign principal) | Cross-account access |
+| `LAMBDA_CROSS_ACCOUNT_PERMISSION` | AddPermission (foreign or public) | Cross-account access |
+| `FAILED_ASSUME_ROLE` | AssumeRole ×5–8 (AccessDenied) | Credential probing |
+| `BACKUP_VAULT_POLICY` | PutBackupVaultAccessPolicy | Backup tampering |
+| `BACKUP_VAULT_DELETED` | DeleteBackupVault | Backup destruction |
+| `BACKUP_STORAGE_ACCESS` | GetObject on backup bucket | Data access |
+| `ROUTE53_RESOLVER_LOGGING_DELETED` | DeleteResolverQueryLogConfig | Defense evasion |
+| `LOG_ENUMERATION` | DescribeTrails/LogGroups/ConfigRecorders | Reconnaissance |
+| `LOGGING_EXTERNAL_KMS` | UpdateTrail + AssociateKmsKey (foreign key) | Logging impairment |
+| `LOGGING_BUCKET_DELETION` | DeleteObjects on logging bucket | Defense evasion |
+| `DISABLE_ENCRYPTION` | DisableEbsEncryptionByDefault | Defense evasion |
+| `KMS_KEY_POLICY_FOREIGN` | PutKeyPolicy (foreign principal) | Data exposure |
+| `S3_FOREIGN_BUCKET_POLICY` | PutBucketPolicy (foreign account) | Data exposure |
+| `SG_REMOTE_ACCESS_UNKNOWN` | AuthorizeSecurityGroupIngress (/32) | Network exposure |
+| `PUBLIC_SNAPSHOT_SHARE` | ModifySnapshotAttribute / ModifyDBSnapshotAttribute | Data exposure |
+| `EBS_SNAPSHOT_BLOCK_DOWNLOAD` | ListSnapshotBlocks + GetSnapshotBlock | Data exfiltration |
+| `MULTIPLE_SNAPSHOT_EXPORT` | StartExportTask ×3 | Data exfiltration |
+| `RDS_SNAPSHOT_EXPORT_UNKNOWN` | StartExportTask (unknown bucket) | Data exfiltration |
+| `EBS_SNAPSHOT_DELETION` | DeleteSnapshot ×4–6 | Data destruction |
+| `EBS_VOLUME_ATTACH` | AttachVolume | Lateral movement |
+| `EBS_SNAPSHOT_CREATED` | CreateSnapshot ×2–3 | Data staging |
+| `SECRETS_MASS_DUMP` | GetSecretValue ×6 | Credential theft |
+| `SSM_PARAMETERS_DUMP` | GetParameters (decrypt) | Credential theft |
+| `RDS_MASTER_PASSWORD_CHANGE` | ModifyDBInstance (master password) | Persistence |
+| `MULTI_REGION_COMPUTE` | RunInstances (GPU) ×4 regions | Compute abuse |
+| `MULTI_REGION_DISCOVERY` | Describe/List ×4 regions | Reconnaissance |
+| `COMPUTE_OUTSIDE_REGION` | Instance-role calls from external IP | Credential abuse |
+| `DORMANT_REGION_COMPUTE` | RunInstances in dormant region | Compute abuse |
+| `SERIAL_CONSOLE_ACCESS` | SendSerialConsoleSSHPublicKey | Persistence |
+| `EC2_USER_DATA_READ` | DescribeInstanceAttribute(userData) | Credential access |
+| `SSH_KEY_MODIFICATION` | SendSSHPublicKey + ImportKeyPair | Persistence |
+| `USER_DATA_MODIFY_REBOOT` | ModifyInstanceAttribute(userData) + Reboot | Persistence |
+| `EC2_BACKDOOR_PUBLIC` | RunInstances + open SSH/RDP | Persistence |
+| `TRAFFIC_MIRRORING` | CreateTrafficMirrorFilter/Target/Session | Collection |
+| `API_THROTTLING` | DescribeInstances ×12–18 (throttled) | Discovery |
+| `BEDROCK_MODEL_SHARE` | RAM CreateResourceShare | AI exfiltration |
+| `AI_AGENT_MODIFIED` | UpdateAgent | AI tampering |
+| `AI_SAFEGUARDS_MODIFIED` | UpdateGuardrail | AI tampering |
+| `ML_ARTIFACT_DESTRUCTION` | SageMaker Delete* | AI destruction |
+| `AI_DATASET_DOWNLOAD` | GetObject (dataset shards) | AI exfiltration |
+| `ML_MODEL_DOWNLOAD` | GetObject (model shards) | AI exfiltration |
+| `SES_SENDING_ENABLED` | UpdateAccountSendingEnabled | Email abuse |
+| `SES_ACTIVITY` | VerifyEmailIdentity + SendEmail | Email abuse |
+| `SES_PRODUCTION_REQUEST` | PutAccountDetails | Email abuse |
+| `SES_PHISHING_CHAIN` | Verify + PutIdentityPolicy + SendEmail | Email abuse |
+| `SSM_INVENTORY_ASSOCIATION` | CreateAssociation (inventory doc) | Discovery |
+| `TRANSFER_FAMILY_SERVER` | CreateServer + CreateUser | Exfiltration staging |
+| `IAM_UNUSUAL_ACTIVITY` | EC2-role CreateUser + admin policy + key | Privilege escalation |
+| `UNUSUAL_COUNTRY_API` | Read calls from a novel country | Geo anomaly |
+| `IMPOSSIBLE_TRAVEL_CLOUD` | Home then far country in 8 minutes | Geo anomaly |
+| `MULTIPLE_UNUSUAL_ACTIVITIES` | 6 uncommon calls in one burst | Behavioural anomaly |
+| `MULTIPLE_RISK_INDICATORS` | Anonymizer + novel country + IAM abuse | Risk aggregation |
 
 ---
 
