@@ -7234,13 +7234,18 @@ def _generate_imds_credential_theft(config, context=None):
 #
 # Third run (2026-11-04, 03:42:55Z-03:49:20Z): the remaining 34 scenarios were
 # fired in 7 themed batches, 60s apart, one S3 object per batch, so an alert can
-# be matched to a batch by timestamp. Two credited so far:
+# be matched to a batch by timestamp. Only these two raised an alert; the other
+# 32 scenarios stayed silent:
 #   SSH_KEY_MODIFICATION (batch-6, ImportKeyPair 03:48:13Z) ->
 #     "Potential creation of persistent cloud credentials" (secondary; none of
 #     the SSH-key targets fired).
 #   CONSOLE_FIRST_LOGIN_NONUSER (batch-7, ConsoleLogin 03:49:17Z) ->
 #     "A non-user identity logged in to the AWS console for the first time"
 #     (Medium variation; observed with SecurityAuditorRole).
+# The 32 silent keys have never raised anything in any of the three runs. Their
+# CloudTrail shapes are real, but they do not match the analytics'
+# discriminators as emitted, or the tenant lacks the baseline those analytics
+# need. See docs/modules/aws.md for the full silent list.
 
 # Regions the simulated account does not normally use. Compute/discovery there
 # is what the "dormant region" and "multiple regions" analytics key on.

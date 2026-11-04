@@ -207,8 +207,8 @@ delivered as a single CloudTrail S3 object. The tenant raised **16 alerts**; **1
 
 **2026-11-04 (b).** The remaining 34 scenarios were fired in 7 themed batches
 (`03:42:55Z`–`03:49:20Z`), each flushed as its own S3 object 60 s apart, so an alert can
-be matched to a batch — and usually to a single event — by timestamp. Two are credited so
-far; the rest of the run is awaiting a per-batch report.
+be matched to a batch — and usually to a single event — by timestamp. **Only 2 of the 34
+raised an alert**; the other 32 stayed silent.
 
 > **Attribution caveat:** within a single-object run, an alert is attributed by **event
 > shape**, not one-scenario-per-alert. The batched run removes most of that ambiguity
@@ -244,7 +244,7 @@ far; the rest of the run is awaiting a per-batch report.
 | `SES_SENDING_ENABLED` | Unusual cloud email service activity (not its sending-enabled target) | ⚠️ secondary; target still unproven |
 | `SES_PHISHING_CHAIN` | Unusual cloud email service activity (not its phishing-chain target) | ⚠️ secondary; target still unproven |
 
-**2026-11-04 (b) — batched run (2 confirmed so far):**
+**2026-11-04 (b) — batched run (2 of 34):**
 
 | Key | Batch / event (UTC) | Alert observed in the tenant | Status |
 |---|---|---|---|
@@ -257,6 +257,26 @@ can raise it. The `ImportKeyPair` event pins it to `SSH_KEY_MODIFICATION`; becau
 generator also fired in the 11-03 and 01:26 runs, those earlier alerts are now attributed
 to it rather than to `IAM_UNUSUAL_ACTIVITY` / `MULTIPLE_RISK_INDICATORS`, which remain
 unproven.
+
+Across the three runs, **23 of the 55 scenarios** have been tied to at least one alert
+(two of those, `IAM_UNUSUAL_ACTIVITY` and `MULTIPLE_RISK_INDICATORS`, are now superseded);
+**32 have never raised anything**.
+
+**Silent after three runs (32):**
+
+| Batch | Keys |
+|---|---|
+| identity | `IAM_CROSS_ACCOUNT_ROLE`, `IAM_TRUST_POLICY_FOREIGN`, `LAMBDA_CROSS_ACCOUNT_PERMISSION`, `NEW_IAM_USER_RESOURCE_MOD`, `SG_REMOTE_ACCESS_UNKNOWN` |
+| logging / storage / secrets | `LOG_ENUMERATION`, `LOGGING_BUCKET_DELETION`, `S3_FOREIGN_BUCKET_POLICY`, `BACKUP_STORAGE_ACCESS`, `SECRETS_MASS_DUMP`, `SSM_PARAMETERS_DUMP` |
+| AI / ML / database | `AI_AGENT_MODIFIED`, `ML_ARTIFACT_DESTRUCTION`, `AI_DATASET_DOWNLOAD`, `RDS_MASTER_PASSWORD_CHANGE` |
+| snapshots / volumes | `RDS_SNAPSHOT_EXPORT_UNKNOWN`, `MULTIPLE_SNAPSHOT_EXPORT`, `EBS_SNAPSHOT_DELETION`, `EBS_VOLUME_ATTACH`, `EBS_SNAPSHOT_CREATED` |
+| compute / regions | `MULTI_REGION_COMPUTE`, `MULTI_REGION_DISCOVERY`, `COMPUTE_OUTSIDE_REGION`, `DORMANT_REGION_COMPUTE` |
+| compute access | `SERIAL_CONSOLE_ACCESS`, `USER_DATA_MODIFY_REBOOT`, `EC2_BACKDOOR_PUBLIC`, `TRAFFIC_MIRRORING` |
+| behaviour / console | `FAILED_ASSUME_ROLE`, `API_THROTTLING`, `UNUSUAL_COUNTRY_API`, `IMPOSSIBLE_TRAVEL_CLOUD` |
+
+These emit real CloudTrail calls but do not match the analytic discriminators as written,
+or the tenant has not accumulated the baseline they need (the catalog gives most of them a
+30-day training period).
 
 The primary name in `ANALYTIC_ALERTS` is the published base analytic; sibling Low+
 variation names live in `ANALYTIC_ALERTS_SECONDARY`. A key not listed above is still
