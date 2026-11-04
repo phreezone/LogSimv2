@@ -7212,10 +7212,14 @@ def _generate_imds_credential_theft(config, context=None):
 # secondary claim: LOGGING_EXTERNAL_KMS -> "AWS CloudTrail modification";
 # MULTIPLE_UNUSUAL_ACTIVITIES -> "Successful CloudTrail logging deletion by a
 # non-admin identity".
-# "Potential creation of persistent cloud credentials" also fired, but both
-# IAM_UNUSUAL_ACTIVITY and MULTIPLE_RISK_INDICATORS emit the same
-# CreateUser+AttachUserPolicy+CreateAccessKey shape, so it is recorded as a
-# secondary claim on both without promoting either primary.
+# "Potential creation of persistent cloud credentials" also fired on 11-03. At
+# the time it was recorded as a secondary on IAM_UNUSUAL_ACTIVITY and
+# MULTIPLE_RISK_INDICATORS (both emit the same
+# CreateUser+AttachUserPolicy+CreateAccessKey shape) without promoting either
+# primary. The 2026-11-04 03:48 run later pinned this analytic to ImportKeyPair
+# (see SSH_KEY_MODIFICATION), and that generator fired in every run that raised
+# it, so the 11-03 attribution to the IAM shapes is now superseded. Both IAM keys
+# stay unproven, with no primary promoted.
 #
 # Second run (2026-11-04): the 39 scenarios that raised nothing on 11-03 were
 # fired alone, in one object. Newly credited:
@@ -7224,11 +7228,19 @@ def _generate_imds_credential_theft(config, context=None):
 #   PUBLIC_SNAPSHOT_SHARE      -> primary (two alerts: base + a Low variation)
 #   SES_SENDING_ENABLED and SES_PHISHING_CHAIN -> both raised the generic
 #     "Unusual cloud email service activity" instead of their stated targets.
-# "Potential creation of persistent cloud credentials" was reported again. This
-# run excluded the two known CreateUser+AttachUserPolicy+CreateAccessKey
-# generators, so it is either the still-visible 2026-11-03 alert (5-day dedup)
-# or one of this run's CreateUser/CreateRole shapes. It is NOT re-attributed
-# without the alert's identity or timestamp.
+# "Potential creation of persistent cloud credentials" was reported again. That
+# run excluded IAM_UNUSUAL_ACTIVITY and MULTIPLE_RISK_INDICATORS but still fired
+# SSH_KEY_MODIFICATION (ImportKeyPair), which is now the confirmed source.
+#
+# Third run (2026-11-04, 03:42:55Z-03:49:20Z): the remaining 34 scenarios were
+# fired in 7 themed batches, 60s apart, one S3 object per batch, so an alert can
+# be matched to a batch by timestamp. Two credited so far:
+#   SSH_KEY_MODIFICATION (batch-6, ImportKeyPair 03:48:13Z) ->
+#     "Potential creation of persistent cloud credentials" (secondary; none of
+#     the SSH-key targets fired).
+#   CONSOLE_FIRST_LOGIN_NONUSER (batch-7, ConsoleLogin 03:49:17Z) ->
+#     "A non-user identity logged in to the AWS console for the first time"
+#     (Medium variation; observed with SecurityAuditorRole).
 
 # Regions the simulated account does not normally use. Compute/discovery there
 # is what the "dormant region" and "multiple regions" analytics key on.
@@ -8593,7 +8605,9 @@ def _generate_ssh_key_modification(config, context=None):
     Triggers XSIAM: "Suspicious cloud compute instance SSH keys modification
     attempt" (base Informational; Low+ variations "Instance SSH keys were
     modified for the first time in the cloud provider" and "... by a service
-    account"). NOT tenant-verified.
+    account"). Tenant-verified 2026-11-04: none of those fired; the ImportKeyPair
+    event instead raised "Potential creation of persistent cloud credentials"
+    (recorded as a secondary).
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8873,7 +8887,8 @@ def _generate_console_first_login_nonuser(config, context=None):
 
     Triggers XSIAM: "A user logged in to the AWS console for the first time"
     (base Informational; Low+ variation "A non-user identity logged in to the
-    AWS console for the first time"). NOT tenant-verified.
+    AWS console for the first time"). Tenant-verified 2026-11-04 as the Medium
+    non-user variation (observed with SecurityAuditorRole).
     """
     aws_conf = config.get(CONFIG_KEY, {})
     account_id = aws_conf.get('aws_account_id', '123456789012')
@@ -9920,6 +9935,9 @@ ANALYTIC_ALERTS_SECONDARY = {
     "SSH_KEY_MODIFICATION": [
         "Instance SSH keys were modified for the first time in the cloud provider",
         "Suspicious cloud compute instance SSH keys modification by a service account",
+        # Observed 2026-11-04: the ImportKeyPair event raised this generic
+        # persistence analytic instead of any of the SSH-key targets above.
+        "Potential creation of persistent cloud credentials",
     ],
     "EC2_BACKDOOR_PUBLIC": [
         "EC2 backdoor created with a newly added external SSH or RDP access by a rarely used identity",

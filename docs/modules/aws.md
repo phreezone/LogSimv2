@@ -200,17 +200,19 @@ detector is the published analytic description.
 
 **2026-11-03.** All 55 scenarios were fired in one run (`05:10:41Z`–`05:10:51Z`),
 delivered as a single CloudTrail S3 object. The tenant raised **16 alerts**; **15 of the
-55 scenarios** can be tied to one of them (`KMS_KEY_POLICY_FOREIGN` raised two, and
-"Potential creation of persistent cloud credentials" fits either `IAM_UNUSUAL_ACTIVITY` or
-`MULTIPLE_RISK_INDICATORS`).
+55 scenarios** can be tied to one of them (`KMS_KEY_POLICY_FOREIGN` raised two).
 
-**2026-11-04.** The 39 scenarios that raised nothing on 11-03 were fired alone
+**2026-11-04 (a).** The 39 scenarios that raised nothing on 11-03 were fired alone
 (`01:26:42Z`–`01:26:49Z`, one object, 124 events). Five more scenarios raised an alert.
 
-> **Attribution caveat:** each run shares one S3 object and one short time window, so an
-> alert is attributed by **event shape**, not one-scenario-per-alert. A name below means
-> the run produced a matching event; it does not prove which of two identically-shaped
-> generators raised it.
+**2026-11-04 (b).** The remaining 34 scenarios were fired in 7 themed batches
+(`03:42:55Z`–`03:49:20Z`), each flushed as its own S3 object 60 s apart, so an alert can
+be matched to a batch — and usually to a single event — by timestamp. Two are credited so
+far; the rest of the run is awaiting a per-batch report.
+
+> **Attribution caveat:** within a single-object run, an alert is attributed by **event
+> shape**, not one-scenario-per-alert. The batched run removes most of that ambiguity
+> because each batch is isolated in time.
 
 **2026-11-03 (16 alerts):**
 
@@ -230,9 +232,9 @@ delivered as a single CloudTrail S3 object. The tenant raised **16 alerts**; **1
 | `SES_PRODUCTION_REQUEST` | SES Production Access Requested by an unusual identity | ✅ secondary |
 | `MULTIPLE_UNUSUAL_ACTIVITIES` | Successful CloudTrail logging deletion by a non-admin identity | ⚠️ secondary; primary still unproven |
 | `LOGGING_EXTERNAL_KMS` | AWS CloudTrail modification (not its stated external-key target) | ⚠️ secondary; target still unproven |
-| `IAM_UNUSUAL_ACTIVITY` / `MULTIPLE_RISK_INDICATORS` | Potential creation of persistent cloud credentials | ⚠️ secondary on both; neither primary promoted |
+| `IAM_UNUSUAL_ACTIVITY` / `MULTIPLE_RISK_INDICATORS` | Potential creation of persistent cloud credentials | ⚠️ superseded — the same analytic is now pinned to `SSH_KEY_MODIFICATION` (see below); neither IAM primary promoted |
 
-**2026-11-04 (5 scenarios):**
+**2026-11-04 (a) — 5 scenarios:**
 
 | Key | Alert observed in the tenant | Status |
 |---|---|---|
@@ -242,11 +244,19 @@ delivered as a single CloudTrail S3 object. The tenant raised **16 alerts**; **1
 | `SES_SENDING_ENABLED` | Unusual cloud email service activity (not its sending-enabled target) | ⚠️ secondary; target still unproven |
 | `SES_PHISHING_CHAIN` | Unusual cloud email service activity (not its phishing-chain target) | ⚠️ secondary; target still unproven |
 
-The 2026-11-04 run also reported "Potential creation of persistent cloud credentials"
-again. That run excluded the two known CreateUser+AttachUserPolicy+CreateAccessKey
-generators, so the alert is either the still-visible 11-03 one (5-day dedup) or one of the
-run's CreateUser/CreateRole shapes; it is not re-attributed without the alert identity or
-timestamp.
+**2026-11-04 (b) — batched run (2 confirmed so far):**
+
+| Key | Batch / event (UTC) | Alert observed in the tenant | Status |
+|---|---|---|---|
+| `SSH_KEY_MODIFICATION` | batch-6, `ImportKeyPair` `03:48:13Z` | Potential creation of persistent cloud credentials | ✅ secondary (none of the SSH-key targets fired) |
+| `CONSOLE_FIRST_LOGIN_NONUSER` | batch-7, `ConsoleLogin` `03:49:17Z` | A non-user identity logged in to the AWS console for the first time | ✅ Medium variation (SecurityAuditorRole) |
+
+"Potential creation of persistent cloud credentials" is deliberately generic — *"A cloud
+identity invoked a credential-related persistence operation"* — and more than one shape
+can raise it. The `ImportKeyPair` event pins it to `SSH_KEY_MODIFICATION`; because that
+generator also fired in the 11-03 and 01:26 runs, those earlier alerts are now attributed
+to it rather than to `IAM_UNUSUAL_ACTIVITY` / `MULTIPLE_RISK_INDICATORS`, which remain
+unproven.
 
 The primary name in `ANALYTIC_ALERTS` is the published base analytic; sibling Low+
 variation names live in `ANALYTIC_ALERTS_SECONDARY`. A key not listed above is still
