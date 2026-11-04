@@ -7194,6 +7194,28 @@ def _generate_imds_credential_theft(config, context=None):
 # so an `aws_detector_sweep.py` run can confirm or refute it without touching
 # the older scenarios. Anything the sweep cannot confirm stays flagged in
 # docs/modules/aws.md as "unverified".
+#
+# Tenant verification (2026-11-03): all 55 scenarios were fired in one run
+# (05:10:41Z..05:10:51Z), delivered as a single CloudTrail S3 object. The
+# tenant raised 16 alerts; 15 map to a scenario in this batch (KMS_KEY_POLICY_FOREIGN
+# raised two). Attribution is by EVENT SHAPE, not one-scenario-per-alert: the
+# whole batch shares one object and one time window, so no alert can be pinned
+# to a single generator by time. Confirmed primary/secondary targets:
+#   BACKUP_VAULT_POLICY, BACKUP_VAULT_DELETED (Low+ variation),
+#   ROUTE53_RESOLVER_LOGGING_DELETED (secondary), DISABLE_ENCRYPTION,
+#   KMS_KEY_POLICY_FOREIGN (base + secondary), TRANSFER_FAMILY_SERVER (secondary),
+#   AI_SAFEGUARDS_MODIFIED (secondary), ML_MODEL_DOWNLOAD (secondary),
+#   EBS_SNAPSHOT_BLOCK_DOWNLOAD (secondary), EC2_USER_DATA_READ (secondary),
+#   SES_ACTIVITY (secondary), SES_PRODUCTION_REQUEST (secondary).
+# Two scenarios raised a DIFFERENT analytic than the one their docstring names,
+# so the stated target stays unverified and the observed name becomes a
+# secondary claim: LOGGING_EXTERNAL_KMS -> "AWS CloudTrail modification";
+# MULTIPLE_UNUSUAL_ACTIVITIES -> "Successful CloudTrail logging deletion by a
+# non-admin identity".
+# "Potential creation of persistent cloud credentials" also fired, but both
+# IAM_UNUSUAL_ACTIVITY and MULTIPLE_RISK_INDICATORS emit the same
+# CreateUser+AttachUserPolicy+CreateAccessKey shape, so it is recorded as a
+# secondary claim on both without promoting either primary.
 
 # Regions the simulated account does not normally use. Compute/discovery there
 # is what the "dormant region" and "multiple regions" analytics key on.
@@ -7361,7 +7383,8 @@ def _generate_lambda_cross_account_permission(config, context=None):
 def _generate_backup_vault_policy_modified(config, context=None):
     """(Threat) PutBackupVaultAccessPolicy granting a foreign account the vault.
 
-    Triggers XSIAM: "A Backup vault policy was modified" [Low]. NOT tenant-verified.
+    Triggers XSIAM: "A Backup vault policy was modified" [Low]. Tenant-verified
+    2026-11-03 (the alert was observed after a live fire).
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     foreign = _foreign_account(config, account_id)
@@ -7391,7 +7414,8 @@ def _generate_backup_vault_deleted(config, context=None):
 
     Triggers XSIAM: "AWS Backup vault was deleted" (base Informational; Low+
     variations "... from a production account" and "... for the first time by
-    this identity"). NOT tenant-verified.
+    this identity"). Tenant-verified 2026-11-03: the tenant raised the
+    "... for the first time by this identity" [Low] variation.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     vault = random.choice(["prod-backup-vault", "finance-backup-vault", "dr-backup-vault"])
@@ -7414,7 +7438,9 @@ def _generate_route53_resolver_logging_deleted(config, context=None):
     """(Threat) DeleteResolverQueryLogConfig removes DNS query logging.
 
     Triggers XSIAM: "AWS Route53 DNS Resolver query logging configuration deletion"
-    [Low]. NOT tenant-verified.
+    [Low]. Tenant-verified 2026-11-03 as the Low+ variation "Successful AWS
+    Route53 DNS Resolver query logging configuration deletion by a non-admin
+    identity".
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     cfg_id = f"rqlc-{_rand_hex(17)}"
@@ -7471,7 +7497,10 @@ def _generate_logging_external_kms(config, context=None):
 
     Triggers XSIAM: "Logging was impaired via external encryption key" [Medium].
     The cross-account key ARN in UpdateTrail.kmsKeyId / AssociateKmsKey is the
-    documented "external key" signal. NOT tenant-verified.
+    documented "external key" signal. NOT verified: the 2026-11-03 live fire
+    raised "AWS CloudTrail modification" instead (now a secondary claim), so
+    whether the cross-account key is the discriminator for the external-key
+    analytic remains unproven.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     foreign = _foreign_account(config, account_id)
@@ -7549,7 +7578,8 @@ def _generate_logging_bucket_deletion(config, context=None):
 def _generate_disable_encryption(config, context=None):
     """(Threat) Turn off EBS default encryption and drop the customer-managed key.
 
-    Triggers XSIAM: "Disable encryption operations" [Low]. NOT tenant-verified.
+    Triggers XSIAM: "Disable encryption operations" [Low]. Tenant-verified
+    2026-11-03.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     events = []
@@ -7575,7 +7605,8 @@ def _generate_kms_key_policy_foreign(config, context=None):
 
     Triggers XSIAM: "KMS key policy was changed" (base Informational; Low+
     variation "KMS key policy was modified to include a foreign principal").
-    NOT tenant-verified.
+    Tenant-verified 2026-11-03: both "KMS key policy was changed" and the
+    "Unusual KMS key policy modification" variation were observed.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     foreign = _foreign_account(config, account_id)
@@ -7720,7 +7751,8 @@ def _generate_transfer_family_server(config, context=None):
     """(Threat) CreateServer + CreateUser in AWS Transfer Family (SFTP).
 
     Triggers XSIAM: "AWS Transfer Family server created" (base Informational;
-    Low+ variation "Unusual cloud transfer service activity"). NOT tenant-verified.
+    Low+ variation "Unusual cloud transfer service activity"). Tenant-verified
+    2026-11-03 as the Low+ variation.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -7849,7 +7881,8 @@ def _generate_ai_safeguards_modified(config, context=None):
     """(Threat) UpdateGuardrail weakening Bedrock content filters.
 
     Triggers XSIAM: "AI safeguards were modified" (base Informational; Low+
-    variation "Unusual modification of AI safeguards"). NOT tenant-verified.
+    variation "Unusual modification of AI safeguards"). Tenant-verified
+    2026-11-03 as the Low+ variation.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     guardrail_id = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -7955,7 +7988,7 @@ def _generate_ml_model_download(config, context=None):
 
     Triggers XSIAM: "Suspicious ML Model Download" (base Informational; Low+
     variation "Suspicious First-Time AI Model Download by Identity").
-    NOT tenant-verified.
+    Tenant-verified 2026-11-03 as the Low+ variation.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     bucket = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -8067,7 +8100,8 @@ def _generate_ebs_snapshot_block_download(config, context=None):
 
     Triggers XSIAM: "An EBS snapshot block was downloaded" (base Informational;
     Low+ variations "... from a snapshot with sensitive data" and "An unusual
-    download of EBS snapshot block"). NOT tenant-verified.
+    download of EBS snapshot block"). Tenant-verified 2026-11-03 as the
+    "An unusual download of EBS snapshot block" variation.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     snapshot = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -8520,7 +8554,7 @@ def _generate_ec2_user_data_read(config, context=None):
 
     Triggers XSIAM: "Retrieval of cloud compute EC2 instance user data" (base
     Informational; Low+ variation "Unusual Retrieval of cloud compute instance
-    user data"). NOT tenant-verified.
+    user data"). Tenant-verified 2026-11-03 as the Low+ variation.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     instance = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -8933,7 +8967,8 @@ def _generate_ses_activity(config, context=None):
 
     Triggers XSIAM: "Cloud email service activity" (base Informational; Low+
     variations "Unusual cloud email service activity" and "Cloud email service
-    entity creation"). NOT tenant-verified.
+    entity creation"). Tenant-verified 2026-11-03 as the "Unusual cloud email
+    service activity" variation.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     domain = random.choice(["examplecorp.com", "mail.examplecorp.com"])
@@ -8972,7 +9007,8 @@ def _generate_ses_production_request(config, context=None):
     """(Threat) PutAccountDetails requesting SES production access.
 
     Triggers XSIAM: "SES Production Access Requested" (base Informational; Low+
-    variation "... by an unusual identity"). NOT tenant-verified.
+    variation "... by an unusual identity"). Tenant-verified 2026-11-03 as the
+    "... by an unusual identity" variation.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     event = _get_base_event(config, user_identity, ip_address, region,
@@ -9077,7 +9113,10 @@ def _generate_iam_unusual_activity(config, context=None):
 
     Triggers XSIAM: "Unusual Identity and Access Management (IAM) activity"
     (base Informational; Low+ variation "... executed from a cloud Internet
-    facing instance"). NOT tenant-verified.
+    facing instance"). NOT verified: the 2026-11-03 live fire raised "Potential
+    creation of persistent cloud credentials", but MULTIPLE_RISK_INDICATORS
+    emits the same CreateUser+AttachUserPolicy+CreateAccessKey shape, so the
+    alert cannot be attributed to this generator and the primary stays withheld.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -9307,9 +9346,11 @@ def _generate_multiple_unusual_activities(config, context=None):
     (base Medium) and "A cloud identity performed multiple suspicious
     activities" (Low). The shape is a short burst of distinct, individually
     uncommon calls -- credential creation, bucket policy, ingress, secret read,
-    log tamper -- from one identity and one address. NOT tenant-verified: the
-    analytic is an org-scoped aggregate that also needs the calls to be rare for
-    that identity, which only a long-running baseline can establish.
+    log tamper -- from one identity and one address. NOT verified: the analytic
+    is an org-scoped aggregate that also needs the calls to be rare for that
+    identity, which only a long-running baseline can establish. The 2026-11-03
+    live fire raised "Successful CloudTrail logging deletion by a non-admin
+    identity" (a different analytic, now a secondary claim), not this primary.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -9369,8 +9410,11 @@ def _generate_multiple_risk_indicators(config, context=None):
     described as "combining unusual activity with activity from unusual
     geolocation or high-risk IP". The burst therefore carries all three: an
     anonymizer (commercial VPN / Tor mix) address, a country outside the
-    identity's home set, and privilege changes. NOT tenant-verified: this is the
-    most aggregate target in the batch.
+    identity's home set, and privilege changes. NOT verified: this is the
+    most aggregate target in the batch. The 2026-11-03 live fire raised
+    "Potential creation of persistent cloud credentials" (now a secondary
+    claim), but IAM_UNUSUAL_ACTIVITY emits the same credential-creation shape,
+    so the primary remains unproven.
     """
     user_identity, _, region, account_id = _gap_ctx(config, context, external=False)
     tor_ip = _get_random_ip(config, use_anon=True)
@@ -9682,6 +9726,9 @@ ANALYTIC_ALERTS = {
     # of history showed it never fires in this tenant (Informational base, 14-day
     # activation). The new shape is a closer match for the Low+ "Internet facing
     # instance" variation, but until the tenant sweep credits it, leave the claim off.
+    # The 2026-11-03 fire did raise "Potential creation of persistent cloud credentials",
+    # recorded as a secondary on this key and on MULTIPLE_RISK_INDICATORS; that alert is
+    # not evidence for either primary, so neither is promoted.
     "NEW_IAM_USER_RESOURCE_MOD":       "Unusual resource modification by newly seen IAM user",
     "UNUSUAL_COUNTRY_API":             "A cloud identity executed an API call from an unusual country",
     "IMPOSSIBLE_TRAVEL_CLOUD":         "Impossible travel by a cloud identity",
@@ -9771,6 +9818,11 @@ ANALYTIC_ALERTS_SECONDARY = {
         "Suspicious deletion on CloudTrail logging bucket",
         "Suspicious deletion on S3 access logs bucket",
     ],
+    # Observed 2026-11-03: UpdateTrail to a foreign KMS key raised the CloudTrail
+    # modification analytic, not the "Logging was impaired via external encryption
+    # key" target. The base name and both Medium/Low variations are all spelled
+    # "AWS CloudTrail modification", so one entry covers whichever fires.
+    "LOGGING_EXTERNAL_KMS": ["AWS CloudTrail modification"],
     "KMS_KEY_POLICY_FOREIGN": [
         "KMS key policy was modified to include a foreign principal",
         "Unusual KMS key policy modification",
@@ -9891,6 +9943,11 @@ ANALYTIC_ALERTS_SECONDARY = {
     ],
     # IAM_UNUSUAL_ACTIVITY secondary withheld with its primary -- see the ANALYTIC_ALERTS
     # comment. Re-add both together if the tenant sweep ever credits the variation.
+    # EXCEPTION (2026-11-03): "Potential creation of persistent cloud credentials" did
+    # fire, but both this generator and MULTIPLE_RISK_INDICATORS emit the same
+    # CreateUser+AttachUserPolicy+CreateAccessKey shape, so the alert cannot be pinned
+    # to one of them. It is recorded on both as a secondary; neither primary is promoted.
+    "IAM_UNUSUAL_ACTIVITY": ["Potential creation of persistent cloud credentials"],
     "NEW_IAM_USER_RESOURCE_MOD": [
         "Unusual IAM resource modification by newly seen IAM user",
         "Unusual resource modification by newly seen IAM user from an uncommon IP",
@@ -9906,7 +9963,12 @@ ANALYTIC_ALERTS_SECONDARY = {
     ],
     "MULTIPLE_UNUSUAL_ACTIVITIES": [
         "A cloud identity performed multiple suspicious activities",
+        # Observed 2026-11-03: the burst's DeleteTrail step raised this Low+ variation
+        # of "CloudTrail logging deletion". The primary aggregate is still unproven.
+        "Successful CloudTrail logging deletion by a non-admin identity",
     ],
+    # Same credential-creation shape as IAM_UNUSUAL_ACTIVITY; see that entry's note.
+    "MULTIPLE_RISK_INDICATORS": ["Potential creation of persistent cloud credentials"],
 }
 
 def get_threat_names():

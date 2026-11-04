@@ -221,6 +221,16 @@ certificate activities use an **en dash** and a trailing space in the activity n
 hyphen. `azure_audit_catalog.CLOUD_ALERTING_ACTIVITIES` was updated to suppress the en-dash
 variants on the event-hub copy.
 
+**Tenant verification (2026-11-03).** All ten calibrated shapes were fired through the
+Cribl receiver. The `Consent to application` record raised **"First seen Azure admin
+consent to an application"** — the same alert already credited to `consent_risky_app`,
+now confirmed for the `_app_lifecycle_record` path as well. The other nine activities
+(`Add application`, `Add service principal`, `Update service principal`,
+`Update application`, both certificate-management activities, `Add delegated permission
+grant`, `Add owner to application`, `Remove owner from application`) raised no alert in
+that run; their record shapes remain field-verified against live rows but their detection
+status is unconfirmed.
+
 ## `o365_azuread` — O365 Management Activity (Azure AD workload)
 
 `Audit.AzureActiveDirectory` records in the `manage.office.com` shape. RecordType 15 is

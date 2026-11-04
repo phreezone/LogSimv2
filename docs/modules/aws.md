@@ -194,13 +194,45 @@ Context-dependent events that are common in legitimate admin workflows but also 
 These scenarios close Low-or-higher "AWS Audit Log" analytics that previously had no
 producer. Each emits a real CloudTrail call with AWS-API-accurate
 `requestParameters` / `responseElements` field names; the mapping from event shape to
-detector is the published analytic description, not a tenant-verified XQL.
+detector is the published analytic description.
 
-> **Verification status:** every scenario in this section is **NOT tenant-verified**.
-> The shapes are real AWS calls, but whether each is the exact discriminator the XSIAM
-> analytic keys on is unproven until `_local_validation/aws_detector_sweep.py` credits
-> it. The primary name in `ANALYTIC_ALERTS` is the published base analytic; sibling
-> Low+ variation names live in `ANALYTIC_ALERTS_SECONDARY`.
+### Tenant verification (2026-11-03)
+
+All 55 scenarios were fired in one run (`05:10:41Z`–`05:10:51Z`), delivered as a single
+CloudTrail S3 object. The tenant raised **16 alerts**; **15 of the 55 scenarios** can be
+tied to one of them (`KMS_KEY_POLICY_FOREIGN` raised two, and
+"Potential creation of persistent cloud credentials" fits either `IAM_UNUSUAL_ACTIVITY` or
+`MULTIPLE_RISK_INDICATORS`). The remaining 40 scenarios raised no alert in that run and
+stay **unverified**.
+
+> **Attribution caveat:** the whole batch shares one S3 object and one short time window,
+> so an alert is attributed by **event shape**, not one-scenario-per-alert. A name below
+> means the batch produced a matching event; it does not prove which of two
+> identically-shaped generators raised it.
+
+| Key | Alert observed in the tenant | Status |
+|---|---|---|
+| `BACKUP_VAULT_POLICY` | A Backup vault policy was modified | ✅ primary |
+| `BACKUP_VAULT_DELETED` | AWS Backup vault was deleted for the first time by this identity | ✅ Low+ variation |
+| `ROUTE53_RESOLVER_LOGGING_DELETED` | Successful AWS Route53 DNS Resolver query logging configuration deletion by a non-admin identity | ✅ secondary |
+| `DISABLE_ENCRYPTION` | Disable encryption operations | ✅ primary |
+| `KMS_KEY_POLICY_FOREIGN` | KMS key policy was changed **and** Unusual KMS key policy modification | ✅ primary + secondary |
+| `TRANSFER_FAMILY_SERVER` | Unusual cloud transfer service activity | ✅ secondary |
+| `AI_SAFEGUARDS_MODIFIED` | Unusual modification of AI safeguards | ✅ secondary |
+| `ML_MODEL_DOWNLOAD` | Suspicious First-Time AI Model Download by Identity | ✅ secondary |
+| `EBS_SNAPSHOT_BLOCK_DOWNLOAD` | An unusual download of EBS snapshot block | ✅ secondary |
+| `EC2_USER_DATA_READ` | Unusual Retrieval of cloud compute instance user data | ✅ secondary |
+| `SES_ACTIVITY` | Unusual cloud email service activity | ✅ secondary |
+| `SES_PRODUCTION_REQUEST` | SES Production Access Requested by an unusual identity | ✅ secondary |
+| `MULTIPLE_UNUSUAL_ACTIVITIES` | Successful CloudTrail logging deletion by a non-admin identity | ⚠️ secondary; primary still unproven |
+| `LOGGING_EXTERNAL_KMS` | AWS CloudTrail modification (not its stated external-key target) | ⚠️ secondary; target still unproven |
+| `IAM_UNUSUAL_ACTIVITY` / `MULTIPLE_RISK_INDICATORS` | Potential creation of persistent cloud credentials | ⚠️ secondary on both; neither primary promoted |
+
+The primary name in `ANALYTIC_ALERTS` is the published base analytic; sibling Low+
+variation names live in `ANALYTIC_ALERTS_SECONDARY`. A key not listed above is still
+**NOT tenant-verified** — real AWS call shape, but whether it is the exact discriminator
+the XSIAM analytic keys on is unproven until `_local_validation/aws_detector_sweep.py`
+credits it.
 
 ### Identity, Trust & Cross-Account
 
