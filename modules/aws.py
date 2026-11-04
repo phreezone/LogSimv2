@@ -7216,6 +7216,19 @@ def _generate_imds_credential_theft(config, context=None):
 # IAM_UNUSUAL_ACTIVITY and MULTIPLE_RISK_INDICATORS emit the same
 # CreateUser+AttachUserPolicy+CreateAccessKey shape, so it is recorded as a
 # secondary claim on both without promoting either primary.
+#
+# Second run (2026-11-04): the 39 scenarios that raised nothing on 11-03 were
+# fired alone, in one object. Newly credited:
+#   SSM_INVENTORY_ASSOCIATION  -> Low+ "Unusual AWS SSM association ..."
+#   BEDROCK_MODEL_SHARE        -> primary
+#   PUBLIC_SNAPSHOT_SHARE      -> primary (two alerts: base + a Low variation)
+#   SES_SENDING_ENABLED and SES_PHISHING_CHAIN -> both raised the generic
+#     "Unusual cloud email service activity" instead of their stated targets.
+# "Potential creation of persistent cloud credentials" was reported again. This
+# run excluded the two known CreateUser+AttachUserPolicy+CreateAccessKey
+# generators, so it is either the still-visible 2026-11-03 alert (5-day dedup)
+# or one of this run's CreateUser/CreateRole shapes. It is NOT re-attributed
+# without the alert's identity or timestamp.
 
 # Regions the simulated account does not normally use. Compute/discovery there
 # is what the "dormant region" and "multiple regions" analytics key on.
@@ -7708,7 +7721,8 @@ def _generate_ssm_inventory_association(config, context=None):
 
     Triggers XSIAM: "AWS SSM association created with inventory collection
     document" (base Informational; Low+ variation "Unusual AWS SSM association
-    created with inventory collection document"). NOT tenant-verified.
+    created with inventory collection document"). Tenant-verified 2026-11-04 as
+    the Low+ variation.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -7799,7 +7813,7 @@ def _generate_bedrock_model_share(config, context=None):
     """(Threat) RAM CreateResourceShare sharing a Bedrock custom model with a foreign account.
 
     Triggers XSIAM: "Bedrock model shared with a foreign account" [Low].
-    NOT tenant-verified.
+    Tenant-verified 2026-11-04.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     foreign = _foreign_account(config, account_id)
@@ -8297,7 +8311,8 @@ def _generate_public_snapshot_share(config, context=None):
     Triggers XSIAM: "Cloud snapshot of a database or storage instance was
     publicly shared" [Medium]; also satisfies "Cloud snapshot created or
     modified" (Low+ "Cloud snapshot was configured for public access").
-    NOT tenant-verified.
+    Tenant-verified 2026-11-04: two alerts were observed, the Medium base plus a
+    Low variation (the exact second name was not captured).
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8951,7 +8966,9 @@ def _generate_ses_sending_enabled(config, context=None):
     """(Threat) UpdateAccountSendingEnabled(True).
 
     Triggers XSIAM: "Cloud email sending was enabled" (base Informational; Low+
-    variation "... by an unusual identity"). NOT tenant-verified.
+    variation "... by an unusual identity"). NOT observed. The 2026-11-04 fire
+    raised "Unusual cloud email service activity" instead (now a secondary), so
+    the sending-enabled target remains unproven.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     event = _get_base_event(config, user_identity, ip_address, region,
@@ -9033,7 +9050,9 @@ def _generate_ses_phishing_chain(config, context=None):
 
     Triggers XSIAM: "Suspicious activity indicating a potential abuse of a
     cloud-native email service" [Low]; the discovery/weaponization/impact
-    variations are also claimed. NOT tenant-verified.
+    variations are also claimed. NOT observed. The 2026-11-04 fire raised
+    "Unusual cloud email service activity" instead (now a secondary); the
+    phishing-chain target remains unproven.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     domain = f"promo-{_rand_hex(4)}.com"
@@ -9926,6 +9945,11 @@ ANALYTIC_ALERTS_SECONDARY = {
     ],
     "SES_SENDING_ENABLED": [
         "Cloud email sending was enabled by an unusual identity",
+        # Observed 2026-11-04: the generic "first email operation in the tenant"
+        # variation fired; the sending-enabled target did not. Two such alerts
+        # appeared across this scenario and SES_PHISHING_CHAIN, so the run cannot
+        # pin which alert belongs to which shape.
+        "Unusual cloud email service activity",
     ],
     "SES_ACTIVITY": [
         "Unusual cloud email service activity",
@@ -9937,6 +9961,8 @@ ANALYTIC_ALERTS_SECONDARY = {
     "SES_PHISHING_CHAIN": [
         "Suspicious activity indicating a potential abuse of a cloud-native email service involving discovery, weaponization, and impact",
         "Suspicious activity indicating a potential abuse of a cloud-native email service involving discovery and weaponization",
+        # Observed 2026-11-04: generic SES activity variation; see SES_SENDING_ENABLED.
+        "Unusual cloud email service activity",
     ],
     "BACKUP_STORAGE_ACCESS": [
         "An identity accessed a backup cloud storage which wasn't read recently",
