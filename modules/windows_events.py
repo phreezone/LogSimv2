@@ -6945,9 +6945,8 @@ def _threat_samaccountname_spoofing(config, session_context):
     # The rename to a DC name was previously expressed only in the 5136 pair above, and
     # 5136 is NOT in XSIAM's analytics intake, so "this machine account name was modified
     # to <DC name>" was invisible: the single 4742 emitted earlier still reported the
-    # ORIGINAL name. "TGT request with a spoofed sAMAccountName - Event log"
-    # (rule aa13b505) last fired 2026-07-02, consistent with the rename never being
-    # visible on a consumed event.
+    # ORIGINAL name, so "TGT request with a spoofed sAMAccountName - Event log"
+    # (rule aa13b505) never saw the rename on a consumed event.
     events.append(json.dumps(_build_4742(
         u, config,
         target_computer_name=machine_sam,
