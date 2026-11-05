@@ -1282,7 +1282,7 @@ def egress(user, remote_prob=0.25, mobile_prob=0.08):
 # never reaches it; the same objects streamed through Entra diagnostic settings to an event hub
 # do, as log_name azure_ad_signin_logs, and Graph API request logs (MicrosoftGraphActivityLogs)
 # arrive as microsoft_graph_activity_logs -- the data the "Microsoft Graph Activity Logs"
-# detectors need (verified by a canary on 2026-10-22). Modules emit those copies alongside their
+# detectors need. Modules emit those copies alongside their
 # native records; the cribl transport routes each to the Azure Event Hubs Source-Identifier
 # via the record's route key (integrations.cribl_direct.ROUTE_KEY, stripped before sending).
 EVENTHUB_SOURCE = "fce13a1d51294f84bae4a37851503060"
@@ -1348,7 +1348,7 @@ def with_eventhub_signins(records):
 
 def eventhub_audit(audit):
     """The Event Hub diagnostic-settings record (category AuditLogs) for a Graph directoryAudit
-    object (same object as properties; envelope as Entra streams it, verified by a 2026-10-22 canary)."""
+    object (same object as properties; envelope as Entra streams it)."""
     by = audit.get("initiatedBy") or {}
     user, app = by.get("user") or {}, by.get("app") or {}
     rec = {"time": audit.get("activityDateTime"), "resourceId": EVENTHUB_RESOURCE,

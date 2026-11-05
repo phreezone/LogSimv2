@@ -396,11 +396,9 @@ _ANONYMIZER_SOURCE_LISTS = {"tor_exit_nodes": "tor"}
 # --- Tor is reserved, and rare per user (2026-10-02) ---------------------------------
 # 37 of the 82 threats used to source EVERY event from a Tor exit, and the three bulk
 # sprays (intense_sso_failures, sso_password_spray, password_spray) sent Tor-sourced
-# SSO -- ending in a success -- to all ~500 users on every run. Since 9365f61 (April)
-# every user's Okta profile has therefore accumulated Tor activity, and the profile-
-# scored Analytics BIOC "A successful SSO sign-in from TOR" stopped firing after
-# 2026-08-30. An A/B in the tenant showed the August event shape no longer fires
-# either, so the cause is the profile, not the event format.
+# SSO -- ending in a success -- to all ~500 users on every run. Every user's Okta
+# profile therefore accumulated Tor activity, and the profile-scored Analytics BIOC
+# "A successful SSO sign-in from TOR" stops firing once Tor is normal for a user.
 #
 # Real attack traffic against an IdP is mostly cloud/VPS hosting, commercial VPNs and
 # residential proxies; Tor is a minority. So:
@@ -7143,9 +7141,9 @@ def _make_threat_dict(config, user_info, session_context):
 
 # Threat -> the XSIAM analytics alert it is built to trigger. Only these threats are
 # offered for on-demand firing (dashboard / MCP / CLI, via modules/threat_catalog.py);
-# every threat still runs in long-running sessions. Names are as the tenant raises them
-# where observed, else the published Cortex name. Mapped 2026-09-29 against the Cortex
-# "Okta" and "Okta Audit Log" analytics list and 90 days of tenant alerts.
+# every threat still runs in long-running sessions. Names are the XSIAM alert names,
+# mapped against the Cortex
+# "Okta" and "Okta Audit Log" analytics list.
 ANALYTIC_ALERTS = {
     # Unmapped (background only): Okta system-log signals with no published analytic --
     # policy_deny, breached_credential(_login), session_roaming, token_reuse, risk_*,

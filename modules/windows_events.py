@@ -3879,8 +3879,8 @@ def _build_4776(user_info, config, *, status="0x0", workstation=None, ts=None) -
 # WARNING: these are LDAP userAccountControl values. Event 4738's OldUacValue/NewUacValue
 # fields are SAM USER_ACCOUNT flags ([MS-SAMR]), a DIFFERENT bitmask — there
 # USER_NORMAL_ACCOUNT is 0x10 and USER_DONT_EXPIRE_PASSWORD is 0x200. Passing the LDAP
-# constants into a 4738 emits a change that contradicts the %%-token beside it (this is
-# why _threat_password_never_expires never fired its intended detector). Use SAM literals
+# constants into a 4738 emits a change that contradicts the %%-token beside it, which
+# defeats the intended detector. Use SAM literals
 # for 4738; these constants are correct for LDAP-facing events such as 4720.
 _UAC_NORMAL_ACCOUNT        = "0x200"     # 512: normal user account (LDAP)
 _UAC_ACCOUNTDISABLE        = "0x202"     # 514: disabled + normal
@@ -6143,8 +6143,7 @@ def _threat_irregular_service_tgs(config, session_context):
     tool sets the request's sname to the target SPN instead of krbtgt, so the DC
     logs 4768 events whose ServiceName is an ordinary service principal.  On 4769
     "a service other than KRBTGT" is true of every event ever logged, so the
-    detector cannot be reading TGS events — an earlier 4769-only version of this
-    generator ingested cleanly and never fired.
+    detector cannot be reading TGS events.
 
     We emit both shapes: the 4768 burst is the key trigger for this detector, and
     a matching 4769 for each target keeps the Kerberos exchange internally
@@ -8271,13 +8270,12 @@ def _threat_default_account_enabled(config, session_context):
     return events
 
 
-# Threats renamed once their detection was confirmed firing in the tenant: the wip_
-# ("work in progress") prefix marked a generator whose detection had not yet been
-# seen. The old names still dispatch, so saved scenarios and MCP callers keep working.
+# Threats renamed out of the wip_ ("work in progress") prefix. The old names still
+# dispatch, so saved scenarios and MCP callers keep working.
 _RENAMED_THREATS = {
-    "WIP_AS_REP_ROASTING":          "AS_REP_ROASTING",           # fired 2026-07-30
-    "WIP_DMSA_PRIVESC":             "DMSA_PRIVESC",              # fired 2026-09-19
-    "WIP_SENSITIVE_PASSWORD_RESET": "SENSITIVE_PASSWORD_RESET",  # fired 2026-09-28
+    "WIP_AS_REP_ROASTING":          "AS_REP_ROASTING",
+    "WIP_DMSA_PRIVESC":             "DMSA_PRIVESC",
+    "WIP_SENSITIVE_PASSWORD_RESET": "SENSITIVE_PASSWORD_RESET",
 }
 
 # ── Exchange mailbox abuse via PowerShell (4104 ScriptBlock) ──────────────────
@@ -8918,13 +8916,12 @@ def _threat_malicious_service_install(config, session_context):
 # Which event actually reaches the XSIAM analytics is only partly documented.
 # The published analytic pages name the *signal* ("a user modified the
 # msDS-KeyCredentialLink attribute", "a user added SID history") but not the
-# Event ID or EventData fields. Repo notes elsewhere state that 5136 is not in
-# the tenant's analytics intake while 4662 is, and the dMSA generator only
-# started firing once a 4662 was added. Every attribute-change generator here
+# Event ID or EventData fields, and 5136 may not reach the analytics intake while
+# 4662 does (the dMSA detector consumes 4662). Every attribute-change generator here
 # therefore emits BOTH:
 #   * 5136 old -> new pairs (the native AD audit record, kept for realism), and
 #   * 4662 Write Property (0x20) on the object naming the attribute schema GUID
-#     (the shape the dMSA/dcsync detectors are proven to consume), plus
+#     (the shape the dMSA/dcsync detectors consume), plus
 #   * the final-state 4738/4742 where Windows has a field for the attribute.
 # Attribute schema GUIDs below are the published System-Id-Guid values from
 # Microsoft Learn's AD schema pages (fetched 2026-11-01), not guesses.
@@ -8946,10 +8943,8 @@ def _pkinit_cert_fields(config, *, rogue=False):
 
     Field names are the published 4768 EventData names. The issuer is either the
     simulated enterprise CA or, for the suspicious variant, an issuer outside
-    the organisation's PKI. NOT tenant-verified: no real PKINIT 4768 has been
-    captured from this environment yet (the XSIAM query quota was exhausted
-    while this was written), so diff against a genuine event before changing
-    anything else if the detector stays silent.
+    the organisation's PKI. The shape is built from the published field names, not a
+    captured PKINIT 4768; diff against a genuine event if the detector stays silent.
     """
     base = _domain_dn(config)
     if rogue:
@@ -8996,7 +8991,7 @@ def _threat_shadow_credentials(config, session_context):
         "Key credential attribute addition" (Low)
       - the follow-on PKINIT TGT also feeds "PKINIT TGT authentication request"
 
-    Which event carries the signal is UNVERIFIED (see the block comment above):
+    Which event carries the signal is not published (see the block comment above):
     both the 5136 Value Added pair and the 4662 Write Property are emitted, plus
     a PKINIT 4768 for the modified identity. The target is deliberately a
     different account from the actor so the higher "Possible shadow
@@ -9107,8 +9102,8 @@ def _threat_pkinit_auth(config, session_context):
     obtained with PKINIT. Windows records that on 4768 as PreAuthType=16
     (PA-PK-AS-REQ) with CertIssuerName / CertSerialNumber / CertThumbprint
     populated. Those field names are the published 4768 EventData names.
-    NOT tenant-verified — no genuine PKINIT 4768 has been captured here yet, so
-    if this fires nothing, diff a real event before changing anything else.
+    The shape is built from those names, not a captured PKINIT 4768; if this fires
+    nothing, diff a real event before changing anything else.
 
     A rogue (non-enterprise) issuer is used half the time to exercise the
     certificate-anomaly path that the "Suspicious" variation likely keys on;
@@ -9257,7 +9252,7 @@ def _threat_adfs_dkm_access(config, session_context):
     Fires "ADFS DKM Key Access" (Low). The analytic description names the exact
     signal: "ADFS DKM key attribute (thumbnailphoto) access in AD container".
 
-    Shape assumptions (NOT tenant-verified): the DC audit record is a 4662 read
+    Shape assumptions: the DC audit record is a 4662 read
     of the DKM container, with ObjectType and Properties both the thumbnailPhoto
     schema GUID ({8d3bca50-...}), ObjectName the DKM container DN, and
     AccessMask 0x10 (Read Property). This matches public Golden SAML detection
@@ -9333,8 +9328,7 @@ def _threat_kerberos_relay(config, session_context):
     own machine account — a combination normal workstations never produce.
 
     Shape is inferred from the description and from how Windows logs relayed
-    machine auth; the page does not publish EventData fields. NOT
-    tenant-verified.
+    machine auth; the page does not publish EventData fields.
 
     Sequence:
       1. 4768 TGT for the target's machine account
@@ -9695,9 +9689,8 @@ _THREAT_GENERATORS = {k: _ending_by_now(v) for k, v in _THREAT_GENERATORS.items(
 
 # Threat -> the XSIAM analytics alert it is built to trigger. Only these threats are
 # offered for on-demand firing (dashboard / MCP / CLI, via modules/threat_catalog.py);
-# every threat still runs in long-running sessions. Names are as the tenant raises them
-# where observed, else the published Cortex name. Mapped 2026-09-29 against the Cortex
-# "Windows Event Collector" analytics list and 90 days of tenant alerts.
+# every threat still runs in long-running sessions. Names are the XSIAM alert names,
+# mapped against the Cortex "Windows Event Collector" analytics list.
 ANALYTIC_ALERTS = {
     # Unmapped (background only): lsass_handle_access and account_access_removal (no
     # Windows Event Collector analytic; LSASS access is an XDR-agent detection), and

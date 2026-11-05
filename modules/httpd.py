@@ -31,7 +31,7 @@ _ATTACK_TYPES = [
 
 
 # No threat here is offered for on-demand firing (modules/threat_catalog.py): Cortex
-# publishes no analytics for Apache httpd data, and none has fired from it in the tenant --
+# publishes no analytics for Apache httpd data, --
 # its alerts come from correlation rules and threat intel. Every threat still runs
 # in long-running sessions.
 ANALYTIC_ALERTS = {}

@@ -168,8 +168,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Spam Bot Traffic"},
     {"event": "smtp_large_exfil",      "weight": 2,  "analytic": True,
      "xsiam_alert": "Large Upload (SMTP)"},
-    # "Large Upload (FTP)" is a third-party-firewall analytic: it fired from Firepower
-    # data on 2026-09-25 while this entry still said non-analytic.
+    # "Large Upload (FTP)" is a real third-party-firewall analytic, though it is missing
+    # from the published Third-Party Firewalls list.
     {"event": "ftp_large_exfil",       "weight": 2,  "analytic": True,
      "xsiam_alert": "Large Upload (FTP)"},
     {"event": "ddns_connection",       "weight": 2,  "analytic": True,
@@ -800,10 +800,8 @@ def _benign_destination(config, user, weighted=True):
 
     Before 2026-09-18 the name and the address were chosen from two unrelated
     pools -- `dst_ip` from the destination's CIDR, `domain` from config
-    `benign_domains` -- so the pairing was meaningless. Measured in-tenant, every
-    one of github.com / zoom.us / salesforce.com was logged against 13.107.4.50
-    (the Windows Update /32), and no DNS answer from Infoblox ever matched a
-    FortiGate destination: the join was EMPTY.
+    `benign_domains` -- so the pairing was meaningless, and no DNS answer from
+    Infoblox matched a FortiGate destination.
 
     Both now come from modules/resolver.py, the same table Infoblox answers from,
     so a DNS response and the connection that follows carry the same address.
@@ -1796,9 +1794,8 @@ def _simulate_large_upload(config, src_ip, user, shost, domain=None, dst_ip=None
     )
     fields.update({
         # "SSL", not "HTTPS": xdm.network.application_protocol comes from `app`, and the
-        # Large Upload (HTTPS) alerts that fire (Check Point) carry app_id 'ip,tcp,ssl'
-        # from an "SSL" application. FortiGate uploads labelled "HTTPS" -- 11 over
-        # 100 MB in 14 days -- never fired. Real FortiOS App Control names generic TLS
+        # Large Upload (HTTPS) alerts carry app_id 'ip,tcp,ssl' from an "SSL"
+        # application, not "HTTPS". Real FortiOS App Control names generic TLS
         # "SSL"; the upload-specific signature stays in FTNTFGTapp.
         "app":              "SSL",
         "out":              sent_mb * 1024 * 1024,
@@ -2348,7 +2345,7 @@ def _simulate_smb_rare_file_transfer(config, src_ip, user, shost):
     except ImportError:
         from session_utils import rare_known_host
     # A live workstation in another subnet: rare_internal_host() addresses were never
-    # seen anywhere, and Rare SMB/RDP never fired from any vendor while using them.
+    # seen anywhere, so they have no baseline for Rare SMB/RDP to compare against.
     dst_ip     = rare_known_host(config, exclude=(src_ip,), avoid_subnet_of=src_ip)   # rarely-receiving host, not hot pool
     file_size  = random.randint(104_857_600, 1_073_741_824)  # 100 MB – 1 GB
     duration_s = random.randint(120, 900)
@@ -2867,7 +2864,7 @@ def _simulate_rare_domain_communication(config, src_ip, user, shost):
     Detection; variations for an attack-platform port and a less common port).
 
     NEW 2026-09-17 — the analytic successor to webfilter_block, which stays as vendor
-    noise. webfilter_block never fired because it could not: it is a BLOCK (no
+    noise. webfilter_block cannot fire: it is a BLOCK (no
     communication happened), its "domains" come from a small fixed config map that
     recurs every run, and its destination was the ambient IP pool.
 
@@ -3456,9 +3453,8 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
     _dns_tunnel_target_map above). XSIAM's "Recurring rare domain access to dynamic
     DNS domain" needs one endpoint returning to ONE rare domain repeatedly. Choosing
     a fresh provider x subdomain per call (12 x 10 = 120 combinations) with a random
-    source produced scattered single hits — the opposite of recurrence. Verified
-    in-tenant: a concentrated replay (1 host -> 1 domain, 45-90 sessions)
-    produced the correct shape while the randomised generator never did.
+    source produced scattered single hits — the opposite of recurrence. A
+    concentrated replay (1 host -> 1 domain, 45-90 sessions) is the correct shape.
     DO NOT restore per-call randomisation.
 
     Returns list of CEF log strings.

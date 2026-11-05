@@ -624,9 +624,8 @@ def _generate_s3_make_public_acl(config, context=None):
     #
     # The grant-URI form stays dominant on purpose: per the 2026-08-02 note below on
     # the removed PutBucketPolicy variant, the built-in BIOC "AWS S3 bucket was
-    # exposed to public access" only recognises that form (it alerted in 65s where the
-    # policy form was silent for 20 minutes). The canned form is a real minority of
-    # traffic and is what the `public-read` / `public-read-write` branches of
+    # exposed to public access" only recognises that form. The canned form is a real
+    # minority of traffic and is what the `public-read` / `public-read-write` branches of
     # correlation rule 01_step6 match, so a quarter of events take it.
     use_canned = random.random() < 0.25
     canned_acl = random.choice(["public-read", "public-read-write"])
@@ -4554,12 +4553,10 @@ def _generate_iam_remove_billing_admin(config, context=None):
     })
     return [event]
 
-# _generate_s3_make_public (PutBucketPolicy + Principal:"*") was removed on
-# 2026-08-02. It normalised identically to the ACL variant in cloud_audit_logs
-# but never fired the built-in BIOC "AWS S3 bucket was exposed to public
-# access" — 0 alerts in 180 days, and silent for 20min in a direct A/B where
-# the ACL form alerted in 65s. Bucket exposure is now simulated exclusively by
-# _generate_s3_make_public_acl.
+# _generate_s3_make_public (PutBucketPolicy + Principal:"*") was removed. It
+# normalises identically to the ACL variant in cloud_audit_logs, but the built-in
+# BIOC "AWS S3 bucket was exposed to public access" keys on the ACL form. Bucket
+# exposure is now simulated exclusively by _generate_s3_make_public_acl.
 
 
 def _generate_iam_delete_mfa_device(config, context=None):
@@ -5004,7 +5001,7 @@ def _generate_lambda_role_remote_usage(config, context=None):
     """(Threat) An IAM user assumes the Lambda execution role from outside AWS with the
     CLI, then works with the issued credentials.
     Triggers XSIAM: 'Remote command line usage of AWS Lambda's role' [High]
-    Detection logic (confirmed from ~180 tenant alerts, 2026-10-22..29): AssumeRole by
+    Detection logic: AssumeRole by
     an IAMUser, aws-cli user agent, non-AWS sourceIPAddress, Lambda-style roleSessionName
     (lambda-NNNN). The baseline only ever has lambda.amazonaws.com assume this role, so
     the human CLI assumption stands out.
@@ -7192,60 +7189,7 @@ def _generate_imds_credential_theft(config, context=None):
 # XSIAM analytic keys on -- the published pages describe the signal, not the
 # XQL. Each docstring names the analytic it targets; the batch is grouped here
 # so an `aws_detector_sweep.py` run can confirm or refute it without touching
-# the older scenarios. Anything the sweep cannot confirm stays flagged in
-# docs/modules/aws.md as "unverified".
-#
-# Tenant verification (2026-11-03): all 55 scenarios were fired in one run
-# (05:10:41Z..05:10:51Z), delivered as a single CloudTrail S3 object. The
-# tenant raised 16 alerts; 15 map to a scenario in this batch (KMS_KEY_POLICY_FOREIGN
-# raised two). Attribution is by EVENT SHAPE, not one-scenario-per-alert: the
-# whole batch shares one object and one time window, so no alert can be pinned
-# to a single generator by time. Confirmed primary/secondary targets:
-#   BACKUP_VAULT_POLICY, BACKUP_VAULT_DELETED (Low+ variation),
-#   ROUTE53_RESOLVER_LOGGING_DELETED (secondary), DISABLE_ENCRYPTION,
-#   KMS_KEY_POLICY_FOREIGN (base + secondary), TRANSFER_FAMILY_SERVER (secondary),
-#   AI_SAFEGUARDS_MODIFIED (secondary), ML_MODEL_DOWNLOAD (secondary),
-#   EBS_SNAPSHOT_BLOCK_DOWNLOAD (secondary), EC2_USER_DATA_READ (secondary),
-#   SES_ACTIVITY (secondary), SES_PRODUCTION_REQUEST (secondary).
-# Two scenarios raised a DIFFERENT analytic than the one their docstring names,
-# so the stated target stays unverified and the observed name becomes a
-# secondary claim: LOGGING_EXTERNAL_KMS -> "AWS CloudTrail modification";
-# MULTIPLE_UNUSUAL_ACTIVITIES -> "Successful CloudTrail logging deletion by a
-# non-admin identity".
-# "Potential creation of persistent cloud credentials" also fired on 11-03. At
-# the time it was recorded as a secondary on IAM_UNUSUAL_ACTIVITY and
-# MULTIPLE_RISK_INDICATORS (both emit the same
-# CreateUser+AttachUserPolicy+CreateAccessKey shape) without promoting either
-# primary. The 2026-11-04 03:48 run later pinned this analytic to ImportKeyPair
-# (see SSH_KEY_MODIFICATION), and that generator fired in every run that raised
-# it, so the 11-03 attribution to the IAM shapes is now superseded. Both IAM keys
-# stay unproven, with no primary promoted.
-#
-# Second run (2026-11-04): the 39 scenarios that raised nothing on 11-03 were
-# fired alone, in one object. Newly credited:
-#   SSM_INVENTORY_ASSOCIATION  -> Low+ "Unusual AWS SSM association ..."
-#   BEDROCK_MODEL_SHARE        -> primary
-#   PUBLIC_SNAPSHOT_SHARE      -> primary (two alerts: base + a Low variation)
-#   SES_SENDING_ENABLED and SES_PHISHING_CHAIN -> both raised the generic
-#     "Unusual cloud email service activity" instead of their stated targets.
-# "Potential creation of persistent cloud credentials" was reported again. That
-# run excluded IAM_UNUSUAL_ACTIVITY and MULTIPLE_RISK_INDICATORS but still fired
-# SSH_KEY_MODIFICATION (ImportKeyPair), which is now the confirmed source.
-#
-# Third run (2026-11-04, 03:42:55Z-03:49:20Z): the remaining 34 scenarios were
-# fired in 7 themed batches, 60s apart, one S3 object per batch, so an alert can
-# be matched to a batch by timestamp. Only these two raised an alert; the other
-# 32 scenarios stayed silent:
-#   SSH_KEY_MODIFICATION (batch-6, ImportKeyPair 03:48:13Z) ->
-#     "Potential creation of persistent cloud credentials" (secondary; none of
-#     the SSH-key targets fired).
-#   CONSOLE_FIRST_LOGIN_NONUSER (batch-7, ConsoleLogin 03:49:17Z) ->
-#     "A non-user identity logged in to the AWS console for the first time"
-#     (Medium variation; observed with SecurityAuditorRole).
-# The 32 silent keys have never raised anything in any of the three runs. Their
-# CloudTrail shapes are real, but they do not match the analytics'
-# discriminators as emitted, or the tenant lacks the baseline those analytics
-# need. See docs/modules/aws.md for the full silent list.
+# the older scenarios.
 
 # Regions the simulated account does not normally use. Compute/discovery there
 # is what the "dormant region" and "multiple regions" analytics key on.
@@ -7290,7 +7234,7 @@ def _generate_iam_role_cross_account_trust(config, context=None):
 
     Triggers XSIAM: "AWS IAM Role Created with Cross-Account Access" [Low].
     CloudTrail URL-encodes assumeRolePolicyDocument in both requestParameters and
-    responseElements; that encoding is reproduced here. NOT tenant-verified.
+    responseElements; that encoding is reproduced here.
     """
     user_identity, ip_address, _, account_id = _gap_ctx(config, context, region='us-east-1')
     foreign = _foreign_account(config, account_id)
@@ -7332,7 +7276,7 @@ def _generate_iam_update_trust_policy(config, context=None):
     """(Threat) UpdateAssumeRolePolicy adding a foreign account to an existing role.
 
     Triggers XSIAM: "AWS IAM Role's Trusted Policy Modification Allows Cross-Account
-    Access" [Low]. NOT tenant-verified.
+    Access" [Low].
     """
     user_identity, ip_address, _, account_id = _gap_ctx(config, context, region='us-east-1')
     foreign = _foreign_account(config, account_id)
@@ -7367,7 +7311,7 @@ def _generate_lambda_cross_account_permission(config, context=None):
 
     Triggers XSIAM: "AWS Lambda Cross-Account sensitive permissions configured" [Low].
     The public variants also satisfy "AWS Lambda public sensitive permissions
-    configured" and "AWS Lambda public permissions configured". NOT tenant-verified.
+    configured" and "AWS Lambda public permissions configured".
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -7413,8 +7357,7 @@ def _generate_lambda_cross_account_permission(config, context=None):
 def _generate_backup_vault_policy_modified(config, context=None):
     """(Threat) PutBackupVaultAccessPolicy granting a foreign account the vault.
 
-    Triggers XSIAM: "A Backup vault policy was modified" [Low]. Tenant-verified
-    2026-11-03 (the alert was observed after a live fire).
+    Triggers XSIAM: "A Backup vault policy was modified" [Low].
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     foreign = _foreign_account(config, account_id)
@@ -7444,8 +7387,7 @@ def _generate_backup_vault_deleted(config, context=None):
 
     Triggers XSIAM: "AWS Backup vault was deleted" (base Informational; Low+
     variations "... from a production account" and "... for the first time by
-    this identity"). Tenant-verified 2026-11-03: the tenant raised the
-    "... for the first time by this identity" [Low] variation.
+    this identity").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     vault = random.choice(["prod-backup-vault", "finance-backup-vault", "dr-backup-vault"])
@@ -7468,9 +7410,7 @@ def _generate_route53_resolver_logging_deleted(config, context=None):
     """(Threat) DeleteResolverQueryLogConfig removes DNS query logging.
 
     Triggers XSIAM: "AWS Route53 DNS Resolver query logging configuration deletion"
-    [Low]. Tenant-verified 2026-11-03 as the Low+ variation "Successful AWS
-    Route53 DNS Resolver query logging configuration deletion by a non-admin
-    identity".
+    [Low].
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     cfg_id = f"rqlc-{_rand_hex(17)}"
@@ -7502,7 +7442,6 @@ def _generate_log_enumeration(config, context=None):
     Triggers XSIAM: "Log enumeration via cloud native logging service" (base
     Informational; Low+ variation "... invoked by an identity for the first
     time"). Four read-only calls across CloudTrail, CloudWatch Logs and Config.
-    NOT tenant-verified.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     calls = [
@@ -7577,7 +7516,7 @@ def _generate_logging_bucket_deletion(config, context=None):
 
     Triggers XSIAM: "Suspicious activity on logging bucket" (base Informational;
     Low+ variations "Suspicious deletion on CloudTrail logging bucket" and
-    "Suspicious deletion on S3 access logs bucket"). NOT tenant-verified.
+    "Suspicious deletion on S3 access logs bucket").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -7608,8 +7547,7 @@ def _generate_logging_bucket_deletion(config, context=None):
 def _generate_disable_encryption(config, context=None):
     """(Threat) Turn off EBS default encryption and drop the customer-managed key.
 
-    Triggers XSIAM: "Disable encryption operations" [Low]. Tenant-verified
-    2026-11-03.
+    Triggers XSIAM: "Disable encryption operations" [Low].
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     events = []
@@ -7635,8 +7573,6 @@ def _generate_kms_key_policy_foreign(config, context=None):
 
     Triggers XSIAM: "KMS key policy was changed" (base Informational; Low+
     variation "KMS key policy was modified to include a foreign principal").
-    Tenant-verified 2026-11-03: both "KMS key policy was changed" and the
-    "Unusual KMS key policy modification" variation were observed.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     foreign = _foreign_account(config, account_id)
@@ -7670,7 +7606,7 @@ def _generate_s3_foreign_bucket_policy(config, context=None):
 
     Triggers XSIAM: "Foreign account was granted permissions to S3 bucket via
     resource-based policy" (base Informational; Low+ variation "... with
-    suspicious indicators"). NOT tenant-verified.
+    suspicious indicators").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     foreign = _foreign_account(config, account_id)
@@ -7703,7 +7639,6 @@ def _generate_security_group_remote_access(config, context=None):
     Triggers XSIAM: "AWS Security Group remote access allowed from an unknown
     external IP address" [Low]. The CIDR is a routable /32 rather than 0.0.0.0/0
     because the analytic is about an *unknown external IP*, not a public range.
-    NOT tenant-verified.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -7738,8 +7673,7 @@ def _generate_ssm_inventory_association(config, context=None):
 
     Triggers XSIAM: "AWS SSM association created with inventory collection
     document" (base Informational; Low+ variation "Unusual AWS SSM association
-    created with inventory collection document"). Tenant-verified 2026-11-04 as
-    the Low+ variation.
+    created with inventory collection document").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -7782,8 +7716,7 @@ def _generate_transfer_family_server(config, context=None):
     """(Threat) CreateServer + CreateUser in AWS Transfer Family (SFTP).
 
     Triggers XSIAM: "AWS Transfer Family server created" (base Informational;
-    Low+ variation "Unusual cloud transfer service activity"). Tenant-verified
-    2026-11-03 as the Low+ variation.
+    Low+ variation "Unusual cloud transfer service activity").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -7830,7 +7763,6 @@ def _generate_bedrock_model_share(config, context=None):
     """(Threat) RAM CreateResourceShare sharing a Bedrock custom model with a foreign account.
 
     Triggers XSIAM: "Bedrock model shared with a foreign account" [Low].
-    Tenant-verified 2026-11-04.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     foreign = _foreign_account(config, account_id)
@@ -7870,7 +7802,7 @@ def _generate_ai_agent_modified(config, context=None):
     """(Threat) UpdateAgent changing a Bedrock agent's model and instructions.
 
     Triggers XSIAM: "Cloud AI agent was modified" (base Informational; Low+
-    variation "Unusual modification of AI agent"). NOT tenant-verified.
+    variation "Unusual modification of AI agent").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -7912,8 +7844,7 @@ def _generate_ai_safeguards_modified(config, context=None):
     """(Threat) UpdateGuardrail weakening Bedrock content filters.
 
     Triggers XSIAM: "AI safeguards were modified" (base Informational; Low+
-    variation "Unusual modification of AI safeguards"). Tenant-verified
-    2026-11-03 as the Low+ variation.
+    variation "Unusual modification of AI safeguards").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     guardrail_id = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -7950,7 +7881,7 @@ def _generate_ml_artifact_destruction(config, context=None):
     """(Threat) Delete several SageMaker models/endpoints/feature groups.
 
     Triggers XSIAM: "ML artifacts destruction" [Low] and "Unusual ML artifacts
-    destruction". NOT tenant-verified.
+    destruction".
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -7983,7 +7914,7 @@ def _generate_ai_dataset_download(config, context=None):
 
     Triggers XSIAM: "Suspicious AI Dataset Download" [Low]; the first-time
     variation ("Suspicious First-Time AI Dataset Download by Identity") is also
-    satisfied. NOT tenant-verified.
+    satisfied.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     bucket = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -8019,7 +7950,6 @@ def _generate_ml_model_download(config, context=None):
 
     Triggers XSIAM: "Suspicious ML Model Download" (base Informational; Low+
     variation "Suspicious First-Time AI Model Download by Identity").
-    Tenant-verified 2026-11-03 as the Low+ variation.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     bucket = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -8058,7 +7988,6 @@ def _generate_rds_master_password_change(config, context=None):
     Triggers XSIAM: "An AWS database service master user password was changed"
     (base Informational; Low+ variations "... from an unusual country" and
     "... by a non-DevOps identity"). CloudTrail redacts the password as "****".
-    NOT tenant-verified.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context, external=True)
     db = random.choice(config.get(CONFIG_KEY, {}).get('rds_instances',
@@ -8083,7 +8012,6 @@ def _generate_rds_snapshot_export(config, context=None):
     """(Threat) StartExportTask writing an RDS snapshot to an unknown S3 bucket.
 
     Triggers XSIAM: "An RDS snapshot was exported to an unknown S3 bucket" [Low].
-    NOT tenant-verified.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8131,8 +8059,7 @@ def _generate_ebs_snapshot_block_download(config, context=None):
 
     Triggers XSIAM: "An EBS snapshot block was downloaded" (base Informational;
     Low+ variations "... from a snapshot with sensitive data" and "An unusual
-    download of EBS snapshot block"). Tenant-verified 2026-11-03 as the
-    "An unusual download of EBS snapshot block" variation.
+    download of EBS snapshot block").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     snapshot = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -8171,7 +8098,7 @@ def _generate_multiple_snapshot_export(config, context=None):
     """(Threat) Three StartExportTask calls exporting different RDS snapshots.
 
     Triggers XSIAM: "Multiple cloud snapshots export" (base Informational; every
-    Low+ variation shares the same name). NOT tenant-verified.
+    Low+ variation shares the same name).
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8223,7 +8150,7 @@ def _generate_ebs_snapshot_deletion(config, context=None):
 
     Triggers XSIAM: "Suspicious EBS snapshots deletion" [Low]; secondary
     "A non administrative identity successfully deleted multiple snapshots from
-    a project". NOT tenant-verified.
+    a project".
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     snapshots = config.get(CONFIG_KEY, {}).get('ec2_snapshots',
@@ -8249,7 +8176,6 @@ def _generate_ebs_volume_attach(config, context=None):
 
     Triggers XSIAM: "EBS volume attachment attempt" (base Informational; Low+
     variation "EBS volume attachment attempt for volume with sensitive data").
-    NOT tenant-verified.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8285,7 +8211,7 @@ def _generate_ebs_snapshot_created(config, context=None):
     Triggers XSIAM: "EBS snapshots were created from an EC2 instance" (base
     Informational; Low+ variations "... attached one or more volumes with
     sensitive data" and "An unusual creation of EBS snapshots from an EC2
-    instances"). NOT tenant-verified.
+    instances").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8328,8 +8254,6 @@ def _generate_public_snapshot_share(config, context=None):
     Triggers XSIAM: "Cloud snapshot of a database or storage instance was
     publicly shared" [Medium]; also satisfies "Cloud snapshot created or
     modified" (Low+ "Cloud snapshot was configured for public access").
-    Tenant-verified 2026-11-04: two alerts were observed, the Medium base plus a
-    Low variation (the exact second name was not captured).
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8379,7 +8303,7 @@ def _generate_secrets_mass_dump(config, context=None):
 
     Triggers XSIAM: "An identity successfully extracted multiple secrets within
     the organization" [Low]; secondary "Suspicious secrets dump activity" and the
-    cross-region variations. NOT tenant-verified.
+    cross-region variations.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8411,7 +8335,7 @@ def _generate_ssm_parameters_dump(config, context=None):
 
     Triggers XSIAM: "Suspicious AWS SSM parameters retrieval activity" (base
     Informational; Low+ variation "A non admin identity extracted multiple
-    secrets within the organization across multiple regions"). NOT tenant-verified.
+    secrets within the organization across multiple regions").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8444,7 +8368,7 @@ def _generate_multi_region_compute(config, context=None):
 
     Triggers XSIAM: "Abnormal Allocation of compute resources in multiple
     regions" (base Informational; Low+ variations listed in SECONDARY) and
-    "Allocation of multiple cloud compute resources". NOT tenant-verified.
+    "Allocation of multiple cloud compute resources".
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8486,7 +8410,7 @@ def _generate_multi_region_discovery(config, context=None):
 
     Triggers XSIAM: "Cloud infrastructure discovery across multiple regions"
     (base Informational; Low+ variation "Cloud infrastructure discovery across
-    multiple AWS services and regions"). NOT tenant-verified.
+    multiple AWS services and regions").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     regions = [region] + [r for r in _DORMANT_REGIONS if r != region][:3]
@@ -8512,7 +8436,7 @@ def _generate_compute_outside_region(config, context=None):
 
     Triggers XSIAM: "A compute-attached identity executed API calls outside the
     instance's region" (base Informational; Low+ variations for geolocation/ASN
-    and the plain form). NOT tenant-verified.
+    and the plain form).
     """
     aws_conf = config.get(CONFIG_KEY, {})
     account_id = aws_conf.get('aws_account_id', '123456789012')
@@ -8558,7 +8482,7 @@ def _generate_serial_console_access(config, context=None):
 
     Triggers XSIAM: "Cloud compute serial console access" (base Informational;
     Low+ variation "Suspicious cloud compute serial console access in a
-    project"). NOT tenant-verified.
+    project").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     instance = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -8586,7 +8510,7 @@ def _generate_ec2_user_data_read(config, context=None):
 
     Triggers XSIAM: "Retrieval of cloud compute EC2 instance user data" (base
     Informational; Low+ variation "Unusual Retrieval of cloud compute instance
-    user data"). Tenant-verified 2026-11-03 as the Low+ variation.
+    user data").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     instance = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -8610,9 +8534,7 @@ def _generate_ssh_key_modification(config, context=None):
     Triggers XSIAM: "Suspicious cloud compute instance SSH keys modification
     attempt" (base Informational; Low+ variations "Instance SSH keys were
     modified for the first time in the cloud provider" and "... by a service
-    account"). Tenant-verified 2026-11-04: none of those fired; the ImportKeyPair
-    event instead raised "Potential creation of persistent cloud credentials"
-    (recorded as a secondary).
+    account").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8653,7 +8575,7 @@ def _generate_user_data_modify_reboot(config, context=None):
     """(Threat) ModifyInstanceAttribute(userData) then RebootInstances.
 
     Triggers XSIAM: "Suspicious cloud user data modification attempt followed by
-    VM restart" [Low]. NOT tenant-verified.
+    VM restart" [Low].
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     instance = random.choice(config.get(CONFIG_KEY, {}).get(
@@ -8692,7 +8614,6 @@ def _generate_ec2_backdoor_public(config, context=None):
     Triggers XSIAM: "EC2 backdoor created with newly added external SSH or RDP
     access" [High]; secondary "Cloud instance creation attempt" and "EC2 instance
     creation with admin profile, public IP address and external security group".
-    NOT tenant-verified.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8760,7 +8681,7 @@ def _generate_traffic_mirroring(config, context=None):
 
     Triggers XSIAM: "Network sniffing detected in Cloud environment" (base
     Informational; Low+ variation "Unusual Network sniffing detected in Cloud
-    environment"). NOT tenant-verified.
+    environment").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8837,7 +8758,7 @@ def _generate_failed_assume_role(config, context=None):
 
     Triggers XSIAM: "Multiple failed AWS assume role attempts" (base
     Informational; Low+ variation "Suspicious multiple failed AWS assume role
-    attempts"). NOT tenant-verified.
+    attempts").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -8868,7 +8789,7 @@ def _generate_api_throttling(config, context=None):
 
     Triggers XSIAM: "Cloud identity reached a throttling API rate" (base
     Informational; Low+ variation "Cloud identity reached a highly unusual
-    throttling API rate"). NOT tenant-verified.
+    throttling API rate").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     events = []
@@ -8892,8 +8813,7 @@ def _generate_console_first_login_nonuser(config, context=None):
 
     Triggers XSIAM: "A user logged in to the AWS console for the first time"
     (base Informational; Low+ variation "A non-user identity logged in to the
-    AWS console for the first time"). Tenant-verified 2026-11-04 as the Medium
-    non-user variation (observed with SecurityAuditorRole).
+    AWS console for the first time").
     """
     aws_conf = config.get(CONFIG_KEY, {})
     account_id = aws_conf.get('aws_account_id', '123456789012')
@@ -8947,7 +8867,7 @@ def _generate_dormant_region_compute(config, context=None):
 
     Triggers XSIAM: "Compute activity in dormant cloud region" (base
     Informational; Low+ variations "A cloud compute instance was created in a
-    dormant region" and "... by a compromised AWS access key"). NOT tenant-verified.
+    dormant region" and "... by a compromised AWS access key").
     """
     user_identity, ip_address, _, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -9004,8 +8924,7 @@ def _generate_ses_activity(config, context=None):
 
     Triggers XSIAM: "Cloud email service activity" (base Informational; Low+
     variations "Unusual cloud email service activity" and "Cloud email service
-    entity creation"). Tenant-verified 2026-11-03 as the "Unusual cloud email
-    service activity" variation.
+    entity creation").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     domain = random.choice(["examplecorp.com", "mail.examplecorp.com"])
@@ -9044,8 +8963,7 @@ def _generate_ses_production_request(config, context=None):
     """(Threat) PutAccountDetails requesting SES production access.
 
     Triggers XSIAM: "SES Production Access Requested" (base Informational; Low+
-    variation "... by an unusual identity"). Tenant-verified 2026-11-03 as the
-    "... by an unusual identity" variation.
+    variation "... by an unusual identity").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     event = _get_base_event(config, user_identity, ip_address, region,
@@ -9119,7 +9037,6 @@ def _generate_backup_storage_access(config, context=None):
 
     Triggers XSIAM: "An identity accessed a backup cloud storage" (base
     Informational; Low+ variation "... which wasn't read recently").
-    NOT tenant-verified.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -9232,7 +9149,7 @@ def _generate_new_iam_user_resource_mod(config, context=None):
 
     Triggers XSIAM: "Unusual resource modification by newly seen IAM user" (base
     Informational; Low+ variations "Unusual IAM resource modification by newly
-    seen IAM user" and "... from an uncommon IP"). NOT tenant-verified.
+    seen IAM user" and "... from an uncommon IP").
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
@@ -9330,7 +9247,7 @@ def _generate_unusual_country_api_call(config, context=None):
     identity executed an API call from an unusual country" is the one the
     tenant can actually raise). Identity-scoped: the country is already in the
     org's ambient pool, so this does NOT burn the org-scoped VPN novelty pool.
-    NOT tenant-verified -- depends on XSIAM having baselined the identity first.
+    Depends on XSIAM having baselined the identity first.
     """
     user_identity, _, region, account_id = _gap_ctx(config, context, external=False)
     novel_ip = _ip_from_country(config)
@@ -9357,7 +9274,7 @@ def _generate_impossible_travel_cloud(config, context=None):
     Low+ variation "Impossible travel by an unusual cloud identity"). The first
     event is from a home-country address (benign_ingress_sources), the second
     from the far side of an _FAR_TRAVEL_PAIRS pair 8 minutes later -- well under
-    any plausible flight time. NOT tenant-verified: the analytic needs geo-IP
+    any plausible flight time. The analytic needs geo-IP
     enrichment of sourceIPAddress plus a per-identity baseline.
     """
     user_identity, _, region, account_id = _gap_ctx(config, context, external=False)
@@ -9497,9 +9414,7 @@ SCENARIO_FUNCTIONS = {
     # The built-in BIOC "AWS S3 bucket was exposed to public access" only
     # recognises the ACL form (PutBucketAcl + the AllUsers grant URI). A
     # PutBucketPolicy carrying Principal:"*" normalises identically in
-    # cloud_audit_logs but never fires it — verified 2026-08-02 by firing both
-    # against fresh bucket names: ACL alerted in 65s, policy was silent for
-    # 20min (and has 0 alerts in 180 days). Keep the named threat on the ACL
+    # cloud_audit_logs but does not fire it. Keep the named threat on the ACL
     # variant so scenarios hit the native detector; the policy variant stays in
     # THREAT_SCENARIOS for ambient realism. Correlation rule 01_step6 matches
     # either form, so it keeps firing.
@@ -9639,9 +9554,8 @@ SCENARIO_FUNCTIONS = {
 
 # Threat -> the XSIAM analytics alert it is built to trigger. Only these threats are
 # offered for on-demand firing (dashboard / MCP / CLI, via modules/threat_catalog.py);
-# every threat still runs in long-running sessions. Names are as the tenant raises them
-# where observed, else the published Cortex name. Mapped 2026-09-29 against the Cortex
-# "AWS Audit Log" analytics list and 90 days of tenant alerts.
+# every threat still runs in long-running sessions. Names are the XSIAM alert names,
+# mapped against the Cortex "AWS Audit Log" analytics list.
 ANALYTIC_ALERTS = {
     # Unmapped (background only): ASSUME_ROLE_WITH_SAML is a benign SSO baseline;
     # DISABLE_SECURITY_HUB, DISABLE_MACIE, DISABLE_INSPECTOR, EVENTBRIDGE_RULE_DELETED,
@@ -9812,15 +9726,12 @@ ANALYTIC_ALERTS_SECONDARY = {
         "AWS SSM send command attempt",
         "AWS Systems Manager hosts enumeration",
     ],
-    # Verified: an S3 bucket is a data asset, made public by ACL.
+    # An S3 bucket is a data asset, made public by ACL.
     "MAKE_S3_PUBLIC": ["AWS data asset shared public"],
-    # Dropped 2026-10-08: the cross-account-impersonation and unusual-IAM-activity
-    # secondaries never fired in 90 days of history, and all three target alerts are
-    # Informational base severity (this tenant does not raise Informational) with a
-    # 14-day activation -- so they cannot credit here regardless of time. The threats
-    # keep their proven primaries (CROSS_ACCOUNT_ASSUME_ROLE -> "Unusual cross projects
-    # activity", which fired as recently as 2026-10-08; IAM_RECON_LIST -> "IAM
-    # Enumeration sequence").
+    # Dropped: the cross-account-impersonation and unusual-IAM-activity secondaries
+    # target Informational base-severity alerts with a 14-day activation. The threats
+    # keep their primaries (CROSS_ACCOUNT_ASSUME_ROLE -> "Unusual cross projects
+    # activity"; IAM_RECON_LIST -> "IAM Enumeration sequence").
     # The ransomware chain permanently deletes the original object VERSIONS (Phase 5,
     # each delete carries a versionId, deleteMarker=False). That is a direct match for
     # the Medium "permanently deleted multiple objects" variation. "Mass deletion of
@@ -9832,7 +9743,7 @@ ANALYTIC_ALERTS_SECONDARY = {
         "Mass deletion of versioned S3 objects",
     ],
     # A Tor exit node is a high-risk IP, so every Tor-sourced API call also raises
-    # "Cloud activity from an unusual high-risk IP" [Low] (observed firing 2026-10-07).
+    # "Cloud activity from an unusual high-risk IP" [Low].
     "TOR_LOGIN": ["Cloud activity from a high-risk IP address"],
     "API_CALL_FROM_TOR": ["Cloud activity from a high-risk IP address"],
     "BEDROCK_TOR_USAGE": ["Cloud activity from a high-risk IP address"],
@@ -9968,10 +9879,7 @@ ANALYTIC_ALERTS_SECONDARY = {
     ],
     "SES_SENDING_ENABLED": [
         "Cloud email sending was enabled by an unusual identity",
-        # Observed 2026-11-04: the generic "first email operation in the tenant"
-        # variation fired; the sending-enabled target did not. Two such alerts
-        # appeared across this scenario and SES_PHISHING_CHAIN, so the run cannot
-        # pin which alert belongs to which shape.
+        # The generic "first email operation in the tenant" variation.
         "Unusual cloud email service activity",
     ],
     "SES_ACTIVITY": [

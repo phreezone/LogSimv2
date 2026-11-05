@@ -29,7 +29,7 @@ CONFIG_KEY = "infoblox_config"
 SOURCE_IDENTIFIER = "af01292940d7426594d3d3e55ae17ee0"   # Cribl generic UUID -> <vendor>_<product>_raw
 
 # No threat here is offered for on-demand firing (modules/threat_catalog.py): Cortex
-# publishes no analytics for Infoblox data, and none has fired from it in the tenant --
+# publishes no analytics for Infoblox data, --
 # its alerts come from correlation rules and threat intel. Every threat still runs
 # in long-running sessions.
 ANALYTIC_ALERTS = {}
@@ -67,8 +67,7 @@ _CEF_PRI = {8: "<26>", 7: "<27>", 6: "<28>", 4: "<30>"}
 
 # A NIOS threat-protection rule has a STABLE SID (the rule id) and a fixed
 # severity -- both are properties of the rule, not of the packet that hit it.
-# Measured in-tenant 2026-09-18 before this fix: 411 events carried 411 distinct
-# SIDs, because the SID was random.randint(100000000, 999999999) per event. No
+# The SID used to be random.randint(100000000, 999999999) per event, so no
 # rule could ever be seen to fire twice, so grouping or tuning by SID was
 # impossible. 120601943 is the real SID from the Infoblox documentation sample.
 #   (category, CEF severity, SID, CEF Name phrase)
@@ -86,7 +85,7 @@ _THREAT_RULES = {
 # PASSTHRU is deliberately NOT in the block list: it is an explicit ALLOW (the
 # rule matched and the answer was let through untouched). It used to be one of
 # three entries in _RPZ_ACTIONS, so a third of every "RPZ block storm" was
-# actually permitted traffic -- 199 of 587 RPZ events in the tenant.
+# actually permitted traffic.
 _RPZ_BLOCK_ACTIONS = ["NXDOMAIN", "NODATA", "Local-Data"]
 _RPZ_TRIGGERS      = ["QNAME", "IP", "CLIENT-IP", "NSDNAME"]
 # Audit verbs NIOS actually writes. Object_Add / Object_Modify / Object_Delete,
@@ -111,7 +110,7 @@ _AUDIT_WAPI_OBJECTS = [
     ("network",        "Network"),
     # "Range", not "DHCPRange": the Infoblox content pack's DHCP section claims
     # any line matching DHCP\w+, so an audit line naming a DHCPRange object was
-    # modelled as a DHCP event and lost its admin (seen in-tenant 2026-09-21).
+    # modelled as a DHCP event and lost its admin.
     ("range",          "Range"),
     ("fixedaddress",   "FixedAddress"),
     ("record:ptr",     "PtrRecord"),
@@ -619,13 +618,8 @@ def _build_threat_cef_log(config, client_ip, client_port, domain, threat_categor
     what the Elastic/Splunk NIOS parsers are written against:
     <27>Sep 18 22:03:05 infoblox-dc1-01 threat-protect-log[12674]: CEF:0|Infoblox|NIOS Threat|...
 
-    That change is why this function exists in its current shape. Measured
-    in-tenant 2026-09-18 over 7 days, with the local-file rendering above:
-
-        rows with a <PRI> header : 443,955   ->  303,940 carried xdm.source.ipv4
-        rows without one         :     998   ->        0 carried ANY XDM field
-
-    All 998 were these CEF events. XSIAM set xdm.event.type = "Threat" off a raw
+    That change is why this function exists in its current shape. With the local-file
+    rendering above (no <PRI> header), XSIAM set xdm.event.type = "Threat" off a raw
     substring match and dropped every field after it -- src, dst, act, cat, fqdn
     and hit_count all landed nowhere. The facility/severity the doc spells out in
     words ("daemon", "err") is exactly what a PRI encodes, so moving it into the

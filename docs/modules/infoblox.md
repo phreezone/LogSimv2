@@ -4,16 +4,13 @@
 **Transport:** Syslog (TCP)
 **Format:** Native Infoblox NIOS syslog (DNS/DHCP queries and responses) + CEF (RPZ, Threat Protect)
 
-> **Correction (2026-09-18).** This page and every builder docstring previously claimed
-> events route to `infoblox_dns_raw` / `infoblox_dhcp_raw` / `infoblox_audit_raw` /
-> `infoblox_threat_raw`. **None of those datasets exist.** Verified in-tenant: everything
-> lands in **`infoblox_infoblox_raw`**, the `<vendor>_<product>_raw` dataset for
-> vendor=`infoblox`/product=`infoblox` (409,869 rows over 7 days). The built-in parser
-> *does* model it — measured coverage over 441k rows: `xdm.network.dns.dns_question.name`
-> 265,064 · `xdm.source.ipv4` 301,601 · `xdm.target.ipv4` 84,263 ·
-> `xdm.network.dns.response_code` 132,121 — with `xdm.event.type` resolving to
+> **Dataset.** Everything lands in **`infoblox_infoblox_raw`**, the `<vendor>_<product>_raw`
+> dataset for vendor=`infoblox`/product=`infoblox`; there are no `infoblox_dns_raw` /
+> `infoblox_dhcp_raw` / `infoblox_audit_raw` / `infoblox_threat_raw` datasets. The built-in
+> parser models it — `xdm.network.dns.dns_question.name`, `xdm.source.ipv4`,
+> `xdm.target.ipv4` and `xdm.network.dns.response_code` — with `xdm.event.type` resolving to
 > DNS Query / DNS Response / DHCP / AUDIT / Threat. `xdm.observer.name` and
-> `xdm.source.host.hostname` are **not** mapped (0 rows).
+> `xdm.source.host.hostname` are **not** mapped.
 
 Simulates Infoblox NIOS DNS, DHCP, audit, RPZ and Threat Protect syslog events into the
 single XSIAM `infoblox_infoblox_raw` dataset. DNS and DHCP events use the native Infoblox
@@ -31,14 +28,8 @@ parser distinguishes them by the syslog **process** field.
 ## Cross-matching: DNS answers are the connection targets
 
 Infoblox is only useful alongside the network modules if a DNS answer and the session
-that follows it carry **the same address**. Until 2026-09-18 they did not, and the join
-was empty. Measured in-tenant over 7 days:
-
-| | |
-|---|---|
-| Infoblox `zoom.us` → | `45.25.97.136`, `213.199.25.93`, `142.254.180.140` … |
-| FortiGate `zoom.us` → | `13.107.4.50` |
-| **intersection** | **EMPTY** |
+that follows it carry **the same address**. Earlier versions did not — Infoblox answered
+`zoom.us` with addresses no firewall module ever connected to — so the join was empty.
 
 Three root causes, all fixed:
 
@@ -187,14 +178,7 @@ file** — ISO timestamp, the facility as a word, no PRI:
 2020-12-21T22:47:37-08:00 daemon ibflex2.com threat-protect-log[12674]: err CEF:0|Infoblox|NIOS Threat|...
 ```
 
-This module emitted that rendering verbatim. Measured in-tenant over 7 days:
-
-| | rows | carried `xdm.source.ipv4` |
-|---|---|---|
-| with a `<PRI>` header | 443,955 | 303,940 |
-| **without one** | **998** | **0** |
-
-All 998 were the RPZ and threat-protect CEF events. XSIAM set
+This module emitted that rendering verbatim. Without a `<PRI>` header, XSIAM set
 `xdm.event.type = "Threat"` off a raw substring match and dropped everything after
 it — `src`, `dst`, `act`, `cat`, `fqdn` and `hit_count` all landed nowhere, so the
 entire Infoblox threat feed was unqueryable by any XDM field.
@@ -211,25 +195,22 @@ Also corrected in the same pass:
 | RPZ process | `daemon info rpz:` (the NIOS 6.12 rendering, no host/pid/PRI) | `named[pid]:`, as NIOS 8.3+ logs it |
 | RPZ `via` | the bare policy zone (`via bloxone-rpz-malware`) | the RPZ **record** that matched (`via domain.zone`, `via 32.<rev-ip>.rpz-ip.zone`) |
 | RPZ trailer | *(missing)* | `CAT=RPZ` |
-| RPZ actions | `NXDOMAIN`, `PASSTHRU`, `IP/NXDOMAIN` — a third of a "block storm" was **PASSTHRU**, an explicit *allow* (199 of 587 events in tenant) | `NXDOMAIN` / `NODATA` / `Local-Data`, over QNAME / IP / CLIENT-IP / NSDNAME triggers |
-| Threat SID | `random.randint(1e8, 1e9)` per event — **411 events, 411 distinct SIDs** | one stable SID per rule category (the DDoS rule uses Infoblox's real `120601943`) |
+| RPZ actions | `NXDOMAIN`, `PASSTHRU`, `IP/NXDOMAIN` — a third of a "block storm" was **PASSTHRU**, an explicit *allow* | `NXDOMAIN` / `NODATA` / `Local-Data`, over QNAME / IP / CLIENT-IP / NSDNAME triggers |
+| Threat SID | `random.randint(1e8, 1e9)` per event — a new SID every time | one stable SID per rule category (the DDoS rule uses Infoblox's real `120601943`) |
 | Threat severity | hardcoded `7` on every event | per-category `8`/`7`/`6`, per the documented 8=Critical / 7=Major / 6=Warning / 4=Informational scale |
 | Threat CEF Name | `cat: fqdn` (the category jammed into the name) | the rule phrase, as documented (`Potential DDoS related domain: phackt.com`) |
 | `hit_count` | pinned at `1` | climbs across the aggregation window |
 | Query ↔ verdict | re-rolled independently: one blocked query logged `(10.2.1.2)` while its RPZ CEF said `dst=10.1.1.2`, with a different `spt` | one appliance, one pid, one source port per transaction |
 
-> **In-tenant result (2026-09-21): the PRI change did NOT make the CEF events model.**
-> 44 threat-protect and 59 RPZ events in the new format arrived and still carried zero
-> network fields. The content pack's Threat section
-> (`Packs/Infoblox/ModelingRules/Infoblox_1_3`) does not regex `_raw_log` — it reads
-> **pre-parsed CEF columns** (`cefName`, `cefDeviceEventClassId`, `src`, `spt`, `dst`,
-> `dpt`, `act`, `cat`, `msg`, `fqdn`) and its filter is `_raw_log = null or _raw_log ~= "CEF:0"`.
-> Those columns exist only when the **Broker VM syslog collector parses CEF on ingest**.
-> In this tenant `infoblox_infoblox_raw` has **0** CEF-parsed rows ever: the Infoblox
-> syslog source is configured so the whole feed lands as raw text. This is a
-> **tenant-side ingestion setting** (Broker VM → Syslog Collector → the Infoblox source's
-> *Format*: Auto-Detect / CEF / RAW), not a generator defect. The PRI header is kept
-> because it is the correct on-the-wire form.
+> **CEF events model only when the collector parses CEF on ingest.** The content pack's
+> Threat section (`Packs/Infoblox/ModelingRules/Infoblox_1_3`) does not regex `_raw_log` —
+> it reads **pre-parsed CEF columns** (`cefName`, `cefDeviceEventClassId`, `src`, `spt`,
+> `dst`, `dpt`, `act`, `cat`, `msg`, `fqdn`) and its filter is
+> `_raw_log = null or _raw_log ~= "CEF:0"`. Those columns exist only when the **Broker VM
+> syslog collector parses CEF on ingest** (Broker VM → Syslog Collector → the Infoblox
+> source's *Format*: Auto-Detect / CEF / RAW). With RAW, the whole feed lands as text and the
+> CEF events carry no network fields — a collector setting, not a generator defect. The PRI
+> header is kept because it is the correct on-the-wire form.
 
 #### Content-pack routing (checked 2026-09-21)
 
@@ -299,7 +280,7 @@ found no published Infoblox sample for either.
 
 **Fields no generator change can reach:**
 - `xdm.network.dns.is_truncated`: the pack captures response flags with `[ATEDVL]`, uppercase only, then tests for a lowercase `t`, so it can never be true.
-- The Threat-section fields (`xdm.alert.*`, `xdm.intermediate.port`, `xdm.target.domain`): they come only from ingest-parsed CEF columns (see *In-tenant result* above).
+- The Threat-section fields (`xdm.alert.*`, `xdm.intermediate.port`, `xdm.target.domain`): they come only from ingest-parsed CEF columns (see the CEF ingest note above).
 - Per-event gaps inside CEF: documented RPZ events carry no `fqdn`, `act` or `dpt`, and documented Threat Protect events carry no `msg`. Adding them would mean inventing fields.
 
 #### Non-CEF fidelity (same pass)
@@ -324,9 +305,9 @@ Infoblox sample it came from.
 > **Deliberately not changed yet:** real NIOS also prints a high-precision body timestamp
 > (`03-May-2018 16:30:50.385`) after `named[pid]:` and a `view N:` segment before the
 > protocol. Both are authentic, but adding them changes the line shape, and the XSIAM
-> built-in parser currently extracts this format correctly (265k query names, 132k rcodes,
-> 84k answers modelled). Breaking a working parse for cosmetic fidelity is the worse trade,
-> so these should be added and then **validated in-tenant** before being kept.
+> built-in parser extracts the current format correctly. Breaking a working parse for
+> cosmetic fidelity is the worse trade, so add them only together with a check that the
+> parser still models them.
 
 ---
 

@@ -778,7 +778,7 @@ def scenario_cross_tenant_trust_abuse(config=None, rogue=None, start=None):
     changes granting inbound collaboration/direct-connect, MFA trust, auto-redemption and inbound
     user provisioning from the attacker tenant -> anomalous directory/trust change + privilege path.
 
-    WIP/prerequisite-gated (verified 2026-10-30, no alert from a synthetic fire): the cross-tenant
+    WIP/prerequisite-gated: the cross-tenant
     trust analytics need an activation baseline of what "normal" cross-tenant config looks like (and
     likely correlation), so a one-shot synthetic change does not trip them. Record shapes are
     field-correct (Policy-target Add/Update split matches real rows); the gap is the prerequisite."""
@@ -1498,37 +1498,31 @@ SCENARIOS.update({
     "wip_sp_owner_granted": scenario_sp_owner_granted,
 })
 
-# On-demand threats (threat_catalog): only scenarios whose analytic has been SEEN firing
-# in the tenant on this feed's synthetic data -- alerts attributed to examplecorp
-# identities on the exact operation the scenario emits (alerts dataset, 2026-09-30 ..
-# 2026-10-21; admin_role_add and federated_domain_backdoor also confirmed fire->alert by
-# _local_validation/threat_harness.py on 2026-10-12). Every other scenario stays
-# background-only until an alert is observed for it. account_unlock_password_reset is
-# held back: one alert in three weeks, not attributable to the scenario over the
-# catalog's own password-reset records.
+# On-demand threats (threat_catalog): scenarios whose analytic this feed's synthetic data
+# drives on its own; `wip_` entries are prerequisite-gated. account_unlock_password_reset
+# is held back: its alert cannot be told apart from the catalog's own password-reset
+# records.
 ANALYTIC_ALERTS = {
-    # Observed firing 2026-10-30: the tenant raised the Cloud privilege-escalation analytic for the
-    # Global Administrator grant (was mapped to "Suspicious Azure AD Administrator Role assignment").
+    # The Global Administrator grant drives the Cloud privilege-escalation analytic (was mapped to
+    # "Suspicious Azure AD Administrator Role assignment").
     "admin_role_add":           "A cloud identity escalated its permissions to a high privilege role/policy",
     "consent_risky_app":        "First seen Azure admin consent to an application",
     "ca_policy_removed":        "Conditional Access policy removed",
     "pim_alert_disabled":       "Azure AD PIM alert disabled",
     "pim_role_settings_change": "Azure AD PIM role settings change",
     "unverified_domain_added":  "Rare unverified domain addition to Azure AD",
-    # Confirmed firing 2026-10-30 (fire -> alert observed; CA-removed re-confirmed with the full
-    # policy-JSON shape, guest invite with the two-row Invited Users + Add user shape).
+    # CA-removed uses the full policy-JSON shape; the guest invite uses the two-row Invited
+    # Users + Add user shape.
     "unusual_guest_invitation": "Rare successful guest invitation in the organization",
     "federated_domain_backdoor": "A successful Azure domain federation settings modification",
     "failed_federation_change": "Azure domain federation settings modification attempt",
     "wip_cloud_group_change": "A cloud identity created or modified a security group",
     "wip_azure_group_create_delete": "Azure group creation/deletion",
-    # App-management family: validated 2026-10-30 against REAL user-initiated tenant events (a custom
-    # "Crawler" app registration + credential) — our record shapes match the real rows. They did NOT
-    # raise standalone alerts, and that is EXPECTED: on their Cortex pages these are Informational
-    # severity (Service principal/Application creation, Owner added, Credentials added via the Cloud
-    # module) which do not surface as standalone alerts, and the Low/Medium variants carry a 14-day
-    # activation + 30-day training window. So "no alert here" is Informational/activation-gated, NOT a
-    # data-shape bug — do not re-chase these as broken. Required data: Azure Audit Log OR Microsoft
+    # App-management family: record shapes match real user-initiated app registrations. On their
+    # Cortex pages these are Informational severity (Service principal/Application creation, Owner
+    # added, Credentials added via the Cloud module), which do not surface as standalone alerts, and
+    # the Low/Medium variants carry a 14-day activation + 30-day training window -- so they are
+    # activation-gated, not a data-shape problem. Required data: Azure Audit Log OR Microsoft
     # Graph Logs (Cloud module) or AzureAD Audit Log + Identity Threat Module.
     "wip_app_credential_added": "Credentials were added to Azure application",
     "wip_app_owner_added": "Owner was added to Azure application",
@@ -1548,7 +1542,7 @@ ANALYTIC_ALERTS = {
     "wip_application_removed": "Azure application removed",
     "wip_service_principal_application_created": "Azure Service principal/Application creation",
     "wip_azure_domain_verification": "A new Azure email domain verification was requested",
-    # Ported from feature/batched-sends; alert names from the scenarios' docstrings, unverified.
+    # Ported from feature/batched-sends; alert names from the scenarios' docstrings.
     "wip_domain_authentication_change": "Azure domain federation settings modification",
     "wip_account_disabled": "Azure AD account disabled",
     "wip_mfa_state_disabled": "Azure AD per-user MFA state change",

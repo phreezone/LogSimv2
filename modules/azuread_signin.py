@@ -913,7 +913,6 @@ SCENARIOS.update({
 })
 
 ANALYTIC_ALERTS = {
-    # Confirmed firing 2026-10-30 (fire -> alert observed on this feed's synthetic data).
     "tor_signin": "A successful SSO sign-in from TOR",
     "first_sso_resource_org": "Abnormal first access to a resource via SSO in the organization",
     "wip_unusual_country_api": "A cloud identity executed an API call from an unusual country",
@@ -950,7 +949,7 @@ ANALYTIC_ALERTS = {
     "wip_service_account_sso": "SSO authentication by a service account",
     "wip_machine_account_sso": "SSO authentication by a machine account",
     "wip_dormant_account_sso": "Dormant account authenticated via SSO",
-    # Ported from feature/batched-sends (documentation-based); alert name unverified.
+    # Ported from feature/batched-sends (documentation-based); alert name from the docs.
     "wip_app_credential_first_use": "First use of a newly added Azure application credential",
 }
 

@@ -652,7 +652,7 @@ ANALYTIC_ALERTS = {
     "wip_onedrive_file_download": "OneDrive file download",
     "wip_onedrive_file_upload": "OneDrive file upload",
     "wip_unusual_m365_storage_access": "Unusual access to Microsoft 365 storage services",
-    # Ported from feature/batched-sends; alert names unverified.
+    # Ported from feature/batched-sends; alert names from the scenarios' docstrings.
     "wip_site_collection_admin_removed": "SharePoint site collection administrator removed",
     "wip_sync_client_blocked": "Unmanaged device sync client blocked",
 }

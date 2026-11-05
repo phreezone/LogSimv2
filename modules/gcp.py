@@ -130,7 +130,7 @@ _ADMIN_ROLES = [
     "roles/owner",
     # serviceAccountUser lets a principal impersonate a service account, which is
     # the classic GCP escalation path and one the SetIamPolicy correlation rule
-    # matches. It was missing from this list, so that branch never fired.
+    # matches. It was missing from this list, so that branch had nothing to match.
     "roles/iam.serviceAccountUser",
     "roles/iam.securityAdmin",
     "roles/resourcemanager.organizationAdmin",
@@ -6117,9 +6117,9 @@ SCENARIO_FUNCTIONS = {
 
 # Threat -> the XSIAM analytics alert it is built to trigger. Only these threats are
 # offered for on-demand firing (dashboard / MCP / CLI, via modules/threat_catalog.py);
-# every threat still runs in long-running sessions. Names are as the tenant raises them
-# where observed, else the published Cortex name. Mapped 2026-09-29 against the Cortex
-# "Gcp Audit Log" analytics list and 90 days of tenant alerts.
+# every threat still runs in long-running sessions. Names are the XSIAM alert names,
+# mapped against the Cortex
+# "Gcp Audit Log" analytics list.
 ANALYTIC_ALERTS = {
     # Unmapped (background only), no matching published analytic: DISABLE_SCC,
     # PROJECT_DELETE, SQL_INSTANCE_PUBLIC, COMPUTE_IMAGE_EXFIL, CLOUD_ARMOR_DELETE,

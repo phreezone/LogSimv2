@@ -101,12 +101,5 @@ and firewall logs each reach their own dataset), else from the module's `XSIAM_V
   correlation rules still apply. For the firewall analytics, keep the Broker syslog pipe.
 - **PAN NGFW** over the Broker is split into `panw_ngfw_*_raw` datasets by
   `__firewall_type`; over Cribl it lands in one CEF dataset.
-- **Verified in a tenant (2026-11-02), with every native pipe unset:** Okta, AWS, GCP and
-  Windows landed over Cribl, parsed, and raised their analytics (TOR sign-in, CloudTrail
-  stopped, logging sink deletion, privileged group addition). Windows event XML as raw
-  `data` under the Windows UUID parses.
 - **Generic UUID vendor/product:** the receiver requires both, as `Vendor` / `Product`
-  headers (without them: 400 "must signal both vendor and product"). Every LogSim route,
-  dedicated and generic, is accepted by the tenant's receiver.
-- **Not yet verified:** that Proofpoint and the generic-UUID syslog lines (`Format: raw`,
-  the line as `data`) land in their datasets and parse.
+  headers (without them: 400 "must signal both vendor and product").

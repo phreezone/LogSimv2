@@ -174,7 +174,7 @@ def mail_items_accessed(owner, count=1, offset_s=0, throttled=False):
     (IsThrottled True) — Microsoft stops logging per-item binds under heavy access, which is itself
     a documented mass-mailbox-access / compromise indicator.
 
-    WIP/prerequisite-gated (verified 2026-10-30, no alert from a synthetic burst): the mass-mailbox-
+    WIP/prerequisite-gated: the mass-mailbox-
     access analytics are Identity Analytics / behavioral detectors that need a per-mailbox baseline
     plus volume over a test window, which a one-shot synthetic burst cannot satisfy. The record shape
     is field-correct (matches real rows); the gap is the analytics prerequisite, not the data."""
@@ -235,7 +235,7 @@ def dlp_rule_match(sender, offset_s=0):
     """RecordType 13 — DlpRuleMatch: a sent message matched a DLP policy. Real rows carry
     ExchangeMetaData + PolicyDetails and no ResultStatus/OriginatingServer.
 
-    WIP/prerequisite-gated (verified 2026-10-30, no alert): DLP alerts are raised by the tenant's own
+    WIP/prerequisite-gated: DLP alerts are raised by the tenant's own
     DLP policy engine evaluating mail, so injecting a match record for a policy that is not configured
     in the tenant will not raise the DLP analytic. The record shape is field-correct; firing needs a
     real DLP policy in the tenant."""
@@ -781,7 +781,7 @@ ANALYTIC_ALERTS = {
     "safe_link_disabled": "Exchange Safe Link policy disabled or removed",
     "sensitive_mail_external": "Sensitive Exchange mail sent to external users",
     "dlp_policy_disabled": "Microsoft 365 DLP policy disabled or removed",
-    # Ported from feature/batched-sends; alert names unverified.
+    # Ported from feature/batched-sends; alert names from the scenarios' docstrings.
     "wip_inbox_forwarding_sender_rule": "Exchange inbox forwarding rule configured",
     "wip_inbox_rule_modified": "Exchange inbox forwarding rule configured",
     "wip_compliance_search_purge_action": "Exchange compliance search purge action",

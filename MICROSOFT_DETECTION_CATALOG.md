@@ -65,8 +65,8 @@ every other module; device OS from the profile). Each user has a **stable public
 mostly their department's shared office NAT IP, sometimes a deterministic home IP — so the
 ML detectors build a coherent per-user IP/ASN/country baseline and anomalies read true. Every
 office, home, mobile and hosting block is really announced by the named ASN and geolocated to
-the named city/country (verified 2026-10-22; XSIAM enriches IPs from real data, so a mismatch
-shows up as an org-level "first ASN" or wrong-country sign-in).
+the named city/country (XSIAM enriches IPs from real data, so a mismatch shows up as an
+org-level "first ASN" or wrong-country sign-in).
 
 Weighted mix emitted by `generate_benign` (reflects real tenant volume):
 - **Sign-ins (`msft_azure_ad_raw`)**: ~70% non-interactive token refresh, ~22% interactive
@@ -176,7 +176,6 @@ Each feed emits the full documented event-type set Microsoft supports for it:
   scenarios `dlp_exfil_block`, `dlp_sharepoint_block`, `dlp_match_burst`.
 - **O365 General** (`msft_o365_general_raw`, `c7655e83…`) — `modules/o365_general.py`: Copilot
   (RT261) + Power BI (RT20); scenarios `powerbi_mass_export`, `powerbi_print_bulk`.
-All three verified landing parsed.
 
 ## Not yet built (supported M365/Entra sources & event types)
 - **Connectors**: Graph Security alerts (alert ingestion).
@@ -206,8 +205,7 @@ stable GUID):
 ## Threat sequences (multi-stage kill-chains) — `modules/azuread_threat_sequences.py`
 Each sequence threads one identity through an ordered chain of events (across both
 datasets) that each trip a detector, so XSIAM correlates them into a high-severity
-**incident**. Fired on-demand via `fire(name)` / `fire_all()` (not continuous). All 10
-verified landing parsed.
+**incident**. Fired on-demand via `fire(name)` / `fire_all()` (not continuous).
 
 | Sequence | Chain (ATT&CK) | Key detectors tripped |
 |----------|----------------|-----------------------|

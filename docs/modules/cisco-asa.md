@@ -22,10 +22,10 @@ Per the XSIAM Cisco ASA onboarding doc, XSIAM's ASA analytics **only parse into 
 
 Every ASA analytics detection therefore has to be driven by connection events or AnyConnect session events. **Deny (`106023`), cut-through auth (`109001`/`109005`/`109006`), IDS (`4000xx`), and NAT (`305011`/`305012`) messages are NOT modeled** — they land in `cisco_asa_raw` as raw text (usable for XQL hunting) but never fire an analytic.
 
-> **Correction (2026-09-16): ICMP `302020`/`302021` *are* modeled.** This page previously grouped them with the unmodeled messages. They are not in XSIAM's supported list and drive no analytic of their own, but they **do** parse into XDM — `xdm.source.ipv4` and `xdm.network.ip_protocol="ICMP"` both populate. That matters, because a malformed one still pollutes the baselines the supported messages feed. Until 2026-09-16 the module emitted them with the orientation reversed: `parse_cisco()` maps `faddr`→`src_ip` and `laddr`→`dst_ip`, while genuine Cisco puts the *foreign* peer in `faddr`, so **6,322 of 6,518 ICMP events (97%) were recorded with an external actor and an internal target** — 6,500 events/day of reversed-direction data. This is the same root cause as the `for`/`to` swap documented under "Source orientation" below, and it is now fixed the same way: the internal host leads `faddr`. Do **not** revert it to the genuine Cisco field order.
+> **ICMP `302020`/`302021` are modeled.** They are not in XSIAM's supported list and drive no analytic of their own, but they **do** parse into XDM — `xdm.source.ipv4` and `xdm.network.ip_protocol="ICMP"` both populate — so a malformed one pollutes the baselines the supported messages feed. `parse_cisco()` maps `faddr`→`src_ip` and `laddr`→`dst_ip`, while genuine Cisco puts the *foreign* peer in `faddr`; in genuine order every ICMP event would record an external actor and an internal target. This is the same root cause as the `for`/`to` swap documented under "Source orientation" below, and it is handled the same way: the internal host leads `faddr`. Do **not** revert it to the genuine Cisco field order.
 
 Changes made 2026-07-24 to keep every catalog threat parseable:
-- **`failed_connections_burst`** — reworked from `106023` denies to a burst of `302013`+`302014` inbound flows with reason `SYN Timeout` and 0 bytes. ⚠️ **This rework did not work, and was reclassified Non-Analytic on 2026-09-16.** The messages parse, but `parse_cisco` **discards the teardown reason entirely** — there is no reason, outcome or failure field in either `_json` or `generalCiscoLog`, and `xdm.event.outcome` is null on 100% of 155,198 rows measured over 24h. The rework swapped an unparsed *message* for a parsed message whose *failure indicator* is unparsed; XSIAM sees 50–150 **successful** connections. `port_scan` survives the same erasure only because it keys on destination-port breadth rather than on failure — which is exactly why `port_scan` fires and this never has.
+- **`failed_connections_burst`** — reworked from `106023` denies to a burst of `302013`+`302014` inbound flows with reason `SYN Timeout` and 0 bytes, and is Non-Analytic. The messages parse, but `parse_cisco` **discards the teardown reason entirely** — there is no reason, outcome or failure field in either `_json` or `generalCiscoLog`, and `xdm.event.outcome` stays null — so XSIAM sees 50–150 **successful** connections. `port_scan` survives the same erasure only because it keys on destination-port breadth rather than on failure.
 - **`vpn_impossible_travel`** — reworked from a `109006`→`109005` fail→success door-knock (invisible to XSIAM) to two SUCCESSFUL AnyConnect sessions (`113039`+`722051`) from impossibly-distant IPs. *The fail→success pattern cannot apply to ASA because XSIAM does not parse ASA auth-failure messages.*
 - **`external_port_scan`** — REMOVED (it used `106023`; the internal `port_scan` already covers scanning via `302013`/`302014`, and external denies are unparseable).
 - **`vpn_bruteforce`** — DELISTED from the threat catalog (no supported AnyConnect auth-failure message exists). Its generator is retained only for the cross-source XQL-hunt scenario that reads the raw `109006` text.
@@ -39,43 +39,37 @@ Genuine Cisco logs an **outbound** connection with the destination leading the `
 Built outbound TCP connection 506986 for outside:17.151.140.30/80 (17.151.140.30/80) to inside:192.168.1.44/61094 (50.197.188.217/61094)
 ```
 
-Cortex's built-in `parse_cisco()` assigns `for`→`src_ip` and `to`→`dst_ip` unconditionally, so emitting the genuine order made XSIAM record the **external peer as the actor** on ~91% of events. Analytics baseline the source entity, so nothing could accumulate. Measured in-tenant 2026-07-28: `xdm.source.ipv4` was an internal address on only **9.02%** of ASA rows, versus 77–88% for Firepower / Check Point / FortiGate, which were the only three firing network analytics.
+Cortex's built-in `parse_cisco()` assigns `for`→`src_ip` and `to`→`dst_ip` unconditionally, so emitting the genuine order makes XSIAM record the **external peer as the actor** on outbound events. Analytics baseline the source entity, so nothing can accumulate.
 
-**The module therefore emits the clauses swapped** (internal host leads `for`), which took the same measurement to **100%**. This is intentional — the emit site in `modules/cisco_asa.py` carries a `DO NOT "FIX" BACK` comment. Inbound sessions are unaffected: genuine inbound ASA is already source-first, so only outbound output deviates.
+**The module therefore emits the clauses swapped** (internal host leads `for`). This is intentional — the emit site in `modules/cisco_asa.py` carries a `DO NOT "FIX" BACK` comment. Inbound sessions are unaffected: genuine inbound ASA is already source-first, so only outbound output deviates.
 
 ### VPN identity must be a BARE username — no `EXAMPLECORP\` prefix
 
-AnyConnect messages (`113039`/`113019`/`722051`) use `_vpn_user()`, **not** `_ad_user()`. XSIAM's Identity Analytics reduces `EXAMPLECORP\jdoe` to the **domain**, collapsing every VPN user into one identity called `examplecorp`. Proven by controlled A/B in-tenant 2026-07-28 — two different probe users sent with the prefix both surfaced as `examplecorp`, while bare usernames surfaced correctly:
+AnyConnect messages (`113039`/`113019`/`722051`) use `_vpn_user()`, **not** `_ad_user()`. XSIAM's Identity Analytics reduces `EXAMPLECORP\jdoe` to the **domain**, collapsing every VPN user into one identity called `examplecorp`.
 
-| sent | alert `user_name` |
-|---|---|
-| `p.probealpha` (bare) | `p.probealpha` |
-| `p.probecharlie` (bare) | `p.probecharlie` |
-| `EXAMPLECORP\p.probebravo` **and** `EXAMPLECORP\p.probedelta` | both → `examplecorp` |
+With all logins merged into one identity, Tor access becomes that identity's baseline-normal behaviour and **"A Successful VPN connection from TOR"** stops firing. The message *format* (`Group <G> User <U> IP <P>` vs `Group = G, Username = U, IP = P`) makes no difference — both parse identically. Connection-event IDFW parentheticals still use `_ad_user()`; they parse to `dst_fwuser`, which the modeling rule never reads.
 
-The prefix was added on 2026-04-27 (`6befff4`) for cross-source identity stitching and had the opposite effect: with all logins merged into one identity, Tor access became that identity's baseline-normal behaviour and **"A Successful VPN connection from TOR" stopped firing on 2026-05-18 after 343 alerts**. Bare usernames restored it within minutes. The message *format* (`Group <G> User <U> IP <P>` vs `Group = G, Username = U, IP = P`) makes no difference — both parse identically. Connection-event IDFW parentheticals still use `_ad_user()`; they parse to `dst_fwuser`, which the modeling rule never reads.
+### Which ASA analytics can fire
 
-### What ASA analytics actually fire
+Two different subsystems:
 
-Two different subsystems, and only one of them works for ASA today:
+- **Identity Analytics.** Driven by AnyConnect session events — e.g. *A Successful VPN connection from TOR*, *First successful VPN access from a country in organization*. They come from the ASA rows where `xdm.source.user.username` is populated (from `vpn_user`).
+- **Third-party firewall analytics.** Limited by what ASA syslog carries (below). The `xsiam_alert` values in the threat table below are the alert each generator is **designed** to drive.
 
-- **Identity Analytics (works).** Driven by AnyConnect session events — e.g. *A Successful VPN connection from TOR*, *First successful VPN access from a country in organization*. These are the ~11% of ASA rows where `xdm.source.user.username` is populated (from `vpn_user`).
-- **Third-party firewall analytics (one confirmed).** Measured over the 30 days to 2026-09-16, ASA fired **`Suspicious port scan` ×2** and nothing else in this family. The `xsiam_alert` values in the threat table below are the alert each generator is **designed** to drive, not a confirmed firing.
+#### What limits the third-party firewall analytics
 
-#### Why the rest stayed silent — measured 2026-09-16
-
-ASA carries the **highest** volume of any firewall in the tenant (155,198 events/24h vs Firepower 86k, FortiGate 85k) with `xdm.source.ipv4` populated on 100% of rows, so volume and source orientation are not the constraint. Three structural walls and five self-inflicted defects were:
+Three structural limits in how ASA is parsed, and five generator defects (all fixed):
 
 | | Finding | Blocks |
 |---|---|---|
-| **S1** | **No connection byte volume in XDM.** `xdm.source.sent_bytes` populated on 8,284/155,198 rows (5.3%) — exactly the AnyConnect `113019` count. The parser *does* extract volume on teardowns, into `_json.sentBytes` **and** `generalCiscoLog.transferred_bytes`; `CiscoASA_1_4.xif` reads only `generalCiscoLog.sent_bytes`. FortiGate 88.6%, Firepower 100%. | Large Upload (HTTPS), Large Upload (SMTP) |
-| **S2** | **No application identification.** `xdm.network.application_protocol` = **0 of 155,198**. Firepower 100%, FortiGate 90%. ASA syslog is layer 3/4. | Spam Bot Traffic, Rare AppID usage, Rare SMTP/S Session |
+| **S1** | **No connection byte volume in XDM.** `xdm.source.sent_bytes` is populated only on the AnyConnect `113019` rows. The parser *does* extract volume on teardowns, into `_json.sentBytes` **and** `generalCiscoLog.transferred_bytes`; `CiscoASA_1_4.xif` reads only `generalCiscoLog.sent_bytes`. | Large Upload (HTTPS), Large Upload (SMTP) |
+| **S2** | **No application identification.** `xdm.network.application_protocol` is never populated; ASA syslog is layer 3/4. | Spam Bot Traffic, Rare AppID usage, Rare SMTP/S Session |
 | **S3** | **Teardown reason discarded.** See `failed_connections_burst` above. | Failed Connections |
-| **D1** | ICMP emitted with reversed orientation — 97% external-actor records. **Fixed 2026-09-16.** | poisoned every detector's baseline |
-| **D2** | `new_ftp_server` was in the module catalog but **absent from `config.json`**, and a non-empty config list fully shadows the catalog — so it never ran. Port 21 appeared **zero** times in 24h. **Fixed.** | New FTP Server |
-| **D3** | `dc_smb_outbound` sourced from `internal_servers[0]` (10.0.10.50), which over 14 days received 2 SMB / 2 RDP / 2 SSH sessions total — **no DC profile at all** — while the five hosts that do look like DCs never sourced a packet. **Fixed:** now shares `_asa_domain_controllers()`. | Suspicious SMB connection from domain controller |
+| **D1** | ICMP emitted with reversed orientation, recording external actors. **Fixed.** | poisoned every detector's baseline |
+| **D2** | `new_ftp_server` was in the module catalog but **absent from `config.json`**, and a non-empty config list fully shadows the catalog — so it never ran. **Fixed.** | New FTP Server |
+| **D3** | `dc_smb_outbound` sourced from `internal_servers[0]` (10.0.10.50), which had **no DC profile at all**, while the hosts that do look like DCs never sourced a packet. **Fixed:** now shares `_asa_domain_controllers()`. | Suspicious SMB connection from domain controller |
 | **D4** | Rarity-driven threats drew destinations from the **ambient** pools — `_random_external_ip()` (the 35 `.20.0/24`s every module uses for background traffic) and, for `smb_rare_file_transfer`, `internal_servers`. A destination from the busiest networks in the tenant is by definition not rare. **Fixed:** `_rare_external_ip()` / `_rare_internal_host()`. | Uncommon SSH session, Recurring access to rare IP, Rare SMB session |
-| **D5** | `port_scan` weighted **1.4%** of the threat mix vs Check Point 7.5%, Firepower 4.8%, FortiGate 5.2% — once every six days against a 1-day dedup window. **Fixed:** raised to 7.0%. | throttled the one detector that works |
+| **D5** | `port_scan` weighted **1.4%** of the threat mix vs Check Point 7.5%, Firepower 4.8%, FortiGate 5.2% — once every six days against a 1-day dedup window. **Fixed:** raised to 7.0%. | throttled `port_scan` |
 
 Also unreachable regardless: the five domain-based alerts (ASA carries no domain) and the two *Rare process created an SSH session* alerts (need agent process data).
 
@@ -83,31 +77,30 @@ Also unreachable regardless: the five domain-based alerts (ASA carries no domain
 
 | Threat | Targets | Rationale |
 |---|---|---|
-| `port_sweep` **(new)** | **Port Sweep** | The clearest remaining gap: nothing targeted it, and it needs only source/destination/destination-port — the exact shape that already fires `port_scan`, so it is proven reachable on ASA. Cortex defines it as connecting to *multiple hosts* on "privileged ports that serve a well-defined function", the mirror image of Port Scan. Distinct from `smb_share_enumeration`, which is SMB-only and targets a different alert. |
-| `new_admin_behavior` | **New Administrative Behavior** | Generator already existed, withheld. Fired in this tenant from Firepower + FortiGate in the 30 days to 2026-09-16, so the detector is live here. |
+| `port_sweep` **(new)** | **Port Sweep** | The clearest remaining gap: nothing targeted it, and it needs only source/destination/destination-port — the same shape `port_scan` uses. Cortex defines it as connecting to *multiple hosts* on "privileged ports that serve a well-defined function", the mirror image of Port Scan. Distinct from `smb_share_enumeration`, which is SMB-only and targets a different alert. |
+| `new_admin_behavior` | **New Administrative Behavior** | Generator already existed, withheld. |
 | `abnormal_rdp_rare_host` | **Abnormal RDP session from a rarely seen host** | Generator already existed, withheld. Now sources from `_rare_source_host()`, a stable 12-address pool — the dispatcher's default workstation carries ~500 events/day and fails the detector's "rarely observed" premise outright. |
 
-The two previously-withheld generators were held back because a first-seen detector burns scarce novel combinations on unproven ambient runs. That no longer applies: destinations come from `_rare_internal_host()` over `internal_networks` /16s rather than the 25-address `internal_servers` pool. **Both remain unproven against ASA** — their reference alerts carry an `app_id` and ASA supplies no `application_protocol` (S2). If they are still silent after **2026-10-16**, that gap is confirmed fatal and they should move into `_NON_ANALYTIC_EVENTS`.
+The two previously-withheld generators were held back because a first-seen detector burns scarce novel combinations on unproven ambient runs. That no longer applies: destinations come from `_rare_internal_host()` over `internal_networks` /16s rather than the 25-address `internal_servers` pool. Their reference alerts carry an `app_id`, which ASA does not supply (S2), so they may not be reachable on ASA; if so they belong in `_NON_ANALYTIC_EVENTS`.
 
-#### `vpn_new_country_login` — why it never fired, and what changed (2026-09-17)
+#### `vpn_new_country_login` — design
 
-Targets the Third-Party **VPN** alert *First VPN access attempt from a country in organization* (and its *First successful VPN access…* variation), plus the user-scoped *A user connected to a VPN from a new country*. Both are **Identity Analytics** detectors, Activation 14d / Training 30d. **Neither had fired in 90 days.**
+Targets the Third-Party **VPN** alert *First VPN access attempt from a country in organization* (and its *First successful VPN access…* variation), plus the user-scoped *A user connected to a VPN from a new country*. Both are **Identity Analytics** detectors, Activation 14d / Training 30d.
 
-The pool design is sound and was not the problem — verified 2026-09-17:
+The pool:
 
 - `vpn_novel_country_pool` holds **84 single-country /24s**, one country each.
 - Country-code overlap with `external_traffic_sources` is **0**, with `benign_ingress_sources` **0**, and the Tor allowlist caps Tor at 5 countries none of which are in the pool. The disjointness the design depends on genuinely holds.
-- The day-keyed rotation **is** reaching the tenant: New Zealand landed on the New Zealand day, Papua New Guinea on the PNG day.
 
-Two things were wrong:
+Two things it depends on:
 
-**1. The reversed ICMP was burning pool countries.** Benign ICMP destinations come from `benign_egress_destinations`, which are large cloud CIDRs (`104.16.0.0/12`, `40.96.0.0/13`, `173.194.0.0/16`) that geo-resolve worldwide. With the orientation reversed, those resolved as the *source* country — **43 of ASA's 51 source countries over 30 days came from `302020`/`302021` alone**, against just 9 from the VPN messages that actually matter. Ten of those 43 were pool countries, and **6 of the last 30 rotation days landed on a country the ICMP noise had already made non-novel** (Ghana, Ireland, Kenya, Nepal, New Zealand, Nigeria). Fixed by the ICMP orientation change above; the 30-day novelty window means the tenant's country history stays polluted until roughly **2026-10-16**.
+**1. ICMP must not burn pool countries.** Benign ICMP destinations come from `benign_egress_destinations`, which are large cloud CIDRs (`104.16.0.0/12`, `40.96.0.0/13`, `173.194.0.0/16`) that geo-resolve worldwide. With the orientation reversed, those resolve as the *source* country and make pool countries non-novel before their rotation day; the ICMP orientation change above prevents that.
 
-**2. The rotation is clock-keyed but emission was probability-keyed.** `novel_country_vpn_ip()` advances one country per UTC day so every module agrees on the day's country and the pool lasts 84 days. That rotation advances **whether or not anything is emitted** — so a day on which the weighted draw never selected `vpn_new_country_login` is a *permanently wasted country*. Measured: only **2 rotation-country logins reached the tenant in 14 days** against ~6 expected, with most rotation days never emitted at all.
+**2. The rotation is clock-keyed, so emission must be too.** `novel_country_vpn_ip()` advances one country per UTC day so every module agrees on the day's country and the pool lasts 84 days. That rotation advances **whether or not anything is emitted** — so a day on which the weighted draw never selected `vpn_new_country_login` would be a *permanently wasted country*.
 
 `generate_log` now **claims the day's country exactly once per UTC day**, consuming one of the ~12 daily threat slots, with the remainder still weighted. The config weight dropped 3 → 1 because the guarantee, not the draw, now does the work. Simulated over 14 days at 12 slots/day: every day ≥ 1 firing, mean 1.29 — against ~0.14/day before.
 
-⏱ **All of these carry a 14-day activation and 30-day training period, and the baseline changes above altered the data they profile.** Silence before 2026-09-30 means nothing. Re-run the alert query at 2026-09-30 and again at 2026-10-16.
+⏱ **These detectors carry a 14-day activation and 30-day training period.**
 
 Note also that non-VPN user attribution is **unreachable**: `parse_cisco` files the connection IDFW user under `dst_fwuser`, and `CiscoASA_1_4.xif` sets `xdm.source.user.username` from `coalesce(user, src_fwuser, vpn_user)` only.
 
@@ -165,7 +158,7 @@ Threat events are dispatched from `generate_log` by weighted random choice. The 
 
 ### Non-Analytic events (no built-in XSIAM detection)
 
-> **2026-09-17 rebuild:** every event formerly in this section was re-examined against the Cortex Analytics Alert Reference and live tenant data. Several were rebuilt toward real detectors, new correctly shaped successors were added, and the ones still Non-Analytic now carry the measured reason. **Rebuilt: web_c2_beacon, cryptomining, external_fanout, vpn_concurrent_sessions, smtp_spray.** The per-event verdicts and the cross-module root causes (bare VPN usernames, truthful country labels, rare/recurring destination pools, success-based impossible travel) are in [../firewall-analytics.md](../firewall-analytics.md). Where this page disagrees, that document is current.
+> **Rebuild:** every event formerly in this section was re-examined against the Cortex Analytics Alert Reference. Several were rebuilt toward real detectors, new correctly shaped successors were added, and the ones still Non-Analytic now carry the reason. **Rebuilt: web_c2_beacon, cryptomining, external_fanout, vpn_concurrent_sessions, smtp_spray.** The per-event verdicts and the cross-module root causes (bare VPN usernames, truthful country labels, rare/recurring destination pools, success-based impossible travel) are in [../firewall-analytics.md](../firewall-analytics.md). Where this page disagrees, that document is current.
 
 These are genuine, XSIAM-parseable connection/session patterns (they emit only supported message IDs) but have **no native XSIAM 3rd-party-firewall analytic**, so they run only in long-running sessions and are not offered for on-demand firing (via `_NON_ANALYTIC_EVENTS`); they are intended for XQL hunting / custom correlation rules rather than out-of-the-box detections. Added 2026-07-24.
 

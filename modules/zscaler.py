@@ -897,11 +897,8 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
         _exfil_url = exfil_url(domain_override, "upload")
         _is_tail = False
     exfil_dest = {"url": _exfil_url, "domain": _exfil_domain}
-    # 300 MB - 700 MB. "Large Upload (HTTPS)" has fired 85 times for Check Point and never
-    # for Zscaler; max xdm.source.sent_bytes on port 443 was 105 MB for
-    # Zscaler vs 523-524 MB for Check Point and FortiGate, and the Check Point sessions that
-    # actually fired were 300-500 MB (alert text: "uploaded 347.2MB to the external host
-    # ... over 1 sessions in the last 24 hours"). 5-100 MB was simply below the threshold.
+    # 300 MB - 700 MB. "Large Upload (HTTPS)" fires on single sessions of several hundred MB;
+    # the earlier 5-100 MB range was below its threshold.
     file_size_bytes = random.randint(314_572_800, 734_003_200)
     ack_bytes = random.randint(100, 500)
     filename, filetype = _pick_upload_file(random.choice(["archive", "pii", "document"]))
@@ -2477,9 +2474,7 @@ def _generate_ddns_connection(config, user, dept, internal_host_ip, device_info)
     #
     # The callbacks must also be SPREAD OVER TIME. "Recurring" is a temporal property: a
     # burst of 8-16 callbacks stamped with one timestamp is a single observation, not
-    # recurrence, and this detector has never fired from any source in this project.
-    # Zscaler DDNS bursts spanned 1-2 distinct timestamps while
-    # Check Point spanned 30-53 and FortiGate 15-72 for the same threat.
+    # recurrence.
     zscaler_conf = config.get('zscaler_config', {})
     n_callbacks  = random.randint(8, 16)
     ddns_base_ms = int(time.time() * 1000)
@@ -2584,9 +2579,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Recurring rare domain access to dynamic DNS domain"},
     {"event": "large_download",       "weight": 3,  "analytic": False,
      "xsiam_alert": None},
-    # Was annotated "Uncommon reverse SSH tunnel to external domain/ip" — that alert name
-    # does not exist in the tenant (searched the whole alerts dataset
-    # for every name containing SSH or tunnel). The real detector this drives is
+    # Was annotated "Uncommon reverse SSH tunnel to external domain/ip" — no XSIAM
+    # alert has that name. The real detector this drives is
     {"event": "reverse_ssh_tunnel",   "weight": 2,  "analytic": True,
      "xsiam_alert": "Uncommon SSH session was established"},
     # web_c2_beacon was ORPHANED: present in _NAMED_THREATS but absent from this list and

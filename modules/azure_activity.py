@@ -6,7 +6,7 @@ hub: time, resourceId, operationName, category, resultType, resultSignature, dur
 0), callerIpAddress, correlationId, identity{authorization, claims}, level, location ("global"),
 properties{statusCode, serviceRequestId, eventCategory, entity, message, hierarchy, ...}.
 resourceId and operationName are upper-cased as the streamed records carry them. XSIAM files them
-in cloud_audit_logs as log_name azure_audit_logs (verified with a canary on 2026-10-21).
+in cloud_audit_logs as log_name azure_audit_logs.
 
   * Administrative: write/delete/action operations on a stable estate (modules/azure_estate.py)
     -- a curated set of the operations a real platform team runs every day, plus the long tail of
@@ -571,7 +571,7 @@ def aks_benign_quiet(config, context):
 
 # ── threat events ────────────────────────────────────────────────────────────────────
 # Scenario keys are prefixed wip_ because the shapes and published Cortex targets are
-# documented, but no alert has yet been attributed to these synthetic events in the tenant.
+# documented, but detector-level matching is not established.
 # On-demand callers can pass the scenario key directly; mappings expose the corresponding
 # published target while preserving that qualification in the event name.
 def _arm_event(config, op, *, roles=None, role="Contributor", actor=None, sub=None,
@@ -1253,8 +1253,7 @@ def generate_log(config=None, threat_level="Realistic", benign_only=False,
         return (SCENARIOS[key](config), key)
     return generate_benign(config, context)
 
-# Scenarios promoted out of wip_ once their alert was observed firing on this feed's data
-# (2026-10-23/24 fire-all). Old wip_ names still resolve on demand via this table.
+# Scenarios promoted out of wip_. Old wip_ names still resolve on demand via this table.
 _RENAMED_THREATS = {
     "WIP_AI_SAFEGUARD_DELETE": "ai_safeguard_delete",
     "WIP_AI_SAFEGUARD_MODIFY": "ai_safeguard_modify",

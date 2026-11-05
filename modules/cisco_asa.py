@@ -76,14 +76,13 @@ def _vpn_user(user):
     Deliberately NOT _ad_user().  XSIAM's Identity Analytics resolves the identity
     on VPN events by reducing "EXAMPLECORP\\jdoe" to the DOMAIN — alerts recorded
     user_name "examplecorp" for every user, so every VPN login collapsed into one
-    synthetic identity.  TOR access then became that identity's normal behaviour and
-    the anomaly detectors went quiet: "A Successful VPN connection from TOR" fired
-    repeatedly with bare usernames and stopped firing once the
-    EXAMPLECORP\\ prefix was introduced.
+    synthetic identity.  TOR access then becomes that identity's normal behaviour and
+    the anomaly detectors go quiet ("A Successful VPN connection from TOR" needs bare
+    usernames).
 
-    Verified in-tenant: all four
+    All four
     layouts parse, and xdm.source.user.username keeps the full string either way
-    (bare -> "p.probealpha", prefixed -> "EXAMPLECORP\\p.probebravo") — the collapse
+    (bare -> "jdoe", prefixed -> "EXAMPLECORP\\jdoe") — the collapse
     happens in analytics identity resolution, downstream of XDM.  Connection-event
     IDFW parentheticals still use _ad_user(); they land in dst_fwuser, which the
     modeling rule never reads.
@@ -114,7 +113,7 @@ XSIAM_PRODUCT = "ASA"
 # (109001/109005/109006) are all OUTSIDE that supported set. Two distinct consequences,
 # do not conflate them:
 #   - 106023 / 109xxx / 305xxx are not parsed into XDM at all -> inert.
-#   - 302020/302021 ARE parsed into XDM (confirmed in-tenant: xdm.source.ipv4 and
+#   - 302020/302021 ARE parsed into XDM (xdm.source.ipv4 and
 #     xdm.network.ip_protocol="ICMP" populate) even though they are unsupported. They
 #     drive no analytic, but a malformed one DAMAGES the baselines the supported
 #     messages feed. See the orientation comment in _generate_connection_session.
@@ -183,8 +182,8 @@ _NON_ANALYTIC_EVENTS = {
     #   external_fanout              -> "Port Sweep" (one worm port, many subnets)
     #   vpn_concurrent_sessions      -> "Impossible traveler - VPN" (two continents)
     #   smtp_spray                   -> "Spam Bot Traffic" (port 25, rare servers)
-    # Everything still listed below failed on DATA the ASA parser cannot carry, not on
-    # generator logic — each entry records the in-tenant measurement that proves it.
+    # Everything still listed below is blocked by DATA the ASA parser cannot carry, not
+    # by generator logic — each entry records the field that is missing.
     #
     # rare_port_connection: an outbound connection to an unusual port on a one-off IP.
     # No third-party firewall analytic keys on (IP, port) alone — the "less common
@@ -613,11 +612,9 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
     # the `for`/`to` swap on TCP/UDP below.  Cortex's parse_cisco() assigns
     # faddr->src_ip and laddr->dst_ip unconditionally, while genuine Cisco puts the
     # FOREIGN (external) peer in faddr and the LOCAL host in laddr.  Emitting the
-    # genuine order therefore recorded the external peer as the actor: measured
-    # in-tenant 2026-09-16, 6,322 of 6,518 ICMP events (97%) landed with an external
-    # source and an internal target, feeding reversed-direction records into the very
-    # baselines the third-party firewall detectors profile.  Verified against the
-    # parsed JSON — `faddr 91.189.89.253 ... laddr 192.168.140.2` produced
+    # genuine order therefore records the external peer as the actor, feeding
+    # reversed-direction records into the very baselines the third-party firewall
+    # detectors profile.  See the parsed JSON — `faddr 91.189.89.253 ... laddr 192.168.140.2` produced
     # generalCiscoLog.src_ip = 91.189.89.253.
     #
     # The internal host therefore leads faddr, matching the TCP/UDP orientation.
@@ -660,15 +657,14 @@ def _generate_connection_session(config, protocol, src_ip, dest_ip, dest_port,
     #     (17.151.140.30/80) to inside:192.168.1.44/61094 (50.197.188.217/61094)
     # (Cisco Secure Firewall ASA Series Syslog Messages, 302003-342008.)  Cortex's
     # built-in parse_cisco() assigns `for`->src_ip and `to`->dst_ip unconditionally,
-    # so emitting the genuine order made XSIAM record the EXTERNAL PEER as the actor
-    # on ~91% of our events.  Analytics baseline the source entity, so nothing could
-    # ever accumulate and cisco_asa_raw fired ZERO analytics while Check Point /
-    # FortiGate / Firepower (all source-correct) fired normally.  Verified in-tenant
-    # swapping the clauses makes generalCiscoLog.src_ip the internal host.
+    # so emitting the genuine order makes XSIAM record the EXTERNAL PEER as the actor
+    # on outbound events.  Analytics baseline the source entity, so nothing could
+    # ever accumulate.  Swapping the clauses makes generalCiscoLog.src_ip the internal
+    # host.
     # We choose parser-correctness over byte-fidelity here because driving XSIAM
     # analytics is this module's purpose.
     #
-    # User placement, re-tested in-tenant 2026-10-02 against Cisco ASA pack 2.0.9
+    # User placement, against Cisco ASA pack 2.0.9
     # (_local_validation/asa_user_placement_ab.py). parse_cisco never yields
     # src_fwuser for ANY placement -- trailing, Cisco's per-side "(user)" after the
     # source tuple, or per-side with a space -- so a connection event cannot carry a
@@ -1396,10 +1392,8 @@ def _simulate_port_scan(config, scanner_ip, session_context=None):
     #
     # This previously sampled range(1, 65535). Uniform sampling over the full range puts
     # ~75% of probes in the EPHEMERAL range (49152-65535), which reads as ordinary return
-    # traffic rather than service enumeration; measured in-tenant, whole ASA
-    # scans landed at 49247..65503 / 49442..65490 with not a single service port. The one
-    # ASA "Suspicious port scan" that ever fired scanned ports 2, 4, 25, 33,
-    # 60, 63, 77, 80, 86, 95, 102, 525... — all low. Check Point/FortiGate scans that fire
+    # traffic rather than service enumeration. A port scan that reads as one probes low,
+    # well-known ports. Check Point/FortiGate scans that fire
     # today sit at 2..8443 / 1..1013.
     for port in random.sample(range(1, 1024), random.randint(100, 200)):
         scan_logs.extend(_generate_connection_session(
@@ -1906,8 +1900,8 @@ def _simulate_smb_rare_file_transfer(config, src_ip, session_context=None):
 
     It used to be drawn from config['internal_servers']. That list is small and every
     SMB generator hit it, and separately _generate_ldap_kerberos_benign sends benign
-    AD-auth SMB to the five domain controllers all day (measured: 538-584 hits each per
-    7 days, the busiest SMB receivers in the tenant). A destination from either set is
+    AD-auth SMB to the five domain controllers all day (they are the busiest SMB
+    receivers). A destination from either set is
     the opposite of rare. _rare_internal_host() draws from the wide internal_networks
     space while excluding the hot server pool.
 
@@ -1920,7 +1914,7 @@ def _simulate_smb_rare_file_transfer(config, src_ip, session_context=None):
     except ImportError:
         from session_utils import rare_known_host
     # A live workstation in another subnet: rare_internal_host() addresses were never
-    # seen anywhere, and Rare SMB/RDP never fired from any vendor while using them.
+    # seen anywhere, so they have no baseline for Rare SMB/RDP to compare against.
     dst_ip = rare_known_host(config, exclude=(src_ip,), avoid_subnet_of=src_ip)
 
     file_size  = random.randint(104_857_600, 1_073_741_824)  # 100 MB – 1 GB
@@ -2289,19 +2283,17 @@ def _simulate_vpn_data_exfil(config, session_context=None):
     THE ONLY ASA PATH TO BYTE-VOLUME ANALYTICS. Connection events (302013/302014) can
     never carry volume into XDM: parse_cisco puts the teardown byte count at
     `_json.sentBytes`, but CiscoASA_1_4.xif reads `_json.generalCiscoLog.sent_bytes`,
-    which is ALWAYS null. Measured in-tenant across production
-    302014 teardowns, generalCiscoLog.sent_bytes populated 0 times while
-    _json.sentBytes populated 65,427 times. Only 113019/113039 reach
+    which is ALWAYS null. Only 113019/113039 reach
     xdm.source.sent_bytes. So large_single_upload_session / cumulative_upload_session /
     smtp_large_exfil / torrent_client CANNOT drive a volume detector however big their
     byte values are — this generator is the substitute.
 
-    Field mapping verified in-tenant:
+    Field mapping:
         'Bytes xmt' -> xdm.source.sent_bytes   (what the detector profiles as upload)
         'Bytes rcv' -> xdm.target.sent_bytes
     The large value therefore goes in **Bytes xmt**. Putting it in Bytes rcv (the prior
     behaviour) parked 5-50 GB in target.sent_bytes, the wrong side for an upload
-    analytic, which is why this event never fired and was marked Non-Analytic.
+    analytic, which is why this event was once marked Non-Analytic.
     """
     print("    - ASA Module simulating: VPN Data Exfiltration (high upload volume)")
     user, public_ip = _resolve_vpn_user_ip(config, session_context)
@@ -2474,10 +2466,8 @@ def _simulate_dc_smb_outbound(config, session_context=None):
     THE SOURCE MUST BE A HOST XSIAM ALREADY BELIEVES IS A DOMAIN CONTROLLER — that
     belief is the detector's entire premise.  This used to fall back to
     internal_servers[0] (10.0.10.50), an address that appears nowhere else in the
-    simulation as a DC.  Measured in-tenant over 14 days: 10.0.10.50 sourced the
-    DC-SMB bursts and otherwise received 2 SMB, 2 RDP and 2 SSH sessions in total —
-    no DC profile at all — while the five hosts that DO look like DCs (each
-    receiving ~1,100 LDAP/389 + Kerberos/88 queries per week from
+    simulation as a DC — no DC profile at all — while the five hosts that DO look
+    like DCs (receiving the LDAP/389 + Kerberos/88 queries from
     _generate_ldap_kerberos_benign) never sourced a single packet.  The detector
     could never fire.
 
@@ -2848,12 +2838,6 @@ def generate_log(config, scenario=None, threat_level="Realistic",
             # days. That rotation advances whether or not we emit anything. Selecting the
             # event by weighted draw meant most rotation days were never emitted at all,
             # and a skipped day is a PERMANENTLY wasted country — the pool moves on.
-            #
-            # Measured 2026-09-17: only 2 rotation-country logins reached the tenant in 14
-            # days (New Zealand 09-10, Papua New Guinea 09-15) against ~6 expected at the
-            # old weight, and the detector has never fired in 90 days. Separately, 6 of the
-            # last 30 rotation days landed on a country the reversed-ICMP bug had already
-            # made non-novel org-wide (Ghana, Ireland, Kenya, Nepal, New Zealand, Nigeria).
             #
             # So: claim the day's country exactly once per UTC day, using one of the ~12
             # daily threat slots. The same applies to the recurring-beacon events, so

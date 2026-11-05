@@ -3,15 +3,9 @@
 WHY THIS EXISTS
 Before this module each generator invented its own destination address. Infoblox
 answered DNS queries with a random public IP, while the firewalls independently
-picked a destination from config['benign_egress_destinations']. Measured in-tenant
-2026-09-18 over 7 days, the two never agreed:
-
-    Infoblox  zoom.us -> 45.25.97.136, 213.199.25.93, 142.254.180.140 ...
-    FortiGate zoom.us -> 13.107.4.50
-    intersection: EMPTY
-
-so a DNS-to-connection network story could not be built at all, and `ups.com`
-returned 3,009 distinct answers over 3,009 queries. One resolver removes the
+picked a destination from config['benign_egress_destinations']. The two never agreed,
+so a DNS-to-connection network story could not be built at all, and every query for
+the same name returned a different answer. One resolver removes the
 disagreement by construction: Infoblox answers with resolve(), the firewalls take
 their destination from resolve(), so the DNS answer IS the connection target.
 
