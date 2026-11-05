@@ -2,7 +2,7 @@
 
     python integrations/esxi_correlation_rules.py            # write XSIAM imports/esxi_*.json + bundle
     python integrations/esxi_correlation_rules.py --check [--minutes N]   # run each rule's query on tenant data
-    python integrations/esxi_correlation_rules.py --apply    # create the rules that are not in the tenant
+    python integrations/esxi_correlation_rules.py --apply    # create missing rules, update ones whose description changed
 
 XSIAM ships only the two uncommon-command rarity analytics for ESXi syslog, so every other
 threat in the module needs a custom rule. The rules read vmware_esxi_raw directly: the
@@ -478,7 +478,7 @@ def build(r):
         "severity": "SEV_020_LOW",
         "xql_query": _query(r),
         "is_enabled": True,
-        "description": f"LogSim ESXi threat '{r['event']}'. {r['what']}",
+        "description": r["what"],
         "alert_name": f"{name} on $esxi_host",
         "alert_category": r["category"],
         "alert_type": None,
@@ -556,11 +556,22 @@ def check(minutes):
 def apply():
     from integrations.xsiam_client import XsiamClient
     c = XsiamClient()
-    live = {r["name"] for r in c.get_correlation_rules()}
+    live = {r["name"]: r for r in c.get_correlation_rules()}
     failed = 0
     for rule in (build(r) for r in RULES):
-        if rule["name"] in live:
-            print(f"  exists   {rule['name']}")
+        cur = live.get(rule["name"])
+        if cur is not None:
+            if cur.get("description") == rule["description"]:
+                print(f"  exists   {rule['name']}")
+                continue
+            rep = c.insert_correlation_rules([dict(rule, rule_id=cur["rule_id"])])
+            rep = rep.get("reply", rep) or {}
+            now = {r["name"]: r for r in c.get_correlation_rules()}.get(rule["name"]) or {}
+            ok = now.get("description") == rule["description"]
+            failed += not ok
+            print(f"  {'updated' if ok else 'FAILED '}  {rule['name']}  {'' if ok else rep}")
+            if not ok:
+                break
             continue
         rep = c.insert_correlation_rules([rule])
         rep = rep.get("reply", rep) or {}
