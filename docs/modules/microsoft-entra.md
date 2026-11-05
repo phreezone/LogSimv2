@@ -56,7 +56,7 @@ out and the request still returns HTTP 200, but the record lands unparsed in `_r
 ## Event Hub copies: reaching the Cloud analytics
 
 XSIAM's Cloud analytics (the *Azure Audit Log* detectors) read `cloud_audit_logs`, not the
-native Graph datasets. A canary on 2026-10-22 showed what reaches it:
+native Graph datasets. What reaches it:
 
 | Record, posted to `msft_azure_raw` (Azure Event Hubs Source-Identifier `fce13a1d51294f84bae4a37851503060`) | `cloud_audit_logs` `log_name` |
 |---|---|
@@ -67,14 +67,13 @@ native Graph datasets. A canary on 2026-10-22 showed what reaches it:
 The Graph signIns feed (`msft_azure_ad_raw`) never reaches `cloud_audit_logs`, and most
 Entra detectors in the *Azure Audit Log* list are tagged *Microsoft Graph Activity Logs*.
 They key on the Graph request (`POST /users`, `POST .../addPassword`, `GET .../content`),
-not the audit record. Thirty days of ~600 Add user / Add service principal / Add owner
-audit records raised none of them.
+not the audit record.
 
 The rest (*A Service Principal was created / removed in Azure*, *Azure application removed*,
 *PIM privilege member removal*, *Azure permission delegation granted*, *Granting Access to an
 Account*, *Removal of an Azure Owner*) list **Azure Audit Log** as required data and run in
 the Cloud module. That is the Event Hub data source (`msft_azure_raw`), not the Graph feed.
-The firing Entra detectors (*Azure AD PIM alert disabled*, federation, role assignment,
+The other Entra detectors (*Azure AD PIM alert disabled*, federation, role assignment,
 unverified domain) list **AzureAD Audit Log** and run in the Identity Threat Module. In
 `cloud_audit_logs` both kinds of audit record land as `azure_ad_audit_logs`, but the Cloud
 detectors read only what arrives through the Event Hub data source.
@@ -179,10 +178,9 @@ short-lived, federation change failed / federated-domain backdoor, unverified do
 added, security group created and deleted, and the cross-tenant set: trust abuse,
 outbound sync, default weakened, delegated admin partner abuse, multi-tenant org join.
 
-Confirmed firing in the tenant (fire → alert observed, 2026-10-30; promoted in
-`ANALYTIC_ALERTS` with the exact observed names):
+Scenarios with a standalone analytic, as named in `ANALYTIC_ALERTS`:
 
-| Scenario | Observed XSIAM alert | Severity |
+| Scenario | XSIAM alert | Severity |
 | --- | --- | --- |
 | `admin_role_add` | A cloud identity escalated its permissions to a high privilege role/policy | Low |
 | `consent_risky_app` | First seen Azure admin consent to an application | Low |
@@ -201,9 +199,9 @@ field-correct but do not raise a standalone alert from a synthetic one-shot are 
 in-code with the reason: **Informational** severity (no standalone alert), **14-day activation
 + 30-day training**, **Identity Analytics + Cloud Identity Engine + baseline** (brute force /
 spray / lockout / impossible travel, disabled / honey / service / machine / dormant accounts),
-a **real tenant DLP policy** (DlpRuleMatch), or a **cross-tenant activation baseline**. This
-tenant's live login brute-force coverage is Okta / Cisco-ASA correlation rules, and the
-standalone spray/brute analytics are VPN/host-based rather than Azure AD SSO.
+a **real tenant DLP policy** (DlpRuleMatch), or a **cross-tenant activation baseline**. Login
+brute-force coverage comes from the Okta / Cisco-ASA correlation rules; the standalone
+spray/brute analytics are VPN/host-based rather than Azure AD SSO.
 
 **App-lifecycle calibration (2026-10-30).** The ten `ApplicationManagement` activities the
 Entra portal actually emits — `Add application`, `Add service principal`,
@@ -220,16 +218,6 @@ secrets management `, `Create application – Certificates and secrets managemen
 certificate activities use an **en dash** and a trailing space in the activity name, not a
 hyphen. `azure_audit_catalog.CLOUD_ALERTING_ACTIVITIES` was updated to suppress the en-dash
 variants on the event-hub copy.
-
-**Tenant verification (2026-11-03).** All ten calibrated shapes were fired through the
-Cribl receiver. The `Consent to application` record raised **"First seen Azure admin
-consent to an application"** — the same alert already credited to `consent_risky_app`,
-now confirmed for the `_app_lifecycle_record` path as well. The other nine activities
-(`Add application`, `Add service principal`, `Update service principal`,
-`Update application`, both certificate-management activities, `Add delegated permission
-grant`, `Add owner to application`, `Remove owner from application`) raised no alert in
-that run; their record shapes remain field-verified against live rows but their detection
-status is unconfirmed.
 
 ## `o365_azuread` — O365 Management Activity (Azure AD workload)
 
@@ -252,11 +240,11 @@ maps but no other module produced: **ProvisioningLogs** (SCIM / HR-driven app pr
 cycles) and the risk-detection categories **UserRiskEvents** / **ServicePrincipalRiskEvents**.
 Records carry the Graph resource (`provisioningObjectSummary`, `riskDetection`) in `properties`,
 in the event-hub envelope, sent under the Azure Event Hubs Source-Identifier. Every `properties`
-path is one the modeling rule reads, and a 2026-10-23 canary confirmed ProvisioningLogs and
-UserRiskEvents land in `msft_azure_raw` and map to XDM.
+path is one the modeling rule reads, so ProvisioningLogs and UserRiskEvents map to XDM in
+`msft_azure_raw`.
 
-**Not emitted: the risk-*state* categories** `RiskyUsers` / `RiskyServicePrincipals`. The same
-canary showed this ingestion path accepts them at the receiver but drops them before the dataset
+**Not emitted: the risk-*state* categories** `RiskyUsers` / `RiskyServicePrincipals`. This
+ingestion path accepts them at the receiver but drops them before the dataset
 (they never land, not even raw) — the source's parsing rule admits provisioning and risk-event
 categories but not risk-state, so the modeling rule's `RiskyUsers` branch never receives a row.
 Emitting them would only produce discarded sends.

@@ -1,9 +1,8 @@
 """Keep `XSIAM imports/` in step with the correlation rules actually live in the tenant.
 
 Rules get edited in the XSIAM console far more often than they get exported back,
-so the repo copy drifts: on 2026-11-02, 27 rules had tenant-side query edits the
-repo never saw and 26 rules existed only in the tenant. A review run against the
-repo files would have been reviewing queries that no longer run.
+so the repo copy drifts. A review run against stale repo files reviews queries that
+no longer run.
 
     python integrations/correlation_rules_sync.py            # report drift, exit 1 if any
     python integrations/correlation_rules_sync.py --write    # pull tenant state into the repo

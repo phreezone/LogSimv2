@@ -210,6 +210,6 @@ Project IDs, service-account emails and numeric IDs are composed by
   instance ID, never with a leading zero.
 - **`roles/iam.serviceAccountUser` was missing** from the admin-role pool entirely. It is
   the classic impersonation-escalation path, and the "IAM Privilege Escalation via
-  SetIamPolicy" rule matches it, so that branch of the rule had never fired.
+  SetIamPolicy" rule matches it, so that branch of the rule had nothing to match.
 
 Your GCP project ID is read from `.env` and is never generated.

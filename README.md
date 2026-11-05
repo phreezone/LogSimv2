@@ -98,7 +98,7 @@ RDP lateral generators produce **3-8 blocked attempts followed by 1 successful c
 
 The Windows Events module generates native Windows Security Event XML targeting XSIAM's Identity Analytics (UEBA) engine. Events are delivered to the Broker VM via the **WEC (Windows Event Collector)** transport using direct WS-Management over mutual TLS.
 
-**Confirmed Working Detections:**
+**Targeted Detections:**
 
 | Generator | XSIAM Detection | Severity | MITRE |
 |---|---|---|---|
@@ -120,10 +120,10 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `dmsa_privesc` | Possible Privilege Escalation using Delegated MSA account attempt | High | T1098 |
 | `sensitive_password_reset` | Sensitive account password reset attempt for the first time | Medium | T1098 |
 
-`as_rep_roasting`, `dmsa_privesc` and `sensitive_password_reset` were `wip_`-prefixed until
-2026-09-29, when their detections were found firing in the tenant. The old names still work.
+`as_rep_roasting`, `dmsa_privesc` and `sensitive_password_reset` were previously
+`wip_`-prefixed. The old names still work.
 
-**WIP Detections** (prefixed with `wip_` — generating events but not yet seen triggering their detection):
+**WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 
 | Generator | Reason |
 |---|---|
@@ -248,12 +248,12 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | AWS CloudTrail | S3 | 69 event types across 15+ AWS services | 70 (61 on demand) | [docs/modules/aws.md](docs/modules/aws.md) |
 | GCP Cloud Audit Logs | Pub/Sub | 42 event types with @type proto annotations and LRO operation pairs | 75 (60 on demand) | [docs/modules/gcp.md](docs/modules/gcp.md) |
 | Okta SSO | HTTP Collector | 183+ event types across auth, SSO, MFA, lifecycle, policy, OAuth2, IAM, device, and zone domains | 83 (42 on demand), incl. break-glass account use | [docs/modules/okta.md](docs/modules/okta.md) |
-| Azure AD / Entra sign-ins | Cribl receiver | Graph signIns: non-interactive token refresh, interactive sign-in, routine failures; Event Hub copies + Graph API activity to `msft_azure_raw` | 68 (incl. `tor_signin`, `first_sso_resource_org` confirmed firing) | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
-| Azure AD / Entra directory audit | Cribl receiver | Graph directoryAudits: user, group, app and device maintenance, admin actions in business hours; Graph requests behind threat changes | 59 (8 confirmed firing: role escalation, admin consent, unverified domain, domain federation, CA policy removed, 2× PIM, guest invitation) | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Azure AD / Entra sign-ins | Cribl receiver | Graph signIns: non-interactive token refresh, interactive sign-in, routine failures; Event Hub copies + Graph API activity to `msft_azure_raw` | 68 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
+| Azure AD / Entra directory audit | Cribl receiver | Graph directoryAudits: user, group, app and device maintenance, admin actions in business hours; Graph requests behind threat changes | 59 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
 | Office 365 Azure AD | Cribl receiver | Management Activity RecordType 15 sign-ins / 8 directory ops | 14 | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
-| Office 365 Exchange Online | Cribl receiver | MailItemsAccessed (RT50), RecordType-3 soft/hard delete, DlpRuleMatch (RT13), Send, Move, inbox rules, light admin | 28 (3 forwarding detectors confirmed firing: external inbox rule, mailbox SMTP, transport rule) | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
+| Office 365 Exchange Online | Cribl receiver | MailItemsAccessed (RT50), RecordType-3 soft/hard delete, DlpRuleMatch (RT13), Send, Move, inbox rules, light admin | 28 (including the external inbox rule, mailbox SMTP and transport rule forwarding detectors) | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Office 365 SharePoint / OneDrive | Cribl receiver | File and sharing operations, business-hours weighted; Graph requests behind threat activity | 19 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
-| Azure Activity | Cribl receiver | 145 threat scenarios across ARM, AKS kube-audit, Storage, Key Vault, and AI data-plane; all 186 Cortex Azure Audit Log entries mapped with adjacent Entra/Graph/M365 generators (three names verified in the 2026-10-23 smoke run) | 145 Azure Activity scenarios | [docs/modules/azure-activity.md](docs/modules/azure-activity.md) |
+| Azure Activity | Cribl receiver | 145 threat scenarios across ARM, AKS kube-audit, Storage, Key Vault, and AI data-plane; all 186 Cortex Azure Audit Log entries mapped with adjacent Entra/Graph/M365 generators | 145 Azure Activity scenarios | [docs/modules/azure-activity.md](docs/modules/azure-activity.md) |
 | Office 365 DLP | Cribl receiver | Low-severity notify-only rule matches | 4 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Office 365 General | Cribl receiver | Copilot interactions, Power BI views | 2 | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
 | Azure AD Identity Protection | Cribl receiver | Entra ProvisioningLogs (SCIM/HR sync) and UserRiskEvents/ServicePrincipalRiskEvents — benign identity-protection baseline | 0 (benign only) | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
@@ -262,7 +262,7 @@ from the dashboard in brackets (see [On-Demand Threats](#on-demand-threats--anal
 | Cisco ASA Firewall | Syslog (TCP) | 6 types (office traffic, DHCP, DNS, inbound block, VPN, connections) + management plane (CLI admin sessions, nightly backup, SNMP polling) | 38 (29 on demand) | [docs/modules/cisco-asa.md](docs/modules/cisco-asa.md) |
 | Cisco Firepower | Syslog (TCP) | 14 types (web, FTP, SSH, SMB, RDP, DNS, VPN, mail, connections) + management plane | 46 (30 on demand) | [docs/modules/cisco-firepower.md](docs/modules/cisco-firepower.md) |
 | Fortinet FortiGate | Syslog (TCP) | 10 types (traffic forward, web filter, DNS, email, inbound block, VPN, connections) + management plane | 49 (32 on demand) | [docs/modules/fortinet.md](docs/modules/fortinet.md) |
-| Palo Alto Networks NGFW | Syslog (TCP, CEF) | Traffic logs (Internet egress, internal east-west, perimeter deny) → `panw_ngfw_traffic_raw`, plus URL logs → `panw_ngfw_url_raw` | 61 (44 on demand, Low+ only; 7 confirmed firing in-tenant) | [docs/modules/panw-ngfw.md](docs/modules/panw-ngfw.md) |
+| Palo Alto Networks NGFW | Syslog (TCP, CEF) | Traffic logs (Internet egress, internal east-west, perimeter deny) → `panw_ngfw_traffic_raw`, plus URL logs → `panw_ngfw_url_raw` | 61 (44 on demand, Low+ only) | [docs/modules/panw-ngfw.md](docs/modules/panw-ngfw.md) |
 | Zscaler Web Gateway | Syslog (TCP) | 17 types (web, DNS, email, FTP, firewall, VPN, cloud app, DLP, sandbox) | 38 (28 on demand) | [docs/modules/zscaler.md](docs/modules/zscaler.md) |
 | Apache httpd | Syslog (TCP) | 5 types | 12 attack types | [docs/modules/httpd.md](docs/modules/httpd.md) |
 | Infoblox NIOS | Syslog (TCP) | 15 types | 11 types | [docs/modules/infoblox.md](docs/modules/infoblox.md) |
@@ -297,9 +297,7 @@ belong to the same person. Details: [Entra](docs/modules/microsoft-entra.md) and
   OAuth abuse, golden SAML, AiTM token theft, hybrid on-prem→cloud, and more) that span
   the Graph, O365 and Windows datasets. They're sent over Cribl and WEC together.
 - **Validation:** `_local_validation/threat_harness.py` fires a threat, confirms
-  ingestion and polls for the alert. Confirmed firing so far: *Suspicious Azure AD
-  Administrator Role assignment*, *Rare unverified domain addition to Azure AD*, *A
-  successful Azure domain federation settings modification*.
+  ingestion and polls for the alert.
 
 ### Firewall Management Plane — Device Administration on All Four Firewalls
 
@@ -369,14 +367,12 @@ keeps running in long-running module sessions, just not on demand.
 - **One mapping per module.** Each threat either names the analytic it targets or is
   background-only: `ANALYTIC_ALERTS` in AWS, GCP, Okta and Windows; the existing
   `analytic` / `xsiam_alert` fields in the firewall modules, which ASA now shares via
-  `get_threat_info()`. `modules/threat_catalog.py` reads both. Mappings were made against
-  the published Cortex analytics list for each data source and 90 days of tenant alerts;
-  alert names are the tenant's own wording where the alert has been seen there.
+  `get_threat_info()`. `modules/threat_catalog.py` reads both. Mappings follow
+  the published Cortex analytics list for each data source, using the alert names XSIAM raises.
 - **The dropdown groups threats by target analytic**, lists only modules with at least one
   (with a count), and a successful fire reports the alert to look for.
 - **Proofpoint, Infoblox and Apache httpd offer nothing on demand.** Cortex publishes no
-  analytics for those data sources, and none has fired from them in the tenant; their
-  alerts come from correlation rules and threat intel.
+  analytics for those data sources; their alerts come from correlation rules and threat intel.
 - **`POST /api/modules/<name>/fire` rejects** a threat with no analytic (HTTP 400).
   `GET /api/modules/<name>/threats` still returns `threats` (event names) and adds
   `options` (`[{event, alert}]`).
@@ -385,9 +381,9 @@ keeps running in long-running module sessions, just not on demand.
   counted its non-analytic threats because the generator returned the unprefixed name.
 - **Renamed:** Windows `wip_as_rep_roasting`, `wip_dmsa_privesc` and
   `wip_sensitive_password_reset` became `as_rep_roasting`, `dmsa_privesc` and
-  `sensitive_password_reset`, since their detections now fire. The old names still dispatch.
+  `sensitive_password_reset`, dropping the work-in-progress prefix. The old names still dispatch.
 - **Reclassified:** `ftp_large_exfil` (Firepower, Check Point, FortiGate) now targets
-  *Large Upload (FTP)*, which fired from Firepower data. ASA `ldap_recon` is background-only,
+  *Large Upload (FTP)*. ASA `ldap_recon` is background-only,
   matching Firepower and Check Point: LDAP enumeration is an XDR-agent detection.
 
 Coverage: 310 of 457 threats are offered on demand. Guarded by
@@ -452,9 +448,9 @@ confirm they fire, then disable or delete the originals.
 
 | New rule | Replaces | Why the original could not fire |
 |---|---|---|
-| `Cisco Firepower - IPS Event with Critical Severity (v2)` | rule id **72** | Filtered `cefName = "Intrusion Detected"`. Real FTD/FMC CEF carries the eStreamer eNcore name `INTRUSION EVENT`; the tenant held no such value, ever. |
+| `Cisco Firepower - IPS Event with Critical Severity (v2)` | rule id **72** | Filtered `cefName = "Intrusion Detected"`. Real FTD/FMC CEF carries the eStreamer eNcore name `INTRUSION EVENT`. |
 | `Cisco Firepower - Malicious File Transferred (v2)` | rule id **75** | Filtered `cefName = "Malicious File Detected"`. FTD emits `FireAMP Event`. |
-| `Cisco ASA - High Volume of Failed Inbound Connections from One IP (v2)` | `... Denied Inbound Connections ...` | ANDed a `106023` raw match with `xdm.observer.action = "Deny"`. The ASA parser never sets that value — across 21,435 rows it produced only `Built`, `Teardown` and null. |
+| `Cisco ASA - High Volume of Failed Inbound Connections from One IP (v2)` | `... Denied Inbound Connections ...` | ANDed a `106023` raw match with `xdm.observer.action = "Deny"`. The ASA parser never sets that value; it produces only `Built`, `Teardown` and null. |
 | `DNS C2 Kill Chain - NXDOMAIN Storm + Outbound Firewall Activity (v2)` | same name | Suppression named a column its own `fields` stage dropped, so it errored on every run; and it matched ASA `dst_interface = "inside"`, i.e. traffic *inbound* to the host, in a rule about outbound activity. |
 | `GCP - API Access From External / Non-Corporate IP (v2)` | same name | Same suppression defect, plus it grouped by event description rather than by the caller, so the alert carried no address entity at all. |
 
@@ -463,9 +459,8 @@ external attacker, so it maps to `action_remote_ip`, not `action_local_ip`), use
 normalisation so `EXAMPLECORP\\user` and `user@examplecorp.com` group into one case, and
 `cs3`/`cs4` no longer mapped as interfaces on FireAMP rows where they mean disposition.
 
-A later audit of every live rule (2026-10-21) corrected 53 more. The fixes cover the
-issue's URL field, ASA rules that read connections backwards, substring private-IP tests,
-and fields mapped to nothing. See [docs/correlation-rule-fixes.md](docs/correlation-rule-fixes.md).
+Later fixes to the live rules cover the issue's URL field, ASA rules that read connections
+backwards, substring private-IP tests, and fields mapped to nothing.
 
 Two authoring notes, learned the hard way and worth knowing if you write your own:
 
@@ -487,7 +482,7 @@ Two authoring notes, learned the hard way and worth knowing if you write your ow
 - Multi-hostname simulation — generates events from 500+ simulated hostnames on a single machine, each with a unique `<Computer>` field
 - Parallel internal threading — separate DC, workstation, and threat workers with output queue for consistent delivery
 - 20 benign generators covering interactive logon, network share, RDP, service, cached, unlock, logoff, process creation, DC Kerberos, DC directory service, LDAP, NTLM, SQL, and web app access patterns
-- 21 threat generators targeting 14+ XSIAM UEBA detections, 13 confirmed working
+- 21 threat generators targeting 14+ XSIAM UEBA detections
 - Event XML validated field-by-field against real Windows events from production DCs (single quotes, lowercase GUIDs, `%{GUID}` ObjectName format, nanosecond timestamps, correct `%%` code rendering in message fields)
 - 5136 directory service events use proper delete/add pairs (`%%14675`/`%%14674`) matching real AD modification patterns
 - Filebeat transport removed — WEC is the primary transport for Windows events

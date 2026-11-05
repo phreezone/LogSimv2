@@ -11,7 +11,7 @@ Azure Monitor diagnostic settings stream it to an event hub, plus the AKS API-se
 Transport is the Cribl receiver (`"azure_activity_config": {"transport": "cribl"}`), as for the
 Entra feeds. See [microsoft-entra.md](microsoft-entra.md#transport-the-cribl-receiver-no-cribl-instance-needed).
 XSIAM files the records in `cloud_audit_logs` as `log_name = azure_audit_logs`, the input of
-the Cloud analytics (verified with a canary on 2026-10-21).
+the Cloud analytics.
 
 ## Record shape
 
@@ -30,8 +30,8 @@ under one `correlationId`, ending at or before now.
 the built-in role definition id and principal type. `identity.claims` carries the full ARM-token
 claim set from Microsoft's sample: `objectidentifier`, the xmlsoap `name` and `upn`, `puid`,
 `tenantid`, `scope`, `appid`, `idtyp`, and `onprem_sid` when the CIE identity map supplies one.
-A canary carrying only `upn`/`name`/`appid` was attributed to the app id, not the user. With
-the full set (canary 2026-10-22) the user record came back fully enriched: `identity_name` is
+With only `upn`/`name`/`appid`, XSIAM attributes the record to the app id, not the user. With
+the full set the user record is fully enriched: `identity_name` is
 the UPN, username and domain are filled, and the asset type is `AZURE_ACTIVE_DIRECTORY_USER`.
 A service principal shows as `Application` / `ServicePrincipal` by object id. Started
 normalises to `PENDING` and Succeeded to `Success`.
@@ -100,7 +100,7 @@ records, plus kube-audit. The mix:
 - **AKS audit** (`modules/aks_audit.py`): controllers, the scheduler, kubelets and workloads
   reading and watching, lease renewals, node status patches, events, CI rolling deployments by
   patch, and platform engineers' read-only kubectl.
-  The same canary confirmed these reach `cloud_audit_logs`, parsed from the inner audit event:
+  These reach `cloud_audit_logs`, parsed from the inner audit event:
   `event_id` is the `auditID`, the operation is the request URI, and the identity is the
   Kubernetes user. User agent, source IP and the cluster (as referenced resource) come through
   too. `log_name` is empty for them.
@@ -129,7 +129,7 @@ Vault); model discovery and denial-of-wallet volume (AI).
 
 Storage, Key Vault and AI records are resource logs in categories outside the Entra set, so the
 `msft_azure_raw` modeling rule maps them through its generic resource-log path (caller IP,
-resource id, operation, outcome). A 3-record canary (2026-10-23) confirmed all three reach
+resource id, operation, outcome). All three reach
 `cloud_audit_logs` as `azure_audit_logs`: Storage normalises to `resource_type` CloudStorage
 (operation GetData), Key Vault to KMS/VAULTS, and AI to MachineLearning with `service_type`
 "AI/ML Audit". Caller IP comes through. Azure OpenAI Entra identity is represented by
@@ -154,16 +154,16 @@ Primary references: [Azure Activity Log schema](https://learn.microsoft.com/en-u
 
 Remaining schema boundary: Azure AI diagnostic properties vary by resource/API version and are not
 specified in one Microsoft Event Hub sample as fully as Storage or Key Vault. The builder matches
-the published Azure OpenAI diagnostic field family and the previously ingested canary; validate it
-against the tenant's configured Cognitive Services category before widening the event set. Event
+the published Azure OpenAI diagnostic field family; check it against your configured Cognitive
+Services category before widening the event set. Event
 Hub wrappers also differ from Log Analytics table rows, so wire types must be reviewed before
-interpreting XSIAM's normalized types. No new tenant records were sent during this review.
+interpreting XSIAM's normalized types.
 
 ## Threat scenarios and Cortex detector coverage
 
-`modules/azure_activity.py` now exposes 143 forced scenarios covering Azure Activity ARM operations, AKS kube-audit, Storage Blob, Key Vault, and Azure AI resource logs. Related detectors that require Entra `AuditLogs`, `SignInLogs`, Microsoft Graph activity, or Microsoft 365 SharePoint/OneDrive Graph activity use their owning generators in `azuread_audit.py`, `azuread_signin.py`, and `o365_sharepoint.py`. Across those modules, All 186 Cortex Azure Audit Log index entries now have a same-title scenario mapping, including the AD FS Hybrid Health server-registration operation. Other mappings remain provisional pending alert attribution and detector-profile prerequisites.
+`modules/azure_activity.py` now exposes 143 forced scenarios covering Azure Activity ARM operations, AKS kube-audit, Storage Blob, Key Vault, and Azure AI resource logs. Related detectors that require Entra `AuditLogs`, `SignInLogs`, Microsoft Graph activity, or Microsoft 365 SharePoint/OneDrive Graph activity use their owning generators in `azuread_audit.py`, `azuread_signin.py`, and `o365_sharepoint.py`. Across those modules, All 186 Cortex Azure Audit Log index entries now have a same-title scenario mapping, including the AD FS Hybrid Health server-registration operation.
 
-The row-by-row inventory is in [azure-audit-detector-inventory.md](azure-audit-detector-inventory.md). It records each detector's source requirements, activation and training windows, test window, severity, event family, inferred prerequisites, scenario key, and synopsis. The transport and remaining attribution gaps are summarized in [azure-detector-delivery-gaps.md](azure-detector-delivery-gaps.md). Detector pages expose descriptions and prerequisites, not the full analytic query; same-title mappings therefore do not establish exact query compatibility. Profiling alerts also need the stated activation/training history, and multi-event alerts need all events within the detector's window.
+The row-by-row inventory is in [azure-audit-detector-inventory.md](azure-audit-detector-inventory.md). It records each detector's source requirements, activation and training windows, test window, severity, event family, inferred prerequisites, scenario key, and synopsis. Detector pages expose descriptions and prerequisites, not the full analytic query; same-title mappings therefore do not establish exact query compatibility. Profiling alerts also need the stated activation/training history, and multi-event alerts need all events within the detector's window.
 
 Coverage spans:
 
@@ -174,20 +174,17 @@ Coverage spans:
 
 The only index entry without a scenario mapping is **“A New Server was Added to an Azure Active Directory Hybrid Health ADFS Environment.”** It describes Azure AD Hybrid Health/AD FS server telemetry; the current Azure Activity and Entra audit generators do not have a documented event shape for that source. The inventory marks this row as blocked rather than substituting an unrelated ARM or directory event. Other source-specific detectors such as Exchange mailbox telemetry are mapped only where the existing Graph request logs can express the operation; detector query or profile behavior may still require additional sources.
 
-No new live events were sent during this inventory/build pass. Existing prior canary records are not evidence that these scenario-specific alerts fired. A limited live verification still needs an approved canary batch, followed by read-only checks in `msft_azure_raw`, `cloud_audit_logs`, and the alerts dataset.
-
 ## Validation
 
-Earlier validation established that the module imported, scenario functions returned records,
-and representative canaries reached the tenant. It did not compare every field to an authoritative
-service sample or establish that each threat scenario fires its named analytic. Earlier canaries covered representative Activity, AKS, Storage, Key Vault, and AI ingestion. Earlier review exercised registered scenario-to-alert paths across Azure Activity, Entra Audit, Entra SignIn, and SharePoint/Graph with transport routing stubbed. That confirms local record generation only; it does not prove detector firing.
+Local validation covers record generation: the module imports, scenario functions return
+records, and every registered scenario-to-alert path across Azure Activity, Entra Audit, Entra
+SignIn, and SharePoint/Graph runs with transport routing stubbed.
 
 The 2026-10-23 schema pass additionally passed `py_compile`, the 45-scenario/10-case AKS shape
 check, the 143 Azure on-demand catalog checks, training determinism (60/70/963/1,376 events),
 threat-level alignment across all 20 modules, the 49-case API contract, and cardinality-pool
 guards. The detection compatibility scan still reports its three documented Cisco-only baseline
-failures; it reports no Azure rule as unsatisfiable. These offline checks do not replace a
-field-by-field inspection of a fresh tenant raw record or an alert-firing test.
+failures; it reports no Azure rule as unsatisfiable.
 
 The benign Activity Log category mix now includes all eight documented categories: Administrative, Security, ServiceHealth, ResourceHealth, Alert, Autoscale, Recommendation, and Policy. The Security builder follows Microsoft’s Defender for Cloud Activity Log example fields (Security category, Activate Alert operation, active status, severity, compromised entity, and remediation steps); it is a schema fixture, not a claim that Defender generated the alert.
 
@@ -218,15 +215,13 @@ AKS, so the levels are an explicit approximation rather than proof of byte-for-b
 
 Offline shape validation checks all 45 AKS Cortex inventory mappings and focused cases for event
 schema, URI/object-reference consistency, policy-level body presence, policy-suppressed operations,
-denials, exec/ephemeral/RBAC request paths, and timestamp ordering. This does not establish that a
-tenant's Cortex analytic emitted an alert.
+denials, exec/ephemeral/RBAC request paths, and timestamp ordering.
 
 The operation-specific threat builders also emit account-level Storage network ACL changes that
 allow public network access, a batch of five distinct VM allocations by one identity, correlated
 cross-subscription blob-copy records (`CopyBlobSource` and `CopyBlob`), and AI file-content downloads
 using `Files_GetFileContent`. AI request-spike records now hold the account, caller, and deployment
-constant across the burst. These shapes match the documented operation and fields; detector firing
-remains unverified without a tenant-side alert and profile history.
+constant across the burst. These shapes match the documented operation and fields.
 
 This source review cross-checks the Event Hub envelope and key service-specific fields against
 Microsoft's resource-log schema, Activity Log schema, Storage Blob log reference, Key Vault
@@ -234,7 +229,7 @@ AuditEvent example, Foundry diagnostic logging guide, and AKS monitoring referen
 Activity Logs integration independently documents Event Hub ingestion and parses authorization
 evidence and claims. Splunk's Azure ingestion documentation corroborates the streamed Activity
 fields and search mappings. Vendor parsers establish broad compatibility expectations, but do not
-guarantee each synthetic event matches this tenant's exact detections.
+guarantee each synthetic event matches a detector's exact logic.
 
 Checks run for this review:
 
@@ -253,20 +248,18 @@ fields are documented. A public Azure OpenAI example confirms `Models_List`, res
 caller IP, `properties.objectId`, API version, model deployment/name/version, and request/response
 length and times. The generator now follows those fields. The example is a Log Analytics view of
 the event and does not prove every Event Hub raw-field detail or XSIAM mapping. `wip_` marks
-detector-level matching as unconfirmed.
+scenarios whose detector-level matching is not established.
 
-**Confirmed firing (promoted out of `wip_`, 2026-10-23/24 fire-all).** These ten scenarios were
-observed raising their alert on this feed's data, so they carry plain keys and their
-`ANALYTIC_ALERTS` value is the tenant's observed name; the old `wip_` names still resolve on
-demand via `_RENAMED_THREATS`:
+**Promoted out of `wip_`.** These ten scenarios carry plain keys, and their `ANALYTIC_ALERTS`
+value is the XSIAM alert name; the old `wip_` names still resolve on demand via
+`_RENAMED_THREATS`:
 `firewall_policy_delete` (An Azure Firewall policy deletion), `network_watcher_delete` (Azure
 Network Watcher Deletion), `alert_rule_delete` (Unusual Azure Monitor alert rule deletion),
 `eventhub_delete` (Azure Event Hub Deletion), `vm_command` (Unusual Azure VM remote command
 execution), `ai_safeguard_delete` (AI safeguards were successfully deleted), `ai_safeguard_modify`
 (Unusual modification of AI safeguards), `kube_anonymous` (A Kubernetes API operation was
 successfully invoked by an anonymous user), `kube_node_external` and `kube_dashboard_external`
-(the Kubernetes service-account-outside-cluster detections). Everything else stays `wip_` until
-its own alert is observed.
+(the Kubernetes service-account-outside-cluster detections). The rest stay `wip_`.
 
 Sources:
 

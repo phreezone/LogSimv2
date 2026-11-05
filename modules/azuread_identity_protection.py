@@ -98,7 +98,7 @@ def _provisioning(config, context=None):
 
 
 # NOTE: the RiskyUsers / RiskyServicePrincipals categories (an identity's current risk STATE) are
-# not emitted. A 2026-10-23 canary showed this ingestion path accepts them at the receiver but
+# not emitted. This ingestion path accepts them at the receiver but
 # drops them before msft_azure_raw (they never land, not even raw) -- the source's parsing rule
 # admits ProvisioningLogs and the risk-EVENT categories but not the risk-state ones, so the
 # modeling rule's RiskyUsers branch never sees a row. Risk state would just be discarded sends.

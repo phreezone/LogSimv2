@@ -7,7 +7,7 @@ genuinely new. Identities come from LogSim's shared user model (azure_common), s
 changes an NSG is the same person who signed in to Entra and logged on to Windows.
 
 Caller identity is the `identity.claims` object of an Activity record. XSIAM's cloud normaliser
-reads the user from it; a canary carrying only upn/name/appid was attributed to the appid, so
+reads the user from it; a record carrying only upn/name/appid is attributed to the appid, so
 callers carry the full claim set of Microsoft's documented event-hub sample (objectidentifier,
 xmlsoap name and upn, puid, tenantid, scope, ...).
 """
@@ -33,8 +33,7 @@ def hex32(seed):
 
 
 # ── subscriptions and resource groups ─────────────────────────────────────────────────
-# The prod subscription id is the one the 2026-10-21 canary used, so its resources stay part
-# of the same estate.
+# The prod subscription id is fixed, so its resources stay part of the same estate.
 SUBSCRIPTIONS = [
     {"name": "examplecorp-prod", "id": "7d1f0a4e-2b6c-4c8e-9a51-3e0f6b2d9c14", "env": "prod",
      "mgs": ("mg-examplecorp", "mg-landingzones", "mg-prod"), "regions": ("eastus", "eastus2")},

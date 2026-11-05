@@ -392,11 +392,10 @@ AUDIT_ACTIVITIES = [
     ('Unlock user account (self-service)', 'UserManagement', 'Self-service Password Management', 'Update', 'User'),
 ]
 
-# Activities XSIAM raises an alert on by themselves (seen firing on LogSim data, alerts
-# dataset 2026-09-30..2026-10-21). They belong to the threat scenarios only: drawn into
-# the benign baseline they raised hundreds of alerts (e.g. 38 federation alerts from the
-# catalog's own "Set domain authentication") and taught XSIAM that the operations are
-# routine. Compared case-insensitively, ignoring O365's trailing period.
+# Activities XSIAM raises an alert on by themselves. They belong to the threat scenarios
+# only: drawn into the benign baseline they raise alerts of their own (e.g. federation
+# alerts from the catalog's own "Set domain authentication") and teach XSIAM that the
+# operations are routine. Compared case-insensitively, ignoring O365's trailing period.
 ALERTING_ACTIVITIES = frozenset(a.lower() for a in (
     "Disable PIM alert",                    # Azure AD PIM alert disabled
     "Deactivate PIM alert",
@@ -418,8 +417,7 @@ BENIGN_ACTIVITIES = [a for a in AUDIT_ACTIVITIES if not is_alerting(a[0])]
 
 # Directory operations the Cloud-module "Azure Audit Log" analytics raise on by themselves. Those
 # analytics read the Entra AuditLogs category streamed through an event hub (msft_azure_raw), not
-# the Graph directoryAudits feed: 30 days of ~600 benign Add service principal / Add owner / Add
-# user records on the Graph feed raised none of them. azuread_audit therefore sends an event-hub
+# the Graph directoryAudits feed, which never reaches them. azuread_audit therefore sends an event-hub
 # copy of every benign record EXCEPT these (routine directory work would otherwise trip them all
 # day); threat scenarios are copied in full.
 CLOUD_ALERTING_ACTIVITIES = frozenset(a.lower() for a in (

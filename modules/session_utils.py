@@ -960,11 +960,10 @@ def random_external_ip(config=None):
 # Analytic-targeting helpers, shared by every firewall module (2026-09-17).
 #
 # Each exists because a detector's premise was being defeated by where a generator
-# drew its values from. Measured in-tenant before these were written:
+# drew its values from:
 #   * rarity detectors fed destinations from the AMBIENT pools above;
 #   * every non-ASA VPN event carried EXAMPLECORP\user, collapsing all VPN users
-#     into one identity (ASA, the only bare-username source, is the only vendor
-#     whose VPN analytics have ever fired);
+#     into one identity;
 #   * "recurring" detectors fed a random host each run, so no (host, destination)
 #     pair ever recurred across days.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1032,10 +1031,9 @@ def known_internal_hosts(config, exclude=()):
 def sweep_targets(config, exclude=(), n_range=(30, 80), min_subnets=3):
     """Destinations for a port sweep: known live hosts spread over >= min_subnets /24s.
 
-    Port Sweep has never fired from any vendor while every sweep went to random
-    addresses in the /16s of internal_networks -- hosts that never appear anywhere
-    else in the data. A real sweep finds machines that exist, and Port Scan, which does
-    fire, always targets one real server. So a sweep is drawn from known hosts first,
+    Sweeping random addresses in the /16s of internal_networks hits hosts that never
+    appear anywhere else in the data. A real sweep finds machines that exist, and Port
+    Scan always targets one real server. So a sweep is drawn from known hosts first,
     across several subnets for the Low-severity "Port Sweep to multiple subnets"
     variation, and only topped up with unseen addresses in those same subnets when the
     session has too few devices."""
@@ -1134,10 +1132,8 @@ def rare_internal_host(config, exclude=()):
 #   * It needs a hostname of its own -- a machine that is genuinely little used (a lab PC,
 #     a kiosk, a spare loaner) -- rather than the caller's workstation name.
 #
-# Evidence for why this matters: "Abnormal RDP ... from a rarely seen host" fired from
-# FortiGate, Check Point and Firepower only in 2026-07-24..08-01, the two weeks after the
-# tenant's analytics activated, when every host's baseline was thin. Once training filled
-# the baselines in, ordinary workstations stopped looking rare and it never fired again.
+# Why this matters: "Abnormal RDP ... from a rarely seen host" can only fire while a source
+# looks rare. Once training fills the baselines in, ordinary workstations stop looking rare.
 _RARE_SOURCE_POOLS = {}
 _RARE_HOST_ROLES = ("LAB-WS", "KIOSK", "SPARE-LT", "TRAIN-PC", "CONFRM-PC")
 
@@ -1189,12 +1185,9 @@ def rare_source_host(config, key):
 def vpn_username(user):
     """Bare username for VPN AUTHENTICATION events. Never EXAMPLECORP\\user.
 
-    Proven by controlled A/B in-tenant on ASA 2026-07-28: Identity Analytics reduces
-    'EXAMPLECORP\\jdoe' to the DOMAIN, so every VPN user collapses into one identity
-    called 'examplecorp' and per-user VPN detectors can never fire. Measured
-    2026-09-17 over 7 days: FortiGate (6,561), Firepower (5,132) and Check Point
-    (6,318) VPN events were 100% domain-prefixed; ASA (9,043) was 100% bare — and ASA
-    is the only vendor whose VPN analytics have ever fired.
+    Identity Analytics reduces 'EXAMPLECORP\\jdoe' to the DOMAIN, so every VPN user
+    collapses into one identity called 'examplecorp' and per-user VPN detectors can
+    never fire.
 
     Non-VPN identity-firewall fields may keep the prefix; only VPN auth needs this.
     """

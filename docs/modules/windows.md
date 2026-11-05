@@ -29,45 +29,40 @@ Generates native Windows Security-channel Event XML targeting XSIAM's Identity A
 
 ## AD / Identity Threat Scenarios
 
-Named threat generators (via `scenario_event` = the key below, or fired individually). The 19 in the table below are confirmed firing on the tenant; 7 more were added on 2026-11-01, built to published analytics — 2 are now tenant-verified (2026-11-03) and 5 are **not yet tenant-verified**; 5 (`wip_` prefix) generate correct events but depend on an identity-graph baseline or are still under investigation.
+Named threat generators (via `scenario_event` = the key below, or fired individually). The 19 in the table below target published analytics; 7 more, added on 2026-11-01, cover AD identity attacks; 5 (`wip_` prefix) generate correct events but depend on an identity-graph baseline or are still under investigation.
 
-**Confirmed detections:**
+**Detections:**
 
-> **Names verified against live alerts on 2026-07-30** via
-> the detector test loop of that time (since retired; `_local_validation/threat_harness.py`
-> now does fire → ingest → detect validation, with `win:` keys for on-prem threats).
-> Eight of the names previously in this table were wrong — the tenant's wording differs
-> from the detector's description. Do not re-transcribe them by hand; re-run the sweep.
+> The names are XSIAM's alert wording, which can differ from a detector's description, so
+> don't re-transcribe them by hand. `_local_validation/threat_harness.py` does fire → ingest
+> → detect validation, with `win:` keys for on-prem threats.
 
-| Generator (`scenario_event`) | XSIAM Detection (as the tenant fires it) | Source | Verified |
-|---|---|---|---|
-| `DCSYNC` | Possible DCSync by an unusual user | Analytics BIOC | ✅ |
-| `DELEGATION_CHANGE` | User account delegation to KRBTGT | Analytics BIOC | ✅ |
-| `DNSHOSTNAME_SPOOFING` | Suspicious dNSHostName attribute change to DC name | Analytics BIOC | ✅ |
-| `SAMACCOUNTNAME_SPOOFING` | Service ticket request with a spoofed sAMAccountName | Analytics BIOC | ✅ |
-| `PRIV_GROUP_ADDITION` | User added to a Windows privileged group | Analytics BIOC | ✅ |
-| `ACCOUNT_LOCKOUT` | Multiple user accounts failed login due to account lockouts | XDR Analytics | ✅ |
-| `DEFAULT_ACCOUNT_ENABLED` | A user enabled the Windows DefaultAccount | Analytics BIOC | ✅ |
-| `SUSPICIOUS_ACCOUNT_CREATION` | Suspicious hidden user created | Analytics BIOC | ✅ |
-| `MASS_ACCOUNT_DELETION` | A user deleted multiple users for the first time | XDR Analytics | ✅ |
-| `MULTIPLE_SERVICE_TICKETS` | Abnormal issuance of weakly encrypted service tickets to a user | XDR Analytics | ✅ |
-| `SUSPICIOUS_ACCOUNT_LOCKOUT` | Excessive account lockouts on suspicious users | XDR Analytics | ✅ |
-| `PRIV_GROUP_ADD_REMOVE` | Rare privileged group addition and removal | XDR Analytics | ✅ |
-| `SMS_ADMINS_ADDITION` | User added to the SMS Admins local group | XDR Analytics | ✅ |
-| `SMS_ADMINS_ADD_REMOVE` | User added to the SMS Admins group and removed | XDR Analytics | ✅ |
-| `IRREGULAR_TGT_BURST` | A user sent an excessive number of TGT requests to irregular services | XDR Analytics | ✅ |
-| `MACHINE_ACCOUNT_TO_DOMAIN_ADMINS` | Machine account was added to a domain admins group | Analytics BIOC | ✅ |
-| `AS_REP_ROASTING` | An excessive number of TGT requests were sent for users that do not require Kerberos pre-authentication | XDR Analytics | ✅ |
-| `DMSA_PRIVESC` | Possible Privilege Escalation using Delegated MSA account attempt | XDR Analytics | ✅ |
-| `SENSITIVE_PASSWORD_RESET` | Sensitive account password reset attempt for the first time | Analytics BIOC | ✅ |
+| Generator (`scenario_event`) | XSIAM Detection | Source |
+|---|---|---|
+| `DCSYNC` | Possible DCSync by an unusual user | Analytics BIOC |
+| `DELEGATION_CHANGE` | User account delegation to KRBTGT | Analytics BIOC |
+| `DNSHOSTNAME_SPOOFING` | Suspicious dNSHostName attribute change to DC name | Analytics BIOC |
+| `SAMACCOUNTNAME_SPOOFING` | Service ticket request with a spoofed sAMAccountName | Analytics BIOC |
+| `PRIV_GROUP_ADDITION` | User added to a Windows privileged group | Analytics BIOC |
+| `ACCOUNT_LOCKOUT` | Multiple user accounts failed login due to account lockouts | XDR Analytics |
+| `DEFAULT_ACCOUNT_ENABLED` | A user enabled the Windows DefaultAccount | Analytics BIOC |
+| `SUSPICIOUS_ACCOUNT_CREATION` | Suspicious hidden user created | Analytics BIOC |
+| `MASS_ACCOUNT_DELETION` | A user deleted multiple users for the first time | XDR Analytics |
+| `MULTIPLE_SERVICE_TICKETS` | Abnormal issuance of weakly encrypted service tickets to a user | XDR Analytics |
+| `SUSPICIOUS_ACCOUNT_LOCKOUT` | Excessive account lockouts on suspicious users | XDR Analytics |
+| `PRIV_GROUP_ADD_REMOVE` | Rare privileged group addition and removal | XDR Analytics |
+| `SMS_ADMINS_ADDITION` | User added to the SMS Admins local group | XDR Analytics |
+| `SMS_ADMINS_ADD_REMOVE` | User added to the SMS Admins group and removed | XDR Analytics |
+| `IRREGULAR_TGT_BURST` | A user sent an excessive number of TGT requests to irregular services | XDR Analytics |
+| `MACHINE_ACCOUNT_TO_DOMAIN_ADMINS` | Machine account was added to a domain admins group | Analytics BIOC |
+| `AS_REP_ROASTING` | An excessive number of TGT requests were sent for users that do not require Kerberos pre-authentication | XDR Analytics |
+| `DMSA_PRIVESC` | Possible Privilege Escalation using Delegated MSA account attempt | XDR Analytics |
+| `SENSITIVE_PASSWORD_RESET` | Sensitive account password reset attempt for the first time | Analytics BIOC |
 
-Rows from `MULTIPLE_SERVICE_TICKETS` down were re-checked against 90 days of tenant alerts
-on 2026-09-29; each has fired at least once. `PRIV_GROUP_ADD_REMOVE` and
-`SMS_ADMINS_ADDITION`, earlier marked "no alert", have since fired. `AS_REP_ROASTING`,
-`DMSA_PRIVESC` and `SENSITIVE_PASSWORD_RESET` dropped their `WIP_` prefix for the same
-reason; the old `WIP_` names still dispatch.
+`AS_REP_ROASTING`, `DMSA_PRIVESC` and `SENSITIVE_PASSWORD_RESET` dropped their `WIP_`
+prefix; the old `WIP_` names still dispatch.
 
-**WIP** (events ingest correctly; detection not yet seen firing): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_PASSWORD_NEVER_EXPIRES`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
+**WIP** (events are correctly shaped; the detection depends on an identity-graph baseline or is still under investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_PASSWORD_NEVER_EXPIRES`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
 
 **On-demand firing** offers the threats in the module's `ANALYTIC_ALERTS` table: everything
 above plus the four remaining `WIP_` detections, which target published analytics. Not
@@ -81,13 +76,6 @@ Seven generators cover AD identity attacks that previously had no producer. The 
 shapes follow Microsoft's documented field layout and the AD schema GUIDs were read from
 Microsoft Learn on 2026-11-01.
 
-> **Tenant verification (2026-11-03):** all seven were fired through the WEC broker and
-> two raised alerts — `sid_history_injection` → **"Suspicious SID History Addition"** and
-> `adfs_dkm_access` → **"ADFS DKM Key Access"**. The other five (`shadow_credentials`,
-> `pkinit_auth`, `kerberos_relay`, `spn_cleared`, `suspicious_sam_change`) raised no alert
-> in that run and remain **NOT tenant-verified**: their shapes are documented, but whether
-> each is the discriminator the XSIAM analytic keys on is still unconfirmed.
-
 Attribute-change detectors emit **both** the 5136 old→new pair and the 4662
 write-property event (with the attribute's schema GUID), plus a state-carrying 4738/4742
 where one exists. This is deliberate: repo notes disagree on whether 5136 reaches XSIAM's
@@ -97,8 +85,8 @@ WEC intake, so the 4662 corroboration keeps the signal alive either way.
 |---|---|---|
 | `shadow_credentials` | 4624 ×2, 4672, 4688 (Whisker/Certipy), 5136 `msDS-KeyCredentialLink` added, 4662 write-property, 4768 PKINIT TGT, 4769, 4689 | Possible shadow credentials addition (Medium) |
 | `pkinit_auth` | 4768 with `Pre-Authentication Type: 16` and certificate issuer/serial/thumbprint fields, 4624 ×2, 4672, 4769 | Suspicious PKINIT TGT authentication request |
-| `sid_history_injection` | 4624 ×2, 4672, 4688, 5136 `sIDHistory` added, 4662 write-property, 4738 carrying `SID History`, 4768, 4689 | Suspicious SID History Addition — ✅ 2026-11-03 |
-| `adfs_dkm_access` | 4624 ×2, 4672, 4688, 4662 read of `CN=DKM,CN=ADFS,CN=Microsoft,CN=Program Data` (`thumbnailPhoto` GUID, `AccessMask 0x10`), 4689 | ADFS DKM Key Access — ✅ 2026-11-03 |
+| `sid_history_injection` | 4624 ×2, 4672, 4688, 5136 `sIDHistory` added, 4662 write-property, 4738 carrying `SID History`, 4768, 4689 | Suspicious SID History Addition |
+| `adfs_dkm_access` | 4624 ×2, 4672, 4688, 4662 read of `CN=DKM,CN=ADFS,CN=Microsoft,CN=Program Data` (`thumbnailPhoto` GUID, `AccessMask 0x10`), 4689 | ADFS DKM Key Access |
 | `kerberos_relay` | 4768 for `<HOST>$` from `::1`, 4624 ×2 (type 3), 4769, 4672, 4688, 4689 | Possible Kerberos relay attack |
 | `spn_cleared` | 4624 ×2, 4672, 4688, 5136 ×2 (SPNs cleared on a machine account), 4662, 4742, 4689 | SPNs cleared from a machine account for the first time |
 | `suspicious_sam_change` | 4624 ×2, 4672, 4688, 5136 ×2 (sAMAccountName → DC hostname), 4662, 4742, 4768, 4689 | Suspicious sAMAccountName change to DC hostname |
@@ -110,10 +98,9 @@ Verified AD schema GUIDs used by the 4662 events: key credential
 `3e0abfd0-126a-11d0-a060-00aa006c33ed`, thumbnailPhoto
 `8d3bca50-1d7e-11d0-a081-00aa006c33ed`.
 
-Two shapes were inferred rather than documented. The ADFS DKM 4662
-(`thumbnailPhoto` GUID with `AccessMask 0x10`) is now tenant-confirmed (2026-11-03). The
-Kerberos relay sequence (type-3 logon as `<HOST>$` from `::1`) still has no alert and is
-the most likely to need revision after a sweep.
+Two shapes were inferred rather than documented: the ADFS DKM 4662 (`thumbnailPhoto` GUID
+with `AccessMask 0x10`) and the Kerberos relay sequence (type-3 logon as `<HOST>$` from
+`::1`).
 
 `samaccountname_spoofing` and `dnshostname_spoofing` also gained secondary claims for the
 attribute-change analytics above, and `multiple_service_tickets` now lists

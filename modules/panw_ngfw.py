@@ -1385,7 +1385,7 @@ def _sim_host_attack_chain(config, session_context):
     failed connections across the subnet, then a generic-protocol upload out -- the shape
     XSIAM rolls up into "Multiple network-related alerts produced by different detectors on
     the same host" (the NDR-insight case seen from the real pa440). Each stage on its own is
-    a detector this module confirmed firing; the roll-up only needs them on one host."""
+    a detector this module targets; the roll-up only needs them on one host."""
     src, user, shost = _threat_actor(config, session_context)
     now = time.time()
     print(f"    - PAN NGFW simulating: multi-detector attack chain on {src}")

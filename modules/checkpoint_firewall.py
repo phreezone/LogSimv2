@@ -107,8 +107,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Spam Bot Traffic"},
     {"event": "smtp_large_exfil",      "weight": 2,  "analytic": True,
      "xsiam_alert": "Large Upload (SMTP)"},
-    # "Large Upload (FTP)" is a third-party-firewall analytic: it fired from Firepower
-    # data on 2026-09-25 while this entry still said non-analytic.
+    # "Large Upload (FTP)" is a real third-party-firewall analytic, though it is missing
+    # from the published Third-Party Firewalls list.
     {"event": "ftp_large_exfil",       "weight": 2,  "analytic": True,
      "xsiam_alert": "Large Upload (FTP)"},
     {"event": "ddns_connection",       "weight": 3,  "analytic": False,
@@ -1593,7 +1593,7 @@ def _simulate_smb_rare_file_transfer(config, src_ip, user, shost):
     except ImportError:
         from session_utils import rare_known_host
     # A live workstation in another subnet: rare_internal_host() addresses were never
-    # seen anywhere, and Rare SMB/RDP never fired from any vendor while using them.
+    # seen anywhere, so they have no baseline for Rare SMB/RDP to compare against.
     dst_ip = rare_known_host(config, exclude=(src_ip,), avoid_subnet_of=src_ip)   # rarely-receiving host, not hot pool
     file_size_bytes = random.randint(104_857_600, 1_073_741_824)  # 100 MB – 1 GB
     duration        = random.randint(120, 900)
@@ -1810,7 +1810,7 @@ def _simulate_workstation_rdp(config, src_ip, user, shost):
     except ImportError:
         from session_utils import rare_known_host
     # A live workstation in another subnet: rare_internal_host() addresses were never
-    # seen anywhere, and Rare SMB/RDP never fired from any vendor while using them.
+    # seen anywhere, so they have no baseline for Rare SMB/RDP to compare against.
     dest_ip = rare_known_host(config, exclude=(src_ip,), avoid_subnet_of=src_ip)
     now  = datetime.now(timezone.utc)
     logs = []
@@ -2067,9 +2067,8 @@ def _simulate_ddns_connection(config, src_ip, user, shost):
     # access to dynamic DNS domain" needs one endpoint returning to ONE rare domain
     # repeatedly. Picking a fresh provider x subdomain per call (12 x 10 = 120
     # combinations) with a random source produced scattered single hits, the opposite
-    # of recurrence. Verified in-tenant: a concentrated replay
-    # (192.168.55.77 -> sync-node.duckdns.org, 90 sessions, 1 source) produced the
-    # correct shape while the randomised generator never did.
+    # of recurrence; a concentrated replay (one source -> one domain, many sessions)
+    # is the correct shape.
     # DO NOT restore per-call randomisation.
     if src_ip not in _ddns_beacon_map:
         _rnd = random.Random(hash(("ddns", src_ip)) & 0xFFFFFFFF)

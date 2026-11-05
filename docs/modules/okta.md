@@ -442,26 +442,19 @@ All 88 threat scenarios are available from the Specific Threat menu. The module 
 
 ## Attack Source Infrastructure (Tor is reserved)
 
-Until 2026-10-02, 37 of the 82 threats sourced every event from a Tor exit, and the
-three bulk sprays (`intense_sso_failures`, `sso_password_spray`, `password_spray`) sent
-Tor-sourced SSO, ending in a success, to all ~500 users on every run. Every user's
-Okta profile accumulated Tor activity, and the profile-scored Analytics BIOC
-"A successful SSO sign-in from TOR" stopped firing after 2026-08-30. A tenant A/B showed
-the August event shape no longer fires either, so the cause was the profile, not the
-event format (`_local_validation/okta_tor_ab.py`).
+Sourcing threats from Tor exits fills users' Okta profiles with Tor activity, and the
+profile-scored Analytics BIOC "A successful SSO sign-in from TOR" stops firing once Tor
+is normal for a user. So Tor is reserved for the threats where it is the signal.
 
 - **Tor is used only by the threats where it is the signal:** `tor_login`, `sso_tor`,
-  `tor_zone_bypass_access`, `tor_admin_app_pivot`, and `mfa_bombing` (left unchanged
-  because its analytic fires today).
+  `tor_zone_bypass_access`, `tor_admin_app_pivot`, and `mfa_bombing`.
 - **Every other threat** comes from attacker infrastructure: cloud/VPS hosting (55%,
   real provider ranges and ASNs), a commercial VPN (30%, still flagged as anonymized),
   or a residential-proxy exit (15%).
 - **Tor is rare per user:** a Tor threat targets a user with no Tor activity yet in the
   current run, unless a scenario names its victim.
 
-Measured locally: Tor fell to ~1.6% of threat events. Profiles already carrying Tor
-history in the tenant decay on Cortex's schedule, so the Tor BIOC may take time to
-return.
+Measured locally: Tor is ~1.6% of threat events.
 
 ## User-Agent Fidelity
 

@@ -274,8 +274,7 @@ Measured effect across the three steps, on the full run:
 | unsatisfiable rules | 3 | 3 | **3** |
 
 The three unsatisfiable rules are the same ones throughout -- the two Cisco Firepower
-`cefName` rules and the Cisco ASA `106023` rule, all three replaced in the tenant and
-awaiting deletion of the originals. No literal regressed at any step.
+`cefName` rules and the Cisco ASA `106023` rule, all three since replaced by `(v2)` rules. No literal regressed at any step.
 
 Note the test's `_THREAT_REPS` was raised from 12 to 30 once the sleep stub brought
 the run to ~20s. At 12, rarely-drawn values flipped between runs (the pentest AMI

@@ -16,7 +16,7 @@ A module declares its mapping in one of two ways:
 
 A module with neither (or an empty ANALYTIC_ALERTS) offers nothing on demand. Proofpoint,
 Infoblox and Apache httpd are in that position: Cortex publishes no analytics for those
-data sources, and none has ever fired from them in the tenant — their alerts come from
+data sources — their alerts come from
 correlation rules and threat intel.
 
 Alert names are the ones the tenant actually raises where that has been observed (the

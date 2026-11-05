@@ -154,8 +154,8 @@ _DEFAULT_THREAT_EVENTS = [
      "xsiam_alert": "Spam Bot Traffic"},
     {"event": "smtp_large_exfil",      "weight": 2,  "analytic": True,
      "xsiam_alert": "Large Upload (SMTP)"},
-    # "Large Upload (FTP)" is a third-party-firewall analytic: it fired from Firepower
-    # data on 2026-09-25 while this entry still said non-analytic.
+    # "Large Upload (FTP)" is a real third-party-firewall analytic, though it is missing
+    # from the published Third-Party Firewalls list.
     {"event": "ftp_large_exfil",       "weight": 2,  "analytic": True,
      "xsiam_alert": "Large Upload (FTP)"},
     {"event": "ddns_connection",       "weight": 3,  "analytic": False,
@@ -672,7 +672,7 @@ def _generate_internal_smb_event(config, src_ip, user, shost=None):
     except ImportError:
         from session_utils import rare_known_host
     # A live workstation in another subnet: rare_internal_host() addresses were never
-    # seen anywhere, and Rare SMB/RDP never fired from any vendor while using them.
+    # seen anywhere, so they have no baseline for Rare SMB/RDP to compare against.
     dest_ip = rare_known_host(config, exclude=(src_ip,), avoid_subnet_of=src_ip)
     start_ms, end_ms = _conn_timing(random.randint(2_000, 90_000))
     fields.update({
@@ -1850,7 +1850,7 @@ def _generate_smb_rare_file_transfer(config, src_ip, user, shost=None):
     except ImportError:
         from session_utils import rare_known_host
     # A live workstation in another subnet: rare_internal_host() addresses were never
-    # seen anywhere, and Rare SMB/RDP never fired from any vendor while using them.
+    # seen anywhere, so they have no baseline for Rare SMB/RDP to compare against.
     dst_ip = rare_known_host(config, exclude=(src_ip,), avoid_subnet_of=src_ip)
     if False:
         internal_servers = config.get('internal_servers', [])

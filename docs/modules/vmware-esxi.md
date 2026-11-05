@@ -23,7 +23,7 @@ Plain syslog carries **no in-body routing key** (unlike the CEF `__firewall_type
 - **Timestamp** is ISO 8601-UTC with milliseconds and `Z` — the format modern ESXi (6.5+) emits and the pack parses for `_time`. The legacy ESXi 6.0 BSD `Mmm dd HH:MM:SS` stamp (no year/zone) would leave `_time` unset and break every time-windowed analytic, so it is never emitted.
 - The `[Originator@6876 sub=… opID=… user=…]` tag sits in the **message body** (not RFC 5424 structured data), matching real ESXi and the pack's `regexcapture`.
 
-**Key normalized XDM** (from the pack changelog, not yet confirmed by an in-tenant parse here): `xdm.source.user.username`, `xdm.*.identity.*` (pack ≥ 1.0.20), `xdm.source.ipv4`, `xdm.event.outcome`, target process name/path/command_line for `vmkernel` process-lifecycle events (≥ 1.0.21), and the Virtualization Stories (≥ 1.0.10).
+**Key normalized XDM** (from the pack changelog): `xdm.source.user.username`, `xdm.*.identity.*` (pack ≥ 1.0.20), `xdm.source.ipv4`, `xdm.event.outcome`, target process name/path/command_line for `vmkernel` process-lifecycle events (≥ 1.0.21), and the Virtualization Stories (≥ 1.0.10).
 
 **Identity:** when a session context is present the human operator is a correlated `session_utils` user, so ESXi auth stitches to the same identity seen on the cloud / Windows feeds; otherwise it falls back to a local ESXi account (`root`, `svc_vcenter`, `vmadmin`).
 
@@ -90,7 +90,7 @@ Only the **analytic** event is offered on demand (dashboard Fire panel / MCP `fi
 
 The `uncommon_host_command` rare pool mirrors the ESXi-ransomware command catalog SIEM vendors detect on: `esxcli system account add` / `permission set … role Admin`, `network firewall set --enabled false` / `unload`, `vim-cmd hostsvc/lockdown_disable`, `system auditrecords remote|local disable`, `software acceptance set --level CommunitySupported`, `software vib install --force --no-sig-check`, `system settings encryption set --require-secure-boot=false` / `--require-exec-installed-only=false`, `syslog config set --loghost=''`, SSH-key and crontab **persistence** implants (`authorized_keys`, `/var/spool/cron/crontabs/root`), `software vib remove`, plus downloaded-tooling and encryptor staging. `ssh_service_enabled` also emits "Administrator access to the host has been enabled".
 
-> **Still unverified in-tenant.** `uncommon_host_command` targets the real catalog analytic and emits the command-line the modeling rule reads, but no live fire has confirmed it here — every other module earned its "confirmed" status only after a fire → ingest → detect pass (`_local_validation/threat_harness.py`). The rarity model also needs the baseline to have trained (30 days of the common commands), so validation is not instantaneous. Run that pass before upgrading the claim.
+> `uncommon_host_command` targets the real catalog analytic and emits the command line the modeling rule reads. The rarity model needs the baseline to have trained (30 days of the common commands) before it can alert; `_local_validation/threat_harness.py` runs the fire → ingest → detect pass.
 
 ### Custom-rule targets (top tier)
 
