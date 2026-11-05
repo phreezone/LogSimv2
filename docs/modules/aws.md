@@ -194,13 +194,95 @@ Context-dependent events that are common in legitimate admin workflows but also 
 These scenarios close Low-or-higher "AWS Audit Log" analytics that previously had no
 producer. Each emits a real CloudTrail call with AWS-API-accurate
 `requestParameters` / `responseElements` field names; the mapping from event shape to
-detector is the published analytic description, not a tenant-verified XQL.
+detector is the published analytic description.
 
-> **Verification status:** every scenario in this section is **NOT tenant-verified**.
-> The shapes are real AWS calls, but whether each is the exact discriminator the XSIAM
-> analytic keys on is unproven until `_local_validation/aws_detector_sweep.py` credits
-> it. The primary name in `ANALYTIC_ALERTS` is the published base analytic; sibling
-> Low+ variation names live in `ANALYTIC_ALERTS_SECONDARY`.
+### Tenant verification (2026-11-03 and 2026-11-04)
+
+**2026-11-03.** All 55 scenarios were fired in one run (`05:10:41Z`–`05:10:51Z`),
+delivered as a single CloudTrail S3 object. The tenant raised **16 alerts**; **15 of the
+55 scenarios** can be tied to one of them (`KMS_KEY_POLICY_FOREIGN` raised two).
+
+**2026-11-04 (a).** The 39 scenarios that raised nothing on 11-03 were fired alone
+(`01:26:42Z`–`01:26:49Z`, one object, 124 events). Five more scenarios raised an alert.
+
+**2026-11-04 (b).** The remaining 34 scenarios were fired in 7 themed batches
+(`03:42:55Z`–`03:49:20Z`), each flushed as its own S3 object 60 s apart, so an alert can
+be matched to a batch — and usually to a single event — by timestamp. **Only 2 of the 34
+raised an alert**; the other 32 stayed silent.
+
+> **Attribution caveat:** within a single-object run, an alert is attributed by **event
+> shape**, not one-scenario-per-alert. The batched run removes most of that ambiguity
+> because each batch is isolated in time.
+
+**2026-11-03 (16 alerts):**
+
+| Key | Alert observed in the tenant | Status |
+|---|---|---|
+| `BACKUP_VAULT_POLICY` | A Backup vault policy was modified | ✅ primary |
+| `BACKUP_VAULT_DELETED` | AWS Backup vault was deleted for the first time by this identity | ✅ Low+ variation |
+| `ROUTE53_RESOLVER_LOGGING_DELETED` | Successful AWS Route53 DNS Resolver query logging configuration deletion by a non-admin identity | ✅ secondary |
+| `DISABLE_ENCRYPTION` | Disable encryption operations | ✅ primary |
+| `KMS_KEY_POLICY_FOREIGN` | KMS key policy was changed **and** Unusual KMS key policy modification | ✅ primary + secondary |
+| `TRANSFER_FAMILY_SERVER` | Unusual cloud transfer service activity | ✅ secondary |
+| `AI_SAFEGUARDS_MODIFIED` | Unusual modification of AI safeguards | ✅ secondary |
+| `ML_MODEL_DOWNLOAD` | Suspicious First-Time AI Model Download by Identity | ✅ secondary |
+| `EBS_SNAPSHOT_BLOCK_DOWNLOAD` | An unusual download of EBS snapshot block | ✅ secondary |
+| `EC2_USER_DATA_READ` | Unusual Retrieval of cloud compute instance user data | ✅ secondary |
+| `SES_ACTIVITY` | Unusual cloud email service activity | ✅ secondary |
+| `SES_PRODUCTION_REQUEST` | SES Production Access Requested by an unusual identity | ✅ secondary |
+| `MULTIPLE_UNUSUAL_ACTIVITIES` | Successful CloudTrail logging deletion by a non-admin identity | ⚠️ secondary; primary still unproven |
+| `LOGGING_EXTERNAL_KMS` | AWS CloudTrail modification (not its stated external-key target) | ⚠️ secondary; target still unproven |
+| `IAM_UNUSUAL_ACTIVITY` / `MULTIPLE_RISK_INDICATORS` | Potential creation of persistent cloud credentials | ⚠️ superseded — the same analytic is now pinned to `SSH_KEY_MODIFICATION` (see below); neither IAM primary promoted |
+
+**2026-11-04 (a) — 5 scenarios:**
+
+| Key | Alert observed in the tenant | Status |
+|---|---|---|
+| `SSM_INVENTORY_ASSOCIATION` | Unusual AWS SSM association created with inventory collection document | ✅ secondary |
+| `BEDROCK_MODEL_SHARE` | Bedrock model shared with a foreign account | ✅ primary |
+| `PUBLIC_SNAPSHOT_SHARE` | Cloud snapshot of a database or storage instance was publicly shared | ✅ primary (two alerts: the Medium base plus a Low variation) |
+| `SES_SENDING_ENABLED` | Unusual cloud email service activity (not its sending-enabled target) | ⚠️ secondary; target still unproven |
+| `SES_PHISHING_CHAIN` | Unusual cloud email service activity (not its phishing-chain target) | ⚠️ secondary; target still unproven |
+
+**2026-11-04 (b) — batched run (2 of 34):**
+
+| Key | Batch / event (UTC) | Alert observed in the tenant | Status |
+|---|---|---|---|
+| `SSH_KEY_MODIFICATION` | batch-6, `ImportKeyPair` `03:48:13Z` | Potential creation of persistent cloud credentials | ✅ secondary (none of the SSH-key targets fired) |
+| `CONSOLE_FIRST_LOGIN_NONUSER` | batch-7, `ConsoleLogin` `03:49:17Z` | A non-user identity logged in to the AWS console for the first time | ✅ Medium variation (SecurityAuditorRole) |
+
+"Potential creation of persistent cloud credentials" is deliberately generic — *"A cloud
+identity invoked a credential-related persistence operation"* — and more than one shape
+can raise it. The `ImportKeyPair` event pins it to `SSH_KEY_MODIFICATION`; because that
+generator also fired in the 11-03 and 01:26 runs, those earlier alerts are now attributed
+to it rather than to `IAM_UNUSUAL_ACTIVITY` / `MULTIPLE_RISK_INDICATORS`, which remain
+unproven.
+
+Across the three runs, **23 of the 55 scenarios** have been tied to at least one alert
+(two of those, `IAM_UNUSUAL_ACTIVITY` and `MULTIPLE_RISK_INDICATORS`, are now superseded);
+**32 have never raised anything**.
+
+**Silent after three runs (32):**
+
+| Batch | Keys |
+|---|---|
+| identity | `IAM_CROSS_ACCOUNT_ROLE`, `IAM_TRUST_POLICY_FOREIGN`, `LAMBDA_CROSS_ACCOUNT_PERMISSION`, `NEW_IAM_USER_RESOURCE_MOD`, `SG_REMOTE_ACCESS_UNKNOWN` |
+| logging / storage / secrets | `LOG_ENUMERATION`, `LOGGING_BUCKET_DELETION`, `S3_FOREIGN_BUCKET_POLICY`, `BACKUP_STORAGE_ACCESS`, `SECRETS_MASS_DUMP`, `SSM_PARAMETERS_DUMP` |
+| AI / ML / database | `AI_AGENT_MODIFIED`, `ML_ARTIFACT_DESTRUCTION`, `AI_DATASET_DOWNLOAD`, `RDS_MASTER_PASSWORD_CHANGE` |
+| snapshots / volumes | `RDS_SNAPSHOT_EXPORT_UNKNOWN`, `MULTIPLE_SNAPSHOT_EXPORT`, `EBS_SNAPSHOT_DELETION`, `EBS_VOLUME_ATTACH`, `EBS_SNAPSHOT_CREATED` |
+| compute / regions | `MULTI_REGION_COMPUTE`, `MULTI_REGION_DISCOVERY`, `COMPUTE_OUTSIDE_REGION`, `DORMANT_REGION_COMPUTE` |
+| compute access | `SERIAL_CONSOLE_ACCESS`, `USER_DATA_MODIFY_REBOOT`, `EC2_BACKDOOR_PUBLIC`, `TRAFFIC_MIRRORING` |
+| behaviour / console | `FAILED_ASSUME_ROLE`, `API_THROTTLING`, `UNUSUAL_COUNTRY_API`, `IMPOSSIBLE_TRAVEL_CLOUD` |
+
+These emit real CloudTrail calls but do not match the analytic discriminators as written,
+or the tenant has not accumulated the baseline they need (the catalog gives most of them a
+30-day training period).
+
+The primary name in `ANALYTIC_ALERTS` is the published base analytic; sibling Low+
+variation names live in `ANALYTIC_ALERTS_SECONDARY`. A key not listed above is still
+**NOT tenant-verified** — real AWS call shape, but whether it is the exact discriminator
+the XSIAM analytic keys on is unproven until `_local_validation/aws_detector_sweep.py`
+credits it.
 
 ### Identity, Trust & Cross-Account
 

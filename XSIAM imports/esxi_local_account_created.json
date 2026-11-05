@@ -1,0 +1,59 @@
+[
+  {
+    "name": "VMware ESXi \u2014 Local Account Created and Granted Admin",
+    "severity": "SEV_020_LOW",
+    "xql_query": "dataset = vmware_esxi_raw\n| filter _raw_log ~= \"(Account \\S+ was created on host|Permission created for \\S+ on root, role is Administrator)\"\n| alter esxi_host = arrayindex(regextract(_raw_log, \"^<\\d+>\\S+\\s+(\\S+)\\s\"), 0),\n        process_name = lowercase(arrayindex(regextract(_raw_log, \"^<\\d+>\\S+\\s+\\S+\\s+([A-Za-z_-]+)\"), 0)),\n        process_id = arrayindex(regextract(_raw_log, \"^<\\d+>\\S+\\s+\\S+\\s+[^\\[]*?\\[(\\d+)\\]\"), 0),\n        event_id = arrayindex(regextract(_raw_log, \"Event (\\d+) :\"), 0),\n        host_ip = _final_reporting_device_ip,\n        message = arrayindex(regextract(_raw_log, \"^<\\d+>\\S+\\s+\\S+\\s+(.*)$\"), 0)\n| alter actor_user = coalesce(\n            arrayindex(regextract(_raw_log, \"\\suser=([^\\s\\]]+)\"), 0),\n            arrayindex(regextract(_raw_log, \"shell\\[\\d+\\]: \\[([^\\]]+)\\]: \"), 0),\n            arrayindex(regextract(_raw_log, \" by ([^\\s@]+)@\\d\"), 0),\n            arrayindex(regextract(_raw_log, \"Accepted \\S+ for (?:user )?(\\S+) from\"), 0),\n            arrayindex(regextract(_raw_log, \"USER (\\S+) pid \\d+ cmd\"), 0)),\n        src_ip = coalesce(\n            arrayindex(regextract(_raw_log, \"@(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n            arrayindex(regextract(_raw_log, \"from (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n            arrayindex(regextract(_raw_log, \"rhost=(\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n            arrayindex(regextract(_raw_log, \"envoy-access\\[\\d+\\]: .*? (\\d+\\.\\d+\\.\\d+\\.\\d+):\\d+ HTTP/\"), 0)),\n        src_port = coalesce(\n            arrayindex(regextract(_raw_log, \"from \\S+ port (\\d+)\"), 0),\n            arrayindex(regextract(_raw_log, \"envoy-access\\[\\d+\\]: .*? \\d+\\.\\d+\\.\\d+\\.\\d+:(\\d+) HTTP/\"), 0))\n| alter app_protocol = if(process_name = \"sshd-session\", \"ssh\",\n                       if(process_name in (\"hostd\", \"envoy-access\"), \"https\",\n                       if(process_name = \"shell\", \"esxi-shell\", null))),\n        host_service_port = if(process_name = \"sshd-session\", \"22\",\n                            if(process_name in (\"hostd\", \"envoy-access\"), \"443\", null)),\n        event_action = null, target_account = null, command_or_path = null,\n        target_object = null, external_target = null\n| alter geo_ip = if(src_ip != null and not (incidr(src_ip, \"10.0.0.0/8\") or incidr(src_ip, \"172.16.0.0/12\") or incidr(src_ip, \"192.168.0.0/16\") or incidr(src_ip, \"127.0.0.0/8\")), src_ip, \"0.0.0.0\")\n| iploc geo_ip loc_country as src_country\n| alter target_account = coalesce(arrayindex(regextract(_raw_log, \"Account (\\S+) was created on host\"), 0),\n                                 arrayindex(regextract(_raw_log, \"Permission created for (\\S+) on root\"), 0)),\n        event_action = if(_raw_log contains \"role is Administrator\", \"admin role granted\", \"account created\"),\n        created = if(_raw_log contains \"was created on host\", 1, 0),\n        admin = if(_raw_log contains \"role is Administrator\", 1, 0)\n| bin _time span = 1h\n| comp count() as event_count,\n       values(actor_user) as actor_users,\n       values(src_ip) as src_ips,\n       values(src_country) as src_countries,\n       values(src_port) as src_ports,\n       values(process_name) as process_names,\n       values(process_id) as process_ids,\n       values(event_id) as event_ids,\n       values(event_action) as event_actions,\n       values(target_account) as target_accounts,\n       values(command_or_path) as commands_paths,\n       values(target_object) as target_objects,\n       values(external_target) as external_targets,\n       values(app_protocol) as app_protocols,\n       values(host_service_port) as host_service_ports,\n       values(message) as events_seen,\n       sum(created) as creations, sum(admin) as admin_grants\n       by esxi_host, host_ip, _time, target_account, actor_user\n| filter creations >= 1 and admin_grants >= 1\n| fields esxi_host, host_ip, actor_users, src_ips, src_countries, src_ports, host_service_ports, process_names, process_ids, event_ids, event_actions, target_accounts, commands_paths, target_objects, external_targets, app_protocols, events_seen, event_count\n",
+    "is_enabled": true,
+    "description": "LogSim ESXi threat 'local_account_created'. One user created a new local account on the host and gave it the Admin role within the same hour.",
+    "alert_name": "VMware ESXi \u2014 Local Account Created and Granted Admin on $esxi_host",
+    "alert_category": "PERSISTENCE",
+    "alert_type": null,
+    "alert_description": "What fired: One user created a new local account on the host and gave it the Admin role within the same hour.\n\nWhy it matters: A fresh local admin is a classic ESXi persistence foothold that survives password resets of the existing accounts. Assessed severity: Low.\n\nMITRE ATT&CK: T1136.001 - Create Account: Local Account; T1098 - Account Manipulation (TA0003 - Persistence).\n\nInvestigate:\n  - Read events_seen for the exact host log lines and the acting user / source.\n  - Confirm with the ESXi owner whether the change or access was planned (change ticket, maintenance window).\n  - Pivot on the alert's key (esxi_host, target_account, actor_user) and the source IP to firewall, VPN, and identity activity in the same window.\n  - Check the same host for other ESXi alerts (shell enabled, uncommon commands, syslog changes, VM power-offs) that would make this part of a ransomware chain.",
+    "alert_domain": "DOMAIN_SECURITY",
+    "alert_fields": {
+      "agent_hostname": "esxi_host",
+      "action_local_ip": "host_ip",
+      "action_local_port": "host_service_ports",
+      "actor_effective_username": "actor_users",
+      "action_remote_ip": "src_ips",
+      "action_remote_port": "src_ports",
+      "src_geo_country_name": "src_countries",
+      "actor_process_image_name": "process_names",
+      "processid": "process_ids",
+      "eventid": "event_ids",
+      "eventaction": "event_actions",
+      "usersdetails": "target_accounts",
+      "applicationpath": "commands_paths",
+      "action_file_name": "target_objects",
+      "action_external_hostname": "external_targets",
+      "action_app_protocol": "app_protocols",
+      "action_evtlog_message": "events_seen"
+    },
+    "execution_mode": "SCHEDULED",
+    "search_window": "1 hours",
+    "simple_schedule": "10 minutes",
+    "timezone": "America/New_York",
+    "crontab": "*/10 * * * *",
+    "suppression_enabled": true,
+    "suppression_duration": "1 hours",
+    "suppression_fields": [
+      "esxi_host",
+      "target_account",
+      "actor_user"
+    ],
+    "dataset": "alerts",
+    "user_defined_severity": null,
+    "user_defined_category": null,
+    "mitre_defs": {
+      "TA0003 - Persistence": [
+        "T1136.001 - Create Account: Local Account",
+        "T1098 - Account Manipulation"
+      ]
+    },
+    "investigation_query_link": "",
+    "drilldown_query_timeframe": "ALERT",
+    "mapping_strategy": "CUSTOM",
+    "action": "ALERTS",
+    "lookup_mapping": []
+  }
+]
