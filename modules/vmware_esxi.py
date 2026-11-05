@@ -11,8 +11,7 @@
 #   distinguishes ESXi from the other syslog sources BY PORT (its own syslog_port),
 #   exactly as cisco_asa (1514), apache (1515) and infoblox (1516) are separated today.
 #
-# What the pack normalizes (confirmed from the Marketplace pack changelog, not from an
-# in-tenant parse here):
+# What the pack normalizes (from the Marketplace pack changelog):
 #   xdm.source.user.username / xdm.*.identity.*   (auth + identity, pack >= 1.0.8/1.0.20)
 #   xdm.source.ipv4                                (client address on auth events)
 #   xdm.event.outcome                              (success / failure)
@@ -32,9 +31,8 @@
 #   this data source. Design consequence: the detector is a RARITY model, so it needs a
 #   stable COMMON-command baseline (the benign shell_command + crond events) for a RARE
 #   command to stand out. The one on-demand analytic threat (uncommon_host_command) fires
-#   commands from the rare pool; it is marked analytic but UNVERIFIED in-tenant — every
-#   other module in this repo earned "confirmed" only after a live fire -> ingest -> detect
-#   pass (_local_validation/threat_harness.py), and this must do the same.
+#   commands from the rare pool; _local_validation/threat_harness.py runs the
+#   fire -> ingest -> detect pass for it.
 #   The remaining generators (ssh_brute_force, root_login_rare_source, ssh_service_enabled,
 #   local_account_created, mass_vm_power_off, remote_syslog_disabled) are faithful ESXi
 #   attacker TTPs with no analytic on this data source: background + hunting/correlation,
