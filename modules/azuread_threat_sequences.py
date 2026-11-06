@@ -36,6 +36,11 @@ DLP_SRC, DLP_INT = dlp.SOURCE_IDENTIFIER, dlp.INTEGRATION_IDENTIFIER
 # and the harness route a WIN_SRC tuple's record (a windows event dict) through the WEC path.
 WIN_SRC, WIN_INT = "__wec__", "logsim:windows"
 
+def _home_us():
+    """The admin's ordinary sign-in location -- the target's own machine in Bad User mode."""
+    return ac.focus_loc() or HOME_US
+
+
 RISKY_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]
 # A DigitalOcean Singapore block (verified origin + GeoLite location, 2026-10-22); the previous
 # 103.21.244.12 is Cloudflare anycast with no country at all.
@@ -50,7 +55,7 @@ def _tor(config):
     if nodes:
         n = random.choice(nodes)
         return n.get("ip") if isinstance(n, dict) else n
-    return random.choice(RISKY_IPS)
+    return ac.attacker_ip(RISKY_IPS)
 
 
 def _loc(ip, city="Unknown", country="US", lat=0, lon=0):
@@ -102,7 +107,7 @@ def seq_aitm_token_theft(config):
 
 def seq_spray_compromise_persist(config):
     """Password spray (Medium) -> success -> attacker adds MFA method (persistence)."""
-    ip = random.choice(RISKY_IPS); out = []
+    ip = ac.attacker_ip(RISKY_IPS); out = []
     for i in range(10):
         v = ac.pick_user(config)
         out.append(_aad(aad._signin(v, _loc(ip), interactive=True, success=False, error_code=50126,
@@ -117,8 +122,8 @@ def seq_spray_compromise_persist(config):
 
 def seq_golden_saml_federation(config):
     """Federation backdoor (T1484 Domain/Tenant Policy Modification): admin -> set federation -> add domain."""
-    admin = ac.pick_user(config); ip = HOME_US["ip"]
-    return [_aad(aad._signin(admin, HOME_US, interactive=True, ca_result="success", offset_s=-400)),
+    admin = ac.pick_user(config); ip = _home_us()["ip"]
+    return [_aad(aad._signin(admin, _home_us(), interactive=True, ca_result="success", offset_s=-400)),
             _o365(o365._audit("Set federation settings on domain.", admin, ip, target_name=ac.UPN_DOMAIN,
                               modified=[{"Name": "IssuerUri", "NewValue": "http://any.sts/adfs/services/trust", "OldValue": ""},
                                         {"Name": "TokenSigningCertificate", "NewValue": "<attacker-cert-thumbprint>", "OldValue": "<orig>"}])),
@@ -129,7 +134,7 @@ def seq_golden_saml_federation(config):
 def seq_illicit_oauth_consent(config):
     """Consent-phishing: user consents a malicious app risky scopes -> the app (SP) reads mail/files."""
     u = ac.pick_user(config); ip = ac.egress(u)["ip"]
-    app_loc = _loc(random.choice(RISKY_IPS))
+    app_loc = _loc(ac.attacker_ip(RISKY_IPS))
     return [_aad(aad._signin(u, ac.egress(u), interactive=True, app="My Apps", offset_s=-300)),
             _o365(o365._audit("Consent to application.", u, ip, target_name=ac.rare_app_name(),
                               modified=[{"Name": "ConsentContext.IsAdminConsent", "NewValue": "False", "OldValue": ""},
@@ -143,13 +148,13 @@ def seq_sp_credential_abuse(config):
     return [_aad(aad._signin(admin, ac.egress(admin), interactive=True, ca_result="success", offset_s=-300)),
             _o365(o365._audit("Add service principal credentials.", admin, ip, target_name="LogSim Reporting App",
                               modified=[{"Name": "KeyDescription", "NewValue": "[KeyType=AsymmetricX509Cert]", "OldValue": ""}])),
-            _aad(aad._sp_signin(_loc(random.choice(RISKY_IPS))))]
+            _aad(aad._sp_signin(_loc(ac.attacker_ip(RISKY_IPS))))]
 
 
 def seq_privesc_global_admin(config):
     """Privilege escalation: compromised user -> granted Global Admin -> PIM MFA requirement removed."""
-    u = ac.pick_user(config); ip = _loc(random.choice(RISKY_IPS))["ip"]
-    return [_aad(aad._signin(ac.pick_user(config), _loc(random.choice(RISKY_IPS)), interactive=True,
+    u = ac.pick_user(config); ip = _loc(ac.attacker_ip(RISKY_IPS))["ip"]
+    return [_aad(aad._signin(ac.pick_user(config), _loc(ac.attacker_ip(RISKY_IPS)), interactive=True,
                              risk_level="medium", risk_state="atRisk", offset_s=-400)),
             _o365(o365._audit("Add member to role.", ac.pick_user(config), ip, target_name=u["upn"],
                               modified=[{"Name": "Role.DisplayName", "NewValue": "Global Administrator", "OldValue": ""}])),
@@ -159,7 +164,7 @@ def seq_privesc_global_admin(config):
 
 def seq_mfa_tamper_takeover(config):
     """Defense evasion + takeover: attacker disables MFA for target, resets password, signs in as them."""
-    attacker = ac.pick_user(config); target = ac.pick_user(config); ip = _loc(random.choice(RISKY_IPS))["ip"]
+    attacker = ac.pick_user(config); target = ac.pick_user(config); ip = _loc(ac.attacker_ip(RISKY_IPS))["ip"]
     return [_aad(aad._signin(attacker, _loc(ip), interactive=True, offset_s=-300)),
             _o365(o365._audit("Disable Strong Authentication.", attacker, ip, target_name=target["upn"],
                               modified=[{"Name": "StrongAuthenticationRequirement", "NewValue": "[]", "OldValue": "[{\"State\":\"Enforced\"}]"}])),
@@ -172,7 +177,7 @@ def seq_impossible_travel_risky(config):
     u = ac.pick_user(config)
     s2 = aad._signin(u, FOREIGN, interactive=True, risk_level="high", risk_state="atRisk", offset_s=-60)
     s2["riskEventTypes_v2"] = ["unlikelyTravel"]
-    return [_aad(aad._signin(u, HOME_US, interactive=True, offset_s=-600)), _aad(s2)]
+    return [_aad(aad._signin(u, _home_us(), interactive=True, offset_s=-600)), _aad(s2)]
 
 
 def seq_backdoor_user(config):
@@ -185,12 +190,12 @@ def seq_backdoor_user(config):
             _o365(o365._audit("Add user.", admin, ip, target_name=backdoor)),
             _o365(o365._audit("Add member to role.", admin, ip, target_name=backdoor,
                               modified=[{"Name": "Role.DisplayName", "NewValue": "Privileged Role Administrator", "OldValue": ""}])),
-            _aad(aad._signin(bd, _loc(random.choice(RISKY_IPS)), interactive=True, offset_s=-30))]
+            _aad(aad._signin(bd, _loc(ac.attacker_ip(RISKY_IPS)), interactive=True, offset_s=-30))]
 
 
 def seq_legacy_auth_bypass(config):
     """Legacy-auth MFA bypass: repeated legacy-protocol sign-ins (no MFA) succeed to Exchange."""
-    u = ac.pick_user(config); ip = random.choice(RISKY_IPS); out = []
+    u = ac.pick_user(config); ip = ac.attacker_ip(RISKY_IPS); out = []
     for i in range(6):
         out.append(_aad(aad._signin(u, _loc(ip), interactive=True, client_app=random.choice(["IMAP4", "SMTP", "POP3"]),
                                     resource="Office 365 Exchange Online", success=(i >= 4),
@@ -523,7 +528,7 @@ def seq_rt_to_prt_transition(config):
                      resource="Microsoft Graph", success=True, offset_s=-1800)
     rt["appId"] = _MAB_APP_ID
     rt["incomingTokenType"] = "refreshToken"
-    rt["deviceDetail"] = {"deviceId": dev_id, "displayName": f'{u["username"].upper().replace(".", "")}-PC',
+    rt["deviceDetail"] = {"deviceId": dev_id, "displayName": ac.device_name(u),
                           "operatingSystem": "Windows 10", "browser": "", "isCompliant": True,
                           "isManaged": True, "trustType": "Azure AD joined"}
     rt["tokenProtectionStatusDetails"] = {"signInSessionStatus": "unbound",
@@ -536,7 +541,7 @@ def seq_rt_to_prt_transition(config):
                                               "Office 365 SharePoint Online"]),
                       success=True, risk_level="high", risk_state="atRisk", offset_s=-120)
     prt["incomingTokenType"] = "primaryRefreshToken"
-    prt["deviceDetail"] = {"deviceId": dev_id, "displayName": f'{u["username"].upper().replace(".", "")}-PC',
+    prt["deviceDetail"] = {"deviceId": dev_id, "displayName": ac.device_name(u),
                            "operatingSystem": "Windows 10", "browser": "", "isCompliant": False,
                            "isManaged": False, "trustType": "Azure AD joined"}
     prt["riskEventTypes_v2"] = ["anonymizedIPAddress", "unfamiliarFeatures"]

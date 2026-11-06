@@ -125,6 +125,94 @@ def correlated_private_ip(session_context, prob=None):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Focus user (dashboard Bad User mode)
+# ---------------------------------------------------------------------------
+# Bad User drives every module as ONE identity so XSIAM stitches the activity into one
+# case. Handing a module a one-user session_context covers the generators that read the
+# context, but many identity choices never see it: the Microsoft feeds pick from
+# config['user_profiles'] (pick_user/pick_by_role/...), and the firewall threats that need
+# a host to RECUR over days take a fixed source from the global roster (recurring_host,
+# stable_beacon_pairs, rare_source_host). Measured 2026-11-03: Exchange, Azure AD Audit
+# and Azure Activity carried the target in 0% of events, every Microsoft threat in 0%.
+#
+# The focus user is a per-thread override those pickers consult first. It is a context
+# variable, so only the Bad User worker threads that set it are affected; the normal
+# module workers, running the same module code at the same time, never see it. Threads a
+# module starts do NOT inherit it unless started under contextvars.copy_context().
+_FOCUS = contextvars.ContextVar("logsim_focus_user", default=None)
+
+
+def focus_user():
+    """The Bad User target for the calling thread, or None.
+
+    A dict: username, profile (the session_context entry), info (get_user_by_name's flat
+    dict for the primary device) and egress_ip (the one public address every feed shows
+    for the target, or None)."""
+    return _FOCUS.get()
+
+
+def set_focus_user(username, profile, egress_ip=None):
+    """Focus this thread on `username`. Returns a token for reset_focus_user()."""
+    info = get_user_by_name({username: profile}, username) or {"username": username}
+    return _FOCUS.set({"username": username, "profile": profile, "info": info,
+                       "egress_ip": egress_ip})
+
+
+def reset_focus_user(token):
+    _FOCUS.reset(token)
+
+
+def carry_focus(fn):
+    """`fn`, wrapped to run under the calling thread's focus user -- for threads a module
+    starts on behalf of a focused caller (a new thread starts with no focus). Returns `fn`
+    itself when the caller is not focused. Carries ONLY the focus, not the whole context:
+    copying everything would also carry a training run's hermetic flag into long-lived
+    workers."""
+    f = _FOCUS.get()
+    if f is None:
+        return fn
+
+    def run(*args, **kwargs):
+        _FOCUS.set(f)
+        return fn(*args, **kwargs)
+    return run
+
+
+def focus_ips():
+    """Every device address of the focus user (empty set when unfocused)."""
+    f = _FOCUS.get()
+    if not f:
+        return set()
+    return {d.get("ip") for d in (f["profile"].get("active_devices") or {}).values()
+            if isinstance(d, dict) and d.get("ip")}
+
+
+def focus_host():
+    """(ip, username, hostname) of the focus user's primary device, or None."""
+    f = _FOCUS.get()
+    if not f:
+        return None
+    p = f["profile"]
+    return p.get("primary_ip") or f["info"].get("ip"), f["username"], \
+        p.get("primary_hostname") or f["info"].get("hostname")
+
+
+def focus_source_ip():
+    """The Bad User target's computer address: their primary device's INTERNAL IP, the
+    source of their on-prem and network events (Windows, firewall, proxy, DNS). Cloud
+    services see the same computer through the office NAT instead -- focus_egress_ip(),
+    which the firewall NAT fields also show. None when unfocused."""
+    fh = focus_host()
+    return fh[0] if fh else None
+
+
+def focus_egress_ip():
+    """The focus user's public egress address, or None (also None when unfocused)."""
+    f = _FOCUS.get()
+    return f.get("egress_ip") if f else None
+
+
 # Session builder – called once in log_simulator.py main()
 
 def build_session_context(config):
@@ -154,9 +242,11 @@ def build_session_context(config):
         config.get('user_behavior', {}).get('department_affinity',
                                             _DEPT_AFFINITY_STRENGTH))
     _USER_DEPARTMENT.clear()
+    _USER_DEVICES.clear()
     for _u, _p in config.get('user_profiles', {}).items():
         if _p.get('department'):
             _USER_DEPARTMENT[_norm_user(_u)] = _p['department']
+        _USER_DEVICES[_u] = [d for d in (_p or {}).get('devices', []) if isinstance(d, dict)]
 
     # Device addresses. "sticky" (default): every device holds one address across runs,
     # like a DHCP reservation -- see _sticky_ip(). "per_restart": the original behaviour,
@@ -295,11 +385,38 @@ def build_session_context(config):
 _ACTIVE_CONTEXT: dict = {}
 
 
+_USER_DEVICES: dict = {}   # username -> every device configured for them (active or not)
+
+
+def user_device_name(username, mobile=False):
+    """Hostname of a user's computer (their primary device) or, with mobile=True, their
+    phone -- the names the endpoint, DHCP/DNS and firewall feeds use, so a cloud record's
+    device name (Entra deviceDetail, SharePoint DeviceDisplayName, a device object) joins
+    the same host. None when the user has no such device configured."""
+    devs = _USER_DEVICES.get(username) or []
+    if mobile:
+        d = next((d for d in devs if d.get('type') == 'mobile' and d.get('hostname')), None)
+        return d.get('hostname') if d else None
+    prof = _ACTIVE_CONTEXT.get(username) or {}
+    if prof.get('primary_hostname'):
+        return prof['primary_hostname']
+    d = next((d for d in devs if d.get('is_primary') and d.get('hostname')), None)
+    return d.get('hostname') if d else None
+
+
+def roster_context():
+    """The whole run's session_context (every user), whatever context a caller was handed."""
+    return _ACTIVE_CONTEXT
+
+
 def recurring_host(key, n=3):
     """(ip, username, hostname) of one of `n` fixed hosts for `key` -- the same set on
     every run, so each recurs daily instead of once per few hundred picks. Requires sticky
     device addresses (the default) for the IP to hold across restarts. None if no session
-    context has been built."""
+    context has been built. In Bad User mode, the focus user's own host."""
+    fh = focus_host()
+    if fh and fh[0]:
+        return fh
     users = sorted(u for u, p in _ACTIVE_CONTEXT.items() if (p or {}).get("primary_ip"))
     if not users:
         return None
@@ -1093,7 +1210,11 @@ def new_ftp_server_host(config):
     """An internal host that has not served FTP before in this run: New FTP Server is
     first-seen per host, and after weeks the internal_servers pool has all served FTP,
     so none of them is ever "new" again. A workstation that suddenly accepts inbound
-    FTP is also the realistic compromise shape."""
+    FTP is also the realistic compromise shape. In Bad User mode that workstation is the
+    target's own (it then stops being "new" after the first time, but it joins the case)."""
+    fh = focus_host()
+    if fh and fh[0]:
+        return fh[0]
     ip = rare_known_host(config, exclude=_FTP_USED)
     _FTP_USED.add(ip)
     return ip
@@ -1176,7 +1297,13 @@ def rare_host_name(ip):
 
 
 def rare_source_host(config, key):
-    """(ip, hostname) for one rarely-seen source. Callers should send it with NO user."""
+    """(ip, hostname) for one rarely-seen source. Callers should send it with NO user.
+
+    In Bad User mode the source is the focus user's host instead: the event must carry
+    the target's address to join the case, at the cost of the 'rare source' signal."""
+    fh = focus_host()
+    if fh and fh[0]:
+        return fh[0], fh[2]
     pool = stable_rare_sources(config, key) or [rare_internal_host(config)]
     ip = random.choice(pool)
     return ip, rare_host_name(ip)
@@ -1295,7 +1422,15 @@ def stable_beacon_pairs(key, config, session_context=None, n=4):
     derived deterministically inside the chosen user's PRIMARY-device subnet rather than
     taken from the session context: build_session_context() re-randomises every user's
     IP on each restart, which would silently break recurrence at the first restart.
+
+    In Bad User mode every pair's host is the focus user's host; the destinations stay
+    the same deterministic rare IPs.
     """
+    fh = focus_host()
+    if fh and fh[0]:
+        return [(fh[0], fh[1], rare_external_ip(
+                    seed=int(hashlib.sha256(f"{key}:{i}".encode()).hexdigest(), 16)))
+                for i in range(n)]
     profiles = (config or {}).get("user_profiles") or {}
     cands = []
     for uname, p in profiles.items():

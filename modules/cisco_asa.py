@@ -39,6 +39,10 @@ except ImportError:
         novel_country_vpn_ip, tor_vpn_ip, random_external_ip, correlated_or_random_user)
 
 last_threat_event_time = 0
+try:
+    from modules.session_utils import focus_egress_ip as _focus_egress_ip, focus_ips as _focus_ips
+except ImportError:  # pragma: no cover - script-style import
+    from session_utils import focus_egress_ip as _focus_egress_ip, focus_ips as _focus_ips
 
 # Events that must happen at least once per UTC DAY, whatever the weighted draw does.
 # Each is CLOCK-KEYED by its detector, so a probability-keyed emission wastes days:
@@ -400,8 +404,12 @@ def _get_nat_ip(config, src_ip=None):
     """Returns the NAT/PAT IP for src_ip, sticky per internal host.
 
     Falls back to a random pool address when src_ip is not supplied (preserves
-    legacy callers).
+    legacy callers). In Bad User mode the target's hosts translate to the target's public
+    egress, the same address their cloud sign-ins come from.
     """
+    _eg = _focus_egress_ip()
+    if _eg and (src_ip is None or src_ip in _focus_ips()):
+        return _eg
     try:
         nat_pool = ip_network(_get_asa_config(config).get('nat_pool_cidr', '203.0.113.0/28'))
         if src_ip is None:

@@ -168,6 +168,38 @@ def _get_random_internal_ip(config):
         return "192.168.1.100"
 
 
+class _ClientPublicIP(str):
+    """A sourceTranslatedAddress still to be tied to the event's user (see below)."""
+
+
+def _client_public_ip(zscaler_conf):
+    """sourceTranslatedAddress: the public address Zscaler sees the client connect from.
+
+    Returned as a placeholder holding a configured location IP; _format_nss_log_as_cef()
+    replaces it with the event USER's office egress (_user_public_ip) -- the address that
+    user's Entra/O365/Okta/AWS/GCP activity, Proofpoint clickIP and the firewall NAT show --
+    and keeps the location IP only for traffic with no roster user (location-level events).
+    It used to be a random pick from three config IPs, so it matched nothing per user."""
+    return _ClientPublicIP(random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])))
+
+
+def _user_public_ip(user):
+    """The office egress of `user` (a username or user@domain), or None if not on the roster."""
+    try:
+        from modules.session_utils import roster_context, focus_egress_ip
+    except ImportError:
+        from session_utils import roster_context, focus_egress_ip
+    eg = focus_egress_ip()
+    if eg:
+        return eg
+    uname = str(user or "").split("@")[0].split("\\")[-1]
+    prof = (roster_context() or {}).get(uname)
+    if not prof:
+        return None
+    from modules import azure_common as _ac
+    return _ac.office_egress({"username": uname, "department": prof.get("department") or "Unknown"})["ip"]
+
+
 def _get_threat_destination(config):
     """Returns a TOR exit node (50%) or suspicious IP from config (50%)."""
     if random.random() < 0.5:
@@ -319,7 +351,7 @@ def _generate_benign_web_traffic(config, user, dept, internal_host_ip, device_in
         # baseline rather than against one flat range shared by everyone.
         "bytesin": random.randint(*get_byte_volume_band(user)),
         "bytesout": random.randint(500, 5000),
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "2",
     }
@@ -370,7 +402,7 @@ def _generate_benign_firewall_traffic(config, user, dept, internal_host_ip, devi
         "spriv": "domain users", "duration_ms": random.randint(100, 300000), "cefSeverity": "3",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "destinationTranslatedAddress": dest_ip,
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
     }
@@ -407,7 +439,7 @@ def _generate_benign_dns_query(config, user, dept, internal_host_ip, device_info
         "duration_ms": random.randint(1, 500), "cefSeverity": "1",
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "destinationTranslatedAddress": fwd,
         "flexString1": location,
     }
@@ -499,7 +531,7 @@ def _generate_benign_saas_upload(config, user, dept, internal_host_ip, device_in
         # file metadata: cn2=filesize (the uploaded file), cn3=totalsize (transaction)
         "filename": filename, "filetype": filetype,
         "filesize": upload_bytes, "totalsize": upload_bytes + ack_bytes,
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "2",
     }
@@ -549,7 +581,7 @@ def _generate_benign_software_update(config, user, dept, internal_host_ip, devic
         # bytesin = client←server (large: downloading patch); bytesout = client→server (small: request)
         "bytesin":  random.randint(5_000_000, 200_000_000),
         "bytesout": random.randint(300, 2_000),
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "1",
     }
@@ -599,7 +631,7 @@ def _generate_benign_video_streaming(config, user, dept, internal_host_ip, devic
         # bytesin = sustained video stream (very large); bytesout = small client requests
         "bytesin":  random.randint(10_000_000, 500_000_000),
         "bytesout": random.randint(1_000, 10_000),
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "2",
     }
@@ -811,7 +843,7 @@ def _generate_threat_web_traffic(config, user, dept, internal_host_ip, device_in
         "bytesout": random.randint(300, 1_500),
         "filename": filename, "filetype": filetype,
         "filesize": details.get('filesize', random.randint(50_000, 5_000_000)),
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "8",
     }
@@ -945,7 +977,7 @@ def _generate_data_exfil_web_traffic(config, user, dept, internal_host_ip, devic
         # file metadata: cn2=filesize (uploaded file), cn3=totalsize (transaction)
         "filename": filename, "filetype": filetype,
         "filesize": file_size_bytes, "totalsize": file_size_bytes + ack_bytes,
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "7",
         # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the web
@@ -1016,7 +1048,7 @@ def _generate_dlp_web_traffic(config, user, dept, internal_host_ip, device_info,
         "filename": filename, "filetype": filetype,
         "filesize": upload_bytes, "totalsize": upload_bytes + ack_bytes,
         "dlpengine": engine, "dlpdictionary": dictionary, "dlprule": rule,
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "6", "event_type": "dlp",
     }
@@ -1064,7 +1096,7 @@ def _generate_cloud_app_control_event(config, user, dept, internal_host_ip, devi
         "ehost": f"{app.get('name', 'app').lower()}.com",
         "cip": internal_host_ip, "sip": dest_ip, "proto": "HTTPS",
         "bytesin": random.randint(500, 5_000), "bytesout": random.randint(200, 2_000),
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "5" if blocked else "2",
     }
@@ -1117,7 +1149,7 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
         "proto": "HTTP",
         "bytesin":  random.randint(200, 2_000),
         "bytesout": random.randint(300, 1_500),
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "10", "event_type": "sandbox",
     }
@@ -1224,7 +1256,7 @@ def _fw_event(config, user, dept, device_info, src_ip, dst_ip, dst_port, proto,
         "cefSeverity": sev,
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "destinationTranslatedAddress": dst_ip,
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cdfqdn": dst_fqdn,
@@ -1436,7 +1468,7 @@ def _generate_rare_domain_communication(config, user, dept, internal_host_ip, de
         "eurl": f"https://{domain}/", "ehost": domain,
         "cip": internal_host_ip, "sip": dst, "proto": "HTTPS",
         "bytesin": random.randint(2_000, 60_000), "bytesout": random.randint(600, 6_000),
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "3",
     }
@@ -2499,8 +2531,7 @@ def _generate_ddns_connection(config, user, dept, internal_host_ip, device_info)
             "cip": internal_host_ip, "sip": resolved_ip, "proto": "HTTPS",
             "bytesin":  random.randint(5_000, 500_000),
             "bytesout": random.randint(1_000, 100_000),
-            "sourceTranslatedAddress": random.choice(
-                zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+            "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
             "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
             "cefSeverity": "5",
         }
@@ -2672,7 +2703,7 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
             "eurl": f"http://{c2_domain}{uri}", "ehost": c2_domain,
             "cip": internal_host_ip, "sip": c2_ip, "proto": "HTTP",
             "bytesin": random.randint(120, 400), "bytesout": random.randint(200, 900),  # small, regular
-            "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+            "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
             "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
             "cefSeverity": "5",
             # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the
@@ -2746,7 +2777,7 @@ def _generate_large_download(config, user, dept, internal_host_ip, device_info,
         "bytesin": download_bytes, "bytesout": req_bytes,
         "filename": filename, "filetype": filetype,
         "filesize": download_bytes, "totalsize": download_bytes + req_bytes,
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "5",
         # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the web
@@ -3037,6 +3068,11 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
     # XSIAM keys _time off the CEF rt field. Respect an explicitly-set rt (ms epoch)
     # so time-spread threats (e.g. impossible travel) can back-date events; else now.
     rt = fields.get("rt") or int(time.time() * 1000)
+    # Tie a placeholder client public IP to this event's user (see _client_public_ip),
+    # once, before the web and firewall field maps both read it.
+    if isinstance(fields.get("sourceTranslatedAddress"), _ClientPublicIP):
+        fields = {**fields, "sourceTranslatedAddress":
+                  _user_public_ip(fields.get("suser") or user) or str(fields["sourceTranslatedAddress"])}
     # Zscaler NSS deviceProduct uses mixed case per XSIAM dataset naming
     _PRODUCT_MAP = {"nssweblog": "NSSWeblog", "nssfwlog": "NSSFWlog"}
     cef_product = _PRODUCT_MAP.get(log_product, log_product)
@@ -3318,7 +3354,7 @@ def _generate_scenario_log(config, scenario):
         "proto": "HTTP",
         "bytesin":  random.randint(200, 2_000),
         "bytesout": random.randint(300, 1_500),
-        "sourceTranslatedAddress": random.choice(zscaler_conf.get('source_translated_ips', ["203.0.113.1"])),
+        "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "8",
     }

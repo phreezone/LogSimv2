@@ -56,7 +56,7 @@ def _tor_ip(config):
     if nodes:
         n = random.choice(nodes)
         return n.get("ip") if isinstance(n, dict) else n
-    return random.choice(RISKY_IPS)
+    return ac.attacker_ip(RISKY_IPS)
 
 
 def _signin(operation, user, ip, *, result_status="Success", error_number="0",
@@ -167,7 +167,7 @@ def scenario_password_spray(config=None, victims=None, src_ip=None):
     """Password spray: one attacker source IP, many victim users each failing exactly once with
     the same STS error, then a success for one of the sprayed users — from a different IP (the
     spray tool yields to an interactive session). Failure and code share the same user."""
-    ip = src_ip or random.choice(RISKY_IPS)
+    ip = src_ip or ac.attacker_ip(RISKY_IPS)
     # 25-50 different accounts, one failure each, throttled across 10-20 minutes.
     users = ac.pick_distinct_users(config, victims or random.randint(25, 50))
     out = [_signin("UserLoginFailed", u, ip, result_status="Failed", error_number="50126",
@@ -175,14 +175,14 @@ def scenario_password_spray(config=None, victims=None, src_ip=None):
                    offset_s=off)
            for u, off in zip(users, ac.attack_offsets(len(users), random.randint(600, 1200)))]
     # The successful compromise is one of the sprayed users, after the spray + different IP.
-    out.append(_signin("UserLoggedIn", random.choice(users), random.choice(RISKY_IPS), offset_s=0))
+    out.append(_signin("UserLoggedIn", random.choice(users), ac.attacker_ip(RISKY_IPS), offset_s=0))
     return out
 
 
 def scenario_brute_force(config=None, user=None, attempts=None, src_ip=None):
     """30-60 wrong passwords on one account over 5-15 minutes, then the guess succeeds."""
     u = ac.pick_user(config)
-    ip = src_ip or random.choice(RISKY_IPS)
+    ip = src_ip or ac.attacker_ip(RISKY_IPS)
     n = attempts or random.randint(30, 60)
     out = [_signin("UserLoginFailed", u, ip, result_status="Failed", error_number="50126",
                    extended=[{"Name": "ResultStatusDetail", "Value": "InvalidUserNameOrPassword"}],
@@ -300,7 +300,7 @@ def scenario_admin_password_reset(config=None, user=None):
     attacker IP (never the victim's usual egress)."""
     actor = ac.pick_by_role(config, _PRIV_ROLES, ("IT", "Security"))
     victim = ac.pick_user(config)
-    ip = random.choice(RISKY_IPS)
+    ip = ac.attacker_ip(RISKY_IPS)
     # The takeover sign-in follows 45 s after the reset: stamped then, and held until then.
     t0 = time.time()
     return [_audit("Reset user password.", actor, ip, target_name=victim["upn"],

@@ -306,10 +306,16 @@ def _get_random_principal(config, context=None, force_service_account=False):
         if user:
             # Prefer gcp_iam_user if set, otherwise use email
             email = user.get('gcp_iam_user') or user.get('email') or f"{user['username']}@examplecorp.com"
+            # Google sees a user's computer through its public egress -- never the device's
+            # private address, which callerIp used to carry for every user. Same egress
+            # function as their Entra/O365 activity (in Bad User mode: the target's office
+            # NAT, which the firewall NAT fields also show).
+            from modules import azure_common as _ac
             return {
                 'email':              email,
                 'display_name':       user.get('display_name', user['username']),
-                'caller_ip':          user.get('ip') or _random_external_ip(),
+                'caller_ip':          _ac.egress({"username": user['username'],
+                                                  "department": user.get('department') or "Unknown"})["ip"],
                 'is_service_account': False,
             }
 

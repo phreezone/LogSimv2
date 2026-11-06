@@ -218,7 +218,7 @@ def user_caller(user, ip=None, client=None):
         "idtyp": "user", "ipaddr": ip or "",
         "name": user.get("display_name") or un,
         "http://schemas.microsoft.com/identity/claims/objectidentifier": oid,
-        "puid": f"1003{_h('puid:' + un) % 16 ** 12:012X}",
+        "puid": ac.user_puid(un),
         "rh": "0.A" + hex32("rh:" + un)[:30],
         "http://schemas.microsoft.com/identity/claims/scope": "user_impersonation",
         "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier": hex32("nid:" + un)[:43],
@@ -284,7 +284,10 @@ def app_caller(name, kind="ServicePrincipal", ip=None, tenant_id=None):
 def pick_admin(config, roles=CLOUD_OPS, context=None):
     """A caller from an Azure-operating role. Prefers someone with a live session on the activity
     bus (their ARM change then lines up with their sign-in and network traffic) and uses that
-    session's egress IP; otherwise the user's own stable egress."""
+    session's egress IP; otherwise the user's own stable egress. In Bad User mode, the target."""
+    fi = ac.focus_identity()
+    if fi:
+        return user_caller(fi, ac.egress(fi)["ip"])
     pool = _role_pool(config, roles)
     sess = None
     if pool and _active_sessions is not None and random.random() < ac.CORRELATE_PROB:
@@ -306,6 +309,9 @@ def pick_admin(config, roles=CLOUD_OPS, context=None):
 
 def pick_nonstandard(config, context=None):
     """An active identity whose role never touches Azure (finance, sales, HR, ...)."""
+    fi = ac.focus_identity()
+    if fi:
+        return user_caller(fi, ac.egress(fi)["ip"])
     profiles = (config or {}).get("user_profiles") or {}
     pool = [u for u, p in profiles.items()
             if p.get("role") not in _ALL_AZURE_ROLES and p.get("department") not in ("IT", "DevOps", "Security")

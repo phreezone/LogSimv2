@@ -76,10 +76,12 @@ except ImportError:
 
 try:
     from modules.session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
-                                        publish_activity, pick_active_session, CORRELATE_PROB)
+                                        publish_activity, pick_active_session, CORRELATE_PROB,
+                                        carry_focus as _carry_focus, focus_user as _focus_user)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
-                               publish_activity, pick_active_session, CORRELATE_PROB)
+                               publish_activity, pick_active_session, CORRELATE_PROB,
+                               carry_focus as _carry_focus, focus_user as _focus_user)
 
 
 def _publish_logon(u):
@@ -4332,6 +4334,8 @@ def _benign_rdp_logon(config, session_context):
     u = _pick_windows_user(session_context)
     if not u:
         return None
+    if _focus_user():
+        return None     # Bad User: the session comes from another host, not the target's computer
     _publish_logon(u)
     src = _pick_windows_user(session_context)
     src_ip = src["ip"] if src and src["ip"] != u["ip"] else "10.10.10.200"
@@ -4933,12 +4937,12 @@ def _threat_as_rep_roasting(config, session_context):
       - All requests hit the DC in rapid succession
     """
     users = _get_windows_users(session_context)
-    if len(users) < 3:
+    if not users:
         return None
     attacker = random.choice(users)
     src_ip = attacker.get("ip") or "10.0.0.1"
 
-    target_usernames = [u["username"] for u in users if u["username"] != attacker["username"]]
+    target_usernames = [u["username"] for u in _peer_windows_users(session_context, attacker["username"])]
     target_usernames += _ASREP_EXTRA_TARGETS[:]
     random.shuffle(target_usernames)
     target_usernames = target_usernames[:random.randint(40, 55)]
@@ -5009,12 +5013,15 @@ def _threat_account_lockout(config, session_context):
       - Workstation   = attacker's hostname
     """
     users = _get_windows_users(session_context)
-    if len(users) < 4:
+    if not users:
+        return None
+    attacker = random.choice(users)
+    peers = _peer_windows_users(session_context, attacker["username"], need=4)
+    if len(peers) < 4:
         return None
     num_victims = random.randint(4, 8)
-    victims = random.sample(users, k=min(len(users), num_victims))
+    victims = random.sample(peers, k=min(len(peers), num_victims))
 
-    attacker = random.choice(users)
     attacker_ip = attacker.get("ip") or "10.0.1.200"
     attacker_hostname = attacker.get("hostname", "WKS-ATTACK01").split(".")[0].upper()
     dc_host = _get_dc_hostname(config)
@@ -6288,10 +6295,9 @@ def _threat_sms_admins_addition(config, session_context):
     if not u:
         return None
 
-    victim = _pick_windows_user(session_context)
-    if not victim or victim["username"] == u["username"]:
-        victim = _pick_windows_user(session_context)
-    if not victim or victim["username"] == u["username"]:
+    _peers = _peer_windows_users(session_context, u["username"], need=1)
+    victim = random.choice(_peers) if _peers else None
+    if not victim:
         return None
 
     dns_domain = _get_dns_domain(config)
@@ -6381,10 +6387,9 @@ def _threat_sms_admins_add_remove(config, session_context):
     if not u:
         return None
 
-    victim = _pick_windows_user(session_context)
-    if not victim or victim["username"] == u["username"]:
-        victim = _pick_windows_user(session_context)
-    if not victim or victim["username"] == u["username"]:
+    _peers = _peer_windows_users(session_context, u["username"], need=1)
+    victim = random.choice(_peers) if _peers else None
+    if not victim:
         return None
 
     dns_domain = _get_dns_domain(config)
@@ -7442,10 +7447,9 @@ def _threat_priv_group_add_remove(config, session_context):
     if not u:
         return None
 
-    victim = _pick_windows_user(session_context)
-    if not victim or victim["username"] == u["username"]:
-        victim = _pick_windows_user(session_context)
-    if not victim or victim["username"] == u["username"]:
+    _peers = _peer_windows_users(session_context, u["username"], need=1)
+    victim = random.choice(_peers) if _peers else None
+    if not victim:
         return None
 
     dns_domain = _get_dns_domain(config)
@@ -8727,10 +8731,29 @@ def _remote_logon(attacker, config, target_host, src_ip, t, auth_pkg=_NTLM_PACKA
                                    ts=t + 0.02))], lid
 
 
+def _peer_windows_users(session_context, exclude_username, need=3):
+    """Windows users OTHER than `exclude_username`, as victims of an actor's threat.
+
+    From the run's session_context; when that holds too few -- Bad User hands each
+    module a context with only the target in it -- from the full roster, so the target
+    can still be the actor of a threat that needs other accounts (roasting, lockouts,
+    adding someone to an admin group)."""
+    peers = [u for u in _get_windows_users(session_context) if u["username"] != exclude_username]
+    if len(peers) >= need:
+        return peers
+    try:
+        from modules.session_utils import roster_context
+    except ImportError:
+        from session_utils import roster_context
+    full = roster_context()
+    return [u for u in _get_windows_users(full) if u["username"] != exclude_username] or peers
+
+
 def _lateral_pair(session_context):
-    """(operator, target_host) -- the operator's own box is the source."""
+    """(operator, target_host) -- the operator's own box is the source. One user is
+    enough (Bad User): the fixed file/app servers below are always valid targets."""
     users = _get_windows_users(session_context)
-    if len(users) < 2:
+    if not users:
         return None, None
     op = random.choice(users)
     targets = [u["hostname"] for u in users if u["hostname"] != op["hostname"]]
@@ -8868,11 +8891,12 @@ def _threat_share_enumeration(config, session_context):
     CrackMapExec --shares): one source connects IPC$ and calls srvsvc
     NetShareEnum on many hosts within a minute or two."""
     users = _get_windows_users(session_context)
-    if len(users) < 2:
+    if not users:
         return None
     op = random.choice(users)
     src_ip = op.get("ip") or "10.10.20.50"
-    hosts = list({u["hostname"] for u in users if u["hostname"] != op["hostname"]})
+    hosts = list({u["hostname"] for u in _peer_windows_users(session_context, op["username"])
+                  if u["hostname"] != op["hostname"]})
     hosts += ["FS01", "FS02", "SQL01", "APP01", "BACKUP01"]
     random.shuffle(hosts)
     t = time.time()
@@ -10275,7 +10299,11 @@ def _threat_worker(config, session_context, threat_level, interval, stop_event):
 
 
 def _ensure_orchestrator(config, session_context, threat_level, benign_only):
-    """Start worker threads on first call. Subsequent calls are no-ops."""
+    """Start worker threads on first call. Subsequent calls are no-ops.
+
+    The workers carry the calling thread's Bad User focus (session_utils.carry_focus), so
+    their identity pickers name the target too. Threads start with an empty context, so
+    without it the focus stopped at the calling thread."""
     global _orchestrator_started, _BUILD_EVENT_OS_SUBTYPE, _output_queue, _threat_queue
     global _N_BENIGN_WORKERS
     with _orchestrator_lock:
@@ -10312,7 +10340,7 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
     # DC worker
     dc_interval = base_interval * wcfg.get("dc_interval_multiplier", 0.5)
     threading.Thread(
-        target=_dc_worker,
+        target=_carry_focus(_dc_worker),
         args=(config, session_context, dc_interval, _workers_stop),
         daemon=True, name="logsim-win-dc",
     ).start()
@@ -10322,7 +10350,7 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
     for hostname, user_list in hosts.items():
         scoped_ctx = {u: session_context[u] for u in user_list}
         threading.Thread(
-            target=_wks_worker,
+            target=_carry_focus(_wks_worker),
             args=(config, scoped_ctx, hostname, wks_interval, _workers_stop),
             daemon=True,
             name=f"logsim-win-{hostname.split('.')[0]}",
@@ -10338,7 +10366,7 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
     if not benign_only:
         threat_interval = base_interval * wcfg.get("threat_interval_multiplier", 2.0)
         threading.Thread(
-            target=_threat_worker,
+            target=_carry_focus(_threat_worker),
             args=(config, session_context, threat_level, threat_interval, _workers_stop),
             daemon=True, name="logsim-win-threats",
         ).start()

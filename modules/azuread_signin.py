@@ -47,9 +47,9 @@ def _burst_offsets(n, spacing=3, end=-3):
 def _tor_ip(config):
     nodes = (config or {}).get("tor_exit_nodes") if isinstance(config, dict) else None
     if nodes:
-        n = random.choice(nodes)
+        n = ac.attacker_ip(nodes)
         return n.get("ip") if isinstance(n, dict) else n
-    return random.choice(RISKY_IPS)
+    return ac.attacker_ip(RISKY_IPS)
 
 
 def _ext_src(config=None, src_ip=None):
@@ -324,10 +324,13 @@ def _distinct_victims(config, n):
     absent or too small (e.g. pick_user keeps returning the same stub), top up with synthetic
     employee-style victims so the 'many users from one IP' signal always holds."""
     seen, out = set(), []
+    fi = ac.focus_identity()          # Bad User: the target is one of the victims
+    if fi:
+        seen.add(fi["username"]); out.append(fi)
     for _ in range(n * 4):
         if len(out) >= n:
             break
-        u = ac.pick_user(config)
+        u = ac._pick_user_any(config) if fi else ac.pick_user(config)
         if u["username"] not in seen:
             seen.add(u["username"]); out.append(u)
     i = 0
@@ -367,7 +370,7 @@ def scenario_impossible_travel(config=None, user=None):
 
 def scenario_high_risk_signin(config=None, user=None):
     u = ac.pick_user(config)
-    bad = {"ip": random.choice(RISKY_IPS), "city": "Frankfurt", "state": "Hesse",
+    bad = {"ip": ac.attacker_ip(RISKY_IPS), "city": "Frankfurt", "state": "Hesse",
            "countryOrRegion": "DE", "geoCoordinates": {"latitude": 50.11, "longitude": 8.68}}
     rec = _signin(u, bad, interactive=True, risk_level="high", risk_state="atRisk")
     rec["riskDetail"] = "aiConfirmedSigninSafe"
@@ -388,7 +391,7 @@ def scenario_powershell_signin(config=None, user=None):
     u = ac.pick_user(config)
     de = {"ip": "185.220.101.34", "city": "Frankfurt", "state": "Hesse", "countryOrRegion": "DE",
           "geoCoordinates": {"latitude": 50.11, "longitude": 8.68}}
-    rec = _signin(u, de, interactive=True, app="Microsoft Azure PowerShell",
+    rec = _signin(u, ac.focus_loc() or de, interactive=True, app="Microsoft Azure PowerShell",
                   client_app="Mobile Apps and Desktop clients")
     rec["appId"] = "1950a258-227b-4e31-a9cf-717495945fc2"  # well-known Azure PowerShell app id
     return [rec]
@@ -549,9 +552,9 @@ def scenario_machine_account_sso(config=None, user=None):
     """A machine (computer) account authenticates via SSO -> 'SSO authentication by a machine
     account' (computer accounts should not interactively sign in to SaaS)."""
     u = ac.pick_user(config)
-    mach = {"username": f'{u["username"].upper().replace(".", "")}-PC$',
-            "upn": f'{u["username"].upper().replace(".", "")}-PC$@examplecorp.com',
-            "display_name": f'{u["username"].upper()}-PC', "department": u.get("department", "IT"),
+    host = ac.device_name(u).split(".")[0].upper()     # the computer account Windows logs: HOST$
+    mach = {"username": f'{host}$', "upn": f'{host}$@examplecorp.com',
+            "display_name": host, "department": u.get("department", "IT"),
             "os_type": "Windows"}
     return [_signin(mach, ac.egress(u), interactive=True, user_type="member",
                     risk_level="low", risk_state="atRisk")]

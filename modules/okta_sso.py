@@ -82,6 +82,21 @@ except ImportError:
     from session_utils import (get_random_user, get_user_by_name, get_all_emails,
         get_random_anon_ip_ctx, get_random_vpn_ip_ctx, novel_country_vpn_ip, random_external_ip)
 
+
+def _focus_ip_ctx():
+    """Bad User: the target's office egress -- the public address their computer reaches
+    Okta through, with the site's geo and ASN -- or None when unfocused. Every Okta source
+    helper returns it first: Bad User fires only what the target did from their machine,
+    and the threats whose point is an outside source are not fired in that mode
+    (bad_user_policy.py). Same address as their Entra sign-ins and firewall NAT."""
+    from modules import azure_common as _ac
+    loc = _ac.focus_loc()
+    if not loc:
+        return None
+    return {"ip": loc["ip"], "city": loc.get("city"), "country": loc.get("countryOrRegion"),
+            "state": loc.get("state"), "isp": loc.get("isp"), "asn": loc.get("asn"),
+            "domain": None, "is_proxy": False}
+
 # Stable alphanumeric Okta user ID: 00u + 17 base-62 chars, deterministic per username.
 # SHA-1 of the username is used as the seed so the same user always gets the same ID,
 # even across restarts — matching how real Okta assigns permanent user IDs.
@@ -438,6 +453,9 @@ def _attacker_ip_context(config):
     """A source for attack traffic that is not Tor: 55% cloud/VPS hosting, 30% a
     commercial VPN (still anonymized: is_proxy, proxyType "vpn"), 15% a residential-
     proxy exit, which Okta cannot tell apart from consumer broadband."""
+    fc = _focus_ip_ctx()
+    if fc:
+        return fc
     roll = random.random()
     if roll < 0.55:
         name, rng, country, city, state, isp, asn, domain = random.choice(_ATTACKER_HOSTING)
@@ -467,6 +485,9 @@ def _anon_ip_ctx(config):
     fired, up to 30% of its events were tagged proxyType "tor" -- around _TOR_THREATS,
     feeding Tor back into ordinary users' profiles. Inside a Tor threat it is unchanged.
     """
+    fc = _focus_ip_ctx()
+    if fc:
+        return fc
     if getattr(_THREAT_STATE, "allow_tor", False):
         return get_random_anon_ip_ctx(config)
     return get_random_vpn_ip_ctx(config)
@@ -484,6 +505,9 @@ def _fresh_tor_user(session_context):
 
 
 def _get_random_ip_and_context(config, source_list_key="benign_ingress_sources"):
+    fc = _focus_ip_ctx()
+    if fc:
+        return fc
     # Tor only while a Tor-defining threat runs; see _TOR_THREATS.
     if source_list_key == "tor_exit_nodes" and not getattr(_THREAT_STATE, "allow_tor", False):
         return _attacker_ip_context(config)
@@ -2468,6 +2492,9 @@ _NEW_COUNTRY_POOL = [
 
 def _new_country_ip_ctx():
     """ip_ctx for a "new country" SSO event, with the address inside the named country."""
+    fc = _focus_ip_ctx()
+    if fc:
+        return fc
     entry = dict(random.choice(_NEW_COUNTRY_POOL))
     cidr  = entry.pop("cidr")
     octets = cidr.split("/")[0].split(".")
