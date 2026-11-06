@@ -8063,7 +8063,7 @@ def _generate_ml_artifact_destruction(config, context=None):
                            "accountId": account_id}],
         })
         events.append(ev)
-    return events
+    return _stagger(events, span=random.uniform(30, 90))
 
 
 def _generate_ai_dataset_download(config, context=None):
@@ -8099,7 +8099,7 @@ def _generate_ai_dataset_download(config, context=None):
                            "accountId": account_id}],
         })
         events.append(ev)
-    return events
+    return _stagger(events, span=random.uniform(20, 60))
 
 
 def _generate_ml_model_download(config, context=None):
@@ -8277,7 +8277,7 @@ def _generate_multiple_snapshot_export(config, context=None):
         ev = _get_base_event(config, user_identity, ip_address, region,
                              "StartExportTask", "rds.amazonaws.com",
                              api_version="2014-10-31", read_only=False)
-        ev["eventTime"] = (now + datetime.timedelta(minutes=i)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        ev["eventTime"] = (now - datetime.timedelta(minutes=len(snapshots) - 1 - i)).strftime('%Y-%m-%dT%H:%M:%SZ')
         ev.update({
             "requestParameters": {
                 "exportTaskIdentifier": task_id,
@@ -8329,7 +8329,7 @@ def _generate_ebs_snapshot_deletion(config, context=None):
                            "accountId": account_id}],
         })
         events.append(ev)
-    return events
+    return _stagger(events, span=random.uniform(60, 180))
 
 
 def _generate_ebs_volume_attach(config, context=None):
@@ -8940,7 +8940,7 @@ def _generate_traffic_mirroring(config, context=None):
                        "accountId": account_id}],
     })
     events.append(ev3)
-    return events
+    return _stagger(events, span=random.uniform(30, 90))
 
 
 def _generate_failed_assume_role(config, context=None):
@@ -9259,7 +9259,7 @@ def _generate_backup_storage_access(config, context=None):
                            "accountId": account_id}],
         })
         events.append(ev)
-    return events
+    return _stagger(events, span=random.uniform(20, 45))
 
 
 def _generate_iam_unusual_activity(config, context=None):
@@ -9307,7 +9307,7 @@ def _generate_iam_unusual_activity(config, context=None):
             "path": "/", "userName": new_user,
             "userId": f"AIDA{_rand_hex(17).upper()}",
             "arn": user_arn,
-            "createDate": datetime.datetime.now(datetime.UTC).strftime('%b %d, %Y, %I:%M:%S %p'),
+            "createDate": datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ'),
         }},
         "resources": [{"type": "AWS::IAM::User", "ARN": user_arn,
                        "accountId": account_id}],
@@ -9333,7 +9333,7 @@ def _generate_iam_unusual_activity(config, context=None):
             "userName": new_user,
             "accessKeyId": f"AKIA{_rand_hex(16).upper()}",
             "status": "Active",
-            "createDate": datetime.datetime.now(datetime.UTC).strftime('%b %d, %Y, %I:%M:%S %p'),
+            "createDate": datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ'),
         }},
         "resources": [{"type": "AWS::IAM::User", "ARN": user_arn,
                        "accountId": account_id}],
@@ -9363,7 +9363,7 @@ def _generate_new_iam_user_resource_mod(config, context=None):
             "path": "/", "userName": new_user,
             "userId": f"AIDA{_rand_hex(17).upper()}",
             "arn": user_arn,
-            "createDate": datetime.datetime.now(datetime.UTC).strftime('%b %d, %Y, %I:%M:%S %p'),
+            "createDate": datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ'),
         }},
         "resources": [{"type": "AWS::IAM::User", "ARN": user_arn,
                        "accountId": account_id}],
