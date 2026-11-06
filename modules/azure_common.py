@@ -30,6 +30,47 @@ except Exception:  # pragma: no cover
     pick_active_session = None
     _publish_activity = None
     CORRELATE_PROB = 0.6
+try:
+    from modules import session_utils as _su
+except Exception:  # pragma: no cover
+    _su = None
+
+
+def focus_loc():
+    """The Bad User target's cloud-facing location, or None when unfocused: their office
+    egress (office_egress -- site geo, ASN and NAT address). A cloud service never sees a
+    private address: the target's computer reaches Entra/O365/AWS/Okta through the office
+    NAT, which is also the translated address the firewall logs (ASA/PAN NAT fields) show
+    for that computer -- so the cloud and network planes of the case share one IP, and the
+    internal IP stays on the on-prem/network side."""
+    if _su is None or not _su.focus_user():
+        return None
+    return office_egress(focus_identity())
+
+
+def attacker_ip(pool):
+    """A source address from `pool` (Tor exits / attacker hosts), or -- in Bad User mode --
+    the target's office egress (focus_loc): there an action that normally comes from
+    attacker infrastructure is the target's own doing from their computer, and the threats
+    whose point IS the outside source are not fired at all (modules/bad_user_policy.py)."""
+    fl = focus_loc()
+    if fl:
+        return fl["ip"]
+    return random.choice(pool)
+
+
+def focus_identity():
+    """The Bad User target as a normalized identity (pick_user's shape), or None when this
+    thread is not focused. Every identity picker below returns it first, so all Microsoft
+    activity -- benign, threats and campaigns -- names the one user the run is about."""
+    f = _su.focus_user() if _su is not None else None
+    if not f:
+        return None
+    un, info, prof = f["username"], f["info"], f["profile"]
+    return {"username": un, "upn": prof.get("email") or info.get("email") or f"{un}@{UPN_DOMAIN}",
+            "display_name": prof.get("display_name") or un,
+            "department": prof.get("department") or "Unknown", "role": prof.get("role", ""),
+            "os_type": info.get("os_type") or "Windows", "os_version": info.get("os_version") or "10"}
 
 
 def publish_signin(user, loc=None):
@@ -565,7 +606,15 @@ _RARE_SIZES = [ipaddress.ip_network(p).num_addresses for _a, _i, p, _c in _RARE_
 def rare_asn_loc(rnd=None, country=None):
     """Egress from a hosting/VPS/anonymizer network (never seen in the benign baseline). Returns the
     same shape as egress(): {ip, city, state, countryOrRegion, geoCoordinates, asn, isp}, in the
-    country the block really sits in. `country` narrows the draw to blocks there when any exist."""
+    country the block really sits in. `country` narrows the draw to blocks there when any exist.
+
+    In Bad User mode, the target's office egress (focus_loc): Bad User fires only what the
+    target did from their computer or account, so an action that normally comes from attacker
+    infrastructure comes from them instead. Threats whose point IS the outside source are not
+    fired in Bad User mode at all (modules/bad_user_policy.py)."""
+    fl = focus_loc()
+    if fl:
+        return fl
     r = rnd or random
     idx = [i for i, x in enumerate(_RARE_ASNS) if not country or x[3] == country] or list(range(len(_RARE_ASNS)))
     # Provider first, weighted by the square root of its space (so AWS's /10s do not crowd out the
@@ -636,6 +685,9 @@ def pick_nonstandard_actor(config=None, context=None):
     """Pick an identity whose directory role is NOT an admin/helpdesk/security role, so an
     admin-type action by them reads as 'performed by a non-standard account'. Falls back to
     pick_user() if no role metadata is available."""
+    fi = focus_identity()
+    if fi:
+        return fi
     profiles = (config or {}).get("user_profiles") or {}
     if profiles:
         non_admin = [u for u, p in profiles.items()
@@ -708,7 +760,11 @@ def _user_info(uname, config, context):
 
 def _pick_cohort_user(config, context, cohort):
     """Pick an identity in a specific lifecycle cohort (dormant/departed). Returns a normalized
-    identity dict, or falls back to pick_user() if the roster has no member of that cohort."""
+    identity dict, or falls back to pick_user() if the roster has no member of that cohort.
+    In Bad User mode the target plays the dormant/departed account."""
+    fi = focus_identity()
+    if fi:
+        return fi
     roster = [u for u in _roster(config, context) if lifecycle_cohort(u) == cohort]
     if roster:
         return _user_info(random.choice(roster), config, context)
@@ -765,14 +821,24 @@ class ThreatGate:
         self._rate_scale = rate_scale   # <1 makes this source rarer (e.g. multi-step campaigns)
         self.count = 0
         self._last = None
+        self._focus_last = None
 
     def fire(self, threat_level, config=None, now=None):
-        """True if a threat scenario should fire on this call."""
-        self.count += 1
+        """True if a threat scenario should fire on this call.
+
+        A Bad User thread (focus user set) runs on its own clock with no warmup: its calls
+        used to advance the same _last as the normal module worker, so each worker's dt
+        covered only the gap since the OTHER worker's call and the two shared one episode
+        rate, and a Bad User run started before the module had 500 benign records got no
+        Microsoft threats at all."""
         t = now if now is not None else time.time()
-        last, self._last = self._last, t
-        if self.count <= self._warmup:                  # still accruing baseline
-            return False
+        if focus_identity() is not None:
+            last, self._focus_last = self._focus_last, t
+        else:
+            self.count += 1
+            last, self._last = self._last, t
+            if self.count <= self._warmup:              # still accruing baseline
+                return False
         rate_hr = THREAT_EPISODES_PER_HOUR.get(threat_level, THREAT_EPISODES_PER_HOUR["Realistic"]) * self._rate_scale
         if rate_hr <= 0 or last is None:
             return False
@@ -825,10 +891,15 @@ def _active_profile_names(profiles):
 
 
 def pick_distinct_users(config, n):
-    """Up to `n` DIFFERENT users (a spray hits each account once, not the same one twice)."""
+    """Up to `n` DIFFERENT users (a spray hits each account once, not the same one twice).
+    In Bad User mode the target is always the first of them (the account that gets
+    compromised); the rest are ordinary users, as a spray really hits many accounts."""
     seen, tries = {}, 0
+    fi = focus_identity()
+    if fi:
+        seen[fi["upn"]] = fi
     while len(seen) < n and tries < n * 6:
-        u = pick_user(config)
+        u = _pick_user_any(config) if fi else pick_user(config)
         seen.setdefault(u["upn"], u)
         tries += 1
     return list(seen.values())
@@ -851,7 +922,19 @@ def pick_user(config=None, context=None, include_reserved=False):
     threat scenarios, which also call this) never touch the reserved dormant/departed accounts —
     those stay absent from the baseline until a dormant/leaver scenario explicitly summons one via
     pick_dormant_user()/pick_departed_user(). include_reserved=True disables the filter.
+
+    In Bad User mode (a focus user is set on this thread) it is always the target, whatever
+    the target's lifecycle cohort -- before, a dormant or departed target failed the
+    active-cohort filter 12 times and fell back to a random roster user.
     """
+    fi = focus_identity()
+    if fi:
+        return fi
+    return _pick_user_any(config, context, include_reserved)
+
+
+def _pick_user_any(config=None, context=None, include_reserved=False):
+    """pick_user() without the Bad User focus: a user from the run's roster."""
     sc = (context or {}).get("session_context") if isinstance(context, dict) else None
     if sc and get_random_user:
         # Correlation: prefer a currently-active session user (someone who just logged on elsewhere),
@@ -912,7 +995,11 @@ def pick_by_role(config, roles, departments=None, owner_of=None):
     Admin actions in a real tenant come from a small, stable set of admins — the analytics
     baseline 'who normally does this', so a non-admin doing it reads as anomalous. Falls back
     to IT-department users, then to pick_user(). `owner_of` pins the pick to one stable admin
-    per entity (the app's owner), so per-(admin, entity) first-seen detectors can baseline."""
+    per entity (the app's owner), so per-(admin, entity) first-seen detectors can baseline.
+    In Bad User mode, the target."""
+    fi = focus_identity()
+    if fi:
+        return fi
     profiles = (config or {}).get("user_profiles") or {}
     key = (tuple(roles), tuple(departments or ()))
     if key not in _ROLE_POOLS:
@@ -1100,6 +1187,13 @@ def cie_identity_overrides(user):
 # "first seen"/"new app" detectors misfire. IDs that MUST stay unique per event
 # (id/Id, correlationId, InterSystemsId, IntraSystemId, sessionId) are left random.
 
+def user_puid(username):
+    """Stable Microsoft account PUID for a user: 16 hex digits starting 1003 (the Azure Activity
+    `puid` claim, and the UserKey of Exchange mailbox-activity rows). One function so the same
+    person carries ONE PUID everywhere -- Exchange used to hash its own, different value."""
+    return f"1003{_h('puid:' + str(username)) % 16 ** 12:012X}"
+
+
 def user_oid(username):
     """Stable directory object id for a user (Graph userId / O365 UserKey).
 
@@ -1197,6 +1291,18 @@ _TRUST_TYPES = [
 ]
 
 
+def device_name(user, mobile=False):
+    """The user's real computer (or phone) hostname from LogSim's device model -- e.g.
+    SALES-LT-009 / KZHANG-GALAXYS24 -- so cloud device fields join the endpoint, DHCP and
+    firewall host. These used to be built from the username (KZHANG-PC, K-Phone), a device
+    no other feed knew. Falls back to that pattern for an identity with no configured device."""
+    un = user["username"]
+    name = _su.user_device_name(un, mobile=mobile) if _su is not None else None
+    if name:
+        return name
+    return f'{un.split(".")[0].capitalize()}-Phone' if mobile else f'{un.upper().replace(".", "")}-PC'
+
+
 def device_for(user, new=False, mobile=False):
     """deviceDetail for a sign-in. Stable per user by default (coherent device baseline); a
     brand-new unmanaged device when new=True -> feeds 'new device seen' anomaly detectors.
@@ -1211,12 +1317,12 @@ def device_for(user, new=False, mobile=False):
         label, bname, _bv, _plat, _ua = _profile(user, mobile=True)
         mos = "iOS 17.4" if "iOS" in _plat or _plat == "IPhone" else "Android 14.0"
         return {"deviceId": _stable_guid("mdev:" + user["username"]),
-                "displayName": f'{user["username"].split(".")[0].capitalize()}-Phone',
+                "displayName": device_name(user, mobile=True),
                 "browser": label, "operatingSystem": mos,
                 "isCompliant": True, "isManaged": True, "trustType": "Azure AD registered"}
     trust, managed, compliant = _TRUST_TYPES[_h("trust:" + user["username"]) % len(_TRUST_TYPES)]
     return {"deviceId": _stable_guid("dev:" + user["username"]),
-            "displayName": f'{user["username"].upper().replace(".", "")}-PC',
+            "displayName": device_name(user),
             "browser": _browser(os_type, user), "operatingSystem": os_str,
             "isCompliant": compliant, "isManaged": managed, "trustType": trust}
 
@@ -1256,8 +1362,13 @@ def egress(user, remote_prob=0.25, mobile_prob=0.08):
     the population spreads across ~50 office IPs + per-user home + carrier IPs. Home and mobile
     blocks are in the user's office metro (HOME_POOLS / MOBILE_POOLS), so a day at home or on a
     phone never looks like travel.
+    In Bad User mode the target always egresses from their office NAT (focus_loc), the same
+    address the firewall NAT fields show for their computer.
     """
     un = user["username"]
+    fi = focus_identity()
+    if fi and fi["username"] == un:
+        return focus_loc()
     site = office_for(user)
     r = random.random()
     if r < mobile_prob:                                   # phone on cellular (carrier block in the metro)
@@ -1271,7 +1382,15 @@ def egress(user, remote_prob=0.25, mobile_prob=0.08):
         isp, asn, block, city, state, lat, lon = HOME_POOLS[site["city"]][n % len(HOME_POOLS[site["city"]])]
         ip = f'{block.rsplit(".", 1)[0]}.{(n >> 8) % 250 + 3}'
         return _loc(city, state, site["countryOrRegion"], lat, lon, ip, asn, isp)
-    # at the office (stable IP in the site's NAT pool)
+    return office_egress(user)
+
+
+def office_egress(user):
+    """The user's office egress: a stable IP in their department site's NAT pool. egress()
+    returns it most of the time, and always for the Bad User target. Deterministic, so the
+    dashboard can compute the same address up front for the non-Microsoft feeds."""
+    un = user["username"]
+    site = office_for(user)
     ip = site["ips"][_h("deskip:" + un) % len(site["ips"])]
     return _loc(site["city"], site["state"], site["countryOrRegion"],
                 site["lat"], site["lon"], ip, site["asn"], site["isp"])

@@ -269,7 +269,7 @@ def _sp(operation, user, record_type=6, workload="SharePoint", site=None, doc=No
                                  if "." in f["filename"] else ""),
          "ApplicationDisplayName": "OneDrive SyncEngine" if workload == "OneDrive" else "SharePoint",
          "UserAgent": _prof[4], "BrowserName": _prof[1], "BrowserVersion": _prof[2], "Platform": _prof[3],
-         "IsManagedDevice": True, "DeviceDisplayName": f'{user["username"].upper().replace(".", "")}-PC',
+         "IsManagedDevice": True, "DeviceDisplayName": ac.device_name(user),
          "GeoLocation": loc["countryOrRegion"], "AuthenticationType": "OAuth",
          "ResultStatus": "Succeeded"}
     if operation in ("FileCopied", "FileMoved"):

@@ -90,8 +90,9 @@ _API_ID = "774A8455-3122-4FD5-90F1-C4D1A062AD91"
 
 
 def _userkey(username):
-    # Mailbox-activity rows (RecordType 2/3/50) carry a 16-hex UserKey, not a GUID.
-    return f"{ac._h('ukey:' + username) & 0xFFFFFFFFFFFFFFFF:016X}"
+    # Mailbox-activity rows (RecordType 2/3/50) carry the user's 16-hex PUID as UserKey, not
+    # a GUID -- the same PUID as the Azure Activity `puid` claim (ac.user_puid).
+    return ac.user_puid(username)
 
 
 def _b64id(nbytes=48):
@@ -497,7 +498,7 @@ def scenario_sent_to_deleted_scripted(config=None):
     """A burst of Sent Items -> Deleted Items moves via a REST/scripting client from an unusual
     source -> 'User moved Exchange Sent items to Deleted Items (possible scripting)' (anti-forensics)."""
     u = ac.pick_user(config)
-    bad = random.choice(["45.148.10.92", "193.218.118.158", "171.25.193.78"])
+    bad = ac.attacker_ip(["45.148.10.92", "193.218.118.158", "171.25.193.78"])
     out = []
     for i in range(12):
         r = mailbox_action("Move", u, client="REST",
@@ -579,7 +580,7 @@ def scenario_email_hiding_transport_rule(config=None):
 def scenario_single_ip_multi_mailbox(config=None):
     """One caller IP reads mail items from MANY different mailboxes -> 'Single IP accessed mail
     items of multiple users'."""
-    ip = random.choice(["45.148.10.92", "193.218.118.158", "185.220.101.34"])
+    ip = ac.attacker_ip(["45.148.10.92", "193.218.118.158", "185.220.101.34"])
     out = []
     for i in range(8):
         owner = ac.pick_user(config)

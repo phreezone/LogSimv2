@@ -56,6 +56,51 @@ NATIVE_TRANSPORT = "s3"
 SOURCE_IDENTIFIER = "c19f87b6262f48259b3d5d2a2c691802"   # Cribl "AWS audit logs" -> amazon_aws_raw
 INTEGRATION_IDENTIFIER = "logsim:aws_cloudtrail"
 last_threat_event_time = 0
+try:
+    from modules.session_utils import focus_egress_ip as _focus_egress_ip
+except ImportError:  # pragma: no cover - script-style import
+    from session_utils import focus_egress_ip as _focus_egress_ip
+
+
+import hashlib as _hashlib
+
+_AWS_ID_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+
+def _stable_aws_id(seed, k):
+    """`k` characters of [A-Z0-9] derived from `seed`: the same on every event and run."""
+    n = int(_hashlib.sha256(str(seed).encode()).hexdigest(), 16)
+    out = []
+    for _ in range(k):
+        n, r = divmod(n, 36)
+        out.append(_AWS_ID_CHARS[r])
+    return "".join(out)
+
+
+def _identity_key(identity):
+    """What makes an identity the same identity: its ARN suffix (user/x, role/y) or name."""
+    return str(identity.get('arn_suffix') or identity.get('name') or identity.get('arn') or 'DefaultUser')
+
+
+def _stable_principal_main(identity):
+    """17-char body of an identity's principal id (AIDA… user / AROA… role id).
+
+    A real IAM user or role has ONE unique id for its lifetime. This used to be drawn at
+    random on every event -- 892 distinct principalIds for one IAM user in a single Bad User
+    run -- so nothing could join an event to the identity by it."""
+    return _stable_aws_id(f"principal|{identity.get('type', 'IAMUser')}|{_identity_key(identity)}", 17)
+
+
+def _long_term_access_key(identity):
+    """An IAM user's (or root's) long-lived AKIA access key, stable across events and runs.
+
+    Every user has one; about a third also hold a second (rotation overlap) used for roughly
+    one call in five. Used to be a fresh random key per event (968 distinct for one user).
+    Temporary ASIA keys from STS stay per-session, as they really are."""
+    key = _identity_key(identity)
+    two = int(_hashlib.sha256(f"two-keys|{key}".encode()).hexdigest(), 16) % 3 == 0
+    idx = 1 if (two and random.random() < 0.2) else 0
+    return "AKIA" + _stable_aws_id(f"akia|{key}|{idx}", 16)
 
 
 # --- Helper Functions ---
@@ -143,7 +188,7 @@ def _get_random_user(config, allow_root=False):
         default_user = {"type": "IAMUser", "name": "DefaultUser", "arn_suffix": "user/DefaultUser"}
         # Pre-build ARN and Principal ID for the default user
         default_user['arn'] = f"arn:aws:iam::{account_id}:{default_user['arn_suffix']}"
-        default_user['principalId'] = f"AIDA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
+        default_user['principalId'] = f"AIDA{_stable_principal_main(default_user)}"
         default_user['accountId'] = account_id
         return default_user
 
@@ -164,7 +209,7 @@ def _get_random_user(config, allow_root=False):
     # Build PrincipalId if not present
     if 'principalId' not in final_identity:
         principal_id_prefix = ""
-        principal_id_main = "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", k=17))
+        principal_id_main = _stable_principal_main(final_identity)
         id_type = final_identity.get('type', 'IAMUser')
 
         if id_type == 'IAMUser':
@@ -198,6 +243,13 @@ def _get_random_ip(config, use_tor=False, force_external=False, use_anon=False):
     use_tor=True  — always a Tor exit node (use for Tor-specific detections)
     use_anon=True — 70% commercial VPN / 30% Tor mix (use for general anonymizer scenarios)
     """
+    # Bad User: every call comes from the target's computer, which reaches AWS through the
+    # office NAT -- their egress, the same address their Entra/Okta sign-ins and the
+    # firewall NAT show. The Tor/anonymizer threats are not fired in that mode
+    # (modules/bad_user_policy.py).
+    _src = _focus_egress_ip()
+    if _src:
+        return _src
     if use_anon:
         return get_random_anon_ip_ctx(config)["ip"]
     if use_tor:
@@ -296,7 +348,7 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
     principal_id = user_identity.get('principalId')
     if not principal_id:
         principal_id_prefix = ""
-        principal_id_main = "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", k=17))
+        principal_id_main = _stable_principal_main(user_identity)
         id_type = user_identity.get('type', 'IAMUser')
 
         if id_type == 'IAMUser':
@@ -331,7 +383,7 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
             if id_type_for_key in ['AssumedRole', 'FederatedUser', 'SAMLUser']:
                 _access_key_id = f"ASIA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=16))}"
             elif id_type_for_key in ['IAMUser', 'Root']:
-                _access_key_id = f"AKIA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=16))}"
+                _access_key_id = _long_term_access_key(user_identity)
             else:
                 _access_key_id = None
     else:
@@ -370,7 +422,7 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
          _role_path = user_identity.get('_rolePath')
          role_arn_for_issuer = (f"arn:aws:iam::{account_id}:{_role_path}" if _role_path
                                 else f"arn:aws:iam::{account_id}:role/{role_name_for_issuer}")
-         role_id_for_issuer = user_identity.get('_baseRoleId', f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}") # Use stored base ID or generate
+         role_id_for_issuer = user_identity.get('_baseRoleId') or f"AROA{_stable_principal_main({'type': 'Role', 'name': user_identity.get('arn_suffix') or user_identity.get('name')})}" # Use stored base ID or generate
 
          user_identity_block["sessionContext"] = {
             "sessionIssuer": {
@@ -404,7 +456,7 @@ def _get_base_event(config, user_identity, ip_address, region, event_name, event
              },
              "sessionIssuer": {
                  "type": "Role",
-                 "principalId": f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}",
+                 "principalId": f"AROA{_stable_principal_main({'type': 'Role', 'name': idp_arn})}",
                  "arn": idp_arn,
                  "accountId": account_id,
                  "userName": idp_name,
@@ -2788,7 +2840,7 @@ def _get_random_user_from_template(config, user_template):
     # Build PrincipalId if not present (simplified logic, matches _get_random_user)
     if 'principalId' not in final_identity:
         principal_id_prefix = ""
-        principal_id_main = "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", k=17))
+        principal_id_main = _stable_principal_main(final_identity)
         id_type = final_identity.get('type', 'IAMUser')
 
         if id_type == 'IAMUser':
@@ -3748,7 +3800,7 @@ def _generate_s3_ransomware_encrypt(config, context=None):
     }
 
     # Single consistent source IP per run — pinned from context when a scenario provides it.
-    ip_address = _ctx.get('ip_address') or get_random_vpn_ip_ctx(config)["ip"]
+    ip_address = _ctx.get('ip_address') or _focus_egress_ip() or get_random_vpn_ip_ctx(config)["ip"]
 
     # Foreign-account KMS key — the primary cross-account detection signal
     foreign_account = random.choice(aws_conf.get("foreign_account_ids", ["999988887777"]))

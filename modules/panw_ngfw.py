@@ -108,6 +108,10 @@ XSIAM_VENDOR = "PANW"
 XSIAM_PRODUCT = "NGFW_CEF"
 
 last_threat_event_time = 0
+try:
+    from modules.session_utils import focus_egress_ip as _focus_egress_ip, focus_ips as _focus_ips
+except ImportError:  # pragma: no cover - script-style import
+    from session_utils import focus_egress_ip as _focus_egress_ip, focus_ips as _focus_ips
 
 # ---------------------------------------------------------------------------
 # Static data — App-ID catalog (Applipedia, cross-checked against live tenant rows)
@@ -489,7 +493,11 @@ def _end_reason(proto):
 def _nat_for(src_ip, config, bus_egress=None):
     """Public NAT address an internal source egresses behind.  Prefers the egress IP a
     correlated cloud sign-in published to the activity bus (so the PAN NAT matches the
-    Entra/Okta egress for the same user), else a stable address in the configured NAT pool."""
+    Entra/Okta egress for the same user), else a stable address in the configured NAT pool.
+    In Bad User mode the target's hosts always translate to the target's egress."""
+    _eg = _focus_egress_ip()
+    if _eg and src_ip in _focus_ips():
+        return _eg
     if bus_egress:
         return bus_egress
     pool = _get_config(config).get("nat_pool_cidr", "203.0.113.0/27")

@@ -1107,33 +1107,54 @@ def _generate_callback_phishing(config, session_context=None):
     return json.dumps(msg, default=str)
 
 
+def _click_ip_of(user):
+    """clickIP for a user's click: the public address TAP URL Defense sees it arrive from --
+    the user's office egress (azure_common.office_egress), the same address their Entra /
+    O365 / Okta activity and Zscaler's sourceTranslatedAddress show. TAP is an internet
+    service and never sees a workstation's private IP; clickIP used to carry it, so a
+    click could not join to the user's cloud sign-ins (e.g. the Proofpoint / Okta rule)."""
+    if not user or not user.get("username"):
+        return None
+    from modules import azure_common as _ac
+    return _ac.office_egress({"username": user["username"],
+                              "department": user.get("department") or "Unknown"})["ip"]
+
+
+def _random_public_ip():
+    """A public address for a click by someone outside the roster."""
+    from modules.session_utils import random_external_ip
+    return random_external_ip()
+
+
 def _generate_click_blocked(config, session_context=None, guid_override=None,
                              sender_override=None, sender_ip_override=None,
                              subject_override=None, target_email=None):
     """User clicked a rewritten URL; TAP URL Defense blocked the destination.
 
     This is a high-confidence indicator — XSIAM alert: 'Proofpoint - User Clicked Malicious Link'
-    Hunt: click-blocked where clickIP = internal workstation IP → join with Zscaler/Firepower.
+    Hunt: click-blocked where clickIP = the user's office egress → join with their Entra/Okta
+    sign-ins and Zscaler sourceTranslatedAddress.
     """
     all_emails     = _get_all_emails(config, session_context)
     recipient_email= target_email or (random.choice(all_emails) if all_emails else "user@examplecorp.com")
     guid           = guid_override or _make_guid()
 
-    # Use the target user's IP when known; fall back to a random user otherwise
+    # clickIP is the address the click reached TAP URL Defense from -- the clicking user's
+    # public egress (_click_ip_of), not their workstation's private IP.
     click_ip = None
     if session_context:
         if target_email:
             for _profile in session_context.values():
                 if _profile.get('email') == target_email:
-                    click_ip = _profile.get('primary_ip')
+                    click_ip = _click_ip_of(_profile)
                     break
         if not click_ip:
             user_info = get_random_user(session_context)
             if user_info:
-                click_ip = user_info.get("ip")
+                click_ip = _click_ip_of(user_info)
                 if not target_email:
                     recipient_email = user_info.get("email", recipient_email)
-    click_ip = click_ip or f"10.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+    click_ip = click_ip or _random_public_ip()
 
     url         = _malicious_url(config)
     threat_sha, _ = _generate_hashes()
@@ -1179,7 +1200,8 @@ def _generate_click_permitted(config, session_context=None, guid_override=None,
     """User clicked URL; TAP allowed it at time of click — later retroactively flagged.
 
     This is a critical signal: the user SUCCESSFULLY reached a phishing page.
-    Hunt: click-permitted events → correlate clickIP with Zscaler proxy logs
+    Hunt: click-permitted events → correlate clickIP (the user's egress) with Zscaler
+    sourceTranslatedAddress / Okta and Entra sign-in IPs
     (same src IP visiting same URL shortly after) → then Okta failed/succeeded logins.
     threatStatus='active' means still considered a threat.
     """
@@ -1187,21 +1209,22 @@ def _generate_click_permitted(config, session_context=None, guid_override=None,
     recipient_email= target_email or (random.choice(all_emails) if all_emails else "user@examplecorp.com")
     guid           = guid_override or _make_guid()
 
-    # Use the target user's IP when known; fall back to a random user otherwise
+    # clickIP is the address the click reached TAP URL Defense from -- the clicking user's
+    # public egress (_click_ip_of), not their workstation's private IP.
     click_ip = None
     if session_context:
         if target_email:
             for _profile in session_context.values():
                 if _profile.get('email') == target_email:
-                    click_ip = _profile.get('primary_ip')
+                    click_ip = _click_ip_of(_profile)
                     break
         if not click_ip:
             user_info = get_random_user(session_context)
             if user_info:
-                click_ip = user_info.get("ip")
+                click_ip = _click_ip_of(user_info)
                 if not target_email:
                     recipient_email = user_info.get("email", recipient_email)
-    click_ip = click_ip or f"10.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+    click_ip = click_ip or _random_public_ip()
 
     url         = url_override or _malicious_url(config)
     threat_sha, _ = _generate_hashes()

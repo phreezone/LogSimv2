@@ -45,7 +45,7 @@ These top-level fields are not mapped by the XIF but are preserved in the raw da
 | `threatURL` | Link to Proofpoint Threat Insight portal |
 | `threatStatus` | `active` for all simulated threats |
 | `clickTime` | When the user clicked (click events only) |
-| `clickIP` | Internal workstation IP where click originated |
+| `clickIP` | Public address the click reached TAP from: the clicking user's office egress (same IP as their Entra/Okta sign-ins and Zscaler `sourceTranslatedAddress`) |
 | `impostorScore` | 0–100; high (>75) = BEC indicator |
 | `phishScore` | 0–100; TAP phishing confidence |
 | `malwareScore` | 0–100; TAP malware confidence |

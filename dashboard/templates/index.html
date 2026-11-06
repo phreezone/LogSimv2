@@ -380,6 +380,10 @@
       font-size: 10px; color: var(--yellow, #d29922); margin-left: 2px;
     }
     .baduser-mod-label.incompatible { opacity: 0.5; }
+    .baduser-user-warn {
+      font-size: 12px; line-height: 1.4; margin-top: 6px; padding: 6px 10px;
+      color: var(--yellow, #d29922); background: var(--surface2); border-radius: 6px;
+    }
 
     .baduser-note {
       font-size: 12px;
@@ -821,6 +825,7 @@
         <select id="baduser-user" class="sched-input" disabled onchange="onBadUserUserChange()">
           <option value="">-- select department first --</option>
         </select>
+        <div id="baduser-user-warn" class="baduser-user-warn" style="display:none;"></div>
       </div>
 
       <div class="sched-field">
@@ -2068,7 +2073,11 @@
     }
     const users = _badUserGroups[dept];
     userSel.innerHTML = '<option value="">-- select user --</option>' +
-      users.map(u => `<option value="${escHtml(u.username)}">${escHtml(u.display_name)} (${escHtml(u.username)})</option>`).join('');
+      users.map(u => {
+        const noWin = (u.primary_os || '').toLowerCase() !== 'windows';
+        const tag = noWin ? ` — ${u.primary_os || 'non-Windows'}, no Windows events` : '';
+        return `<option value="${escHtml(u.username)}">${escHtml(u.display_name)} (${escHtml(u.username)})${escHtml(tag)}</option>`;
+      }).join('');
     userSel.disabled = false;
     _clearBadUserModWarn();
   }
@@ -2086,6 +2095,13 @@
 
     const isWindows = (user.primary_os || '').toLowerCase() === 'windows';
     const hasAws = user.has_aws;
+
+    const gaps = [];
+    if (!isWindows) gaps.push(`Their main computer runs ${user.primary_os || 'a non-Windows OS'}, so the case gets no Windows or Active Directory events (logons, Kerberos, process creation, group changes).`);
+    if (!hasAws) gaps.push('They have no AWS IAM user, so the case gets no AWS events.');
+    const warnBox = document.getElementById('baduser-user-warn');
+    warnBox.textContent = gaps.length ? '⚠ ' + gaps.join(' ') + ' Pick a Windows user for the fullest case.' : '';
+    warnBox.style.display = gaps.length ? '' : 'none';
 
     document.querySelectorAll('#baduser-modules label').forEach(label => {
       const cb = label.querySelector('input');
@@ -2111,6 +2127,8 @@
   }
 
   function _clearBadUserModWarn() {
+    const warnBox = document.getElementById('baduser-user-warn');
+    if (warnBox) { warnBox.textContent = ''; warnBox.style.display = 'none'; }
     document.querySelectorAll('#baduser-modules label').forEach(label => {
       label.classList.remove('incompatible');
       const w = label.querySelector('.mod-warn');

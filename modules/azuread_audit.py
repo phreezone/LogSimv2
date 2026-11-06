@@ -268,7 +268,7 @@ def _b_admin_consent(cfg, app=None):
 
 
 def _b_register_device(cfg):
-    u = ac.pick_user(cfg); dev = f'{u["username"].upper().replace(".", "")}-PC'
+    u = ac.pick_user(cfg); dev = ac.device_name(u)
     return audit("Register device", "Device", "Device Registration Service", "Add",
                  by_user(u), [t_obj("Device", dev, [mp("DeviceOSType", None, u.get("os_type", "Windows")),
                  mp("DeviceTrustType", None, "Azure AD joined")])])
@@ -433,7 +433,7 @@ def _target_for(ttype, cfg, actor):
     if ttype in ("ServicePrincipal", "Application"):
         return t_obj(ttype, _saas_app())
     if ttype == "Device":
-        return t_obj("Device", f'{actor["username"].upper().replace(".", "")}-PC')
+        return t_obj("Device", ac.device_name(actor))
     if ttype == "Directory":
         return t_obj("Directory", ac.UPN_DOMAIN)
     if ttype == "Policy":
@@ -1014,7 +1014,7 @@ def scenario_bitlocker_key_retrieval(config=None):
     """A user reads a BitLocker recovery key -> 'BitLocker key retrieval'."""
     u = ac.pick_user(config)
     return [audit("Read BitLocker key", "KeyManagement", "Core Directory", "Read", by_user(u),
-                  [t_obj("Device", f'{u["username"].upper().replace(".", "")}-PC',
+                  [t_obj("Device", ac.device_name(u),
                    [mp("KeyId", None, ac._stable_guid("blk:" + u["username"]))])], [_ua(u)])]
 
 

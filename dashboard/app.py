@@ -582,18 +582,33 @@ _baduser_state = {
     "threads": [],
     "metrics": {},       # {module_name: {"logs": int, "threats": int}}
     "selected_modules": [],  # module names chosen by user (empty = all)
+    "private_modules": [],   # per-run module copies (Windows) whose workers must be stopped
+    "egress_ip": None,       # the target's one public egress, shown by every feed
 }
 
 
-def _build_baduser_context(username):
-    """Deep-copy a single user's profile into a new session_context dict.
+def _baduser_profile(username):
+    """The target's session profile with ONLY their primary computer active, so every
+    event of the case comes from one machine and one internal IP (a phone or second
+    laptop active this run would otherwise split the source address)."""
+    prof = copy.deepcopy(SESSION_CONTEXT[username])
+    devs = prof.get("active_devices") or {}
+    primary = {k: d for k, d in devs.items() if isinstance(d, dict) and d.get("is_primary")}
+    if primary:
+        k = next(iter(primary))
+        prof["active_devices"] = {k: primary[k]}
+    return prof
 
-    Since every module (except AWS) calls get_random_user(session_context) and
-    there's only one user in the dict, all events will attribute to that user.
+
+def _build_baduser_context(username):
+    """A session_context holding only the target, on their primary computer.
+
+    Every module that picks from session_context therefore attributes to that user and
+    machine; the pickers that do not read it are covered by the per-thread focus user.
     """
     if username not in SESSION_CONTEXT:
         return None
-    return {"session_context": {username: copy.deepcopy(SESSION_CONTEXT[username])}}
+    return {"session_context": {username: _baduser_profile(username)}}
 
 
 def _build_baduser_aws_config(username, config):
@@ -636,14 +651,130 @@ def _pace_wait(next_due, stop_event):
     return next_due
 
 
+# Bad User paces its own threats from each module's allow-list (bad_user_policy) instead
+# of the module's own threat timer, so it never fires an outside-based threat and never
+# shares a cooldown with the normal module worker. Gap per module = the level's interval
+# from threat_generation_levels, floored here so Insane (0) still means "often", not
+# "every call", and jittered so modules do not fire in lockstep.
+_BADUSER_MIN_THREAT_GAP_S = 20.0
+_BADUSER_FIRST_THREAT_S = (10.0, 60.0)
+
+
+def _baduser_threat_gap(threat_level):
+    """Seconds until a Bad User module's next threat, or None for no threats."""
+    if threat_level == "Benign Traffic Only":
+        return None
+    base = (CONFIG.get("threat_generation_levels") or {}).get(threat_level, 600)
+    return max(float(base), _BADUSER_MIN_THREAT_GAP_S) * random.uniform(0.5, 1.5)
+
+
+def _baduser_matcher(username, profile, egress_ip):
+    """record -> True when it is the target's own: it names them (username, email, display
+    name, Entra object id, AWS IAM user) or carries their device address, hostname or
+    egress, AND its source is not a public address other than their egress. Bad User
+    sends only those -- a module's benign mix also holds other users' traffic,
+    server/DC/service events, inbound internet noise, and the target's own REMOTE access
+    (VPN from home, roaming proxy, sign-ins from elsewhere), none of which came from
+    their computer."""
+    import gzip
+    import ipaddress
+    import re as _re
+    from modules import azure_common as _ac
+    tokens = {username, profile.get("email") or "", profile.get("display_name") or "",
+              str(_ac.user_oid(username)), profile.get("aws_iam_user") or ""}
+    tokens = sorted({t.lower() for t in tokens if t}, key=len, reverse=True)
+    tok_re = _re.compile(r"(?<![A-Za-z0-9_.'\-])(%s)(?![A-Za-z0-9_'\-])"
+                         % "|".join(_re.escape(t) for t in tokens))
+    devs = (profile.get("active_devices") or {}).values()
+    ips = {d.get("ip") for d in devs if isinstance(d, dict) and d.get("ip")}
+    if egress_ip:
+        ips.add(egress_ip)
+    ip_re = _re.compile(r"(?<![\d.])(%s)(?![\d.])" % "|".join(_re.escape(i) for i in ips)) if ips else None
+    hosts = [str(d.get("hostname")).lower() for d in devs if isinstance(d, dict) and d.get("hostname")]
+    _ip = r"(\d{1,3}(?:\.\d{1,3}){3})"
+    src_res = [_re.compile(p, _re.I) for p in (       # source-position fields, per format
+        r'"(?:ipaddress|clientip|clientipaddress|actoripaddress|sourceipaddress|callerip|'
+        r'calleripaddress|cip|srcip|src_ip|sourceip|client_ip|src)"\s*:\s*"' + _ip,   # JSON
+        r'(?<![a-z_])(?:src|srcip|rhost)=' + _ip,                                     # CEF / kv
+        r'\bsrc:\s*"?' + _ip,                                                        # Check Point
+        r'^' + _ip + r' ',                                                            # access log
+    )]
+
+    own_ips = ips - {egress_ip}
+
+    def outside_source(text):
+        for rx in src_res:
+            for m in rx.finditer(text):
+                a = m.group(1)
+                try:
+                    if a != egress_ip and ipaddress.ip_address(a).is_global:
+                        return True
+                except ValueError:
+                    continue
+        return False
+
+    def other_internal_source(text):
+        # The office egress is shared by everyone at the site: a proxy/firewall record
+        # whose source is ANOTHER internal host (a server, a coworker) matches it too.
+        for rx in src_res:
+            for m in rx.finditer(text):
+                a = m.group(1)
+                try:
+                    if a not in own_ips and ipaddress.ip_address(a).is_private:
+                        return True
+                except ValueError:
+                    continue
+        return False
+
+    def is_target(rec):
+        if isinstance(rec, (bytes, bytearray)):
+            try:
+                rec = gzip.decompress(rec)
+            except Exception:
+                pass
+            text = bytes(rec).decode("utf-8", "replace")
+        elif isinstance(rec, (dict, list)):
+            text = json.dumps(rec, default=str)
+        else:
+            text = str(rec)
+        low = text.lower()
+        named = bool(tok_re.search(low) or any(h in low for h in hosts))
+        own_ip = bool(ip_re and any(m.group(1) in own_ips for m in ip_re.finditer(text)))
+        egress_only = not named and not own_ip
+        if egress_only and other_internal_source(text):
+            return False
+        linked = named or bool(ip_re and ip_re.search(text))
+        return linked and not outside_source(text)
+    return is_target
+
+
 def _baduser_worker(module, config, context, stop_event, metrics_key,
-                    threat_level, event_interval_func):
+                    threat_level, event_interval_func, focus=None):
     """Worker loop for a single module in bad-user mode.
 
-    Same pattern as _module_worker() but uses a filtered single-user context
-    and records metrics into the bad-user state instead of MODULE_STATES.
+    Every event must be something the target did from their own computer or account:
+      * benign: the module runs benign-only and only the target's own records are sent
+        (_baduser_matcher);
+      * threats: on Bad User's own clock (_baduser_threat_gap) one threat from the
+        module's allow-list (modules/bad_user_policy.py -- outside-based threats such as
+        scans, Tor/foreign sign-ins, sprays and other actors are excluded) is fired by
+        name, the same on-demand path fire_event uses;
+      * `focus` = (username, profile, egress_ip) is set as this thread's focus user, so the
+        identity pickers and source-address helpers name the target and their machine.
+        Per-thread: the normal module worker running the same code is unaffected.
     """
     _ensure_send_workers()
+    from modules import bad_user_policy as _policy
+    if focus:
+        from modules import session_utils as _su
+        _su.set_focus_user(*focus)
+        is_target = _baduser_matcher(*focus)
+    else:
+        is_target = lambda _rec: True
+    allowed = _policy.allowed_threats(module)
+    benign = _policy.sends_benign(module)
+    threat_due = (time.monotonic() + random.uniform(*_BADUSER_FIRST_THREAT_S)
+                  if allowed and _baduser_threat_gap(threat_level) is not None else None)
 
     next_due = time.monotonic()
     while not stop_event.is_set():
@@ -651,40 +782,42 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
         if next_due is None:
             break
         next_due += max(event_interval_func(), _min_interval(module))
-        current_level = threat_level
-        benign_only = (current_level == "Benign Traffic Only")
+        threat_name = None
+        if threat_due is not None and time.monotonic() >= threat_due:
+            threat_name = random.choice(allowed)
+            threat_due = time.monotonic() + _baduser_threat_gap(threat_level)
+        if not threat_name and not benign:
+            continue
         try:
-            result = module.generate_log(
-                config=config,
-                threat_level=current_level,
-                benign_only=benign_only,
-                context=context,
-            )
-            if result is not None:
-                if isinstance(result, tuple) and len(result) == 2:
-                    log_content, event_name = result
-                else:
-                    log_content, event_name = result, None
-
-                logs = log_content if isinstance(log_content, list) else [log_content]
-                valid = [m for m in logs if m]
-
-                if valid:
-                    # Record metrics immediately, send async
-                    with _baduser_lock:
-                        m = _baduser_state["metrics"].get(metrics_key, {"logs": 0, "threats": 0})
-                        m["logs"] += len(valid)
-                        # Check if this was a threat event
-                        state = MODULE_STATES.get(module.NAME)
-                        if state and event_name and event_name in state.threat_names:
-                            m["threats"] += 1
-                        _baduser_state["metrics"][metrics_key] = m
-                    for msg in valid:
-                        if not _enqueue_send((msg, module, config, event_name), stop_event):
-                            break
+            if threat_name:
+                result = module.generate_log(config=config, threat_level=threat_level,
+                                             benign_only=False, context=context,
+                                             scenario_event=threat_name)
+            else:
+                result = module.generate_log(config=config, threat_level="Benign Traffic Only",
+                                             benign_only=True, context=context)
+            if isinstance(result, tuple) and len(result) == 2:
+                log_content = result[0]
+            else:
+                log_content = result
+            logs = log_content if isinstance(log_content, list) else [log_content]
+            valid = [m for m in logs if m and is_target(m)]
+            # A campaign sends itself (Cribl + WEC) and returns nothing: count it as fired.
+            fired = bool(threat_name) and (bool(valid) or (
+                result is None and module.NAME == "Identity Threat Campaigns"))
+            if valid or fired:
+                with _baduser_lock:
+                    m = _baduser_state["metrics"].get(metrics_key, {"logs": 0, "threats": 0})
+                    m["logs"] += len(valid)
+                    if fired:
+                        m["threats"] += 1
+                    _baduser_state["metrics"][metrics_key] = m
+            for msg in valid:
+                if not _enqueue_send((msg, module, config, threat_name), stop_event):
+                    break
 
         except Exception as exc:
-            print(f"[bad-user][{module.NAME}] worker error: {exc}")
+            print(f"[bad-user][{module.NAME}] {threat_name or 'benign'} error: {exc}")
             stop_event.wait(timeout=5)
             continue
 
@@ -714,6 +847,16 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval,
     profile = SESSION_CONTEXT[username]
     duration_seconds = int(duration_minutes * 60)
     stop_event = threading.Event()
+    # One public egress for the target -- their office NAT, as the Microsoft feeds compute
+    # it -- so the firewall NAT, AWS source address and cloud sign-ins all show one IP.
+    try:
+        from modules import azure_common as _ac
+        egress_ip = _ac.office_egress({"username": username,
+                                       "department": profile.get("department", "Unknown")})["ip"]
+    except Exception as exc:
+        print(f"[bad-user] no egress IP for {username}: {exc}")
+        egress_ip = None
+    focus = (username, _baduser_profile(username), egress_ip)
 
     with _baduser_lock:
         _baduser_state["active"] = True
@@ -728,6 +871,8 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval,
         _baduser_state["threads"] = []
         _baduser_state["metrics"] = {}
         _baduser_state["selected_modules"] = selected_modules or []
+        _baduser_state["private_modules"] = []
+        _baduser_state["egress_ip"] = egress_ip
 
     # Closure so workers always read current interval
     def _get_interval():
@@ -737,8 +882,13 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval,
     base_config = copy.deepcopy(CONFIG)
 
     _sel = set(selected_modules) if selected_modules else None
+    from modules import bad_user_policy as _policy
     for name, mod in MODULES.items():
         if _sel and name not in _sel:
+            continue
+        if not _policy.sends_benign(mod) and not _policy.allowed_threats(mod):
+            print(f"[bad-user] Skipping {name} -- nothing in it is the target's own doing "
+                  f"({_policy.NO_BENIGN.get(name, 'no allowed threats')})")
             continue
         # AWS special handling — skip if no IAM mapping
         if name == "aws":
@@ -751,6 +901,19 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval,
         else:
             worker_config = copy.deepcopy(base_config)
             worker_context = context
+        if getattr(mod, "get_worker_stats", None):
+            # Windows runs one set of worker threads per module object, started by the
+            # first caller with that caller's context. Sharing the normal module's meant
+            # Bad User drained everyone's events (1.5% named the target, measured
+            # 2026-11-03) -- or, started first, pinned normal Windows traffic to the one
+            # target until restart. A private copy gets its own workers, queues and clock.
+            try:
+                mod = _private_module_copy(mod)
+            except Exception as exc:
+                print(f"[bad-user] Skipping {name} -- private copy failed: {exc}")
+                continue
+            with _baduser_lock:
+                _baduser_state["private_modules"].append(mod)
 
         with _baduser_lock:
             _baduser_state["metrics"][name] = {"logs": 0, "threats": 0}
@@ -758,7 +921,7 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval,
         t = threading.Thread(
             target=_baduser_worker,
             args=(mod, worker_config, worker_context, stop_event, name,
-                  threat_level, _get_interval),
+                  threat_level, _get_interval, focus),
             daemon=True,
             name=f"baduser-{name}",
         )
@@ -784,6 +947,17 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval,
     return True, None
 
 
+def _private_module_copy(mod):
+    """A fresh, independent instance of `mod`'s source file (own globals, threads, queues),
+    for Bad User. Not registered in sys.modules, so nothing else can reach it."""
+    import importlib.util
+    stem = os.path.splitext(os.path.basename(mod.__file__))[0]
+    spec = importlib.util.spec_from_file_location(f"modules._baduser_{stem}", mod.__file__)
+    copy_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(copy_mod)
+    return copy_mod
+
+
 def _stop_baduser():
     """Stop all bad-user worker threads."""
     with _baduser_lock:
@@ -791,9 +965,15 @@ def _stop_baduser():
             return
         _baduser_state["stop_event"].set()
         threads = list(_baduser_state["threads"])
+        private = list(_baduser_state["private_modules"])
+        _baduser_state["private_modules"] = []
 
     for t in threads:
         t.join(timeout=5)
+    for mod in private:                     # stop the private Windows workers
+        stop = getattr(mod, "_workers_stop", None)
+        if stop is not None:
+            stop.set()
 
     with _baduser_lock:
         _baduser_state["active"] = False
@@ -2927,6 +3107,7 @@ def api_baduser_status():
             "total_threats": total_threats,
             "per_module": metrics,
             "selected_modules": list(_baduser_state["selected_modules"]),
+            "egress_ip": _baduser_state.get("egress_ip"),
         })
 
 
