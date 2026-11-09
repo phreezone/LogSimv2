@@ -1353,6 +1353,9 @@ def _loc(city, state, country, lat, lon, ip, asn, isp):
             "geoCoordinates": {"latitude": lat, "longitude": lon}, "asn": asn, "isp": isp}
 
 
+_EGRESS_BLOCK_S = 4 * 3600
+
+
 def egress(user, remote_prob=0.25, mobile_prob=0.08):
     """Stable public egress for a user: mostly their dept office NAT (a stable IP within the
     site's pool), sometimes a residential/home IP, occasionally a mobile-carrier IP.
@@ -1364,6 +1367,11 @@ def egress(user, remote_prob=0.25, mobile_prob=0.08):
     phone never looks like travel.
     In Bad User mode the target always egresses from their office NAT (focus_loc), the same
     address the firewall NAT fields show for their computer.
+
+    Office vs home is decided per user per 4-hour block, not per event: a person works from
+    one place for hours, while their phone (mobile_prob) chimes in any time. A per-event coin
+    put active users at office, home and phone within minutes -- three external IPs in 30
+    minutes, which is what the multi-IP sign-in rules look for.
     """
     un = user["username"]
     fi = focus_identity()
@@ -1371,6 +1379,10 @@ def egress(user, remote_prob=0.25, mobile_prob=0.08):
         return focus_loc()
     site = office_for(user)
     r = random.random()
+    if r >= mobile_prob:
+        block = int(time.time() // _EGRESS_BLOCK_S)
+        at_home = (_h(f"wfh:{un}:{block}") % 10000) / 10000 < remote_prob / (1 - mobile_prob)
+        r = mobile_prob if at_home else 1.0               # map onto the branches below
     if r < mobile_prob:                                   # phone on cellular (carrier block in the metro)
         n = _h("mob:" + un)
         isp, asn, block = MOBILE_POOLS[site["city"]][n % len(MOBILE_POOLS[site["city"]])]

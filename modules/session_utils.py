@@ -881,6 +881,14 @@ _VPN_HOME_RANGES = [
     "49.176.44.0/24",    # Optus, Australia
 ]
 
+_VPN_HOME_RANGE_COUNTRY = {
+    "68.86.113.0/24": "US", "71.163.116.0/24": "US", "99.36.12.0/24": "US",
+    "97.85.44.0/24": "US", "70.176.220.0/24": "US", "81.152.44.0/24": "GB",
+    "90.207.60.0/24": "GB", "80.130.44.0/24": "DE", "92.208.44.0/24": "DE",
+    "64.231.44.0/24": "CA", "70.24.140.0/24": "CA", "1.126.44.0/24": "AU",
+    "49.176.44.0/24": "AU",
+}
+
 _USER_HOME_IPS = {}
 
 
@@ -894,6 +902,13 @@ def _home_ranges(config=None):
     return _VPN_HOME_RANGES
 
 
+def _home_range_country(cidr, config=None):
+    for s in (config or {}).get("benign_ingress_sources", []):
+        if s.get("ip_range") == cidr and s.get("country"):
+            return s["country"]
+    return _VPN_HOME_RANGE_COUNTRY.get(cidr)
+
+
 def stable_vpn_ip(user, config=None):
     """Return a deterministic 'home' external IP for a given user.
 
@@ -904,18 +919,24 @@ def stable_vpn_ip(user, config=None):
     — see the geographic source-IP policy note above.  Selecting a wider pool
     here re-saturates the org-wide country baseline and silences the
     "First successful VPN access from a country in organization" analytic.
+
+    The secondary is in the primary's country (home broadband + mobile hotspot): two
+    countries for one person is the impossible-travel signal, not a baseline.
     """
     if user not in _USER_HOME_IPS:
         digest = hashlib.sha256(user.encode()).digest()
         ranges = _home_ranges(config)
-        def _pick(a, b, c):
-            net = ip_network(ranges[digest[a] % len(ranges)], strict=False)
+        def _pick(pool, a, b, c):
+            net = ip_network(pool[digest[a] % len(pool)], strict=False)
             base = int(net.network_address)
             size = net.num_addresses
             # keep off .0 / broadcast
             off = (digest[b] * 256 + digest[c]) % max(size - 2, 1) + 1
             return str(ip_address(base + off))
-        _USER_HOME_IPS[user] = [_pick(0, 1, 2), _pick(4, 5, 6)]
+        primary_range = ranges[digest[0] % len(ranges)]
+        country = _home_range_country(primary_range, config)
+        same = [r for r in ranges if country and _home_range_country(r, config) == country]
+        _USER_HOME_IPS[user] = [_pick(ranges, 0, 1, 2), _pick(same or ranges, 4, 5, 6)]
     ips = _USER_HOME_IPS[user]
     return ips[0] if random.random() < 0.80 else ips[1]
 

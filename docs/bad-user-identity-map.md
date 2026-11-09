@@ -47,6 +47,12 @@ exfiltration destinations on the profile):
 `sourceTranslatedAddress`): an XSIAM rule or profile can join on-prem activity (internal IP)
 to cloud activity (egress) through it.
 
+The egress (#16) is the office NAT, shared by everyone at the site and by the normal
+(non-Bad User) traffic running at the same time. Bad User only sends a record that also
+names the target (#1–#11) or carries their hostname or internal IP; the egress alone never
+qualifies it. A correlation rule joining two feeds should therefore key on the user as well
+as the IP. A join on the egress alone pairs the target with every other account behind it.
+
 ## 3. Linking rules to configure
 
 1. `sAMAccountName` = UPN local part = email local part (`k.zhang` ↔ `k.zhang@examplecorp.com`).

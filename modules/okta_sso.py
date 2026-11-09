@@ -557,7 +557,23 @@ def _get_random_ip_and_context(config, source_list_key="benign_ingress_sources")
         # and _country_name() would echo it verbatim into geographicalContext.
         if ctx.get("country") in ("Unknown", ""):
             ctx["country"] = None
+    if source_list_key == "benign_ingress_sources":
+        # Placeholder: _build_client swaps in the signing-in user's own egress.
+        ctx["_benign_pool"] = True
     return ctx
+
+
+def _user_egress_ctx(username, session_context=None):
+    """A user's own stable public egress (azure_common.egress: office NAT, sometimes home or
+    mobile in the same metro) -- the address their Entra sign-ins show too. A random pick
+    from the 13 home ranges per event gave each user 11-24 IPs in 3-9 countries a day."""
+    from modules import azure_common as _ac
+    un = username.split("@")[0]
+    prof = (session_context or {}).get(un) or {}
+    loc = _ac.egress({"username": un, "department": prof.get("department") or "Unknown"})
+    return {"ip": loc["ip"], "city": loc.get("city"), "country": loc.get("countryOrRegion"),
+            "state": loc.get("state"), "isp": loc.get("isp"), "asn": loc.get("asn"),
+            "domain": None, "is_proxy": False}
 
 
 def _get_random_user_info(config, session_context=None):
@@ -709,6 +725,9 @@ def _build_client(ip_context, config, interactive_only=False,
     os_name  = _parse_os(ua_string)
     device   = "Mobile" if ("iPhone" in ua_string or "Android" in ua_string) else "Computer"
     browser_match = True  # placeholder — using _parse_browser directly below
+    if ip_context.pop("_benign_pool", False) and username:
+        # In place, so the securityContext the caller builds from ip_context agrees.
+        ip_context.update(_user_egress_ctx(username, session_context))
     ip       = ip_context.get("ip")
 
     return {
@@ -6093,6 +6112,35 @@ def _generate_malicious_oauth_app_registration(config, user_info, session_contex
 # All _gen_* functions return a single JSON string. Wrap with [x] when adding to lists.
 # All _generate_* multi-event functions return a list already.
 
+# Okta's own attack verdicts. Each is a threat (fired by name); in the background mix,
+# uniform 1-in-187 picks put ~460/day of each on ~300 users, so every rule keyed on one
+# fired all day. A detector event must never be baseline (see azure_common's rare tier).
+_THREAT_ONLY_BACKGROUND = {
+    _gen_oauth2_token_detect_reuse, _generate_mfa_factor_reset_by_admin,
+    _gen_security_attack_start, _gen_security_breached_credential,
+    _gen_security_session_roaming, _gen_user_risk_detect, _gen_user_risk_change,
+    _gen_policy_entity_risk_action, _gen_zone_make_blacklist,
+}
+
+# Things real users do now and then (drop an old phone's factor, travel), so they stay in
+# the background but at a realistic rate -- about one a day each, or a handful for travel
+# -- instead of ~460/day: first-seen detectors still get the occasional real one.
+_RARE_BACKGROUND = {
+    _gen_user_mfa_factor_deactivate: 0.003, _gen_user_mfa_factor_suspend: 0.003,
+    _gen_system_mfa_factor_deactivate: 0.003,
+    _generate_sso_new_country: 0.01, _generate_sso_new_country_org: 0.01,
+    _generate_sso_new_asn_user: 0.01, _generate_sso_new_asn_org: 0.01,
+}
+
+
+def _rarely(gen, p):
+    def _gen_rare(config, user_info, session_context=None):
+        if random.random() < p:
+            return gen(config, user_info, session_context)
+        return _generate_sso_access(config, user_info, session_context)
+    return _gen_rare
+
+
 def _generate_background_log(config, session_context=None):
     user_info = _get_random_user_info(config, session_context)
 
@@ -6122,8 +6170,11 @@ def _generate_background_log(config, session_context=None):
         _gen_user_lifecycle_reactivate, _gen_user_lifecycle_unsuspend,
         _gen_user_lifecycle_delete_initiated, _gen_user_lifecycle_delete_completed,
         # --- NEW: user.account ---
+        # No lockouts here: a lockout follows failed sign-ins, and as a 1-in-188 pick it
+        # locked ~290 of ~500 users out every day. They come from the brute_force
+        # sequence and the account_lock_limit threat.
         _gen_user_account_update_profile, _gen_user_account_privilege_revoke,
-        _gen_user_account_expire_password, _gen_user_account_lock_limit,
+        _gen_user_account_expire_password,
         _gen_user_account_update_primary_email, _gen_user_account_update_phone,
         # --- NEW: user.session ---
         _gen_user_session_end, _gen_user_session_clear,
@@ -6213,6 +6264,9 @@ def _generate_background_log(config, session_context=None):
         # --- NEW: mfa reset (low-freq benign admin op) ---
         _generate_mfa_factor_reset_by_admin,
     ]
+
+    single = [_rarely(g, _RARE_BACKGROUND[g]) if g in _RARE_BACKGROUND else g
+              for g in single if g not in _THREAT_ONLY_BACKGROUND]
 
     # Multi-event generators — each returns a list
     multi = [

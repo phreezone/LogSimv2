@@ -237,6 +237,29 @@ def _get_random_user(config, allow_root=False):
     return final_identity
 
 
+_IAM_OWNERS = {}
+
+
+def _user_egress_ip(config, name):
+    """A person's own stable public egress for a benign console login or SSO role session:
+    the IAM user / SSO session name is mapped to its owner (user_profiles.*.aws_iam_user,
+    or the AD username itself) and azure_common.egress gives that owner's office, home or
+    phone address -- the same one their Entra and Okta sign-ins show. A random external
+    pick per event gave every user ~20 IPs a day, which is what the multi-IP rules flag."""
+    _src = _focus_egress_ip()
+    if _src:
+        return _src
+    if not _IAM_OWNERS:
+        for un, prof in (config.get("user_profiles") or {}).items():
+            if prof.get("aws_iam_user"):
+                _IAM_OWNERS[prof["aws_iam_user"].lower()] = (un, prof.get("department"))
+            _IAM_OWNERS.setdefault(un.lower(), (un, prof.get("department")))
+    owner, dept = _IAM_OWNERS.get(str(name).lower(), (str(name).lower(), None))
+    from modules import azure_common as _ac
+    # No mobile hop: an admin role session is a laptop, at the office or at home.
+    return _ac.egress({"username": owner, "department": dept or "Unknown"}, mobile_prob=0)["ip"]
+
+
 def _get_random_ip(config, use_tor=False, force_external=False, use_anon=False):
     """Gets a random IP address, from internal, external, Tor, or anonymizer (VPN/Tor mix) sources.
 
@@ -3034,7 +3057,7 @@ def _generate_console_login_benign(config, context=None):
         user_identity = _get_random_user_from_template(config, user_template)
 
     if not ip_address:
-        ip_address = _get_random_ip(config, force_external=True)
+        ip_address = _user_egress_ip(config, user_identity.get('name') or user_identity.get('userName'))
 
     region = 'us-east-1'
     account_id = user_identity.get('accountId', config.get(CONFIG_KEY, {}).get('aws_account_id', '123456789012'))
@@ -6531,6 +6554,8 @@ def _generate_assume_role_with_saml(config, context=None):
     # will resolve). roleSessionName is the IdP-asserted username = the Okta login.
     user_name  = (context or {}).get('saml_user') or (context or {}).get('target_user') or random.choice(user_names)
     session_name = user_name
+    if not (context or {}).get('ip_address'):
+        ip_address = _user_egress_ip(config, user_name)
 
     assumed_role_id = f"AROA{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=17))}"
     expiry = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")

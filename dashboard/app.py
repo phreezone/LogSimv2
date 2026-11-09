@@ -670,12 +670,16 @@ def _baduser_threat_gap(threat_level):
 
 def _baduser_matcher(username, profile, egress_ip):
     """record -> True when it is the target's own: it names them (username, email, display
-    name, Entra object id, AWS IAM user) or carries their device address, hostname or
-    egress, AND its source is not a public address other than their egress. Bad User
-    sends only those -- a module's benign mix also holds other users' traffic,
-    server/DC/service events, inbound internet noise, and the target's own REMOTE access
-    (VPN from home, roaming proxy, sign-ins from elsewhere), none of which came from
-    their computer."""
+    name, Entra object id, AWS IAM user) or carries their device address or hostname,
+    AND its source is not a public address other than their egress. Bad User sends only
+    those -- a module's benign mix also holds other users' traffic, server/DC/service
+    events, inbound internet noise, and the target's own REMOTE access (VPN from home,
+    roaming proxy, sign-ins from elsewhere), none of which came from their computer.
+
+    The office egress alone never links a record: everyone at the site shares it, and
+    under focus the source helpers hand it to service accounts, service principals and
+    other users too (Okta svc-* SSO, Entra service-principal sign-ins, AWS SSO/EC2-role
+    calls) -- an IP-only correlation rule then pins them on the target."""
     import gzip
     import ipaddress
     import re as _re
@@ -713,19 +717,6 @@ def _baduser_matcher(username, profile, egress_ip):
                     continue
         return False
 
-    def other_internal_source(text):
-        # The office egress is shared by everyone at the site: a proxy/firewall record
-        # whose source is ANOTHER internal host (a server, a coworker) matches it too.
-        for rx in src_res:
-            for m in rx.finditer(text):
-                a = m.group(1)
-                try:
-                    if a not in own_ips and ipaddress.ip_address(a).is_private:
-                        return True
-                except ValueError:
-                    continue
-        return False
-
     def is_target(rec):
         if isinstance(rec, (bytes, bytearray)):
             try:
@@ -740,11 +731,7 @@ def _baduser_matcher(username, profile, egress_ip):
         low = text.lower()
         named = bool(tok_re.search(low) or any(h in low for h in hosts))
         own_ip = bool(ip_re and any(m.group(1) in own_ips for m in ip_re.finditer(text)))
-        egress_only = not named and not own_ip
-        if egress_only and other_internal_source(text):
-            return False
-        linked = named or bool(ip_re and ip_re.search(text))
-        return linked and not outside_source(text)
+        return (named or own_ip) and not outside_source(text)
     return is_target
 
 

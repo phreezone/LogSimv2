@@ -739,12 +739,10 @@ def _generate_anyconnect_vpn_log(config, user=None, public_ip=None, session_cont
             user = random.choice(list(user_ip_map.keys()))
 
     if not public_ip:
-        ingress_sources = config.get('benign_ingress_sources', [{}])
-        source_ingress = random.choice(ingress_sources) if ingress_sources else {}
-        try:
-            public_ip = rand_ip_from_network(ip_network(source_ingress.get("ip_range", "1.1.1.0/24"), strict=False))
-        except (AddressValueError, ValueError):
-            public_ip = "1.1.1.1"
+        # The user's stable home IP pair, not a random ingress address: a fresh IP per
+        # session gave every user 7-31 source IPs a day and made each one look like
+        # VPN impossible travel.
+        public_ip = stable_vpn_ip(user)
 
     if random.choice([True, False]):
         # Session Start — documented Cisco format is positional, severity 6:

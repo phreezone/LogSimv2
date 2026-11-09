@@ -50,8 +50,6 @@ Events are generated continuously as background noise. Core authentication event
 | `user.account.update_password` | User self-service password change. |
 | `user.account.reset_password` | Admin resets a user's password. |
 | `user.account.expire_password` | Admin expires a user's password (forces reset on next login). |
-| `user.account.lock` | Account locked after repeated authentication failures. |
-| `user.account.lock.limit` | Account lock limit reached (elevated signal — may indicate brute force). |
 | `user.account.unlock` | User self-unlocks via email/SMS recovery flow. |
 | `user.account.unlock_by_admin` | Admin manually unlocks a locked account. |
 | `user.account.unlock_token` | Account unlocked via one-time token. |

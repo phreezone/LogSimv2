@@ -82,6 +82,8 @@ EXCLUDED = {
         "wip_kube_permission_enumeration", "wip_kube_serviceaccount_create_delete",
         "wip_kube_events_removed", "wip_kube_unusual_secret_access",
         "wip_ai_model_discovery", "wip_ai_denial_of_wallet", "wip_ai_dataset_download",
+        # account-key / SAS-token access carries no identity, only the shared egress
+        "wip_storage_shared_key_access", "wip_storage_sas_access",
     },
     "Check Point Firewall": {
         "ips", "smartdefense", "external_port_scan",                       # outside-in
