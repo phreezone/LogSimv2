@@ -2,8 +2,8 @@
  {
   "name": "GCP — API Access From External / Non-Corporate IP (v2)",
   "alert_name": "GCP — API Access From External / Non-Corporate IP (v2)",
-  "description": "GCP Cloud Audit activity from a caller outside RFC1918 and outside GCP's IAP forwarding range (35.235.240.0/20) - >=5 API calls per hour from one external address. Replaces the original, which errored every run, grouped by event description rather than by caller, and emitted no address entity at all. NOTE: google_cloud_logging_raw is empty (0 rows/30d) because GCP Pub/Sub delivery is failing authentication, so this cannot fire until that is fixed.",
-  "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.source.ipv4 != null\n| filter not (incidr(xdm.source.ipv4, \"10.0.0.0/8\")\n              or incidr(xdm.source.ipv4, \"192.168.0.0/16\")\n              or incidr(xdm.source.ipv4, \"172.16.0.0/12\")\n              or incidr(xdm.source.ipv4, \"35.235.240.0/20\"))\n| bin _time span = 1h\n| comp count() as api_calls,\n       count_distinct(xdm.event.description) as distinct_operations,\n       values(xdm.source.user.username) as users,\n       values(xdm.event.description) as events_seen\n       by xdm.source.ipv4, _time\n| filter api_calls >= 5\n| alter caller_ip = xdm.source.ipv4\n| fields caller_ip, api_calls, distinct_operations, users, events_seen\n",
+  "description": "GCP principal making 3+ API calls from a public IP it has not used in the previous 7 days (excluding RFC1918 and Google front-end / IAP ranges): stolen credentials or a new attacker source.",
+  "xql_query": "datamodel dataset = google_cloud_logging_raw\n| filter xdm.source.ipv4 != null and xdm.source.user.username != null\n| filter not (incidr(xdm.source.ipv4, \"10.0.0.0/8\")\n              or incidr(xdm.source.ipv4, \"192.168.0.0/16\")\n              or incidr(xdm.source.ipv4, \"172.16.0.0/12\")\n              or incidr(xdm.source.ipv4, \"35.235.240.0/20\")\n              or incidr(xdm.source.ipv4, \"35.191.0.0/16\")\n              or incidr(xdm.source.ipv4, \"130.211.0.0/22\"))\n// First appearance of this (principal, IP) pair inside the 7-day window, in the last hour.\n// Employees' office and home addresses recur daily, so only a new source survives.\n| comp min(_time) as first_seen, max(_time) as last_seen, count() as api_calls\n  by xdm.source.ipv4, xdm.source.user.username\n| filter api_calls >= 3 and timestamp_diff(current_time(), first_seen, \"MINUTE\") <= 60\n| alter caller_ip = xdm.source.ipv4, principal = xdm.source.user.username\n| fields caller_ip, principal, api_calls, first_seen, last_seen",
   "severity": "SEV_040_HIGH",
   "alert_category": "PRIVILEGE_ESCALATION",
   "mitre_defs": {
@@ -16,13 +16,13 @@
   },
   "alert_fields": {
    "action_remote_ip": "caller_ip",
-   "actor_effective_username": "users",
-   "action_evtlog_message": "events_seen"
+   "actor_effective_username": "principal"
   },
-  "search_window": "1 hours",
-  "suppression_duration": "1 hours",
+  "search_window": "7 days",
+  "suppression_duration": "24 hours",
   "suppression_fields": [
-   "caller_ip"
+   "caller_ip",
+   "principal"
   ],
   "is_enabled": true,
   "alert_type": null,

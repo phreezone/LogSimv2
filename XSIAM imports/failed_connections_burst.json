@@ -2,19 +2,18 @@
   {
     "name": "Cisco ASA \u2014 High Volume of Denied Inbound Connections from One IP",
     "severity": "SEV_030_MEDIUM",
-    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"106023\" and xdm.observer.action = \"Deny\"\n| bin _time span = 10m\n| comp count() as denies,\n       values(xdm.target.ipv4) as dst_ips,\n       values(xdm.target.port) as dst_ports,\n       values(xdm.network.ip_protocol) as protocols\n       by xdm.source.ipv4, _time\n| filter denies >= 138\n| fields dst_ips, xdm.source.ipv4, dst_ports, protocols\n",
-    "is_enabled": false,
-    "description": "External IP generating an abnormal count of 106023 denies \u2014 scanner or attack pattern.",
+    "xql_query": "dataset = cisco_asa_raw\n| filter _raw_log contains \"302014\" and _raw_log contains \"SYN Timeout\"\n// 106023 denies are not parsed (and not emitted); an unanswered inbound connection shows\n// as 302013 Built + 302014 Teardown \"SYN Timeout\", 0 bytes. The initiator is the \"for\" side.\n| alter source_ip = arrayindex(regextract(_raw_log, \"for (?:outside|internet|untrust)\\S*?:(\\d+\\.\\d+\\.\\d+\\.\\d+)/\"), 0),\n        dst = arrayindex(regextract(_raw_log, \" to \\S+?:(\\d+\\.\\d+\\.\\d+\\.\\d+)/\"), 0),\n        dport = arrayindex(regextract(_raw_log, \" to \\S+?:\\d+\\.\\d+\\.\\d+\\.\\d+/(\\d+)\"), 0)\n| filter source_ip != null\n| bin _time span = 10m\n| comp count() as failed_connections, count_distinct(dst) as targets, count_distinct(dport) as ports,\n       values(dst) as dst_ips, values(dport) as dst_ports by source_ip, _time\n| filter failed_connections >= 30\n| fields source_ip, failed_connections, targets, ports, dst_ips, dst_ports",
+    "is_enabled": true,
+    "description": "30+ inbound connections from one outside address torn down with SYN Timeout (never answered) within 10 minutes: a scan or connection flood against the perimeter.",
     "alert_name": "Cisco ASA \u2014 High Volume of Denied Inbound Connections from One IP",
     "alert_category": "DISCOVERY",
     "alert_type": null,
     "alert_description": "What fired: External IP generating an abnormal count of 106023 denies \u2014 scanner or attack pattern.\n\nWhy it matters: an actor is enumerating hosts, services, shares, or accounts to map the environment. Assessed severity: Medium.\n\nMITRE ATT&CK: T1046 - Network Service Discovery (TA0007 - Discovery).\n\nInvestigate:\n  - Identify the scanning source and the number/range of targets it touched.\n  - Confirm the source is not an authorized scanner/vuln tool; look for follow-on access to any enumerated target.\n  - Pivot on the alert's key entity (xdm.source.ipv4) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
+      "action_remote_ip": "source_ip",
       "action_local_ip": "dst_ips",
-      "action_remote_ip": "xdm.source.ipv4",
-      "action_local_port": "dst_ports",
-      "action_app_protocol": "protocols"
+      "action_local_port": "dst_ports"
     },
     "execution_mode": "SCHEDULED",
     "search_window": "10 minutes",
@@ -24,7 +23,7 @@
     "suppression_enabled": true,
     "suppression_duration": "1 hours",
     "suppression_fields": [
-      "xdm.source.ipv4"
+      "source_ip"
     ],
     "dataset": "alerts",
     "user_defined_severity": null,
@@ -36,7 +35,7 @@
     },
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
     "lookup_mapping": []
   }

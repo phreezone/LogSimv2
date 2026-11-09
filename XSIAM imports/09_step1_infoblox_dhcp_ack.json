@@ -1,17 +1,17 @@
 [
   {
-    "name": "Infoblox \u2014 DHCP ACK Activity (Baseline, Disabled)",
-    "severity": "SEV_010_INFO",
-    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DHCP\" and xdm.event.description contains \"DHCPACK\"\n| alter mac = arrayindex(regextract(xdm.event.description, \"([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})\"), 0),\n        ip  = arrayindex(regextract(xdm.event.description, \"DHCPACK on (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        hostname = arrayindex(regextract(xdm.event.description, \"\\((\\S+?)\\) via\"), 0)\n| filter mac != null and ip != null\n| bin _time span = 24h\n| comp count_distinct(mac) as new_devices,\n       values(ip) as tgt_ips,\n       values(mac) as device_macs\n       by hostname, _time\n| fields tgt_ips\n",
-    "is_enabled": false,
-    "description": "Infoblox DHCPACK events grouped by hostname \u2014 informational baseline. DISABLED by default because DHCP fires on every device-join (5k+/day). Keep available as a pivot query for case investigation, but not as an active detection.",
-    "alert_name": "Infoblox \u2014 DHCP ACK Activity (Baseline, Disabled)",
+    "name": "Infoblox \u2014 DHCP Address Offered to Randomized (Locally Administered) MAC",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DHCP\"\n| alter mac = lowercase(arrayindex(regextract(xdm.event.description, \"([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})\"), 0)),\n        ip  = arrayindex(regextract(xdm.event.description, \"(?:DHCPACK|DHCPOFFER) on (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        hostname = arrayindex(regextract(xdm.event.description, \"\\((\\S+?)\\) via\"), 0),\n        relay = arrayindex(regextract(xdm.event.description, \" via (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0)\n| filter mac != null and ip != null\n| filter mac ~= \"^.[26ae]:\"\n| comp count_distinct(mac) as random_macs, values(ip) as ip_list, values(relay) as relays,\n       min(_time) as first_seen, max(_time) as last_seen by relay\n| fields relay, random_macs, ip_list, first_seen, last_seen",
+    "is_enabled": true,
+    "description": "DHCP offered or leased an address to a locally-administered (randomized) MAC. Managed hosts use burned-in MACs; random ones come from unmanaged devices, MAC-spoofing or DHCP-starvation tools (many per relay).",
+    "alert_name": "Infoblox \u2014 DHCP Address Offered to Randomized (Locally Administered) MAC",
     "alert_category": "OTHER",
     "alert_type": null,
-    "alert_description": "What fired: Infoblox DHCPACK events grouped by hostname \u2014 informational baseline. DISABLED by default because DHCP fires on every device-join (5k+/day). Keep available as a pivot query for case investigation, but not as an active detection.\n\nWhy it matters: this activity is anomalous and warrants review. Assessed severity: Informational.\n\nInvestigate:\n  - Identify the primary entity and the behaviour that triggered the rule.\n  - Correlate related alerts and events for the same entity within this window before escalating.\n  - Pivot on the alert's key entity (hostname) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
+    "alert_description": "What fired: DHCP offered or leased an address to a locally-administered (randomized) MAC. Managed hosts use burned-in MACs; random ones come from unmanaged devices, MAC-spoofing or DHCP-starvation tools (many per relay).\n\nWhy it matters: an unmanaged, spoofed or rogue device may be on the network. Assessed severity: Medium.\n\nInvestigate:\n  - Pivot on the alert's key entity ($relay) to related activity in the same window.\n  - Check the asset inventory / owner for the device or user involved.\n  - Confirm the activity is not expected/authorized before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_local_ip": "tgt_ips"
+      "action_local_ip": "ip_list"
     },
     "execution_mode": "SCHEDULED",
     "search_window": "1 hours",
@@ -21,7 +21,7 @@
     "suppression_enabled": true,
     "suppression_duration": "1 hours",
     "suppression_fields": [
-      "hostname"
+      "relay"
     ],
     "dataset": "alerts",
     "user_defined_severity": null,
@@ -29,7 +29,7 @@
     "mitre_defs": {},
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
     "lookup_mapping": []
   }

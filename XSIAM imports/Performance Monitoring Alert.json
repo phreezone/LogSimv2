@@ -1,10 +1,10 @@
 [
   {
     "name": "Performance Monitoring Alert",
-    "severity": "SEV_030_MEDIUM",
-    "xql_query": "preset = metrics_view \r\n| alter unique_id = concat(_collector_id, _collector_ip, _collector_name, _collector_type , _final_reporting_device_ip ,_final_reporting_device_name , _broker_device_id ,_vendor , _product )\r\n| comp avg(total_event_rate) as total_event_rate_avg by unique_id //, _collector_id, _collector_ip, _collector_name, _collector_type , _final_reporting_device_ip ,_final_reporting_device_name , _broker_device_id ,_vendor , _product\r\n| join conflict_strategy = both  (\r\n    preset = metrics_view |filter timestamp_diff(current_time(), _time ,\"minute\") <= 10\r\n    | alter unique_id = concat(_collector_id, _collector_ip, _collector_name, _collector_type , _final_reporting_device_ip ,_final_reporting_device_name , _broker_device_id ,_vendor , _product )\r\n    | comp latest(total_event_rate) as total_event_rate, latest(_time) as _time by unique_id ) as last_ten_m last_ten_m.unique_id = unique_id \r\n| filter total_event_rate < multiply(total_event_rate_avg, 0.5)",
-    "is_enabled": false,
-    "description": "Performance Monitoring Alert",
+    "severity": "SEV_020_LOW",
+    "xql_query": "preset = metrics_view\r\n| alter unique_id = concat(_collector_id, _collector_ip, _collector_name, _collector_type, _final_reporting_device_ip, _final_reporting_device_name, _broker_device_id, _vendor, _product)\r\n| comp avg(total_event_rate) as total_event_rate_avg by unique_id\r\n// Feeds averaging under 0.05 events/s (~4,300/day) are trickles: one quiet window is \"-50%\".\r\n| filter total_event_rate_avg >= 0.05\r\n| join conflict_strategy = both (\r\n    preset = metrics_view\r\n    | filter timestamp_diff(current_time(), _time, \"minute\") <= 30\r\n    | alter unique_id = concat(_collector_id, _collector_ip, _collector_name, _collector_type, _final_reporting_device_ip, _final_reporting_device_name, _broker_device_id, _vendor, _product)\r\n    | comp avg(total_event_rate) as total_event_rate, max(_time) as last_sample by unique_id) as recent\r\n  recent.unique_id = unique_id\r\n| filter total_event_rate < multiply(total_event_rate_avg, 0.5)\r\n| fields unique_id, total_event_rate_avg, total_event_rate, last_sample",
+    "is_enabled": true,
+    "description": "Data feed health: a source averaging at least 0.05 events/s over 7 days has run below half that rate for the last 30 minutes. One issue per source per 12 hours.",
     "alert_name": "Performance Monitoring Alert",
     "alert_category": "OTHER",
     "alert_type": null,
@@ -16,9 +16,11 @@
     "simple_schedule": "10 minutes",
     "timezone": "America/New_York",
     "crontab": "*/10 * * * *",
-    "suppression_enabled": false,
-    "suppression_duration": null,
-    "suppression_fields": null,
+    "suppression_enabled": true,
+    "suppression_duration": "12 hours",
+    "suppression_fields": [
+      "unique_id"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,

@@ -461,7 +461,11 @@ def _query(r):
     if r.get("post_filter"):
         q += f"| filter {r['post_filter']}\n"
     q += _COMP.format(span=r["span"], extra=r.get("extra", ""), by=r.get("by", ""))
-    q += f"| filter {r['threshold']}\n" + _FIELDS
+    # Grouping keys beyond esxi_host are suppression fields. A suppression field missing
+    # from the output fails every run on the tenant ("suppression fields references field
+    # that no longer exists" / "server error while generating the alert").
+    keys = "".join(f", {k}" for k in _key(r)[1:])
+    q += f"| filter {r['threshold']}\n" + _FIELDS.replace("| fields esxi_host,", f"| fields esxi_host{keys},", 1)
     return q
 
 
@@ -561,13 +565,13 @@ def apply():
     for rule in (build(r) for r in RULES):
         cur = live.get(rule["name"])
         if cur is not None:
-            if cur.get("description") == rule["description"]:
+            if all(cur.get(k) == rule[k] for k in ("description", "xql_query", "suppression_fields")):
                 print(f"  exists   {rule['name']}")
                 continue
             rep = c.insert_correlation_rules([dict(rule, rule_id=cur["rule_id"])])
             rep = rep.get("reply", rep) or {}
             now = {r["name"]: r for r in c.get_correlation_rules()}.get(rule["name"]) or {}
-            ok = now.get("description") == rule["description"]
+            ok = all(now.get(k) == rule[k] for k in ("description", "xql_query", "suppression_fields"))
             failed += not ok
             print(f"  {'updated' if ok else 'FAILED '}  {rule['name']}  {'' if ok else rep}")
             if not ok:

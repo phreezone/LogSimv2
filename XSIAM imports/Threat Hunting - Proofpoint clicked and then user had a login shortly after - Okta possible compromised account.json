@@ -2,9 +2,9 @@
   {
     "name": "Threat Hunting - Proofpoint clicked and then user had a login shortly after - Okta possible compromised account",
     "severity": "SEV_050_CRITICAL",
-    "xql_query": "dataset = proofpoint_tap_raw\r\n| filter _log_type = \"click-permitted\"\r\n| fields clickIP, senderIP, recipient, url, GUID, _time as pp_time\r\n| join (\r\n    datamodel dataset = okta_sso_raw\r\n    | filter xdm.event.outcome = \"SUCCESS\"\r\n    | filter xdm.source.ipv4 != null\r\n    | fields xdm.source.ipv4 as loginIP,\r\n             xdm.source.user.upn as loginUser,\r\n             xdm.source.user.username as loginDisplayName,\r\n             xdm.source.location.country as loginCountry,\r\n             xdm.alert.risks as riskFlags,\r\n             _time as okta_time) as okta\r\n  senderIP = okta.loginIP\r\n| filter okta_time >= pp_time\r\n| fields recipient, senderIP, url, GUID, pp_time,\r\n         loginUser, loginDisplayName, loginCountry, riskFlags, okta_time",
+    "xql_query": "dataset = proofpoint_tap_raw\r\n| filter _log_type = \"click-permitted\" and senderIP != null and recipient != null\r\n| fields recipient, senderIP, url, GUID, _time as click_time\r\n| join type = inner (\r\n    dataset = okta_sso_raw\r\n    | filter eventType = \"user.session.start\" or eventType = \"user.authentication.sso\"\r\n    | alter outcome_result = arrayindex(regextract(outcome, \"\\\"result\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\r\n            ip = arrayindex(regextract(client, \"\\\"ipAddress\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0),\r\n            user_name = arrayindex(regextract(actor, \"\\\"alternateId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\"), 0)\r\n    | filter outcome_result = \"SUCCESS\" and ip != null and user_name != null\r\n    | filter not (user_name contains \"svc-\" or user_name contains \"api-\" or user_name contains \"default.user\")\r\n    | fields user_name as loginUser, ip as loginIP, _time as login_time) as okta\r\n  okta.loginIP = senderIP\r\n| filter loginUser = recipient\r\n     and login_time >= click_time\r\n     and timestamp_diff(login_time, click_time, \"MINUTE\") <= 60\r\n| comp count() as logins, min(login_time) as first_login\r\n  by recipient, loginUser, senderIP, url, GUID, click_time\r\n| fields recipient, loginUser, senderIP, url, GUID, click_time, first_login, logins",
     "is_enabled": true,
-    "description": null,
+    "description": "A user clicked a permitted Proofpoint URL and, within 60 minutes, their Okta account signed in from the IP that sent the phishing mail.",
     "alert_name": "Threat Hunting - Proofpoint clicked and then user had a login shortly after - possible compromised account",
     "alert_category": "OTHER",
     "alert_type": null,
@@ -12,7 +12,6 @@
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
       "xdm_url": "url",
-      "usersdetails": "loginDisplayName",
       "fw_url_domain": "url",
       "action_remote_ip": "senderIP",
       "proofpointtapguid": "GUID",
@@ -20,13 +19,15 @@
       "actor_effective_username": "loginUser"
     },
     "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
+    "search_window": "2 hours",
     "simple_schedule": "10 minutes",
     "timezone": "America/New_York",
     "crontab": "*/10 * * * *",
-    "suppression_enabled": false,
-    "suppression_duration": null,
-    "suppression_fields": null,
+    "suppression_enabled": true,
+    "suppression_duration": "24 hours",
+    "suppression_fields": [
+      "GUID"
+    ],
     "dataset": "alerts",
     "user_defined_severity": null,
     "user_defined_category": null,

@@ -1,27 +1,26 @@
 [
   {
-    "name": "Infoblox \u2014 DHCP ACK Activity (Baseline)",
-    "severity": "SEV_010_INFO",
-    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DHCP\" and xdm.event.description contains \"DHCPACK\"\n| alter mac = arrayindex(regextract(xdm.event.description, \"([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})\"), 0),\n        ip  = arrayindex(regextract(xdm.event.description, \"DHCPACK on (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        hostname = arrayindex(regextract(xdm.event.description, \"\\((\\S+?)\\) via\"), 0)\n| filter mac != null and ip != null\n| bin _time span = 24h\n| comp count_distinct(mac) as new_devices by hostname, _time\n",
-    "is_enabled": false,
-    "description": "Infoblox DHCPACK events grouped by hostname \u2014 informational baseline showing devices joining the network for kill-chain timeline correlation.",
-    "alert_name": "Infoblox \u2014 DHCP ACK Activity (Baseline)",
+    "name": "Infoblox \u2014 Hostname Leased to Multiple MAC Addresses",
+    "severity": "SEV_030_MEDIUM",
+    "xql_query": "datamodel dataset = infoblox_infoblox_raw\n| filter xdm.event.type = \"DHCP\"\n| alter mac = lowercase(arrayindex(regextract(xdm.event.description, \"([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})\"), 0)),\n        ip  = arrayindex(regextract(xdm.event.description, \"(?:DHCPACK|DHCPOFFER) on (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0),\n        hostname = arrayindex(regextract(xdm.event.description, \"\\((\\S+?)\\) via\"), 0),\n        relay = arrayindex(regextract(xdm.event.description, \" via (\\d+\\.\\d+\\.\\d+\\.\\d+)\"), 0)\n| filter mac != null and ip != null\n| filter xdm.event.description contains \"DHCPACK\" and hostname != null\n| comp count_distinct(mac) as macs, values(mac) as mac_list, values(ip) as ip_list,\n       min(_time) as first_seen, max(_time) as last_seen by hostname\n| filter macs >= 2\n| fields hostname, macs, mac_list, ip_list, first_seen, last_seen",
+    "is_enabled": true,
+    "description": "One hostname was leased addresses for two or more MAC addresses within 24 hours: a device impersonating another's name, or a spoofed MAC. Each managed host keeps one NIC.",
+    "alert_name": "Infoblox \u2014 Hostname Leased to Multiple MAC Addresses",
     "alert_category": "OTHER",
     "alert_type": null,
-    "alert_description": null,
+    "alert_description": "What fired: One hostname was leased addresses for two or more MAC addresses within 24 hours: a device impersonating another's name, or a spoofed MAC. Each managed host keeps one NIC.\n\nWhy it matters: an unmanaged, spoofed or rogue device may be on the network. Assessed severity: Medium.\n\nInvestigate:\n  - Pivot on the alert's key entity ($hostname) to related activity in the same window.\n  - Check the asset inventory / owner for the device or user involved.\n  - Confirm the activity is not expected/authorized before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "appmessage": "xdm.event.description",
-      "action_local_ip": "xdm.source.ipv4",
-      "action_remote_ip": "xdm.target.ipv4"
+      "action_local_ip": "ip_list",
+      "agent_hostname": "hostname"
     },
     "execution_mode": "SCHEDULED",
-    "search_window": "1 hours",
+    "search_window": "24 hours",
     "simple_schedule": "10 minutes",
     "timezone": "America/New_York",
     "crontab": "*/10 * * * *",
     "suppression_enabled": true,
-    "suppression_duration": "1 hours",
+    "suppression_duration": "24 hours",
     "suppression_fields": [
       "hostname"
     ],
@@ -31,7 +30,7 @@
     "mitre_defs": {},
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
     "lookup_mapping": []
   }

@@ -2,17 +2,17 @@
   {
     "name": "Cisco ASA \u2014 VPN Login From \u22652 Distinct IPs for Same User",
     "severity": "SEV_040_HIGH",
-    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"113039\"\n| filter xdm.source.user.username != null and xdm.source.ipv4 != null\n| alter ip_16 = arrayindex(regextract(xdm.source.ipv4, \"^(\\d+\\.\\d+)\\.\"), 0)\n| filter ip_16 != null\n| comp count_distinct(xdm.source.ipv4) as ips,\n       count_distinct(ip_16) as distinct_networks,\n       values(xdm.source.ipv4) as ip_list\n       by xdm.source.user.username\n| filter distinct_networks >= 2 and ips >= 2\n| fields ip_list, xdm.source.user.username\n",
+    "xql_query": "datamodel dataset = cisco_asa_raw\n| filter cisco_asa_raw._raw_log contains \"113039\"\n| filter xdm.source.user.username != null and xdm.source.ipv4 != null\n| fields xdm.source.user.username as vpn_user, xdm.source.ipv4 as first_ip,\n         xdm.source.location.country as first_country, _time as first_time\n| join type = inner (\n    datamodel dataset = cisco_asa_raw\n    | filter cisco_asa_raw._raw_log contains \"113039\"\n    | filter xdm.source.user.username != null and xdm.source.ipv4 != null\n    | fields xdm.source.user.username as user2, xdm.source.ipv4 as second_ip,\n             xdm.source.location.country as second_country, _time as second_time) as b\n  b.user2 = vpn_user\n| filter second_time > first_time\n     and timestamp_diff(second_time, first_time, \"MINUTE\") <= 30\n     and first_country != second_country\n| comp count() as pairs, values(first_ip) as first_ips, values(second_ip) as second_ips,\n       values(first_country) as first_countries, values(second_country) as second_countries,\n       min(first_time) as first_seen, max(second_time) as last_seen by vpn_user\n| alter remote_ip = arrayindex(second_ips, 0)\n| fields vpn_user, remote_ip, first_ips, second_ips, first_countries, second_countries,\n         pairs, first_seen, last_seen",
     "is_enabled": true,
-    "description": "ASA 113039 AnyConnect parent session start events for the same xdm.source.user.username from \u22652 distinct source IPs within 30 minutes \u2014 impossible travel via VPN.",
+    "description": "ASA 113039 AnyConnect parent session starts for the same user from two different countries within 30 minutes: impossible travel via VPN.",
     "alert_name": "Cisco ASA \u2014 VPN Login From \u22652 Distinct IPs for Same User",
     "alert_category": "INFILTRATION",
     "alert_type": null,
-    "alert_description": "What fired: ASA 113039 AnyConnect parent session start events for the same xdm.source.user.username from \u22652 distinct source IPs within 30 minutes \u2014 impossible travel via VPN.\n\nWhy it matters: an actor may be gaining an initial foothold (phishing, exploit, or valid accounts). Assessed severity: High.\n\nMITRE ATT&CK: T1078 - Valid Accounts (TA0001 - Initial Access).\n\nInvestigate:\n  - Identify the entry vector, the targeted user/asset, and the source.\n  - Check for successful access and any follow-on execution or persistence from the same actor.\n  - Pivot on the alert's key entity (xdm.source.user.username) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
+    "alert_description": "What fired: ASA 113039 AnyConnect parent session starts for the same user from two different countries within 30 minutes: impossible travel via VPN.\n\nWhy it matters: an actor may be gaining an initial foothold (phishing, exploit, or valid accounts). Assessed severity: High.\n\nMITRE ATT&CK: T1078 - Valid Accounts (TA0001 - Initial Access).\n\nInvestigate:\n  - Identify the entry vector, the targeted user/asset, and the source.\n  - Check for successful access and any follow-on execution or persistence from the same actor.\n  - Pivot on the alert's key entity (vpn_user) to related activity in the same window.\n  - Confirm the activity is not expected/authorized for the involved entity before escalating.",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "action_remote_ip": "ip_list",
-      "actor_effective_username": "xdm.source.user.username"
+      "action_remote_ip": "remote_ip",
+      "actor_effective_username": "vpn_user"
     },
     "execution_mode": "SCHEDULED",
     "search_window": "1 hours",
@@ -22,7 +22,7 @@
     "suppression_enabled": true,
     "suppression_duration": "1 hours",
     "suppression_fields": [
-      "xdm.source.user.username"
+      "vpn_user"
     ],
     "dataset": "alerts",
     "user_defined_severity": null,
@@ -34,7 +34,7 @@
     },
     "investigation_query_link": "",
     "drilldown_query_timeframe": "ALERT",
-    "mapping_strategy": "AUTO",
+    "mapping_strategy": "CUSTOM",
     "action": "ALERTS",
     "lookup_mapping": []
   }
