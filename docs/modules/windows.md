@@ -83,13 +83,13 @@ WEC intake, so the 4662 corroboration keeps the signal alive either way.
 
 | Generator (`scenario_event`) | Event sequence | Target analytic |
 |---|---|---|
-| `shadow_credentials` | 4624 ×2, 4672, 4688 (Whisker/Certipy), 5136 `msDS-KeyCredentialLink` added, 4662 write-property, 4768 PKINIT TGT, 4769, 4689 | Possible shadow credentials addition (Medium) |
+| `shadow_credentials` | 4624 ×2, 4672, 4688 (Whisker/Certipy), 5136 `msDS-KeyCredentialLink` added, 4662 write-property, 4768 PKINIT TGT, 4769, 4689 | Possible shadow credentials addition (Medium); Key credential attribute addition (Low) |
 | `pkinit_auth` | 4768 with `Pre-Authentication Type: 16` and certificate issuer/serial/thumbprint fields, 4624 ×2, 4672, 4769 | Suspicious PKINIT TGT authentication request |
 | `sid_history_injection` | 4624 ×2, 4672, 4688, 5136 `sIDHistory` added, 4662 write-property, 4738 carrying `SID History`, 4768, 4689 | Suspicious SID History Addition |
 | `adfs_dkm_access` | 4624 ×2, 4672, 4688, 4662 read of `CN=DKM,CN=ADFS,CN=Microsoft,CN=Program Data` (`thumbnailPhoto` GUID, `AccessMask 0x10`), 4689 | ADFS DKM Key Access |
-| `kerberos_relay` | 4768 for `<HOST>$` from `::1`, 4624 ×2 (type 3), 4769, 4672, 4688, 4689 | Possible Kerberos relay attack |
+| `kerberos_relay` | 4768 for `<HOST>$` from the attacker IP, DC 4624, 4769, endpoint 4624 type 3 Kerberos from `127.0.0.1` as the **local** `Administrator` (`S-1-5-21-*-500`, non-zero `IpPort`, target never a DC), 4672, 4688, 4689 | Possible Kerberos relay attack |
 | `spn_cleared` | 4624 ×2, 4672, 4688, 5136 ×2 (SPNs cleared on a machine account), 4662, 4742, 4689 | SPNs cleared from a machine account for the first time |
-| `suspicious_sam_change` | 4624 ×2, 4672, 4688, 5136 ×2 (sAMAccountName → DC hostname), 4662, 4742, 4768, 4689 | Suspicious sAMAccountName change to DC hostname |
+| `suspicious_sam_change` | 4624 ×2, 4672, 4688, 5136 ×2 (sAMAccountName → DC hostname), 4662, 4742, 4768, 4689 | Suspicious sAMAccountName change to DC hostname; related "TGT request with a spoofed sAMAccountName" |
 
 Verified AD schema GUIDs used by the 4662 events: key credential
 `5b47d60f-6090-40b2-9f37-2a4de88f3063`, sIDHistory
@@ -98,9 +98,17 @@ Verified AD schema GUIDs used by the 4662 events: key credential
 `3e0abfd0-126a-11d0-a060-00aa006c33ed`, thumbnailPhoto
 `8d3bca50-1d7e-11d0-a081-00aa006c33ed`.
 
-Two shapes were inferred rather than documented: the ADFS DKM 4662 (`thumbnailPhoto` GUID
-with `AccessMask 0x10`) and the Kerberos relay sequence (type-3 logon as `<HOST>$` from
-`::1`).
+Two shapes were inferred rather than documented. The ADFS DKM 4662
+(`thumbnailPhoto` GUID with `AccessMask 0x10`) is inferred.
+`kerberos_relay` is no longer inferred: the endpoint 4624 now follows the published
+KrbRelayUp signature — EventID 4624, `LogonType 3`,
+`AuthenticationPackageName Kerberos`, `IpAddress 127.0.0.1`, `TargetUserSid`
+`S-1-5-21-*-500`, non-zero `IpPort`, and no domain-controller target — which is the
+detection block of Sigma rule `749c9f5e-b353-4b90-a9c1-05243357ca4b`
+("Potential Privilege Escalation via Local Kerberos Relay over LDAP") and Splunk
+`8309c3a8-4d34-48ae-ad66-631658214653` ("Windows Kerberos Local Successful Logon").
+The relayed ticket is modelled as the target's *machine-local* Administrator
+(`S-1-5-21-<machine>-500`, `TargetDomainName` = the computer name), not the domain SID.
 
 `samaccountname_spoofing` and `dnshostname_spoofing` also gained secondary claims for the
 attribute-change analytics above, and `multiple_service_tickets` now lists

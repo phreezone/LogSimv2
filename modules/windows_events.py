@@ -198,6 +198,7 @@ _EVENT_META = {
     4663: {"task": 12800, "category": "File System",            "version": 1, "outcome": "success"},
     4741: {"task": 13825, "category": "Computer Account Management","version": 0, "outcome": "success"},
     4742: {"task": 13825, "category": "Computer Account Management","version": 0, "outcome": "success"},
+    4781: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4728: {"task": 13826, "category": "Security Group Management",   "version": 0, "outcome": "success"},
     4732: {"task": 13826, "category": "Security Group Management",   "version": 0, "outcome": "success"},
     4756: {"task": 13826, "category": "Security Group Management",   "version": 0, "outcome": "success"},
@@ -786,6 +787,24 @@ def _msg_4742(d):
     )
 
 
+def _msg_4781(d):
+    return (
+        "The name of an account was changed.\r\n\r\n"
+        "Subject:\r\n"
+        f"\tSecurity ID:\t\t{d.get('SubjectUserSid','')}\r\n"
+        f"\tAccount Name:\t\t{d.get('SubjectUserName','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('SubjectDomainName','')}\r\n"
+        f"\tLogon ID:\t\t{d.get('SubjectLogonId','')}\r\n\r\n"
+        "Account That Was Changed:\r\n"
+        f"\tSecurity ID:\t\t{d.get('TargetSid','')}\r\n"
+        f"\tAccount Domain:\t\t{d.get('TargetDomainName','')}\r\n"
+        f"\tOld Account Name:\t{d.get('OldTargetUserName','')}\r\n"
+        f"\tNew Account Name:\t{d.get('NewTargetUserName','')}\r\n\r\n"
+        "Additional Information:\r\n"
+        f"\tPrivileges:\t\t{d.get('PrivilegeList','-')}"
+    )
+
+
 def _msg_5136(d):
     return (
         "A directory service object was modified.\r\n\r\n"
@@ -1368,6 +1387,7 @@ _MSG_BUILDERS = {
     4732: _msg_4732,
     4741: _msg_4741,
     4742: _msg_4742,
+    4781: _msg_4781,
     4756: _msg_4756,
     4729: _msg_4729,
     4733: _msg_4733,
@@ -1872,6 +1892,21 @@ def _stable_user_sid(username: str) -> str:
         sid = f"{_SYNTH_DOMAIN_SID}-{rid}"
         _USER_SIDS[username] = sid
         return sid
+
+
+def _local_admin_sid(hostname: str) -> str:
+    """Deterministic machine-local SID for the built-in Administrator (RID 500).
+
+    A domain-joined box's local Administrator is S-1-5-21-<machine SID>-500,
+    which is a *different* SID from the domain account of the same name. The
+    three sub-authorities are derived from the hostname so every host keeps a
+    stable, distinct machine SID.
+    """
+    h = hashlib.sha1(hostname.upper().encode()).digest()
+    a = int.from_bytes(h[0:4], "big") & 0x7FFFFFFF
+    b = int.from_bytes(h[4:8], "big") & 0x7FFFFFFF
+    c = int.from_bytes(h[8:12], "big") & 0x7FFFFFFF
+    return f"S-1-5-21-{a}-{b}-{c}-500"
 
 
 # --- Record numbers that never go backwards --------------------------------------------
@@ -2418,14 +2453,19 @@ def cribl_record(payload):
 def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
                 workstation_override=None, ip_override=None,
                 target_logon_id=None, logon_guid=None, ts=None,
-                elevated=False, domain_override=None) -> dict:
+                elevated=False, domain_override=None,
+                target_sid_override=None) -> dict:
     """4624 – An account was successfully logged on (emitted by the endpoint).
 
     `domain_override`: TargetDomainName to use instead of the config AD domain.
     For a LOCAL (non-domain) box account, the logon "domain" is the computer's own
     name — pass it so the synthetic identity matches how XSIAM resolves that local
     account (netbios = the host), which the IP<->user binding needs to line up with
-    the endpoint case."""
+    the endpoint case.
+
+    `target_sid_override`: TargetUserSid to emit instead of the hash-derived
+    domain SID. Needed when the logon is a *machine-local* account (e.g. the
+    built-in Administrator, S-1-5-21-<machine>-500) rather than a domain user."""
     domain = domain_override or _get_domain(config)
     computer = _fqdn(workstation_override or user_info["hostname"], config)
     ip = ip_override if ip_override is not None else user_info.get("ip") or "-"
@@ -2492,7 +2532,7 @@ def _build_4624(user_info, config, *, logon_type=2, auth_pkg=None,
         "SubjectUserName":           subj_name,
         "SubjectDomainName":         subj_domain,
         "SubjectLogonId":            "0x0" if logon_type in (3, 10) else "0x3e7",
-        "TargetUserSid":             _stable_user_sid(user_info["username"]),
+        "TargetUserSid":             target_sid_override or _stable_user_sid(user_info["username"]),
         "TargetUserName":            user_info["username"],
         "TargetDomainName":          domain,
         "TargetLogonId":             target_logon_id,
@@ -3031,9 +3071,10 @@ _NORMAL_USER_PRIVILEGES = [
 
 
 def _build_4672(user_info, config, *, logon_id=None, is_admin=False,
-                is_service=False, ts=None) -> dict:
+                is_service=False, sid_override=None, domain_override=None,
+                ts=None) -> dict:
     """4672 – Special privileges assigned to new logon."""
-    domain = _get_domain(config)
+    domain = domain_override or _get_domain(config)
     computer = _fqdn(user_info["hostname"], config)
     if is_service:
         privs = _SERVICE_PRIVILEGES
@@ -3043,7 +3084,7 @@ def _build_4672(user_info, config, *, logon_id=None, is_admin=False,
         privs = random.sample(_NORMAL_USER_PRIVILEGES,
                               k=random.randint(2, len(_NORMAL_USER_PRIVILEGES)))
     event_data = {
-        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserSid":    sid_override or _stable_user_sid(user_info["username"]),
         "SubjectUserName":   user_info["username"],
         "SubjectDomainName": domain,
         "SubjectLogonId":    logon_id or _new_logon_id(),
@@ -3054,9 +3095,11 @@ def _build_4672(user_info, config, *, logon_id=None, is_admin=False,
 
 def _build_4688(user_info, config, *, process_name, command_line="",
                 parent_process="C:\\Windows\\explorer.exe",
-                logon_id=None, ts=None) -> dict:
+                logon_id=None, sid_override=None, domain_override=None,
+                ts=None) -> dict:
     """4688 – A new process has been created."""
     domain = _get_domain(config)
+    target_domain = domain_override or domain
     computer = _fqdn(user_info["hostname"], config)
     new_pid = "0x%x" % random.randint(0x200, 0xffff)
     parent_pid = "0x%x" % random.randint(0x100, 0x9fff)
@@ -3070,9 +3113,9 @@ def _build_4688(user_info, config, *, process_name, command_line="",
         "TokenElevationType":"%%1936",
         "ProcessId":         parent_pid,
         "CommandLine":       command_line,
-        "TargetUserSid":     _stable_user_sid(user_info["username"]),
+        "TargetUserSid":     sid_override or _stable_user_sid(user_info["username"]),
         "TargetUserName":    user_info["username"],
-        "TargetDomainName":  domain,
+        "TargetDomainName":  target_domain,
         "TargetLogonId":     logon_id or _new_logon_id(),
         "ParentProcessName": parent_process,
         "MandatoryLabel":    "S-1-16-12288",
@@ -3081,12 +3124,13 @@ def _build_4688(user_info, config, *, process_name, command_line="",
 
 
 def _build_4689(user_info, config, *, process_name, process_id=None,
-                logon_id=None, ts=None) -> dict:
+                logon_id=None, sid_override=None, domain_override=None,
+                ts=None) -> dict:
     """4689 – A process has exited."""
-    domain = _get_domain(config)
+    domain = domain_override or _get_domain(config)
     computer = _fqdn(user_info["hostname"], config)
     event_data = {
-        "SubjectUserSid":    _stable_user_sid(user_info["username"]),
+        "SubjectUserSid":    sid_override or _stable_user_sid(user_info["username"]),
         "SubjectUserName":   user_info["username"],
         "SubjectDomainName": domain,
         "SubjectLogonId":    logon_id or _new_logon_id(),
@@ -3313,6 +3357,30 @@ def _build_4742(user_info, config, *, target_computer_name, target_sid,
         "ServicePrincipalNames": spns,
     }
     return _build_event(4742, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_4781(user_info, config, *, old_target_user_name, new_target_user_name,
+                target_sid, target_domain=None, logon_id=None, ts=None) -> dict:
+    """4781 – The name of an account was changed (DC event).
+
+    This is the state-transition event Windows writes for a rename; it carries
+    the old and new name on one record. Cortex's "Suspicious sAMAccountName
+    change" analytic keys on it, not on the 4742 final-state event alone.
+    """
+    dc_host = _get_dc_hostname(config)
+    domain = _get_domain(config)
+    event_data = {
+        "OldTargetUserName":   old_target_user_name,
+        "NewTargetUserName":   new_target_user_name,
+        "TargetDomainName":    target_domain or domain,
+        "TargetSid":           target_sid,
+        "SubjectUserSid":      _stable_user_sid(user_info["username"]),
+        "SubjectUserName":     user_info["username"],
+        "SubjectDomainName":   domain,
+        "SubjectLogonId":      logon_id or _new_logon_id(),
+        "PrivilegeList":       "-",
+    }
+    return _build_event(4781, dc_host, event_data, success=True, ts=ts)
 
 
 # Well-known SIDs for privileged AD groups
@@ -9014,11 +9082,13 @@ def _threat_shadow_credentials(config, session_context):
         "Key credential attribute addition" (Low)
       - the follow-on PKINIT TGT also feeds "PKINIT TGT authentication request"
 
-    Which event carries the signal is not published (see the block comment above):
-    both the 5136 Value Added pair and the 4662 Write Property are emitted, plus
-    a PKINIT 4768 for the modified identity. The target is deliberately a
-    different account from the actor so the higher "Possible shadow
-    credentials addition" variation is the one exercised.
+    Both the 5136 Value Added pair and the 4662 Write Property are emitted, plus
+    a PKINIT 4768 for the modified identity. The Medium "Possible shadow
+    credentials addition" variation is selected by the AttributeValue's declared
+    DN-Binary length: `B:828:` selects Medium, other lengths the Low "Key
+    credential attribute addition" variation; the target account type (user vs
+    computer) does not. The generator therefore emits a realistic
+    828-hex-character KEY_CREDENTIAL blob, the length a genuine value has.
 
     Sequence:
       1. Attacker authenticates -> DC 4624 + endpoint 4624 + 4672
@@ -9033,15 +9103,23 @@ def _threat_shadow_credentials(config, session_context):
     if not actor:
         return None
 
-    target = _pick_other_windows_user(session_context, actor)
-    if not target:
-        target = {**actor, "username": "Administrator"}
-
     dns_domain = _get_dns_domain(config)
     base_dn = _domain_dn(config)
-    target_dn = f"CN={target['username']},CN=Users,{base_dn}"
+
+    # The realistic Whisker/Certipy target is a computer, so the target is a
+    # machine account rather than a second user. (The account type does not
+    # select the analytic variation; the key-credential length below does.)
+    computer_name = (random.choice(["BACKUP", "FILE", "APP", "SQL", "WEB"])
+                     + str(random.randint(10, 99)))
+    computer_sam = f"{computer_name}$"
+    target = {
+        "username": computer_sam,
+        "hostname": f"{computer_name.lower()}.{dns_domain}",
+        "ip": actor.get("ip"),
+    }
+    target_dn = f"CN={computer_name},CN=Computers,{base_dn}"
     target_guid = _new_logon_guid()
-    target_sid = _stable_user_sid(target["username"])
+    target_sid = _stable_user_sid(computer_name)
 
     events = []
     t = time.time()
@@ -9071,7 +9149,7 @@ def _threat_shadow_credentials(config, session_context):
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
          f"powershell.exe -ep bypass -c \"$c = New-Object "
          f"System.Security.Cryptography.X509Certificates.X509Certificate2; "
-         f"Set-ADUser -Identity {target['username']} -Add "
+         f"Set-ADComputer -Identity {target['username']} -Add "
          f"@{{'msDS-KeyCredentialLink'=$c}}\""),
     ])
     events.append(json.dumps(_build_4688(actor, config, process_name=tool[0],
@@ -9080,11 +9158,17 @@ def _threat_shadow_credentials(config, session_context):
     t += random.uniform(0.5, 1.5)
 
     # DN-Binary form real AD stores for msDS-KeyCredentialLink: B:<len>:<hex>:<DN>
-    key_hex = uuid.uuid4().hex + uuid.uuid4().hex
-    key_blob = f"B:{len(key_hex)}:{key_hex}:{target_dn}"
+    # The Cortex analytic's Medium "Possible shadow credentials addition"
+    # variation keys on the declared hex length being exactly 828; other lengths
+    # select the Low variation. 828 is also the length of a genuine blob, so
+    # emit a realistic KEY_CREDENTIAL blob.
+    key_prefix = ("00020000200037AC7887BC49F44F1FD58C9A5CC99738DF4541AE5920BF"
+                  "644370A50D")
+    key_hex = key_prefix + os.urandom((828 - len(key_prefix)) // 2).hex()
+    key_blob = f"B:828:{key_hex}:{target_dn}"
     events.append(json.dumps(_build_5136(
         actor, config,
-        object_dn=target_dn, object_class="user", object_guid=target_guid,
+        object_dn=target_dn, object_class="computer", object_guid=target_guid,
         attribute_name="msDS-KeyCredentialLink",
         attribute_value=key_blob,
         attribute_syntax_oid="2.5.5.7",
@@ -9092,7 +9176,7 @@ def _threat_shadow_credentials(config, session_context):
         op_correlation_id=op_corr_id, logon_id=logon_id, ts=t)))
     t += 0.01
     events.append(json.dumps(_attr_change_4662(
-        actor, config, object_class=_GUID_CLASS_USER, object_dn=target_dn,
+        actor, config, object_class=_GUID_CLASS_COMPUTER, object_dn=target_dn,
         attr_guid=_GUID_ATTR_KEY_CREDENTIAL,
         logon_id=logon_id, ts=t)))
     t += random.uniform(1.0, 3.0)
@@ -9341,24 +9425,30 @@ def _threat_adfs_dkm_access(config, session_context):
 
 
 def _threat_kerberos_relay(config, session_context):
-    """Kerberos relay: a machine account authenticates over the network to a
-    host from that host's own loopback address.
+    """KrbRelayUp-style local Kerberos relay (LDAP relay -> local SYSTEM).
 
-    Fires "Possible Kerberos relay attack" (Low). The analytic is documented as
-    "a suspicious local network login" that can yield SYSTEM on the target.
-    A relayed machine-account authentication arrives as a type-3 Kerberos logon
-    whose source address is loopback (::1) and whose principal is the target's
-    own machine account — a combination normal workstations never produce.
+    Fires "Possible Kerberos relay attack" (Low). The published shape is a
+    *local network logon*: EventID 4624, LogonType 3,
+    AuthenticationPackageName "Kerberos", IpAddress "127.0.0.1" and
+    TargetUserSid S-1-5-21-*-500 (the built-in Administrator RID). That is the
+    Sigma rule "Potential Privilege Escalation via Local Kerberos Relay over
+    LDAP" (749c9f5e-b353-4b90-a9c1-05243357ca4b) and Splunk "Windows Kerberos
+    Local Successful Logon" (8309c3a8-...). Both also drop IpPort 0, so the
+    endpoint logon keeps a real ephemeral port, and both exclude domain
+    controllers, so the target is never DC01.
 
-    Shape is inferred from the description and from how Windows logs relayed
-    machine auth; the page does not publish EventData fields.
+    The relayed ticket is for the target box's built-in LOCAL Administrator, so
+    TargetDomainName is the computer name and the SID is the machine-local
+    S-1-5-21-<machine>-500, not the domain SID. The DC-side events still show
+    the machine account authenticating from the attacker's address.
 
     Sequence:
-      1. 4768 TGT for the target's machine account
+      1. 4768 TGT for the target's machine account, requested by the attacker
       2. DC-side 4624 for that machine account
       3. 4769 TGS for cifs/<target>
-      4. 4624 type 3 Kerberos on the target, source ::1, principal <TARGET>$
-      5. 4672 (SYSTEM-equivalent privileges)
+      4. 4624 type 3 Kerberos on the target, source 127.0.0.1, principal the
+         local Administrator (S-1-5-21-*-500)
+      5. 4672 SYSTEM-equivalent privileges for that logon
       6. 4688 whoami /priv under the relayed logon
       7. 4689 process exit
     """
@@ -9366,45 +9456,58 @@ def _threat_kerberos_relay(config, session_context):
     if not u:
         return None
 
-    target_short = random.choice(["FS01", "FS02", "SQL01", "APP01", "DC01"])
+    # Never target a DC: both published rules exclude domain-controller logons.
+    target_short = random.choice(["FS01", "FS02", "SQL01", "APP01"])
     target_fqdn = _fqdn(target_short, config)
+    target_domain = target_short.upper()
     machine_user = {**u, "username": f"{target_short}$", "hostname": target_fqdn}
+    local_admin = {**u, "username": "Administrator", "hostname": target_fqdn}
+    local_admin_sid = _local_admin_sid(target_short)
+    attacker_ip = u.get("ip") or "-"
 
     events = []
     t = time.time()
     logon_id = _new_logon_id()
 
     events.append(json.dumps(_build_4768(machine_user, config,
-                                         ip_override="::1",
+                                         ip_override=attacker_ip,
                                          encryption="0x12", ts=t)))
     t += random.uniform(0.2, 0.6)
     events.append(json.dumps(_dc_logon_event(machine_user, config,
-                                             ip_override="::1",
+                                             ip_override=attacker_ip,
                                              logon_id=logon_id, ts=t)))
     t += random.uniform(0.3, 0.8)
     events.append(json.dumps(_build_4769(
         machine_user, config, service_spn=f"cifs/{target_fqdn}",
-        encryption="0x12", ip_override="::1", ts=t)))
+        encryption="0x12", ip_override=attacker_ip, ts=t)))
     t += random.uniform(0.3, 0.8)
 
     events.append(json.dumps(_build_4624(
-        machine_user, config, logon_type=3, auth_pkg=_KRB_PACKAGE,
-        workstation_override=target_fqdn, ip_override="::1",
-        target_logon_id=logon_id, elevated=True, ts=t)))
+        local_admin, config, logon_type=3, auth_pkg=_KRB_PACKAGE,
+        workstation_override=target_fqdn, ip_override="127.0.0.1",
+        target_logon_id=logon_id, elevated=True,
+        domain_override=target_domain,
+        target_sid_override=local_admin_sid, ts=t)))
     t += 0.05
-    events.append(json.dumps(_build_4672(machine_user, config,
-                                         logon_id=logon_id, is_admin=True, ts=t)))
+    events.append(json.dumps(_build_4672(local_admin, config,
+                                         logon_id=logon_id, is_admin=True,
+                                         sid_override=local_admin_sid,
+                                         domain_override=target_domain, ts=t)))
     t += random.uniform(0.5, 1.5)
 
     proc = "C:\\Windows\\System32\\cmd.exe"
-    events.append(json.dumps(_build_4688(machine_user, config,
+    events.append(json.dumps(_build_4688(local_admin, config,
                                          process_name=proc,
                                          command_line="cmd.exe /c whoami /priv",
-                                         logon_id=logon_id, ts=t)))
+                                         logon_id=logon_id,
+                                         sid_override=local_admin_sid,
+                                         domain_override=target_domain, ts=t)))
     t += random.uniform(0.5, 1.0)
-    events.append(json.dumps(_build_4689(machine_user, config,
+    events.append(json.dumps(_build_4689(local_admin, config,
                                          process_name=proc,
-                                         logon_id=logon_id, ts=t)))
+                                         logon_id=logon_id,
+                                         sid_override=local_admin_sid,
+                                         domain_override=target_domain, ts=t)))
     return events
 
 
@@ -9592,8 +9695,15 @@ def _threat_suspicious_sam_change(config, session_context):
         logon_id=logon_id, ts=t)))
     t += 0.01
     events.append(json.dumps(_build_4742(
-        actor, config, target_computer_name=machine_sam, target_sid=machine_sid,
-        sam_account_name=new_sam, dns_host_name=machine_fqdn,
+        actor, config, target_computer_name=new_sam, target_sid=machine_sid,
+        sam_account_name=new_sam, dns_host_name="-",
+        logon_id=logon_id, ts=t)))
+    t += 0.01
+    # 4781 is the event the analytic keys on: one record carrying old -> new on
+    # the same object.
+    events.append(json.dumps(_build_4781(
+        actor, config, old_target_user_name=machine_sam,
+        new_target_user_name=new_sam, target_sid=machine_sid,
         logon_id=logon_id, ts=t)))
     t += random.uniform(0.3, 0.8)
 
