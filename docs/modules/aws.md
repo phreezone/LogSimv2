@@ -200,6 +200,41 @@ The primary name in `ANALYTIC_ALERTS` is the published base analytic; sibling Lo
 variation names live in `ANALYTIC_ALERTS_SECONDARY`. Whether a shape matches the exact
 discriminator an analytic keys on is checked with `_local_validation/aws_detector_sweep.py`.
 
+### Shape audit (2026-11-05)
+
+The 32 silent scenarios were re-read against the published CloudTrail record shapes, the
+AWS API references, and the tenant's own `amazon_aws_raw` rows. These generator defects
+were confirmed and fixed; none changes the event *name*, only the fields an analytic has
+to parse.
+
+| Area | Defect | Fix / source |
+|---|---|---|
+| `IAM_CROSS_ACCOUNT_ROLE` | trust policy was URL-encoded; `createDate` was localized (`Nov 05, 2026, 01:17:15 AM`) | plain JSON policy, `path: "/"`, ISO `createDate` — matches real tenant `CreateRole` and the AWS `CreateRole` example |
+| `IAM_TRUST_POLICY_FOREIGN` | `policyDocument` URL-encoded | plain JSON (inferred from `CreateRole`; the tenant has no `UpdateAssumeRolePolicy` row — still unverified) |
+| `LOGGING_BUCKET_DELETION` | could delete from `vpc-flow-logs-storage`; returned `{"requestCharged": null}` | targets a CloudTrail/access-log bucket; returns `{"DeleteResult": {"Deleted": [...]}}` |
+| `EBS_SNAPSHOT_CREATED` | request and response `description` differed | one description echoed into both; `startTime` stays epoch-ms |
+| `USER_DATA_MODIFY_REBOOT` | `ModifyInstanceAttribute.responseElements` was `null` | `{"return": true, "requestId": ...}` (real EC2 shape) |
+| `SG_REMOTE_ACCESS_UNKNOWN`, `EC2_BACKDOOR_PUBLIC` | `AuthorizeSecurityGroupIngress` added a `requestId` | `{"_return": true}` only |
+| `API_THROTTLING` | mixed `ThrottlingException` and `RequestLimitExceeded` | EC2's `RequestLimitExceeded` only |
+| multi-event scenarios | every event shared one second | ordered, distinct `eventTime`s ending at "now" (spread over 10–240 s) |
+| `NEW_IAM_USER_RESOURCE_MOD`, `IAM_UNUSUAL_ACTIVITY` | IAM `createDate` localized | ISO `createDate` |
+| `SERIAL_CONSOLE_ACCESS` (and every generator reading `ec2_instances`) | config held non-hex IDs (`i-0webserverprod01`, `i-09h8g7f6e5d4c3f6`, …) | replaced with valid `i-` + 17 hex IDs |
+
+**Still unverified, deliberately not changed:**
+
+* `AI_AGENT_MODIFIED` uses `bedrock-agent.amazonaws.com`. AWS's
+  `logging-using-cloudtrail` page documents `bedrock.amazonaws.com` for the Bedrock
+  runtime (`InvokeModel`) but publishes no control-plane `UpdateAgent` sample; the
+  Agents service prefix is `bedrock` in the service-authorization reference, so the
+  event source is ambiguous. Flagged rather than guessed.
+* `IAM_TRUST_POLICY_FOREIGN` policy encoding (see above).
+* `EBS_VOLUME_ATTACH.attachTime` is emitted as ISO-8601. CloudTrail serializes some EC2
+  timestamps as epoch-ms (`CreateSnapshot.startTime`), and no tenant `AttachVolume` row
+  exists to settle it.
+* `MULTI_REGION_*` / `DORMANT_REGION_COMPUTE` still depend on the tenant having
+  baselined the account's home regions. More regions improve the chance; they do not
+  prove the analytic.
+
 ### Identity, Trust & Cross-Account
 
 | Key | Events | Target analytic |
