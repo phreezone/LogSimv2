@@ -5217,7 +5217,7 @@ def _generate_breached_credential_login(config, user_info, session_context=None)
         session_context=session_context)
     logs.append(_assemble("security.breached_credential.detected", actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
-        display_message=f"Breached credential detected for {user_info["username"]}",
+        display_message=f"Breached credential detected for {user_info['username']}",
         security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "breachReason": "CREDENTIAL_STUFFING", "threatSuspected": "true",
@@ -5327,7 +5327,7 @@ def _generate_universal_logout_bypass(config, user_info, session_context=None):
         session_context=session_context)
     logs.append(_assemble("user.authentication.universal_logout", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
-        display_message=f"Universal Logout triggered for {user_info["username"]}",
+        display_message=f"Universal Logout triggered for {user_info['username']}",
         security_context=sec_ctx, debug_context=_build_debug_context("PASSWORD"), target=t_user))
     c2 = _build_client(ip_ctx, config, interactive_only=False,
         username=(user_info or {}).get('username'),
@@ -5404,7 +5404,7 @@ def _generate_third_party_signal_access(config, user_info, session_context=None)
         session_context=session_context)
     logs.append(_assemble("security.events.provider.receive_event", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
-        display_message=f"Security event from {provider}: {detection} for {user_info["username"]}",
+        display_message=f"Security event from {provider}: {detection} for {user_info['username']}",
         security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "provider": provider, "detectionType": detection,
@@ -5439,7 +5439,7 @@ def _generate_dormant_account_reactivation(config, user_info, session_context=No
         session_context=session_context)
     logs.append(_assemble("user.lifecycle.reactivate", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
-        display_message=f"Dormant account reactivated: {user_info["username"]}",
+        display_message=f"Dormant account reactivated: {user_info['username']}",
         security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "risk": "{level=MEDIUM}"}),
@@ -5513,7 +5513,7 @@ def _generate_session_clear_bypass(config, user_info, session_context=None):
         session_context=session_context)
     logs.append(_assemble("user.session.clear", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
-        display_message=f"Admin cleared all sessions for {user_info["username"]}",
+        display_message=f"Admin cleared all sessions for {user_info['username']}",
         security_context=sec_ctx, debug_context=_build_debug_context("PASSWORD"), target=t_user))
     c2 = _build_client(ip_ctx, config, interactive_only=False,
         username=(user_info or {}).get('username'),
@@ -5586,7 +5586,7 @@ def _generate_iam_privilege_escalation(config, user_info, session_context=None):
     actor = _build_actor(user_info["username"], user_info["full_name"])
     sec_ctx = _build_security_context(ip_ctx)
     t_user = _build_target_user(actor)
-    role_name = f"Escalated-{random.choice(["Security","Compliance","Billing","Platform"])}-Role"
+    role_name = f"Escalated-{random.choice(['Security','Compliance','Billing','Platform'])}-Role"
     t_role = [{"id": f"role-{uuid.uuid4()}", "type": "Role",
                "displayName": role_name, "alternateId": role_name, "detailEntry": None}]
     c1 = _build_client(ip_ctx, config, interactive_only=True,
@@ -5612,7 +5612,7 @@ def _generate_iam_privilege_escalation(config, user_info, session_context=None):
         session_context=session_context)
     logs.append(_assemble("user.account.privilege.grant", admin_actor, c3,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
-        display_message=f"Admin privilege granted after IAM escalation: {user_info["username"]}",
+        display_message=f"Admin privilege granted after IAM escalation: {user_info['username']}",
         security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "privilegeGranted": "SUPER_ADMIN",
@@ -5644,7 +5644,7 @@ def _generate_mfa_downgrade_access(config, user_info, session_context=None):
         session_context=session_context)
     logs.append(_assemble("user.mfa.factor.deactivate", admin_actor, c1,
         outcome={"result": "SUCCESS", "reason": None}, severity="WARN",
-        display_message=f"Admin removed MFA factor {factor} for {user_info["username"]}",
+        display_message=f"Admin removed MFA factor {factor} for {user_info['username']}",
         security_context=sec_ctx,
         debug_context=_build_debug_context("PASSWORD", extra={
             "risk": "{level=MEDIUM}"}),

@@ -262,3 +262,27 @@ On first run the simulator will:
 2. Auto-discover all modules in `modules/`
 3. Attempt to fetch live Tor exit nodes (falls back to `tor_exit_nodes` in `config.json` on failure)
 4. Display a menu to select run mode and threat level
+
+---
+
+### Running in Docker
+
+The image (`Dockerfile`, published to `ghcr.io` on every push to `main`) contains
+`log_simulator.py`, `config.json`, `modules/`, `integrations/` (the transports, imported at
+startup) and `dashboard/`. Credentials stay out of the image: compose reads them from `.env`.
+
+```bash
+docker compose up -d --build
+```
+
+* **Dashboard.** Control LogSim from `http://<host>:5000` (set `LOGSIM_API_KEY` in `.env`).
+  Under compose the menu waits on the container's console meanwhile; with no console at all
+  (`docker run` without `-it`) LogSim runs headless instead of exiting. The MCP server (`integrations/mcp_server.py`) runs on your workstation with
+  `LOGSIM_API_URL=http://<host>:5000`.
+* **Interactive menu.** Compose keeps a console open, so `docker attach <container>` reaches
+  the menu (detach with Ctrl+P, Ctrl+Q). Without compose: `docker run -it --env-file .env -p 5000:5000 <image>`.
+* **State.** `state/` (beacon destinations, Windows record numbers) and `domain_cache/` are
+  named volumes, so a restart keeps the same entities.
+* **Credential files.** Anything `.env` points at by path (`WEC_PFX_PATH`,
+  `GOOGLE_APPLICATION_CREDENTIALS`) must be mounted, with the `.env` value set to the
+  container path, e.g. mount `./secrets:/app/secrets:ro` and set `WEC_PFX_PATH=/app/secrets/wec.pfx`.

@@ -13,7 +13,7 @@ modules/__pycache__/
 docs/
 terraform/
 CloudFormation/
-"XSIAM imports"/
+XSIAM imports/
 *.docx
 *.md
 .env.example
@@ -21,3 +21,12 @@ CloudFormation/
 # Git
 .git/
 .gitignore
+
+# Local-only: worktrees, validation scripts, runtime state and caches
+.claude/
+_local_validation/
+tenant-results/
+state/
+domain_cache/
+training_cache/
+.github/

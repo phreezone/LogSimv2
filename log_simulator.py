@@ -4289,7 +4289,13 @@ def main():
         print("  3. Generate Specific Threat (Targeted — pick technology + threat type)")
         print("  q. Quit")
 
-        mode = input("\nEnter mode (1, 2, 3, or q): ").strip().lower()
+        try:
+            mode = input("\nEnter mode (1, 2, 3, or q): ").strip().lower()
+        except EOFError:
+            # No console (a container without -it, a service): the menu cannot be used,
+            # so keep the process alive for the dashboard, which drives runs itself.
+            _run_headless()
+            break
 
         if mode == 'q':
             print("Exiting.")
@@ -4338,6 +4344,26 @@ def _kill_port(port):
 
 
 _dashboard_proc = None
+
+
+def _run_headless():
+    """Block on the dashboard when there is no console to read the menu from.
+
+    Exits when the dashboard exits, or on SIGTERM (`docker stop`): as a container's
+    PID 1 Python would otherwise ignore SIGTERM and be killed after the timeout."""
+    import signal
+    if not (_dashboard_proc and _dashboard_proc.poll() is None):
+        print("\nNo console input and no dashboard running. Exiting.")
+        return
+    port = int(os.getenv("DASHBOARD_PORT", "5000"))
+    print(f"\nNo console input: running headless. Control LogSim from the dashboard "
+          f"on port {port}.", flush=True)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        _dashboard_proc.wait()
+        print(f"Dashboard exited (code {_dashboard_proc.returncode}). Exiting.")
+    except KeyboardInterrupt:
+        pass
 
 
 def _cleanup_dashboard():

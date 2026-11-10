@@ -2,7 +2,24 @@ services:
   logsim:
     build: .
     env_file: .env                          # credentials/endpoints — never committed
-    # Optional: override the default config.json baked into the image
-    # volumes:
-    #   - ./config.json:/app/config.json:ro
-    restart: "no"                           # run once and exit; change to "unless-stopped" for continuous mode
+    ports:
+      - "5000:5000"                         # dashboard / API (set LOGSIM_API_KEY in .env)
+    # Keep a console so `docker attach` reaches the interactive menu. Without one,
+    # LogSim runs headless and is controlled from the dashboard.
+    stdin_open: true
+    tty: true
+    volumes:
+      # Persistent simulator state (beacon destinations, Windows record numbers) and the
+      # domain/resolver cache, so a restart keeps stable entities.
+      - logsim-state:/app/state
+      - logsim-cache:/app/domain_cache
+      # Optional: override the config.json baked into the image
+      # - ./config.json:/app/config.json:ro
+      # Files referenced from .env must be mounted, and the .env path set to the
+      # container path, e.g. WEC_PFX_PATH=/app/secrets/wec.pfx
+      # - ./secrets:/app/secrets:ro
+    restart: unless-stopped
+
+volumes:
+  logsim-state:
+  logsim-cache:
