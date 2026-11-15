@@ -1894,6 +1894,22 @@ def _stable_user_sid(username: str) -> str:
         return sid
 
 
+def _win_ip(ip) -> str:
+    """Render an IP address the way Windows writes the Kerberos IpAddress field.
+
+    Windows shows IPv4 peers IPv4-mapped (``::ffff:a.b.c.d``), while genuine IPv6
+    addresses (``::1``, ``2001:db8::1``) and values that are already mapped are
+    written verbatim. Callers used to prepend ``::ffff:`` unconditionally, which
+    double-prefixed an already-mapped override to ``::ffff:::ffff:a.b.c.d``.
+    """
+    if not ip or ip == "-":
+        return "-"
+    s = str(ip)
+    if s.startswith("::ffff:") or ":" in s:
+        return s
+    return f"::ffff:{s}"
+
+
 def _local_admin_sid(hostname: str) -> str:
     """Deterministic machine-local SID for the built-in Administrator (RID 500).
 
@@ -2412,8 +2428,26 @@ def _render_event_xml(event: dict) -> str:
             data_el.text = str(value) if value is not None else ""
 
     # -- <RenderingInfo> --
-    msg = event.get("message", "").replace("\r\n", "\n")
+    # Keep the CRLF the message templates use. Real Windows events carry CRLF in
+    # RenderingInfo/Message, and several analytics parse that text with
+    # \r\n-anchored regexes -- e.g. "Possible Kerberos relay attack" extracts
+    # "Logon Type", "Source Network Address" and the New Logon "Security ID"
+    # from action_evtlog_message (verified: real XDR-agent 4624 messages hold
+    # 58 CRLF / 0 bare LF).
+    #
+    # XSIAM's Windows event parser then collapses every "\r\n" to "\n" in a
+    # single pass, on BOTH the WEC and the Cribl receiver paths (proven
+    # 2026-11-15: a marker event sent through each landed with 0 CRLF, and the
+    # raw XML still held &#13;). A literal CR in XML text is also normalised to
+    # LF, so lxml has to escape it as &#13;.
+    #
+    # Therefore the CR is doubled here: "\r\r\n" collapses to "\r\n" under that
+    # one-pass replacement and the stored message keeps real CRLF. Verified end
+    # to end -- a 4624 rendered with this encoding landed in the tenant with 59
+    # CRLF / 0 bare LF, and all four relay regexes matched.
+    msg = event.get("message", "")
     if msg:
+        msg = msg.replace("\r\n", "\r\r\n")
         ri = SE(root, "RenderingInfo")
         ri.set("Culture", "en-US")
         SE(ri, "Message").text = msg
@@ -3803,13 +3837,15 @@ def _dc_logon_event(user_info, config, *, logon_type=3, auth_pkg=_KRB_PACKAGE,
 
 def _build_4768(user_info, config, *, ip_override=None, encryption=None,
                 status="0x0", cert_issuer="", cert_serial="", cert_thumbprint="",
-                preauth_type="2", ts=None) -> dict:
+                preauth_type="2", preauth_encryption="N/A", ts=None) -> dict:
     """4768 – Kerberos TGT request (DC event, success=Status 0x0).
 
     `preauth_type` is the Windows numeric pre-authentication type. The default
-    "2" is PA-ENC-TIMESTAMP (password). PKINIT is "16" (PA-PK-AS-REQ), which is
-    what the "PKINIT TGT authentication request" analytic keys on; callers using
-    it must also populate cert_issuer/cert_serial/cert_thumbprint.
+    "2" is PA-ENC-TIMESTAMP (password). Smart-card/PKINIT logons are recorded as
+    "15" (PA-PK-AS-REP_OLD) in the documented 4768 sample, with "16"
+    (PA-PK-AS-REQ) and "17" (PA-PK-AS-REP) as the other PKINIT codes; callers
+    using any of them must also populate cert_issuer/cert_serial/cert_thumbprint
+    and `preauth_encryption` (the pre-authentication flow's etype, e.g. "0x12").
     """
     domain = _get_domain(config)
     dc_host = _get_dc_hostname(config)
@@ -3833,7 +3869,7 @@ def _build_4768(user_info, config, *, ip_override=None, encryption=None,
         "Status":                           status,
         "TicketEncryptionType":             enc,
         "PreAuthType":                      preauth_type,
-        "IpAddress":                        f"::ffff:{ip}" if ip and "." in str(ip) else ip,
+        "IpAddress":                        _win_ip(ip),
         "IpPort":                           str(random.randint(49152, 65535)) if ip and ip != "-" else "0",
         "CertIssuerName":                   cert_issuer,
         "CertSerialNumber":                 cert_serial,
@@ -3847,7 +3883,7 @@ def _build_4768(user_info, config, *, ip_override=None, encryption=None,
         "DCAvailableKeys":                  "AES-SHA1, RC4",
         "ClientAdvertizedEncryptionTypes":  client_enc_types,
         "SessionKeyEncryptionType":         enc,
-        "PreAuthEncryptionType":            "N/A",
+        "PreAuthEncryptionType":            preauth_encryption,
     }
     return _build_event(4768, dc_host, event_data, success=success, ts=ts,
 )
@@ -3885,7 +3921,7 @@ def _build_4769(user_info, config, *, service_spn=None, encryption=None,
         "ServiceSid":            _stable_user_sid(spn) if success else _SID_ANON,
         "TicketOptions":         "0x40810000",
         "TicketEncryptionType":  enc if success else "0xFFFFFFFF",
-        "IpAddress":             f"::ffff:{ip}" if ip and "." in str(ip) else ip,
+        "IpAddress":             _win_ip(ip),
         "IpPort":                str(random.randint(49152, 65535)) if ip and ip != "-" else "0",
         "Status":                status,
         "LogonGuid":             _new_logon_guid(),
@@ -3918,7 +3954,7 @@ def _build_4771(user_info, config, *, status="0x18", ip_override=None, ts=None) 
         "TicketOptions":         "0x40810010",
         "Status":                status,
         "PreAuthType":           "2",
-        "IpAddress":             f"::ffff:{ip}" if ip and "." in str(ip) else ip,
+        "IpAddress":             _win_ip(ip),
         "IpPort":                str(random.randint(49152, 65535)),
         "CertIssuerName":        "",
         "CertSerialNumber":      "",
@@ -9024,9 +9060,11 @@ _GUID_ATTR_SERVICE_PRINCIPAL  = "{f3a64788-5306-11d1-a9c5-0000f80367c1}"
 _GUID_ATTR_SAM_ACCOUNT_NAME   = "{3e0abfd0-126a-11d0-a060-00aa006c33ed}"
 _GUID_ATTR_THUMBNAIL_PHOTO    = "{8d3bca50-1d7e-11d0-a081-00aa006c33ed}"
 
-# PA-PK-AS-REQ. Windows records this as PreAuthType=16 on a PKINIT 4768; 2 is
-# PA-ENC-TIMESTAMP (password), the value every non-PKINIT generator uses.
-_PREAUTH_PKINIT = "16"
+# 4768 PreAuthType for smart-card / PKINIT logons. Microsoft's documented 4768
+# sample with CertIssuerName/Serial/Thumbprint populated uses 15 (PA-PK-AS-REP_OLD,
+# "used for Smart Card logon authentication"); 16 is PA-PK-AS-REQ and 17 is
+# PA-PK-AS-REP. The generator emits 15; the probe harness exercised all three.
+_PREAUTH_PKINIT = "15"
 
 
 def _pkinit_cert_fields(config, *, rogue=False):
@@ -9185,7 +9223,8 @@ def _threat_shadow_credentials(config, session_context):
     pkinit_user = {**target, "ip": actor.get("ip")}
     events.append(json.dumps(_build_4768(
         pkinit_user, config, ip_override=actor.get("ip"), encryption="0x12",
-        preauth_type=_PREAUTH_PKINIT, cert_issuer=issuer, cert_serial=serial,
+        preauth_type=_PREAUTH_PKINIT, preauth_encryption="0x12",
+        cert_issuer=issuer, cert_serial=serial,
         cert_thumbprint=thumb, ts=t)))
     t += random.uniform(0.5, 1.5)
     events.append(json.dumps(_build_4769(
@@ -9206,11 +9245,13 @@ def _threat_pkinit_auth(config, session_context):
     PKINIT TGT authentication request" (Low) variations.
 
     Single-event detector: the only documented discriminator is that the TGT was
-    obtained with PKINIT. Windows records that on 4768 as PreAuthType=16
-    (PA-PK-AS-REQ) with CertIssuerName / CertSerialNumber / CertThumbprint
-    populated. Those field names are the published 4768 EventData names.
-    The shape is built from those names, not a captured PKINIT 4768; if this fires
-    nothing, diff a real event before changing anything else.
+    obtained with PKINIT. Windows records that on 4768 as PreAuthType=15
+    (PA-PK-AS-REP_OLD — the value in Microsoft's own smart-card 4768 sample)
+    with CertIssuerName / CertSerialNumber / CertThumbprint populated and
+    PreAuthEncryptionType set to the pre-auth flow etype (0x12). Those field
+    names are the published 4768 EventData names. The shape is built from those
+    names, not a captured PKINIT 4768; if this fires nothing, diff a real event
+    before changing anything else.
 
     A rogue (non-enterprise) issuer is used half the time to exercise the
     certificate-anomaly path that the "Suspicious" variation likely keys on;
@@ -9236,7 +9277,8 @@ def _threat_pkinit_auth(config, session_context):
 
     events.append(json.dumps(_build_4768(
         u, config, ip_override=src_ip, encryption="0x12",
-        preauth_type=_PREAUTH_PKINIT, cert_issuer=issuer, cert_serial=serial,
+        preauth_type=_PREAUTH_PKINIT, preauth_encryption="0x12",
+        cert_issuer=issuer, cert_serial=serial,
         cert_thumbprint=thumb, ts=t)))
     t += random.uniform(0.2, 0.8)
     events.append(json.dumps(_dc_logon_event(u, config, ip_override=src_ip,
@@ -9593,8 +9635,8 @@ def _threat_spn_cleared(config, session_context):
     t += 0.01
     events.append(json.dumps(_build_4742(
         actor, config, target_computer_name=machine_sam, target_sid=machine_sid,
-        sam_account_name=machine_sam, dns_host_name=machine_fqdn, spns="-",
-        logon_id=logon_id, ts=t)))
+        sam_account_name="-", dns_host_name="-", spns="-",
+        uac_control="%%2080", logon_id=logon_id, ts=t)))
     t += random.uniform(0.5, 1.0)
 
     events.append(json.dumps(_build_4689(actor, config, process_name=tool[0],
@@ -9855,18 +9897,21 @@ ANALYTIC_ALERTS = {
     "sensitive_password_reset":    "Sensitive account password reset attempt for the first time",
     "wip_password_never_expires":  "A user account was modified to password never expires",
     "default_account_enabled":     "A user enabled the Windows DefaultAccount",
-    "mailbox_export":              "PowerShell used to export mailbox contents",
-    "mailbox_export_log_removal":  "PowerShell used to remove mailbox export request logs",
-    "mailbox_cas_change":          "Mailbox Client Access Setting (CAS) changed",
+    # WIP (2026-11-10): the three mailbox detectors ingest on 4104, 4688 and the
+    # native MSExchange Management channel but raised no alert after 3 probe
+    # batches each. See docs/modules/windows.md "Live verification".
+    "mailbox_export":              "PowerShell used to export mailbox contents",  # WIP
+    "mailbox_export_log_removal":  "PowerShell used to remove mailbox export request logs",  # WIP
+    "mailbox_cas_change":          "Mailbox Client Access Setting (CAS) changed",  # WIP
     # AD CS / Kerberos / directory-attribute abuse (added 2026-11-01).
     # The primary name is the Low+ variation the generator is built to raise;
     # the base Informational name and any sibling variation are in SECONDARY.
     "shadow_credentials":          "Possible shadow credentials addition",
-    "pkinit_auth":                 "Suspicious PKINIT TGT authentication request",
+    "pkinit_auth":                 "Suspicious PKINIT TGT authentication request",  # WIP
     "sid_history_injection":       "Suspicious SID History Addition",
     "adfs_dkm_access":             "ADFS DKM Key Access",
-    "kerberos_relay":              "Possible Kerberos relay attack",
-    "spn_cleared":                 "SPNs cleared from a machine account for the first time",
+    "kerberos_relay":              "Possible Kerberos relay attack",  # WIP
+    "spn_cleared":                 "SPNs cleared from a machine account for the first time",  # WIP
     "suspicious_sam_change":       "Suspicious sAMAccountName change to DC hostname",
 }
 

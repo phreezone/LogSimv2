@@ -8,7 +8,7 @@ Generates native Windows Security-channel Event XML targeting XSIAM's Identity A
 
 - **Rendering:** `_render_event_xml()` uses `lxml` for correct namespace/prefix control and single-quoted attributes, matching real Windows XML byte-for-byte (lowercase GUIDs, nanosecond timestamps, `%%` message codes).
 - **Event modeling:** every record is built through `_build_event(event_id, computer, event_data, …)` so `microsoft_windows_raw` modeling rules, correlation rules, and UEBA analytics process it identically to real WEC-collected events. `_raw_log` is the Windows Event **XML** (not JSON) — extract fields with `regextract(_raw_log, "Name='<Field>'>([^<]+)<")`.
-- **Covered Event IDs:** 4624, 4625, 4634, 4647, 4648, 4656, 4662, 4663, 4672, 4688, 4689, 4697, 4720, 4722, 4724, 4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4741, 4742, 4756, 4757, 4767, 4768, 4769, 4771, 4776, 4886, 4887, 4888, 5136, 5137, 1102.
+- **Covered Event IDs:** 4624, 4625, 4634, 4647, 4648, 4656, 4662, 4663, 4672, 4688, 4689, 4697, 4720, 4722, 4724, 4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4741, 4742, 4756, 4757, 4767, 4768, 4769, 4771, 4776, 4781, 4886, 4887, 4888, 5136, 5137, 1102.
 
 > **WEC subscription filter:** the Broker VM's WEC subscription must **forward the Event IDs** LogSim emits for them to reach XSIAM. If a newly added Event ID (e.g. 1102) doesn't appear in search, confirm it's in the subscription's query filter. See **WEC Transport Setup** in the [README](../../README.md) for broker configuration.
 
@@ -84,7 +84,7 @@ WEC intake, so the 4662 corroboration keeps the signal alive either way.
 | Generator (`scenario_event`) | Event sequence | Target analytic |
 |---|---|---|
 | `shadow_credentials` | 4624 ×2, 4672, 4688 (Whisker/Certipy), 5136 `msDS-KeyCredentialLink` added, 4662 write-property, 4768 PKINIT TGT, 4769, 4689 | Possible shadow credentials addition (Medium); Key credential attribute addition (Low) |
-| `pkinit_auth` | 4768 with `Pre-Authentication Type: 16` and certificate issuer/serial/thumbprint fields, 4624 ×2, 4672, 4769 | Suspicious PKINIT TGT authentication request |
+| `pkinit_auth` | 4768 with `PreAuthType: 15` (Microsoft's documented smart-card value; 16/17 are the other PKINIT codes), `PreAuthEncryptionType: 0x12`, and certificate issuer/serial/thumbprint fields, 4624 ×2, 4672, 4769 | Suspicious PKINIT TGT authentication request |
 | `sid_history_injection` | 4624 ×2, 4672, 4688, 5136 `sIDHistory` added, 4662 write-property, 4738 carrying `SID History`, 4768, 4689 | Suspicious SID History Addition |
 | `adfs_dkm_access` | 4624 ×2, 4672, 4688, 4662 read of `CN=DKM,CN=ADFS,CN=Microsoft,CN=Program Data` (`thumbnailPhoto` GUID, `AccessMask 0x10`), 4689 | ADFS DKM Key Access |
 | `kerberos_relay` | 4768 for `<HOST>$` from the attacker IP, DC 4624, 4769, endpoint 4624 type 3 Kerberos from `127.0.0.1` as the **local** `Administrator` (`S-1-5-21-*-500`, non-zero `IpPort`, target never a DC), 4672, 4688, 4689 | Possible Kerberos relay attack |
@@ -113,6 +113,155 @@ The relayed ticket is modelled as the target's *machine-local* Administrator
 `samaccountname_spoofing` and `dnshostname_spoofing` also gained secondary claims for the
 attribute-change analytics above, and `multiple_service_tickets` now lists
 "A user requested multiple service tickets" alongside its weak-encryption primary.
+
+### Live verification (2026-11-10)
+
+Two of the seven AD identity generators were confirmed end-to-end against the
+tenant. Three others (`pkinit_auth`, `spn_cleared`, `kerberos_relay`) and the
+three mailbox generators emit correctly shaped events but produced **no** alert
+after three or more isolated probe batches each, so they are **WIP**.
+(`sid_history_injection` and `adfs_dkm_access` were not part of this probe.)
+
+| Generator | Status | Evidence |
+|---|---|---|
+| `shadow_credentials` | **Confirmed** | Medium "Possible shadow credentials addition" fired 2026-11-08 and again 2026-11-10 04:46Z on `WEB43$`/`BACKUP31$` (actors `j.fedorov2`, `o.curtis`). A length sweep proved the Medium variation is selected by the 5136 `AttributeValue` DN-Binary length: only `B:828:` fires Medium; every other length fires the Low "Key credential attribute addition" variation. The generator therefore emits an 828-hex-character KEY_CREDENTIAL blob. |
+| `suspicious_sam_change` | **Confirmed** | Low "Suspicious sAMAccountName change" fired 2026-11-08 18:59Z. The state-carrying **4781** rename record is what the analytic keys on, not the 4742 alone. The Medium "to DC hostname" variation is not selected by `NewTargetUserName=DC01` alone; its discriminator remains unknown. |
+| `pkinit_auth` | **WIP** | 4 batches, 0 alerts. Tried the Microsoft-documented smart-card shape (4768 `PreAuthType=15`, `PreAuthEncryptionType=0x12`, cert issuer/serial/thumbprint), `PreAuthType` 14/16/17, rogue and enterprise issuers, short/full issuer DN, machine and user targets, missing cert, `4771` failure, `TicketOptions=0x60810010`, loopback `::1`, realm-qualified `ServiceName`, and a 4768 correlated with a preceding `msDS-KeyCredentialLink` write. All shapes ingested with the fields intact in both `microsoft_windows_raw` and `xdr_data`. |
+| `spn_cleared` | **WIP** | 5 batches, 0 alerts. Tried 4742 `ServicePrincipalNames` empty / `-` / absent, 5136 `%%14675` delete pairs, 5136 `%%14674` add-with-empty-value, 4662 write-property, and a same-account state transition (4742 with real SPNs, then 4742 with `-`). Batches 4–5 added the missing realism: `UserAccountControl` `%%2080` / `0x1000` (instead of `-`), the "only SPN changed" 4742 shape (`SamAccountName`/`DnsHostName` left as `-`), a real tenant asset (`FS01$`) as well as a new machine, and deleted-value renderings `-` / empty / absent. All shapes ingested; none alerted. Batch 6 re-ran the module's full sequence after the CRLF fix (9 events, real CRLF) — still 0 alerts. |
+| `kerberos_relay` | **WIP** | 7 batches, 0 alerts. Tried the published KrbRelayUp endpoint signature alone (4624 type 3, Kerberos, local Administrator RID 500, loopback) with `127.0.0.1` / `::1` / `::ffff:127.0.0.1` and `WorkstationName` `FS01` / `-`, then the full sequence 4768 → DC 4624 → 4769 → endpoint 4624 → 4672 → 4688 → 4689 against the real `FS01` asset. Batch 4 varied the target SID (machine-local vs synthetic-domain vs the tenant's real domain `S-1-5-21-2795392456-4107320412-3908095700` Administrator), the subject (machine account + `0x3e7` + `lsass.exe` vs anonymous `S-1-0-0`), and the target host (`FS01` vs `DC01`); all six events ingested with the fields intact and produced no alert. **Batches 5–7 ran after the CRLF fix below.** The stored `action_evtlog_message` now carries real CRLF (58–59 per 4624, 0 bare LF) and the published XQL hunt for this analytic returns the synthetic rows verbatim (`auth_package=Kerberos`, `logon_type=3`, `network=127.0.0.1`, `sid` ending `-500`). Batch 6 covered machine-local and real-domain Administrator SIDs; batch 7 fired the module's own full 7-event sequence against `SQL01`. Neither the Cribl receiver path nor attributing the WEC event to a real agent hostname (`Windows10-Workstation1`) changed anything — both still land as `EVENT_LOG_DOMAIN_CONTROLLER` with null `agent_ip_addresses`/`identity_enrichment`. That collector class is now the standing blocker: real agent 4624s are stamped `EVENT_LOG_AGENT_EVENT_LOG`, and no WEC/Cribl record can be. See "event_sub_type: WEC vs agent" below. |
+| `mailbox_export`, `mailbox_export_log_removal`, `mailbox_cas_change` | **WIP** | 3 batches, 0 alerts. Tried 4104 `ScriptBlockText` carrying `New-MailboxExportRequest` / `Remove-MailboxExportRequest` / `Set-CASMailbox`, 4688 process creation, and native `MSExchange Management` EventID 1 `CmdletName`/`CmdletParameters` (simple and full field sets: `ObjectModified`, `User`, `Organization`, `OriginatingServer`, `Succeeded`, `RunspaceId`, `Timestamp`). The `MSExchange Management` channel **does** ingest and normalize (`microsoft_windows_raw` → `xdr_data`, `action_evtlog_event_id=1`), so channel availability is not the blocker. |
+
+What was ruled out as a common cause:
+
+- **Ingestion/normalization** is not the blocker: WEC events reach both
+  `microsoft_windows_raw` and the normalized `xdr_data` dataset with
+  `event_sub_type=EVENT_LOG_DOMAIN_CONTROLLER`, and `action_evtlog_data_fields`
+  carries the original EventData. The "excessive TGT requests without
+  pre-authentication" analytic fires on the same WEC 4768 events
+  (`PreAuthType=0`), so 4768 processing works.
+- **Training period** is not the blocker: every one of these analytics, including
+  the two that fire, lists Training Period 30 Days.
+- **Activation state** could not be read: `analytics/*`, `detection_rules/*`,
+  `correlation_rules/*` and `content/*` public-API endpoints return HTTP 500, the
+  metadata datasets return HTTP 403, and the tenant UI requires SSO/CSP sign-in.
+  The remaining explanation for the WIP set is therefore either an undiscovered
+  discriminator or the analytics being disabled in the tenant.
+- **Windows 4624 may not be a usable trigger source through this WEC collector.**
+  Every event the collector delivers — including workstations such as
+  `IT-WS-018`, `CS-LT-001` and `fs01` — is tagged
+  `event_sub_type=EVENT_LOG_DOMAIN_CONTROLLER`, and the Splunk analogue of the
+  relay rule explicitly excludes domain controllers. WEC 4624 records also carry
+  **no** normalized logon fields: all `xdm.*` (including `xdm.logon.type`,
+  `xdm.source.ipv4`) are null and only the raw `action_evtlog_data_fields` JSON is
+  populated. Directory-service analytics (5136 `msDS-KeyCredentialLink`, 4781
+  rename) and Kerberos-ticket analytics (4768/4769) do fire on this same
+  collector, but **no** 4624-based analytic has ever fired in the tenant
+  (274 BIOC alert groups, and across the 900 most recent analytics alerts the
+  only referenced Windows events were 5136, 4781, 4720, 4728 and 4768 — never
+  4624). That points at 4624 handling, not at the relay discriminator, as the
+  hard blocker.
+
+Also fixed in this pass: `_build_4768` / `_build_4769` / `_build_4771` used to
+prepend `::ffff:` unconditionally, double-prefixing an already-mapped override to
+`::ffff:::ffff:a.b.c.d`; they now use the shared `_win_ip()` helper and render
+Windows' form exactly once.
+
+### Renderer fix: CRLF in `action_evtlog_message` (2026-11-15)
+
+Several Windows analytics parse the **rendered** event text, not the EventData
+JSON. "Possible Kerberos relay attack" is one: its published XQL (LIVEcommunity
+483034) extracts the fields with `\r\n`-anchored regexes from
+`action_evtlog_message`:
+
+```
+Authentication Package:\s(\w+)
+Source Network Address:\s(.*)\r\n
+Logon Type:\s+(\d+)\r\n
+Security ID:\s+(.*?-500)\r\n
+```
+
+A real XDR-agent 4624 message holds **58 CRLF / 0 bare LF**. Every WEC event in
+the tenant held **0 CRLF / 58 bare LF**, so the regexes could never match and
+every earlier relay batch was structurally unfireable regardless of field
+values.
+
+Two separate normalizations had to be solved:
+
+1. **XML text normalization.** A literal CR in XML text is folded to LF by the
+   parser, so it must be escaped as `&#13;`. `_render_event_xml` previously did
+   `message.replace("\r\n", "\n")`; it now assigns the raw `\r\n` and lets lxml
+   emit `&#13;`.
+2. **XSIAM's parser collapses `\r\n` → `\n` in a single pass**, on both the WEC
+   and the Cribl receiver paths. A marker event sent through each landed with 0
+   CRLF while the stored `microsoft_windows_raw._raw_log` still held `&#13;`, so
+   the fold happens when the message field is built, after XML decoding.
+   `_render_event_xml` therefore **doubles the CR** (`"\r\n"` → `"\r\r\n"`, i.e.
+   `&#13;&#13;\n`); the one-pass replacement turns that back into `\r\n`.
+
+Verified end to end: a 4624 rendered with the doubling lands in the tenant with
+58–59 CRLF / 0 bare LF, and all four relay regexes match. This applies to every
+Windows event, not just the relay, so any message-parsing analytic now sees the
+same line endings a real agent event carries.
+
+The relay analytic still does not fire after that fix (batches 5–7). The data
+now satisfies both the Sigma rule (`749c9f5e`, including `IpPort != 0`) and the
+published hunt verbatim, so the remaining gap is not the event shape.
+
+Other ingestion paths were checked and do not help:
+
+- **Cribl receiver** (`windows_event_logs` UUID → `microsoft_windows_raw`):
+  ingests and parses, normalizes CRLF identically, and produces the same
+  `EVENT_LOG_DOMAIN_CONTROLLER` / null-enrichment record.
+- **XDR Agent path**: the only path that preserves CRLF. The only
+  WinRM-reachable agent host (`192.168.0.44`, `Windows10-Workstation1`) is a
+  workgroup box, so it cannot produce a real Kerberos loopback logon, and it does
+  not forward custom Application-log sources. Writing a genuine Security-channel
+  4624 needs `AuthzReportSecurityEvent`, which requires `SeAuditPrivilege`; the
+  WinRM token does not hold it (error 1300), so that path needs a SYSTEM context.
+
+#### `event_sub_type`: WEC vs agent (2026-11-15)
+
+The remaining structural difference is the collector class the parser stamps on
+each record:
+
+| Source | `_product` | `event_sub_type` |
+|---|---|---|
+| WEC / Cribl receiver | `Windows` | `EVENT_LOG_DOMAIN_CONTROLLER` |
+| XDR agent | `XDR agent` | `EVENT_LOG_AGENT_EVENT_LOG` |
+
+**Every** WEC record carries `EVENT_LOG_DOMAIN_CONTROLLER`, even when the event
+is attributed to a workstation hostname (`FS01`, `SALES-LT-021`,
+`Windows10-Workstation1`), and the tag follows the transport, not the payload:
+the Cribl receiver path produces the same value. An analytic that excludes
+domain controllers (the Sigma rule this one is derived from targets domain-joined
+workstations) can therefore never match WEC data in this tenant. The analytic
+catalog lists `windows-event-collector` as the data source, but its published
+behaviour on this tenant is consistent only with agent-classed events.
+
+Two related facts were established while chasing that path:
+
+- **XSIAM does not build the message from EventData.** A 4624 sent with no
+  `<RenderingInfo>` element lands with `action_evtlog_message = null`; the parser
+  only decodes a message that the collector already rendered. Any agent-sourced
+  event must therefore carry a locally rendered message.
+- **`adtschema.dll` + `MsObjs.dll` renders a genuine 4624 text** (58 CRLF,
+  `Logon Type: 3`, `Source Network Address: 127.0.0.1`, `Security ID: …-500`).
+  This host's template uses the **older 27-string insertion order**
+  (`TargetUserSid` is `%5`, `LogonType` is `%9`, `IpAddress` is `%21`), so the
+  modern order renders shifted fields.
+
+Producing an agent-sourced Security 4624 on `Windows10-Workstation1` is blocked:
+
+| Step | Result |
+|---|---|
+| `AdjustTokenPrivileges(SeAuditPrivilege)` over WinRM | error 1300 (privilege not held) |
+| same, in a `schtasks /ru SYSTEM` task | **succeeds** (err 0) |
+| `RegisterEventSource` for a source under `…\EventLog\Security` | error 5 (access denied) |
+| `AuthzRegisterSecurityEventSource` without install | error 2 (not installed) |
+| `AuthzInstallSecurityEventSource` | **hangs** (process never returns) |
+
+So the endpoint cannot emit an agent-classed 4624 without a real interactive
+logon or a collector change on the tenant side.
 
 ---
 
