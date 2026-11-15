@@ -210,12 +210,15 @@ _PROTO_BY_PORT = {53: "udp", 123: "udp", 161: "udp", 0: "icmp", 67: "udp", 68: "
 
 # PAN-OS URL categories (lowercase, as in the live feed).
 _URL_CAT_BENIGN  = ["business-and-economy", "computer-and-internet-info", "search-engines",
-                    "web-advertisements", "content-delivery-networks", "internet-communications",
+                    "web-advertisements", "content-delivery-networks", "internet-communications-and-telephony",
                     "financial-services", "government", "health-and-medicine", "games",
-                    "streaming-media", "social-networking", "web-based-email", "online-storage-and-backup"]
+                    "streaming-media", "social-networking", "web-based-email", "online-storage-and-backup",
+                    "shopping", "news", "reference-and-research", "ai-conversational-assistant",
+                    "internet-portals", "travel"]
 _URL_CAT_RISKY   = ["malware", "command-and-control", "phishing", "proxy-avoidance-and-anonymizers",
                     "dynamic-dns", "newly-registered-domain", "hacking", "unknown",
-                    "peer-to-peer", "questionable", "grayware"]
+                    "peer-to-peer", "questionable", "grayware", "ransomware", "compromised-website",
+                    "scanning-activity", "parked"]
 
 _SW_VERSION = "11.1.4"       # PAN-OS release stamped in the CEF device-version slot
 _SYSLOG_PRI = 14             # facility LOG_USER(1)*8 + notice(6)=14 (PAN syslog default LOG_USER)
