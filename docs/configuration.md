@@ -64,6 +64,10 @@ This section defines *how* logs are sent. Each module has a native transport —
 
 **`transport_retry_s`** (top level, default `300`) — after a native transport fails, how long its sends go to Cribl before it is tried again.
 
+**`syslog_health_probe`** (top level, default `true`) — before a syslog send, check that the Broker's Syslog Collector accepts a TCP connection on the module's port (`SYSLOG_HOST`:514 for generic syslog, the module's own `syslog_port` otherwise). A port that does not connect sends its modules to the Cribl receiver until it connects again. Set `false` to send syslog without the check.
+
+**`syslog_probe_interval_s`** (top level, default `60`) — how long a probe result is reused before the port is checked again.
+
 ```json
 "http_collectors": {
   "okta_collector": {

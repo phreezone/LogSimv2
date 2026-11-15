@@ -27,7 +27,15 @@ module's own `NATIVE_TRANSPORT`, else syslog. `"tcp"` means syslog.
 1. **Not set up.** The pipe is missing a setting from the table above. The first send logs
    one line, for example
    `Okta SSO: http unavailable (no URL for HTTP collector 'okta_collector') -> Cribl receiver (okta_sso_raw)`.
-2. **Failed.** A send fails with an error retrying will not fix:
+2. **Broker port closed (syslog).** Before a syslog send, LogSim checks that `SYSLOG_HOST`
+   accepts a TCP connection on the module's port: 514 for generic syslog, the module's own
+   `syslog_port` otherwise (ASA 1514, Apache 1515, …). The result is reused for
+   `syslog_probe_interval_s` seconds (default 60). While the port does not connect, that
+   port's modules send via Cribl; once it connects again they go back to syslog. The
+   dashboard's **Syslog** health checks run the same probe, so a failing
+   `TCP <host>:514 reachable (generic Syslog)` check means those sources are on Cribl now.
+   `"syslog_health_probe": false` turns the check off.
+3. **Failed.** A send fails with an error retrying will not fix:
 
    | Pipe | Errors that switch to Cribl |
    |---|---|

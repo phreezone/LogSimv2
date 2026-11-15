@@ -2408,8 +2408,8 @@ _health_lock = threading.Lock()
 
 def _run_health_checks() -> dict:
     """Execute all health checks and return the result dict (no Flask response)."""
-    import socket as _socket
     import requests as _requests
+    from integrations import transport as _transport
 
     results = []
 
@@ -2596,22 +2596,34 @@ def _run_health_checks() -> dict:
                     continue
                 syslog_ports.setdefault(_p, []).append(
                     _k[:-7] if _k.endswith("_config") else _k)
+        # The same probe gates routing (integrations.transport.syslog_probe): a port that
+        # does not connect sends its sources to the Cribl receiver until it connects again.
+        _probing = _transport.syslog_probe_enabled(CONFIG)
+        _cribl_ok = _transport.cribl_configured() and CONFIG.get("cribl_fallback", True)
         for _port in sorted(syslog_ports):
             _srcs = ", ".join(sorted(syslog_ports[_port]))
-            try:
-                with _socket.create_connection((syslog_host, _port), timeout=3):
-                    pass
+            _label = " (generic Syslog)" if _port == 514 else ""
+            _up, _why = _transport.probe_syslog(syslog_host, _port, max_age=0)
+            if _up:
                 results.append({
                     "group": "Syslog",
-                    "check": f"TCP {syslog_host}:{_port} reachable",
-                    "status": "ok", "detail": f"connected ({_srcs})",
+                    "check": f"TCP {syslog_host}:{_port} reachable{_label}",
+                    "status": "ok", "detail": f"connected — sending via syslog ({_srcs})",
                 })
-            except Exception as exc:
+            elif _probing and _cribl_ok:
                 results.append({
                     "group": "Syslog",
-                    "check": f"TCP {syslog_host}:{_port} reachable",
+                    "check": f"TCP {syslog_host}:{_port} reachable{_label}",
+                    "status": "warn",
+                    "detail": f"{_why} — {_srcs} fall back to the Cribl receiver until it connects",
+                })
+            else:
+                results.append({
+                    "group": "Syslog",
+                    "check": f"TCP {syslog_host}:{_port} reachable{_label}",
                     "status": "error",
-                    "detail": f"{exc} — {_srcs} will not ingest",
+                    "detail": f"{_why} — {_srcs} will not ingest"
+                              + ("" if _cribl_ok else " (Cribl fallback not configured)"),
                 })
     else:
         results.append({
