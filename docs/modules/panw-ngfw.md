@@ -213,6 +213,9 @@ feed, so no real tenant row backs them yet); the subtype follows the documented 
 |---|---|---|---|---|---|---|
 | 40020 | Digium Asterisk IAX2 Call Number Denial Of Service Vulnerability | medium | brute-force | vulnerability | alert | `voip-video` (user-confirmed) |
 | 19900 | Bot: Backdoor_Win32_Agent_qxx | high | backdoor | spyware | reset-client | `web-browsing` (assumed) |
+| 19999 | Bot: Backdoor_Win32_Agobot_pnd_pnj | high | backdoor | spyware | reset-both | `web-browsing` (assumed) |
+| 59995 | Manufacturer default username and password found in HTTP Basic Authentication | informational | insecure-credentials | vulnerability | alert | `web-browsing` (assumed) |
+| 21975 / 21976 / 21980 | Pastebin Command and Control Traffic Detection (three signatures, one name) | critical | spyware | spyware | reset-both | `ssl` (assumed) |
 
 The `voip-video` App-ID metadata (category, technology, risk) is assumed. Replace these
 as soon as a real tenant row shows them.
@@ -241,6 +244,9 @@ client's User-Agent in `user_agent`.
 | `threat_ssh_bruteforce` | an internet host, 10–14 SSH attempts at a DMZ server; the first four are plain SSH sessions, then each further session also logs the threat with a rising `count_of_repeats` |
 | `threat_iax2_dos` | an internet host, 6–14 UDP/4569 sessions at a DMZ server (`voip-video`), alert |
 | `threat_bot_backdoor_beacon` | one internal host beaconing 3–6 times to one rare external host, spyware `reset-client` |
+| `threat_bot_agobot_backdoor` | threat logs only (no traffic log): one internal host, 2–5 reset-both hits to one rare external host |
+| `threat_pastebin_c2` | threat logs only: 1–3 reset-both hits to pastebin.com:443 from one internal host, one of the three Pastebin signature IDs |
+| `threat_default_credentials_http` | threat log only, informational, **background only** (never raised on demand): an HTTP Basic login with a default credential to an internal server |
 | `threat_scanner_campaign` | one internal host: port scan → failed connections → Nmap NSE, OpenVAS and portmapper hits on the same server within the hour. The firewall's own threat alerts and the XDR analytics on the traffic land on one host, the shape of case 68482's "Multiple network-related alerts…" roll-up |
 
 Their targets are the signature names, because the firewall's own signature raises a native

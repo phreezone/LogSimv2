@@ -198,6 +198,14 @@ It is PAN-OS 4/5-era legacy CSV (2012-13) and does not describe PAN-OS 10+, so n
 from it: its IDs, names, verdict severities and column order are not trusted for current
 content. Only the PAN-OS 10+ real feed in the tenant (and current PAN documentation) is used.
 
+**More Threat Vault signature details (screenshots, documentation).** 19999 `Bot:
+Backdoor_Win32_Agobot_pnd_pnj` (backdoor, high, reset-both); 59995 `Manufacturer default username
+and password found in HTTP Basic Authentication` (insecure-credentials, informational, alert,
+PAN-OS 9.1+); 21975, 21976 and 21980 `Pastebin Command and Control Traffic Detection` (spyware,
+critical, reset-both: three signatures, one name). The user asked for these as threat logs only,
+no paired traffic logs. The informational one is background-only since informational alerts never
+reach the alerts table.
+
 ## Sources
 
 - PAN-DB URL categories: https://docs.paloaltonetworks.com/advanced-url-filtering/administration/url-filtering-basics/url-categories

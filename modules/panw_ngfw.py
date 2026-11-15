@@ -719,6 +719,13 @@ _THREAT_SIGS = {
     # carries: voip-video for IAX2 (user-confirmed); web-browsing for the bot beacon is assumed.
     "iax2_dos":   (40020, "Digium Asterisk IAX2 Call Number Denial Of Service Vulnerability", "medium", "brute-force", "vulnerability"),
     "bot_qxx":    (19900, "Bot: Backdoor_Win32_Agent_qxx",                      "high",     "backdoor",       "spyware"),
+    "bot_agobot": (19999, "Bot: Backdoor_Win32_Agobot_pnd_pnj",                 "high",     "backdoor",       "spyware"),
+    "default_creds": (59995, "Manufacturer default username and password found in HTTP Basic Authentication",
+                      "informational", "insecure-credentials", "vulnerability"),
+    # One name, three IDs: each is a separate signature that logs under its own Threat ID.
+    "pastebin_c2_a": (21975, "Pastebin Command and Control Traffic Detection", "critical", "spyware", "spyware"),
+    "pastebin_c2_b": (21976, "Pastebin Command and Control Traffic Detection", "critical", "spyware", "spyware"),
+    "pastebin_c2_c": (21980, "Pastebin Command and Control Traffic Detection", "critical", "spyware", "spyware"),
 }
 # Actions that end the session: the matching traffic log ends with session_end_reason=threat.
 _SESSION_ENDING_ACTIONS = ("drop", "reset-server", "reset-client", "reset-both", "block-ip")
@@ -764,8 +771,10 @@ def _threat_record(config, tf, sig, action, ts, misc=None, user_agent=None, repe
 
 def _threat_session(config, key, src, dst, dpt, app, *, action, end, suser=None, shost=None,
                     dhost=None, from_zone="trust", to_zone="trust", proto=None, rule=None,
-                    misc=None, user_agent=None, repeats=1, src_category="workstation"):
-    """[threat log, traffic log] for one session that tripped signature `key`.
+                    misc=None, user_agent=None, repeats=1, src_category="workstation",
+                    threat_only=False):
+    """[threat log, traffic log] for one session that tripped signature `key`
+    ([threat log] alone with threat_only=True: the session's traffic log is not generated).
 
     The firewall logs the threat part-way through the session. If the action ends the session
     (drop / reset-*), the traffic log for it ends with session_end_reason=threat and, as in the
@@ -782,9 +791,9 @@ def _threat_session(config, key, src, dst, dpt, app, *, action, end, suser=None,
                          duration_s=dur, end_reason=("threat" if ends else None),
                          src_category=src_category, rule=rule)
     start = end - dur
-    return [_threat_record(config, tf, sig, action, ts=start + random.uniform(0.3, max(0.4, dur * 0.6)),
-                           misc=misc, user_agent=user_agent, repeats=repeats),
-            _format_cef(config, "end", tf, ts=end)]
+    threat = _threat_record(config, tf, sig, action, ts=start + random.uniform(0.3, max(0.4, dur * 0.6)),
+                            misc=misc, user_agent=user_agent, repeats=repeats)
+    return [threat] if threat_only else [threat, _format_cef(config, "end", tf, ts=end)]
 
 
 # ---------------------------------------------------------------------------
@@ -1056,6 +1065,10 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "threat_ssh_bruteforce", "weight": 2, "analytic": True, "xsiam_alert": "SSH User Authentication Brute Force Attempt"},
     {"event": "threat_iax2_dos",       "weight": 1, "analytic": True, "xsiam_alert": "Digium Asterisk IAX2 Call Number Denial Of Service Vulnerability"},
     {"event": "threat_bot_backdoor_beacon", "weight": 2, "analytic": True, "xsiam_alert": "Bot: Backdoor_Win32_Agent_qxx"},
+    {"event": "threat_bot_agobot_backdoor", "weight": 2, "analytic": True, "xsiam_alert": "Bot: Backdoor_Win32_Agobot_pnd_pnj"},
+    {"event": "threat_pastebin_c2",    "weight": 2, "analytic": True, "xsiam_alert": "Pastebin Command and Control Traffic Detection"},
+    # Informational: never surfaces in the alerts table; background only.
+    {"event": "threat_default_credentials_http", "weight": 2, "analytic": False, "xsiam_alert": None},
     {"event": "threat_scanner_campaign", "weight": 1, "analytic": True, "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
     # Realistic network patterns whose dedicated analytic needs EAL-decoded fields the CEF
     # traffic log cannot carry — kept for hunts / correlation, NOT offered on demand.
@@ -2343,6 +2356,52 @@ def _sim_threat_bot_backdoor_beacon(config, session_context):
     return out
 
 
+def _threat_only_outbound(config, session_context, key, dst, dom, dpt, app, action, *, count, gap):
+    """Threat logs only (no traffic log): an infected internal host trips signature `key` `count`
+    times against one external server, `gap` seconds apart, the last no later than now."""
+    src, user, shost = _threat_actor(config, session_context)
+    now = time.time()
+    t = now - count * gap
+    print(f"    - PAN NGFW simulating: {key} threat {src} -> {dom or dst} x{count}")
+    out = []
+    for _ in range(count):
+        t = min(t + gap + random.randint(-5, 5), now)
+        out += _threat_session(config, key, src, dst, dpt, app, action=action, end=t, suser=user,
+                               shost=shost, dhost=dom, from_zone="trust", to_zone="untrust",
+                               threat_only=True)
+    return out
+
+
+def _sim_threat_bot_agobot_backdoor(config, session_context):
+    """High spyware signature (Agobot backdoor), reset-both: threat log only. App-ID assumed."""
+    dom, dst = _rare_ext(config, f"agobot|{random.random()}")
+    return _threat_only_outbound(config, session_context, "bot_agobot", dst, dom, 80, "web-browsing",
+                                 "reset-both", count=random.randint(2, 5), gap=random.randint(45, 90))
+
+
+def _sim_threat_pastebin_c2(config, session_context):
+    """Critical spyware signature: C2 that hides in Pastebin traffic, reset-both. Threat log only.
+    One of the three signature IDs per event. The destination is the real pastebin.com (a
+    well-known site, so the resolver answer is the same everywhere); the App-ID is assumed ssl."""
+    key = random.choice(["pastebin_c2_a", "pastebin_c2_b", "pastebin_c2_c"])
+    return _threat_only_outbound(config, session_context, key, resolver.answer_for("pastebin.com", config),
+                                 "pastebin.com", 443, "ssl", "reset-both", count=random.randint(1, 3),
+                                 gap=random.randint(60, 180))
+
+
+def _sim_threat_default_credentials_http(config, session_context):
+    """Informational, alert: an HTTP Basic login with a manufacturer default username/password
+    to an internal web admin page. Threat log only; informational severity never reaches the
+    alerts table, so this is background-only."""
+    src, user, shost = _threat_actor(config, session_context)
+    servers = [h for h in (config.get("internal_servers") or ["10.0.10.50"]) if h != src]
+    dst = random.choice(servers)
+    print(f"    - PAN NGFW simulating: default-credentials HTTP Basic {src} -> {dst}")
+    return _threat_session(config, "default_creds", src, dst, random.choice([80, 8080]), "web-browsing",
+                           action="alert", end=time.time(), suser=user, shost=shost,
+                           dhost=resolver.internal_fqdn(config, dst), threat_only=True)
+
+
 def _sim_threat_scanner_campaign(config, session_context):
     """One internal host works through a whole recon sequence within the hour: a port scan,
     failed connections, then scanner-signature hits (Nmap NSE, OpenVAS, portmapper) on the
@@ -2418,6 +2477,8 @@ _THREAT_DISPATCH = {
     "threat_nfs_export_probe": _sim_threat_nfs_export_probe,
     "threat_rpc_fragmentation_evasion": _sim_threat_rpc_fragmentation_evasion,
     "threat_ssh_bruteforce": _sim_threat_ssh_bruteforce,
+    "threat_bot_agobot_backdoor": _sim_threat_bot_agobot_backdoor, "threat_pastebin_c2": _sim_threat_pastebin_c2,
+    "threat_default_credentials_http": _sim_threat_default_credentials_http,
     "threat_iax2_dos": _sim_threat_iax2_dos, "threat_bot_backdoor_beacon": _sim_threat_bot_backdoor_beacon, "threat_scanner_campaign": _sim_threat_scanner_campaign,
 }
 
