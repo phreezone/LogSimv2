@@ -86,9 +86,20 @@ The content-version string looks like `AppThreat-<n>-<n>` (vulnerability, file) 
 - Palo Alto publishes harmless WildFire test files (PE, APK, macOS, ELF) whose verdict is
   always malware; they are for checking forwarding, and no antivirus signature exists for the
   PE test file, so it is logged as a submission, not blocked.
-- **Unconfirmed**: an exact `wildfire` row (threat name format, `cloud` value, `filetype`
-  spelling, which `action`) is not in any source I found. The tenant's own `panw_ngfw_threat_raw`
-  has none yet, so a real row is needed before building it.
+- **`wildfire-virus` vs `wildfire`** (LogRhythm's *V 2.0 Wildfire-Virus Threat Messages*
+  device-mapping guide, which mirrors Palo Alto's PAN-OS 10.1 field text). `wildfire-virus` is a
+  signature detection on a file by an Antivirus profile, fed by the WildFire signature feed:
+  `misc` is the **file name** and it carries none of the submission fields (`filedigest`,
+  `cloud`, `reportid`). It is a *different row* from the `wildfire` submission verdict. The
+  guide splits it by action into two behaviours, which is how a generator should split it too:
+  **a potentially malicious file allowed** (action `alert`/`allow`, a detected-malware event) and
+  **a malicious file blocked by WildFire** (`drop` / `reset-*`, a failed-malware event). The
+  `block` action is WildFire-submission only. The guide holds no sample line and no signature
+  names or IDs.
+- **Unconfirmed**: an exact `wildfire` or `wildfire-virus` row (threat name format, `cloud`
+  value, `filetype` spelling, which `action`) is not in any source I found, including the
+  LogRhythm guide. The tenant's own `panw_ngfw_threat_raw` has none yet, so a real row is
+  needed before building either.
 
 ## 4. How XSIAM turns a threat log into an alert (observed, the tenant's `PAN_NGFW` alerts)
 
@@ -140,6 +151,8 @@ threat generation, and builds what the rows prove.
   https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-admin/monitoring/view-and-manage-logs/log-types-and-severity-levels
   https://docs.paloaltonetworks.com/advanced-wildfire/administration/monitor-wildfire-activity/view-wildfire-logs-and-analysis-reports/view-wildfire-logs-and-analysis-reports-pan-os
 - WildFire test files: https://docs.paloaltonetworks.com/wildfire/10-1/wildfire-admin/submit-files-for-wildfire-analysis/verify-wildfire-submissions/test-a-sample-malware-file
+- LogRhythm *V 2.0 Wildfire-Virus Threat Messages* (device mapping guide):
+  https://docs.logrhythm.com/devices/docs/v-2-0-wildfire-virus-threat-messages
 - Cortex *Ingest NGFW logs using the Syslog collector* (custom format) and *Palo Alto Networks
   Firewall threat Logs* analytics:
   https://cortex-docs.paloaltonetworks.com/analytics-alerts/alerts-by-data-source/palo-alto-networks-firewall-threat-logs
