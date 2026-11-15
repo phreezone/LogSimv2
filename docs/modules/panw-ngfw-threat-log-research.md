@@ -184,6 +184,11 @@ now `internet-communications-and-telephony`; shopping, news, reference-and-resea
 ai-conversational-assistant, internet-portals and travel joined the benign pool, and
 ransomware, compromised-website, scanning-activity and parked the risky one.
 
+**Rejected source: PAN's Splunk-App-Data-Generator sample** (`bin/data/pan_incident.txt`).
+It is PAN-OS 4/5-era legacy CSV (2012-13) and does not describe PAN-OS 10+, so nothing is built
+from it: its IDs, names, verdict severities and column order are not trusted for current
+content. Only the PAN-OS 10+ real feed in the tenant (and current PAN documentation) is used.
+
 ## Sources
 
 - PAN-DB URL categories: https://docs.paloaltonetworks.com/advanced-url-filtering/administration/url-filtering-basics/url-categories
