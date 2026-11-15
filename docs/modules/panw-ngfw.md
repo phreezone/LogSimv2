@@ -219,6 +219,8 @@ feed, so no real tenant row backs them yet); the subtype follows the documented 
 | 21985 | Schoolboy Downloader Traffic Detection | critical | downloader | spyware | reset-both | `web-browsing` (assumed) |
 | 97622 / 97623 / 97625 | PHP Remote Code Execution Vulnerability (three signatures, one name; CVE pair) | critical | code-execution | vulnerability | reset-server | `web-browsing` (assumed) |
 | 97630 | Moxa TN-5900 Firmware Command Injection Vulnerability (CVE-2021-46560) | critical | code-execution | vulnerability | reset-server | `web-browsing` (assumed) |
+| 97650 | TRENDnet TEW-432BRP Firmware Command Injection Vulnerability (CVE-2026-10061) | critical | code-execution | vulnerability | reset-server | `web-browsing` (assumed) |
+| 543004 | PHP Memory Corruption Vulnerability (same CVE pair as the PHP RCE signatures) | critical | code-execution | vulnerability | reset-server | `web-browsing` (assumed) |
 
 The `voip-video` App-ID metadata (category, technology, risk) is assumed. Replace these
 as soon as a real tenant row shows them.
@@ -253,6 +255,8 @@ client's User-Agent in `user_agent`.
 | `threat_schoolboy_downloader` | threat logs only: one internal host, 1–3 reset-both hits to one rare external host |
 | `threat_php_rce` | threat logs only: an internet attacker, 2–6 crafted HTTP requests at a DMZ web server (one of the three PHP IDs), reset-server |
 | `threat_moxa_tn5900_injection` | threat logs only: an internet attacker, 1–4 command-injection requests at a DMZ web server, reset-server |
+| `threat_trendnet_tew432brp_injection` | threat logs only: an internet attacker, 1–4 command-injection requests at a DMZ web server, reset-server |
+| `threat_php_memory_corruption` | threat logs only: an internet attacker, 2–5 crafted HTTP requests at a DMZ web server, reset-server |
 | `threat_scanner_campaign` | one internal host: port scan → failed connections → Nmap NSE, OpenVAS and portmapper hits on the same server within the hour. The firewall's own threat alerts and the XDR analytics on the traffic land on one host, the shape of case 68482's "Multiple network-related alerts…" roll-up |
 
 Their targets are the signature names, because the firewall's own signature raises a native

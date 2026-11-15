@@ -732,6 +732,8 @@ _THREAT_SIGS = {
     "php_rce_b":  (97623, "PHP Remote Code Execution Vulnerability",            "critical", "code-execution", "vulnerability"),
     "php_rce_c":  (97625, "PHP Remote Code Execution Vulnerability",            "critical", "code-execution", "vulnerability"),
     "moxa_tn5900": (97630, "Moxa TN-5900 Firmware Command Injection Vulnerability", "critical", "code-execution", "vulnerability"),
+    "trendnet_tew432brp": (97650, "TRENDnet TEW-432BRP Firmware Command Injection Vulnerability", "critical", "code-execution", "vulnerability"),
+    "php_memcorrupt": (543004, "PHP Memory Corruption Vulnerability",         "critical", "code-execution", "vulnerability"),
 }
 # Actions that end the session: the matching traffic log ends with session_end_reason=threat.
 _SESSION_ENDING_ACTIONS = ("drop", "reset-server", "reset-client", "reset-both", "block-ip")
@@ -1076,6 +1078,8 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "threat_schoolboy_downloader", "weight": 2, "analytic": True, "xsiam_alert": "Schoolboy Downloader Traffic Detection"},
     {"event": "threat_php_rce",        "weight": 3, "analytic": True, "xsiam_alert": "PHP Remote Code Execution Vulnerability"},
     {"event": "threat_moxa_tn5900_injection", "weight": 1, "analytic": True, "xsiam_alert": "Moxa TN-5900 Firmware Command Injection Vulnerability"},
+    {"event": "threat_trendnet_tew432brp_injection", "weight": 1, "analytic": True, "xsiam_alert": "TRENDnet TEW-432BRP Firmware Command Injection Vulnerability"},
+    {"event": "threat_php_memory_corruption", "weight": 2, "analytic": True, "xsiam_alert": "PHP Memory Corruption Vulnerability"},
     # Informational: never surfaces in the alerts table; background only.
     {"event": "threat_default_credentials_http", "weight": 2, "analytic": False, "xsiam_alert": None},
     {"event": "threat_scanner_campaign", "weight": 1, "analytic": True, "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
@@ -2433,6 +2437,20 @@ def _sim_threat_moxa_tn5900_injection(config, session_context):
                            cleartext_web=True, threat_only=True)
 
 
+def _sim_threat_trendnet_tew432brp_injection(config, session_context):
+    """Critical TRENDnet TEW-432BRP firmware command injection, reset-server, cleartext HTTP.
+    Threat logs only."""
+    return _inbound_threat(config, "trendnet_tew432brp", "web-browsing", [80, 8080], ["reset-server"],
+                           n=(1, 4), cleartext_web=True, threat_only=True)
+
+
+def _sim_threat_php_memory_corruption(config, session_context):
+    """Critical PHP memory corruption (remote code execution), reset-server, cleartext HTTP.
+    Threat logs only."""
+    return _inbound_threat(config, "php_memcorrupt", "web-browsing", [80, 8080], ["reset-server"],
+                           n=(2, 5), cleartext_web=True, threat_only=True)
+
+
 def _sim_threat_scanner_campaign(config, session_context):
     """One internal host works through a whole recon sequence within the hour: a port scan,
     failed connections, then scanner-signature hits (Nmap NSE, OpenVAS, portmapper) on the
@@ -2512,6 +2530,8 @@ _THREAT_DISPATCH = {
     "threat_default_credentials_http": _sim_threat_default_credentials_http,
     "threat_schoolboy_downloader": _sim_threat_schoolboy_downloader, "threat_php_rce": _sim_threat_php_rce,
     "threat_moxa_tn5900_injection": _sim_threat_moxa_tn5900_injection,
+    "threat_trendnet_tew432brp_injection": _sim_threat_trendnet_tew432brp_injection,
+    "threat_php_memory_corruption": _sim_threat_php_memory_corruption,
     "threat_iax2_dos": _sim_threat_iax2_dos, "threat_bot_backdoor_beacon": _sim_threat_bot_backdoor_beacon, "threat_scanner_campaign": _sim_threat_scanner_campaign,
 }
 

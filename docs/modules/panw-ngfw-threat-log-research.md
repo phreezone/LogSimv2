@@ -212,6 +212,11 @@ Vulnerability` (code-execution, critical, reset-server, CVE pair, content 9162, 
 97630 `Moxa TN-5900 Firmware Command Injection Vulnerability` (code-execution, critical,
 reset-server, CVE-2021-46560, content 9166). Built as threat logs only.
 
+97650 `TRENDnet TEW-432BRP Firmware Command Injection Vulnerability` (code-execution, critical,
+reset-server, CVE-2026-10061, content 9171, 2026-11-09) and 543004 `PHP Memory Corruption
+Vulnerability` (code-execution, critical, reset-server; the same CVE pair as the PHP RCE
+signatures, content 9162) were added the same way, as threat logs only.
+
 ## Sources
 
 - PAN-DB URL categories: https://docs.paloaltonetworks.com/advanced-url-filtering/administration/url-filtering-basics/url-categories
