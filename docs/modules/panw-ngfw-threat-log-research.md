@@ -184,6 +184,15 @@ now `internet-communications-and-telephony`; shopping, news, reference-and-resea
 ai-conversational-assistant, internet-portals and travel joined the benign pool, and
 ransomware, compromised-website, scanning-activity and parked the risky one.
 
+**Threat Vault signature detail (user-supplied screenshot, current content).** Verified signature:
+ID 40020, "Digium Asterisk IAX2 Call Number Denial Of Service Vulnerability", severity medium,
+category `brute-force`, default action `alert`, CVE-2009-2346, PAN-OS 8.1.0 minimum (no maximum),
+first release content 761 (2018-01-03), status released. Not yet in the generator: it is absent
+from the tenant's threat feed (30-day query), and the App-ID PAN assigns to IAX2 (UDP/4569)
+traffic is not confirmed, which a threat session needs. Fields shown by the detail view map to
+the log as `threat_id`, `threat_name`, `severity`, `threat_category`; the default action is
+the profile's, so the log's action can differ.
+
 **Rejected source: PAN's Splunk-App-Data-Generator sample** (`bin/data/pan_incident.txt`).
 It is PAN-OS 4/5-era legacy CSV (2012-13) and does not describe PAN-OS 10+, so nothing is built
 from it: its IDs, names, verdict severities and column order are not trusted for current
