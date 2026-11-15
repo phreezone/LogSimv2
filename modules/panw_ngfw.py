@@ -136,6 +136,11 @@ _APP = {
     # Applipedia detail API is reCAPTCHA-gated and the live feed has no AD traffic).
     "active-directory-base": ("business-systems", "auth-service", "client-server",   "Medium",        [135, 389]),
     "ms-dc-replication":     ("business-systems", "auth-service", "client-server",   "Medium",        []),
+    # Seen in the live pa440 threat/traffic rows (category / sub-category / technology / risk
+    # exactly as the tenant records them).
+    "portmapper":      ("networking",       "infrastructure",    "network-protocol","Medium",        [111]),
+    "rpc":             ("networking",       "infrastructure",    "network-protocol","Low",           [111]),
+    "nfs":             ("business-systems", "storage-backup",    "client-server",   "Medium",        [2049]),
     "smtp":            ("collaboration",    "email",             "client-server",   "Medium",        [25, 587]),
     "ftp":             ("general-internet", "file-sharing",      "client-server",   "Critical",      [21]),
     "icmp":            ("networking",       "ip-protocol",       "network-protocol","High",          [0]),
@@ -429,14 +434,17 @@ def _zone_if(forti, zone):
 # ---------------------------------------------------------------------------
 # CEF builder
 # ---------------------------------------------------------------------------
-def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None, fw_type=None):
+def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None, fw_type=None,
+                sig=None):
     """Build one PAN-OS NGFW_CEF syslog line.
 
-    Header:  CEF:0|PANW|NGFW_CEF|<sw>|<subtype>|<type>|<sev>|
+    Header:  CEF:0|PANW|NGFW_CEF|<sw>|<sig>|<type>|<sev>|
     Body:    literal key=value pairs (PAN custom log format), space separated.
     `ts` is the event epoch seconds (defaults to now); it drives log_time/time_generated/rt.
     `fw_type` overrides the __firewall_type routing key: a URL log is log_type THREAT but
     routes as firewall.url (into panw_ngfw_url_raw).
+    `sig` is the CEF signature slot: the documented format puts $subtype there for traffic and
+    URL logs but $threatid for threat (and file-data) logs; it defaults to the subtype.
     """
     t = ts if ts is not None else time.time()
     serial, name = _serial(config), _fw_name(config)
@@ -484,7 +492,7 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
             merged[uf] = f"EXAMPLECORP\\{uv}"
     ext = " ".join(f"{k}={_cef_escape(v)}" for k, v in merged.items() if v is not None and v != "")
     sw = _get_config(config).get("sw_version", _SW_VERSION)
-    header = f"CEF:0|PANW|NGFW_CEF|{sw}|{subtype}|{log_type.lower()}|{severity}|"
+    header = f"CEF:0|PANW|NGFW_CEF|{sw}|{sig or subtype}|{log_type.lower()}|{severity}|"
     syslog_ts = time.strftime("%b %d %H:%M:%S", time.gmtime(t))
     return f"<{_SYSLOG_PRI}>{syslog_ts} {_syslog_host(config)} {header} {ext}"
 
@@ -679,6 +687,92 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
         if user_agent:                 # caller explicitly supplied one (decrypted/inspected)
             f["user_agent"] = user_agent
     return _format_cef(config, "url", f, log_type="THREAT", severity=1, ts=ts, fw_type="firewall.url")
+
+
+# ---------------------------------------------------------------------------
+# Threat logs (log_type THREAT, subtype vulnerability) -> panw_ngfw_threat_raw
+# ---------------------------------------------------------------------------
+# The signatures below are the ones the tenant's real pa440 threat feed carries (read-only
+# query, 2026-11-15): same Threat ID, name, severity and category as recorded there. IDs are
+# never invented, so the catalog is limited to signatures whose ID is confirmed; add more in
+# panw_ngfw_config.threat_signatures ({key: [id, name, severity, category, subtype]}) once
+# their IDs are known (spyware / virus / wildfire-virus signatures need that).
+_SEVERITY_NUM = {"informational": 1, "low": 2, "medium": 3, "high": 4, "critical": 5}
+_THREAT_SIGS = {
+    "log4j":      (92046, "Apache Log4j Remote Code Execution Vulnerability", "critical", "code-execution", "vulnerability"),
+    "dnsmasq":    (30109, "Dnsmasq Integer Underflow Vulnerability",          "high",     "code-execution", "vulnerability"),
+    "nmap_nse":   (58433, "Nmap Scripting Engine Detection",                  "medium",   "hacktool",       "vulnerability"),
+    "openvas":    (55283, "OpenVAS Vulnerability Scanner Detection",          "medium",   "info-leak",      "vulnerability"),
+    "rpc_dump":   (32796, "RPC Portmapper DUMP Request Detected",             "medium",   "info-leak",      "vulnerability"),
+    "nfs_export": (32788, "UNIX NFS Export Directory Attempt",                "medium",   "info-leak",      "vulnerability"),
+    "rpc_frag":   (54578, "Sun ONC RPC Small Piece fragmentation Evasion Detection", "medium", "code-execution", "vulnerability"),
+    "ssh_brute":  (40015, "SSH User Authentication Brute Force Attempt",      "high",     "brute-force",    "vulnerability"),
+}
+# Actions that end the session: the matching traffic log ends with session_end_reason=threat.
+_SESSION_ENDING_ACTIONS = ("drop", "reset-server", "reset-client", "reset-both", "block-ip")
+
+
+def _sig(config, key):
+    extra = (_get_config(config).get("threat_signatures") or {}).get(key)
+    return tuple(extra) if extra else _THREAT_SIGS[key]
+
+
+def _threat_record(config, tf, sig, action, ts, misc=None, user_agent=None, repeats=1):
+    """One PAN-OS THREAT log (firewall.threat) for the session described by `tf`.
+
+    `tf` is the traffic-field dict of the session it fired in, so the threat log shares that
+    session's addresses, ports, zones, interfaces, users, App-ID, rule and session_id.
+    Documented extras over the traffic format: misc, threat_id, threat_name, threat_category,
+    direction, user_agent, xff / xff_ip. Header signature slot is the Threat ID.
+    """
+    tid, tname, sev, cat, subtype = sig
+    f = {k: tf[k] for k in _URL_SHARED_KEYS if tf.get(k) not in (None, "")}
+    fmt = str(_get_config(config).get("threat_severity_format", "number")).lower()
+    f.update({
+        "action":              action,
+        "misc":                misc,
+        "file_name":           misc,                 # the live column that holds $misc
+        "threat_id":           str(tid),
+        "threat_name":         tname,
+        "threat_name_firewall": tname,
+        "threat_category":     cat,
+        "direction":           "client-to-server",
+        "direction_of_attack": "client to server",   # the live column (doc key: direction)
+        # The documented format sends the NUMERIC severity ($number-of-severity); the live
+        # columns carry the word. Send the number as `severity` and the word as
+        # `vendor_severity`; threat_severity_format=word swaps them (the probe decides).
+        "severity":            (sev.capitalize() if fmt == "word" else str(_SEVERITY_NUM[sev])),
+        "vendor_severity":     sev.capitalize(),
+        "count_of_repeats":    repeats,
+        "user_agent":          user_agent,
+    })
+    return _format_cef(config, subtype, f, log_type="THREAT", severity=_SEVERITY_NUM[sev], ts=ts,
+                       fw_type="firewall.threat", sig=str(tid))
+
+
+def _threat_session(config, key, src, dst, dpt, app, *, action, end, suser=None, shost=None,
+                    dhost=None, from_zone="trust", to_zone="trust", proto=None, rule=None,
+                    misc=None, user_agent=None, repeats=1, src_category="workstation"):
+    """[threat log, traffic log] for one session that tripped signature `key`.
+
+    The firewall logs the threat part-way through the session. If the action ends the session
+    (drop / reset-*), the traffic log for it ends with session_end_reason=threat and, as in the
+    live feed, still records action=allow (the session was permitted by policy). An 'alert'
+    action leaves the session to end normally. Both logs share one session_id and finish at or
+    before `end`."""
+    sig = _sig(config, key)
+    ends = action in _SESSION_ENDING_ACTIONS
+    dur = random.randint(1, 6) if ends else random.randint(2, 40)
+    tf = _traffic_fields(config, src, dst, dpt, app, action="allow", shost=shost, suser=suser,
+                         dhost=dhost, proto=proto, from_zone=from_zone, to_zone=to_zone,
+                         bytes_sent=random.randint(300, 6000),
+                         bytes_received=(random.randint(0, 600) if ends else random.randint(400, 40000)),
+                         duration_s=dur, end_reason=("threat" if ends else None),
+                         src_category=src_category, rule=rule)
+    start = end - dur
+    return [_threat_record(config, tf, sig, action, ts=start + random.uniform(0.3, max(0.4, dur * 0.6)),
+                           misc=misc, user_agent=user_agent, repeats=repeats),
+            _format_cef(config, "end", tf, ts=end)]
 
 
 # ---------------------------------------------------------------------------
@@ -938,6 +1032,17 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "ssh_proxy_suspicious", "weight": 1,  "analytic": True,  "xsiam_alert": "Suspicious SSH activity that resembles SSH proxy"},
     {"event": "ssh_proxy_detected",   "weight": 1,  "analytic": True,  "xsiam_alert": "Unusual SSH activity that resembles SSH proxy detected"},
     {"event": "host_attack_chain",    "weight": 2,  "analytic": True,  "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
+    # THREAT logs (panw_ngfw_threat_raw). The firewall's own signature raises a native PAN_NGFW
+    # alert named after the signature, so each target is the Threat name the tenant shows.
+    {"event": "threat_log4j_exploit", "weight": 3, "analytic": True, "xsiam_alert": "Apache Log4j Remote Code Execution Vulnerability"},
+    {"event": "threat_dnsmasq_exploit", "weight": 2, "analytic": True, "xsiam_alert": "Dnsmasq Integer Underflow Vulnerability"},
+    {"event": "threat_nmap_nse_scan", "weight": 2, "analytic": True, "xsiam_alert": "Nmap Scripting Engine Detection"},
+    {"event": "threat_openvas_scan",  "weight": 2, "analytic": True, "xsiam_alert": "OpenVAS Vulnerability Scanner Detection"},
+    {"event": "threat_rpc_portmapper_dump", "weight": 1, "analytic": True, "xsiam_alert": "RPC Portmapper DUMP Request Detected"},
+    {"event": "threat_nfs_export_probe", "weight": 1, "analytic": True, "xsiam_alert": "UNIX NFS Export Directory Attempt"},
+    {"event": "threat_rpc_fragmentation_evasion", "weight": 1, "analytic": True, "xsiam_alert": "Sun ONC RPC Small Piece fragmentation Evasion Detection"},
+    {"event": "threat_ssh_bruteforce", "weight": 2, "analytic": True, "xsiam_alert": "SSH User Authentication Brute Force Attempt"},
+    {"event": "threat_scanner_campaign", "weight": 1, "analytic": True, "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
     # Realistic network patterns whose dedicated analytic needs EAL-decoded fields the CEF
     # traffic log cannot carry — kept for hunts / correlation, NOT offered on demand.
     {"event": "kerberos_preauth_pattern", "weight": 2, "analytic": False, "xsiam_alert": None},
@@ -2080,6 +2185,148 @@ def _sim_ldap_recon(config, session_context):
     return out
 
 
+# --- Threat-log scenarios (THREAT + the matching traffic log of each session) ---------------
+_SCANNER_UA = {
+    "nmap_nse": "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)",
+    "openvas":  "Mozilla/5.0 [en] (X11, U; OpenVAS-VT)",
+}
+_CLIENT_UAS = ["python-requests/2.31.0", "curl/8.4.0", "Go-http-client/1.1",
+               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/129.0.0.0 Safari/537.36"]
+_PROBE_PATHS = ["/", "/login", "/api/v1/auth", "/index.jsp", "/admin", "/manager/html", "/actuator/health"]
+
+
+def _inbound_threat(config, key, app, ports, actions, *, proto="tcp", n=(3, 8), rule="Allow-Inbound-Web",
+                    cleartext_web=False):
+    """An internet attacker repeatedly tripping signature `key` against a published DMZ server
+    (untrust -> dmz). Web exploits ride cleartext HTTP so PAN can see the request (it cannot
+    inspect undecrypted TLS), and carry the request path in `misc` and the client User-Agent."""
+    attacker = rare_external_ip()
+    dst = random.choice(_dmz_servers(config))
+    dname = resolver.internal_fqdn(config, dst)
+    now = time.time()
+    count = random.randint(*n)
+    gap = random.randint(8, 25)
+    t = now - count * gap
+    ua = random.choice(_CLIENT_UAS)
+    print(f"    - PAN NGFW simulating: {key} threat {attacker} -> {dst} x{count}")
+    out = []
+    for _ in range(count):
+        t = min(t + gap + random.randint(-3, 3), now)
+        out += _threat_session(config, key, attacker, dst, random.choice(ports), app,
+                               action=random.choice(actions), end=t, dhost=dname, from_zone="untrust",
+                               to_zone="dmz", proto=proto, rule=rule, src_category="unknown",
+                               misc=(random.choice(_PROBE_PATHS) if cleartext_web else None),
+                               user_agent=(ua if cleartext_web else None))
+    return out
+
+
+def _scanner_threat(config, session_context, key, app, ports, action, *, proto="tcp", end=None,
+                    actor=None, target_n=(5, 12), http=False, target=None):
+    """An internal host running a vulnerability scanner against internal servers: one session
+    per target, each tripping signature `key` (scanner detections alert rather than block)."""
+    src, user, shost = actor or _threat_actor(config, session_context)
+    servers = [h for h in (config.get("internal_servers") or ["10.0.10.50"]) if h != src]
+    targets = [target] if target else random.sample(servers, min(len(servers), random.randint(*target_n)))
+    end = end or time.time()
+    gap = random.randint(6, 18)
+    t = end - len(targets) * gap
+    print(f"    - PAN NGFW simulating: {key} scanner {src} -> {len(targets)} servers")
+    out = []
+    for dst in targets:
+        t = min(t + gap, end)
+        out += _threat_session(config, key, src, dst, random.choice(ports), app, action=action, end=t,
+                               suser=user, shost=shost, dhost=resolver.internal_fqdn(config, dst),
+                               proto=proto, misc=(random.choice(_PROBE_PATHS) if http else None),
+                               user_agent=(_SCANNER_UA.get(key) if http else None))
+    return out
+
+
+def _sim_threat_log4j_exploit(config, session_context):
+    """Critical code-execution signature, blocked: Log4j exploitation attempts on cleartext web."""
+    return _inbound_threat(config, "log4j", "web-browsing", [80, 8080], ["drop"] * 4 + ["reset-server"],
+                           cleartext_web=True)
+
+
+def _sim_threat_dnsmasq_exploit(config, session_context):
+    """High code-execution signature, dropped: malformed DNS to a published resolver (UDP)."""
+    return _inbound_threat(config, "dnsmasq", "dns-base", [53], ["drop"], proto="udp", n=(2, 5),
+                           rule="Allow-Inbound-DNS")
+
+
+def _sim_threat_nmap_nse_scan(config, session_context):
+    return _scanner_threat(config, session_context, "nmap_nse", "web-browsing", [80, 8080], "alert", http=True)
+
+
+def _sim_threat_openvas_scan(config, session_context):
+    return _scanner_threat(config, session_context, "openvas", "web-browsing", [80, 8080], "alert", http=True)
+
+
+def _sim_threat_rpc_portmapper_dump(config, session_context):
+    """Portmapper DUMP is reset by the firewall (as in the live feed): session ends 'threat'."""
+    return _scanner_threat(config, session_context, "rpc_dump", "portmapper", [111], "reset-server")
+
+
+def _sim_threat_nfs_export_probe(config, session_context):
+    return _scanner_threat(config, session_context, "nfs_export", "nfs", [2049], "alert")
+
+
+def _sim_threat_rpc_fragmentation_evasion(config, session_context):
+    return _scanner_threat(config, session_context, "rpc_frag", "rpc", [111], "alert", target_n=(3, 6))
+
+
+def _sim_threat_ssh_bruteforce(config, session_context):
+    """An internet host guessing SSH credentials against a published server. The first few
+    attempts are ordinary short SSH sessions; once the guess count crosses the signature's
+    threshold each further session also logs the threat, with the running attempt count in
+    count_of_repeats."""
+    attacker = rare_external_ip()
+    dst = random.choice(_dmz_servers(config))
+    dname = resolver.internal_fqdn(config, dst)
+    count = random.randint(10, 14)
+    now = time.time()
+    t = now - count * 12
+    print(f"    - PAN NGFW simulating: SSH brute force {attacker} -> {dst} ({count} attempts)")
+    out = []
+    for i in range(count):
+        t = min(t + 12 + random.randint(-3, 3), now)
+        if i < 4:
+            out.append(_conn(config, attacker, dst, 22, "ssh", action="allow", ts=t, dhost=dname,
+                             from_zone="untrust", to_zone="dmz", rule="Allow-Inbound-SSH",
+                             bytes_sent=random.randint(1500, 3500), bytes_received=random.randint(1500, 4000),
+                             duration_s=random.randint(1, 4), src_category="unknown"))
+        else:
+            out += _threat_session(config, "ssh_brute", attacker, dst, 22, "ssh", action="alert", end=t,
+                                   dhost=dname, from_zone="untrust", to_zone="dmz", rule="Allow-Inbound-SSH",
+                                   repeats=i - 3, src_category="unknown")
+    return out
+
+
+def _sim_threat_scanner_campaign(config, session_context):
+    """One internal host works through a whole recon sequence within the hour: a port scan,
+    failed connections, then scanner-signature hits (Nmap NSE, OpenVAS, portmapper) on the
+    same server. The firewall's own threat alerts plus the XDR analytics on the traffic land on
+    one host, the shape XSIAM rolls up into "Multiple network-related alerts produced by
+    different detectors on the same host" (case 68482's insight)."""
+    actor = _threat_actor(config, session_context)
+    src, user, shost = actor
+    servers = [h for h in (config.get("internal_servers") or ["10.0.10.50"]) if h != src]
+    target = random.choice(servers)
+    now = time.time()
+    print(f"    - PAN NGFW simulating: scanner campaign on {src}")
+    out = _scan_burst(config, src, user, shost,
+                      random.sample(_PRIV_PORTS, min(len(_PRIV_PORTS), random.randint(20, 24))),
+                      end=now - 45 * 60, target=target)
+    out += _failed_burst(config, src, user, shost, end=now - 25 * 60)
+    out += _scanner_threat(config, session_context, "nmap_nse", "web-browsing", [80, 8080], "alert",
+                           actor=actor, end=now - 12 * 60, http=True, target=target)
+    out += _scanner_threat(config, session_context, "openvas", "web-browsing", [80, 8080], "alert",
+                           actor=actor, end=now - 6 * 60, http=True, target=target)
+    out += _scanner_threat(config, session_context, "rpc_dump", "portmapper", [111], "reset-server",
+                           actor=actor, end=now - 60, target=target)
+    return out
+
+
 _THREAT_DISPATCH = {
     "port_scan": _sim_port_scan, "port_sweep": _sim_port_sweep,
     "failed_connections": _sim_failed_connections,
@@ -2124,6 +2371,12 @@ _THREAT_DISPATCH = {
     "dcsync_non_dc_appid": _sim_dcsync_non_dc_appid, "dcsync_large_appid": _sim_dcsync_large_appid,
     "recurring_rare_domain_suspicious_as": _sim_recurring_rare_domain_suspicious_as,
     "recurring_rare_domain_abnormal_suffix": _sim_recurring_rare_domain_abnormal_suffix,
+    "threat_log4j_exploit": _sim_threat_log4j_exploit, "threat_dnsmasq_exploit": _sim_threat_dnsmasq_exploit,
+    "threat_nmap_nse_scan": _sim_threat_nmap_nse_scan, "threat_openvas_scan": _sim_threat_openvas_scan,
+    "threat_rpc_portmapper_dump": _sim_threat_rpc_portmapper_dump,
+    "threat_nfs_export_probe": _sim_threat_nfs_export_probe,
+    "threat_rpc_fragmentation_evasion": _sim_threat_rpc_fragmentation_evasion,
+    "threat_ssh_bruteforce": _sim_threat_ssh_bruteforce, "threat_scanner_campaign": _sim_threat_scanner_campaign,
 }
 
 

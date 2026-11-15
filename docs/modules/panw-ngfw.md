@@ -167,6 +167,82 @@ The module shares the simulation's identity/network model (`session_utils`, `res
   `nat_source` — so an Entra/Okta sign-in and the matching NGFW HTTPS to Office 365 share one
   identity and egress address.
 
+## Threat logs
+
+PAN threat logs land in `panw_ngfw_threat_raw` (`__firewall_type=firewall.threat`). The format is
+the Threat row of the Syslog Collector's custom log format (Cortex *Ingest NGFW logs using the
+Syslog Collector*):
+
+```
+CEF:0|PANW|NGFW_CEF|<sw>|<threatid>|threat|<number-of-severity>| __firewall_type=firewall.threat
+    __timestamp=<time_generated> __tz=<high_res> log_type=threat subtype=vulnerability ... <the
+    common traffic block: addresses, ports, NAT, users, app, rule, zones, interfaces, session_id,
+    source/dest device> ... misc=<uri or file name> threat_id=<id> threat_name=<name>
+    threat_category=<category> direction=client-to-server user_agent=<UA> severity=<1-5>
+```
+
+The header's signature slot is the **Threat ID** (traffic and URL logs put the subtype there),
+and `severity` is the numeric `$number-of-severity` (1 informational … 5 critical). The live
+CLCS rows spell several of these differently, so the module also sends the column names the
+tenant's own rows use: `file_name` (holds `$misc`), `direction_of_attack`, `vendor_severity`
+(the severity word) and `threat_name_firewall`. `panw_ngfw_config.threat_severity_format`
+(`number` default, or `word`) chooses whether `severity` itself carries the number or the word;
+the number is what the documented format sends.
+
+**What the real feed carries** (read-only query of the tenant's `panw_ngfw_threat_raw`,
+2026-11-15, ~11.5k rows over 30 days): every row is subtype `vulnerability` from the one pa440;
+severity Critical / High / Medium; actions `drop`, `reset-server` and `alert`. The module's
+signature catalog is exactly the eight signatures seen there, with the Threat IDs, names,
+severities and categories as the tenant records them:
+
+| Threat ID | Name | Severity | Category | Typical action |
+|---|---|---|---|---|
+| 92046 | Apache Log4j Remote Code Execution Vulnerability | critical | code-execution | drop / reset-server |
+| 30109 | Dnsmasq Integer Underflow Vulnerability | high | code-execution | drop |
+| 58433 | Nmap Scripting Engine Detection | medium | hacktool | alert |
+| 55283 | OpenVAS Vulnerability Scanner Detection | medium | info-leak | alert |
+| 32796 | RPC Portmapper DUMP Request Detected | medium | info-leak | reset-server |
+| 32788 | UNIX NFS Export Directory Attempt | medium | info-leak | alert |
+| 54578 | Sun ONC RPC Small Piece fragmentation Evasion Detection | medium | code-execution | alert |
+| 40015 | SSH User Authentication Brute Force Attempt | high | brute-force | alert |
+
+Threat IDs are never invented. Signatures whose ID is known can be added without code in
+`panw_ngfw_config.threat_signatures` (`{key: [id, name, severity, category, subtype]}`); spyware,
+virus, wildfire-virus and file-data logs need that (see *Not built yet* below).
+
+**Each threat is a pair of logs.** The threat log shares its session with a traffic log:
+same 5-tuple, zones, interfaces, rule, users, App-ID and `session_id`. The firewall logs the
+threat part-way through the session; when the action ends the session (`drop`, `reset-*`) the
+traffic log ends with `session_end_reason=threat` and still records `action=allow`, exactly as
+the live feed does (its traffic rows with that end reason are all `allow`). An `alert` action
+leaves the session to end normally. Web exploits ride cleartext HTTP (`web-browsing`, ports
+80/8080), because PAN cannot inspect undecrypted TLS; the request path goes in `misc` and the
+client's User-Agent in `user_agent`.
+
+| Event | Shape |
+|---|---|
+| `threat_log4j_exploit` | an internet attacker, 3–8 attempts at a DMZ web server (untrust → dmz, WAN in / DMZ out), dropped or reset |
+| `threat_dnsmasq_exploit` | malformed DNS (udp/53) to a published DMZ resolver, dropped |
+| `threat_nmap_nse_scan` / `threat_openvas_scan` | an internal host scanning 5–12 servers over cleartext HTTP with the scanner's own User-Agent, alert |
+| `threat_rpc_portmapper_dump` | portmapper DUMP to 5–12 servers on 111, reset (session ends `threat`) |
+| `threat_nfs_export_probe` | NFS export probe to 5–12 servers on 2049, alert |
+| `threat_rpc_fragmentation_evasion` | fragmented RPC on 111 to 3–6 servers, alert |
+| `threat_ssh_bruteforce` | an internet host, 10–14 SSH attempts at a DMZ server; the first four are plain SSH sessions, then each further session also logs the threat with a rising `count_of_repeats` |
+| `threat_scanner_campaign` | one internal host: port scan → failed connections → Nmap NSE, OpenVAS and portmapper hits on the same server within the hour. The firewall's own threat alerts and the XDR analytics on the traffic land on one host, the shape of case 68482's "Multiple network-related alerts…" roll-up |
+
+Their targets are the signature names, because the firewall's own signature raises a native
+`PAN_NGFW` alert named after the threat (the tenant already shows Log4j, Nmap, OpenVAS, portmapper
+and NFS alerts from the real pa440). The ambient benign mix deliberately carries **no** threat
+logs: each one is self-alerting, and the lesson from the Entra baseline is that a benign draw
+that raises alerts pollutes every later test. Threats fire only through the threat gate or on demand.
+
+**Not built yet, and what is needed.** Spyware (C2 callbacks, DNS), virus, wildfire-virus and
+file-data logs, and the file fields (`file_url`, `filedigest`, `filetype`) have no confirmed Threat
+IDs or signature names in the tenant to copy. Supplying real IDs and names (or enough threat
+rows to read them from) is all that is needed to add them. Whether the syslog-delivered logs
+raise the same native `PAN_NGFW` alerts as the CLCS rows, and which `severity` form the platform
+expects, have to be settled with a small probe (not yet sent).
+
 ## Threat scenarios
 
 Dispatched from `_generate_threat_log` (weighted) or forced by name via `scenario_event`.
