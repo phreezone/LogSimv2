@@ -216,6 +216,9 @@ feed, so no real tenant row backs them yet); the subtype follows the documented 
 | 19999 | Bot: Backdoor_Win32_Agobot_pnd_pnj | high | backdoor | spyware | reset-both | `web-browsing` (assumed) |
 | 59995 | Manufacturer default username and password found in HTTP Basic Authentication | informational | insecure-credentials | vulnerability | alert | `web-browsing` (assumed) |
 | 21975 / 21976 / 21980 | Pastebin Command and Control Traffic Detection (three signatures, one name) | critical | spyware | spyware | reset-both | `ssl` (assumed) |
+| 21985 | Schoolboy Downloader Traffic Detection | critical | downloader | spyware | reset-both | `web-browsing` (assumed) |
+| 97622 / 97623 / 97625 | PHP Remote Code Execution Vulnerability (three signatures, one name; CVE pair) | critical | code-execution | vulnerability | reset-server | `web-browsing` (assumed) |
+| 97630 | Moxa TN-5900 Firmware Command Injection Vulnerability (CVE-2021-46560) | critical | code-execution | vulnerability | reset-server | `web-browsing` (assumed) |
 
 The `voip-video` App-ID metadata (category, technology, risk) is assumed. Replace these
 as soon as a real tenant row shows them.
@@ -247,6 +250,9 @@ client's User-Agent in `user_agent`.
 | `threat_bot_agobot_backdoor` | threat logs only (no traffic log): one internal host, 2–5 reset-both hits to one rare external host |
 | `threat_pastebin_c2` | threat logs only: 1–3 reset-both hits to pastebin.com:443 from one internal host, one of the three Pastebin signature IDs |
 | `threat_default_credentials_http` | threat log only, informational, **background only** (never raised on demand): an HTTP Basic login with a default credential to an internal server |
+| `threat_schoolboy_downloader` | threat logs only: one internal host, 1–3 reset-both hits to one rare external host |
+| `threat_php_rce` | threat logs only: an internet attacker, 2–6 crafted HTTP requests at a DMZ web server (one of the three PHP IDs), reset-server |
+| `threat_moxa_tn5900_injection` | threat logs only: an internet attacker, 1–4 command-injection requests at a DMZ web server, reset-server |
 | `threat_scanner_campaign` | one internal host: port scan → failed connections → Nmap NSE, OpenVAS and portmapper hits on the same server within the hour. The firewall's own threat alerts and the XDR analytics on the traffic land on one host, the shape of case 68482's "Multiple network-related alerts…" roll-up |
 
 Their targets are the signature names, because the firewall's own signature raises a native

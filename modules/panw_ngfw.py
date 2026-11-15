@@ -726,6 +726,12 @@ _THREAT_SIGS = {
     "pastebin_c2_a": (21975, "Pastebin Command and Control Traffic Detection", "critical", "spyware", "spyware"),
     "pastebin_c2_b": (21976, "Pastebin Command and Control Traffic Detection", "critical", "spyware", "spyware"),
     "pastebin_c2_c": (21980, "Pastebin Command and Control Traffic Detection", "critical", "spyware", "spyware"),
+    "schoolboy":  (21985, "Schoolboy Downloader Traffic Detection",             "critical", "downloader",     "spyware"),
+    # One name, three IDs (PHP RCE, CVE pair); the IDs are separate signatures.
+    "php_rce_a":  (97622, "PHP Remote Code Execution Vulnerability",            "critical", "code-execution", "vulnerability"),
+    "php_rce_b":  (97623, "PHP Remote Code Execution Vulnerability",            "critical", "code-execution", "vulnerability"),
+    "php_rce_c":  (97625, "PHP Remote Code Execution Vulnerability",            "critical", "code-execution", "vulnerability"),
+    "moxa_tn5900": (97630, "Moxa TN-5900 Firmware Command Injection Vulnerability", "critical", "code-execution", "vulnerability"),
 }
 # Actions that end the session: the matching traffic log ends with session_end_reason=threat.
 _SESSION_ENDING_ACTIONS = ("drop", "reset-server", "reset-client", "reset-both", "block-ip")
@@ -1067,6 +1073,9 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "threat_bot_backdoor_beacon", "weight": 2, "analytic": True, "xsiam_alert": "Bot: Backdoor_Win32_Agent_qxx"},
     {"event": "threat_bot_agobot_backdoor", "weight": 2, "analytic": True, "xsiam_alert": "Bot: Backdoor_Win32_Agobot_pnd_pnj"},
     {"event": "threat_pastebin_c2",    "weight": 2, "analytic": True, "xsiam_alert": "Pastebin Command and Control Traffic Detection"},
+    {"event": "threat_schoolboy_downloader", "weight": 2, "analytic": True, "xsiam_alert": "Schoolboy Downloader Traffic Detection"},
+    {"event": "threat_php_rce",        "weight": 3, "analytic": True, "xsiam_alert": "PHP Remote Code Execution Vulnerability"},
+    {"event": "threat_moxa_tn5900_injection", "weight": 1, "analytic": True, "xsiam_alert": "Moxa TN-5900 Firmware Command Injection Vulnerability"},
     # Informational: never surfaces in the alerts table; background only.
     {"event": "threat_default_credentials_http", "weight": 2, "analytic": False, "xsiam_alert": None},
     {"event": "threat_scanner_campaign", "weight": 1, "analytic": True, "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
@@ -2224,7 +2233,7 @@ _PROBE_PATHS = ["/", "/login", "/api/v1/auth", "/index.jsp", "/admin", "/manager
 
 
 def _inbound_threat(config, key, app, ports, actions, *, proto="tcp", n=(3, 8), rule="Allow-Inbound-Web",
-                    cleartext_web=False):
+                    cleartext_web=False, threat_only=False):
     """An internet attacker repeatedly tripping signature `key` against a published DMZ server
     (untrust -> dmz). Web exploits ride cleartext HTTP so PAN can see the request (it cannot
     inspect undecrypted TLS), and carry the request path in `misc` and the client User-Agent."""
@@ -2244,7 +2253,7 @@ def _inbound_threat(config, key, app, ports, actions, *, proto="tcp", n=(3, 8), 
                                action=random.choice(actions), end=t, dhost=dname, from_zone="untrust",
                                to_zone="dmz", proto=proto, rule=rule, src_category="unknown",
                                misc=(random.choice(_PROBE_PATHS) if cleartext_web else None),
-                               user_agent=(ua if cleartext_web else None))
+                               user_agent=(ua if cleartext_web else None), threat_only=threat_only)
     return out
 
 
@@ -2402,6 +2411,28 @@ def _sim_threat_default_credentials_http(config, session_context):
                            dhost=resolver.internal_fqdn(config, dst), threat_only=True)
 
 
+def _sim_threat_schoolboy_downloader(config, session_context):
+    """Critical downloader signature, reset-both: threat logs only. App-ID assumed web-browsing."""
+    dom, dst = _rare_ext(config, f"schoolboy|{random.random()}")
+    return _threat_only_outbound(config, session_context, "schoolboy", dst, dom, 80, "web-browsing",
+                                 "reset-both", count=random.randint(1, 3), gap=random.randint(60, 150))
+
+
+def _sim_threat_php_rce(config, session_context):
+    """Critical PHP RCE (one of three signature IDs), reset-server: an internet attacker's crafted
+    HTTP requests to a DMZ web server. Threat logs only."""
+    key = random.choice(["php_rce_a", "php_rce_b", "php_rce_c"])
+    return _inbound_threat(config, key, "web-browsing", [80, 8080], ["reset-server"], n=(2, 6),
+                           cleartext_web=True, threat_only=True)
+
+
+def _sim_threat_moxa_tn5900_injection(config, session_context):
+    """Critical Moxa TN-5900 firmware command injection, reset-server, over cleartext HTTP.
+    Threat logs only."""
+    return _inbound_threat(config, "moxa_tn5900", "web-browsing", [80, 8080], ["reset-server"], n=(1, 4),
+                           cleartext_web=True, threat_only=True)
+
+
 def _sim_threat_scanner_campaign(config, session_context):
     """One internal host works through a whole recon sequence within the hour: a port scan,
     failed connections, then scanner-signature hits (Nmap NSE, OpenVAS, portmapper) on the
@@ -2479,6 +2510,8 @@ _THREAT_DISPATCH = {
     "threat_ssh_bruteforce": _sim_threat_ssh_bruteforce,
     "threat_bot_agobot_backdoor": _sim_threat_bot_agobot_backdoor, "threat_pastebin_c2": _sim_threat_pastebin_c2,
     "threat_default_credentials_http": _sim_threat_default_credentials_http,
+    "threat_schoolboy_downloader": _sim_threat_schoolboy_downloader, "threat_php_rce": _sim_threat_php_rce,
+    "threat_moxa_tn5900_injection": _sim_threat_moxa_tn5900_injection,
     "threat_iax2_dos": _sim_threat_iax2_dos, "threat_bot_backdoor_beacon": _sim_threat_bot_backdoor_beacon, "threat_scanner_campaign": _sim_threat_scanner_campaign,
 }
 

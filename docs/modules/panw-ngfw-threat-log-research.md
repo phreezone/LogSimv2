@@ -206,6 +206,12 @@ critical, reset-both: three signatures, one name). The user asked for these as t
 no paired traffic logs. The informational one is background-only since informational alerts never
 reach the alerts table.
 
+**Further Threat Vault details (screenshots).** 21985 `Schoolboy Downloader Traffic Detection`
+(downloader, critical, reset-both); 97622 / 97623 / 97625 `PHP Remote Code Execution
+Vulnerability` (code-execution, critical, reset-server, CVE pair, content 9162, 2026-10-21);
+97630 `Moxa TN-5900 Firmware Command Injection Vulnerability` (code-execution, critical,
+reset-server, CVE-2021-46560, content 9166). Built as threat logs only.
+
 ## Sources
 
 - PAN-DB URL categories: https://docs.paloaltonetworks.com/advanced-url-filtering/administration/url-filtering-basics/url-categories
