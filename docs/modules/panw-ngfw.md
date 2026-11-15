@@ -191,8 +191,8 @@ the number is what the documented format sends.
 
 **What the real feed carries** (read-only query of the tenant's `panw_ngfw_threat_raw`,
 2026-11-15, ~11.5k rows over 30 days): every row is subtype `vulnerability` from the one pa440;
-severity Critical / High / Medium; actions `drop`, `reset-server` and `alert`. The module's
-signature catalog is exactly the eight signatures seen there, with the Threat IDs, names,
+severity Critical / High / Medium; actions `drop`, `reset-server` and `alert`. The first
+eight catalog signatures are exactly the ones seen there, with the Threat IDs, names,
 severities and categories as the tenant records them:
 
 | Threat ID | Name | Severity | Category | Typical action |
@@ -205,6 +205,17 @@ severities and categories as the tenant records them:
 | 32788 | UNIX NFS Export Directory Attempt | medium | info-leak | alert |
 | 54578 | Sun ONC RPC Small Piece fragmentation Evasion Detection | medium | code-execution | alert |
 | 40015 | SSH User Authentication Brute Force Attempt | high | brute-force | alert |
+
+Two more come from Palo Alto's Threat Vault signature details (documentation, **not** the tenant
+feed, so no real tenant row backs them yet); the subtype follows the documented Threat ID ranges:
+
+| Threat ID | Name | Severity | Category | Subtype | Action | App-ID |
+|---|---|---|---|---|---|---|
+| 40020 | Digium Asterisk IAX2 Call Number Denial Of Service Vulnerability | medium | brute-force | vulnerability | alert | `voip-video` (user-confirmed) |
+| 19900 | Bot: Backdoor_Win32_Agent_qxx | high | backdoor | spyware | reset-client | `web-browsing` (assumed) |
+
+The `voip-video` App-ID metadata (category, technology, risk) is assumed. Replace these
+as soon as a real tenant row shows them.
 
 Threat IDs are never invented. Signatures whose ID is known can be added without code in
 `panw_ngfw_config.threat_signatures` (`{key: [id, name, severity, category, subtype]}`); spyware,
@@ -228,6 +239,8 @@ client's User-Agent in `user_agent`.
 | `threat_nfs_export_probe` | NFS export probe to 5–12 servers on 2049, alert |
 | `threat_rpc_fragmentation_evasion` | fragmented RPC on 111 to 3–6 servers, alert |
 | `threat_ssh_bruteforce` | an internet host, 10–14 SSH attempts at a DMZ server; the first four are plain SSH sessions, then each further session also logs the threat with a rising `count_of_repeats` |
+| `threat_iax2_dos` | an internet host, 6–14 UDP/4569 sessions at a DMZ server (`voip-video`), alert |
+| `threat_bot_backdoor_beacon` | one internal host beaconing 3–6 times to one rare external host, spyware `reset-client` |
 | `threat_scanner_campaign` | one internal host: port scan → failed connections → Nmap NSE, OpenVAS and portmapper hits on the same server within the hour. The firewall's own threat alerts and the XDR analytics on the traffic land on one host, the shape of case 68482's "Multiple network-related alerts…" roll-up |
 
 Their targets are the signature names, because the firewall's own signature raises a native

@@ -146,6 +146,9 @@ _APP = {
     "icmp":            ("networking",       "ip-protocol",       "network-protocol","High",          [0]),
     "ping":            ("general-internet", "internet-utility",  "network-protocol","Low",           [0]),
     "snmp-base":       ("networking",       "infrastructure",    "client-server",   "Low",           [161]),
+    # IAX2 (Asterisk) is identified as voip-video (user-confirmed App-ID); the category,
+    # technology and risk are assumed, not read from Applipedia (its API is gated).
+    "voip-video":      ("collaboration",    "voip-video",        "client-server",   "Medium",        []),
     "incomplete":      ("unknown",          "unknown",           "unknown",         "Informational", []),
     "insufficient-data":("unknown",         "unknown",           "unknown",         "Informational", []),
     "unknown-tcp":     ("unknown",          "unknown",           "unknown",         "Informational", []),
@@ -710,6 +713,12 @@ _THREAT_SIGS = {
     "nfs_export": (32788, "UNIX NFS Export Directory Attempt",                "medium",   "info-leak",      "vulnerability"),
     "rpc_frag":   (54578, "Sun ONC RPC Small Piece fragmentation Evasion Detection", "medium", "code-execution", "vulnerability"),
     "ssh_brute":  (40015, "SSH User Authentication Brute Force Attempt",      "high",     "brute-force",    "vulnerability"),
+    # From Threat Vault signature details (current content, PAN-OS 8.1+), not from the tenant feed:
+    # ID, name, severity and category are as shown there; the subtype follows the documented
+    # Threat ID ranges (30000-44999 vulnerability, 10000-19999 spyware). The App-ID each session
+    # carries: voip-video for IAX2 (user-confirmed); web-browsing for the bot beacon is assumed.
+    "iax2_dos":   (40020, "Digium Asterisk IAX2 Call Number Denial Of Service Vulnerability", "medium", "brute-force", "vulnerability"),
+    "bot_qxx":    (19900, "Bot: Backdoor_Win32_Agent_qxx",                      "high",     "backdoor",       "spyware"),
 }
 # Actions that end the session: the matching traffic log ends with session_end_reason=threat.
 _SESSION_ENDING_ACTIONS = ("drop", "reset-server", "reset-client", "reset-both", "block-ip")
@@ -1045,6 +1054,8 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "threat_nfs_export_probe", "weight": 1, "analytic": True, "xsiam_alert": "UNIX NFS Export Directory Attempt"},
     {"event": "threat_rpc_fragmentation_evasion", "weight": 1, "analytic": True, "xsiam_alert": "Sun ONC RPC Small Piece fragmentation Evasion Detection"},
     {"event": "threat_ssh_bruteforce", "weight": 2, "analytic": True, "xsiam_alert": "SSH User Authentication Brute Force Attempt"},
+    {"event": "threat_iax2_dos",       "weight": 1, "analytic": True, "xsiam_alert": "Digium Asterisk IAX2 Call Number Denial Of Service Vulnerability"},
+    {"event": "threat_bot_backdoor_beacon", "weight": 2, "analytic": True, "xsiam_alert": "Bot: Backdoor_Win32_Agent_qxx"},
     {"event": "threat_scanner_campaign", "weight": 1, "analytic": True, "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
     # Realistic network patterns whose dedicated analytic needs EAL-decoded fields the CEF
     # traffic log cannot carry — kept for hunts / correlation, NOT offered on demand.
@@ -2305,6 +2316,33 @@ def _sim_threat_ssh_bruteforce(config, session_context):
     return out
 
 
+def _sim_threat_iax2_dos(config, session_context):
+    """Medium IAX2 call-number exhaustion against a published Asterisk-style server: an
+    internet host floods UDP/4569 (alert only, the signature's default action) as
+    App-ID voip-video, which is what PAN assigns IAX2."""
+    return _inbound_threat(config, "iax2_dos", "voip-video", [4569], ["alert"], proto="udp",
+                           n=(6, 14), rule="Allow-Inbound-IAX2")
+
+
+def _sim_threat_bot_backdoor_beacon(config, session_context):
+    """High spyware signature, reset-client: an infected internal host's backdoor beacons to a
+    rare external host. The first beacon is reset; the malware retries on a timer, so the same
+    host/C2 pair repeats a handful of times. App-ID assumed web-browsing (cleartext HTTP)."""
+    src, user, shost = _threat_actor(config, session_context)
+    dom, dst = _rare_ext(config, f"bot|{user}")
+    count = random.randint(3, 6)
+    gap = random.randint(45, 90)
+    now = time.time()
+    t = now - count * gap
+    print(f"    - PAN NGFW simulating: Bot backdoor beacon {src} -> {dom} x{count}")
+    out = []
+    for _ in range(count):
+        t = min(t + gap + random.randint(-8, 8), now)
+        out += _threat_session(config, "bot_qxx", src, dst, 80, "web-browsing", action="reset-client", end=t,
+                               suser=user, shost=shost, dhost=dom, from_zone="trust", to_zone="untrust")
+    return out
+
+
 def _sim_threat_scanner_campaign(config, session_context):
     """One internal host works through a whole recon sequence within the hour: a port scan,
     failed connections, then scanner-signature hits (Nmap NSE, OpenVAS, portmapper) on the
@@ -2379,7 +2417,8 @@ _THREAT_DISPATCH = {
     "threat_rpc_portmapper_dump": _sim_threat_rpc_portmapper_dump,
     "threat_nfs_export_probe": _sim_threat_nfs_export_probe,
     "threat_rpc_fragmentation_evasion": _sim_threat_rpc_fragmentation_evasion,
-    "threat_ssh_bruteforce": _sim_threat_ssh_bruteforce, "threat_scanner_campaign": _sim_threat_scanner_campaign,
+    "threat_ssh_bruteforce": _sim_threat_ssh_bruteforce,
+    "threat_iax2_dos": _sim_threat_iax2_dos, "threat_bot_backdoor_beacon": _sim_threat_bot_backdoor_beacon, "threat_scanner_campaign": _sim_threat_scanner_campaign,
 }
 
 
