@@ -143,7 +143,23 @@ Every one needs **real Threat IDs and names from the tenant**: the generator nev
 IDs. The scheduled 12-hour job reads them from `panw_ngfw_threat_raw` after the user's own
 threat generation, and builds what the rows prove.
 
+## 6. Where real signature IDs come from
+
+The PAN-OS *Threat Details* page (Monitor > Logs > Threat, ACC, Objects > Security Profiles)
+documents the per-signature metadata: Name, ID, Description, Severity, CVE, Bugtraq ID, Vendor
+ID, Reference and the exempt profiles/IPs. It contains **no sample log lines and no signature
+list**, so it does not settle the open WildFire / spyware row shapes. The lookup for real
+IDs, names, severities and CVEs is the Threat Vault (`threatvault.paloaltonetworks.com`),
+which requires a Palo Alto sign-in and cannot be read unauthenticated. The generator therefore
+keeps taking IDs from rows the tenant already holds, or from the user-supplied
+`panw_ngfw_config.threat_signatures`. A threat log only exists when a Threat Prevention
+licence, current content updates and Anti-Spyware / Vulnerability Protection / Antivirus
+profiles on the rule are all in place.
+
 ## Sources
+
+- PAN-OS *Threat Details* (signature metadata fields):
+  https://docs.paloaltonetworks.com/ngfw/help/12-2/web-interface-basics/threat-details
 
 - PAN-OS *Threat Log Fields* (syslog field descriptions):
   https://docs.paloaltonetworks.com/ngfw/administration/monitoring/use-syslog-for-monitoring/syslog-field-descriptions/threat-log-fields
