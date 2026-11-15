@@ -32,6 +32,7 @@ import gzip
 import json
 import os
 import re
+import socket
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -42,6 +43,8 @@ NATIVE_TRANSPORTS = ("syslog", "http", "s3", "pubsub", "wec")
 CRIBL = "cribl"
 _ALIASES = {"tcp": "syslog", "auto": None, "": None}
 DEFAULT_RETRY_S = 300.0
+DEFAULT_PROBE_S = 60.0
+PROBE_TIMEOUT_S = 2.0
 
 _log: Callable[[str], None] = print
 
@@ -220,10 +223,59 @@ def down_reason(transport: str, module, config) -> Optional[str]:
 
 
 def reset() -> None:
-    """Forget failed pipes (tests, or a config reload)."""
+    """Forget failed pipes and probe results (tests, or a config reload)."""
     with _down_lock:
         _down.clear()
         _announced.clear()
+    with _probe_lock:
+        _probe.clear()
+
+
+# ── Broker syslog listener probe ─────────────────────────────────────────────
+# Before a syslog send, a TCP connect to SYSLOG_HOST:<port> (cached for
+# syslog_probe_interval_s) says whether the Broker's Syslog Collector is listening there.
+# A closed port sends that port's modules to Cribl until a later probe connects. The
+# dashboard health check runs the same probe, so its result is what routing acts on.
+_probe: Dict[Tuple[str, int], Tuple[float, bool, str]] = {}   # (host, port) -> (at, up, detail)
+_probe_lock = threading.Lock()
+
+
+def syslog_probe_enabled(config) -> bool:
+    return bool((config or {}).get("syslog_health_probe", True))
+
+
+def probe_seconds(config) -> float:
+    try:
+        return float((config or {}).get("syslog_probe_interval_s", DEFAULT_PROBE_S))
+    except (TypeError, ValueError):
+        return DEFAULT_PROBE_S
+
+
+def probe_syslog(host: str, port, max_age: Optional[float] = DEFAULT_PROBE_S) -> Tuple[bool, str]:
+    """(True, "connected") when SYSLOG_HOST:port accepts a TCP connection, else (False, why).
+    A result younger than *max_age* seconds is reused; max_age=0 always probes."""
+    key = (host, int(port))
+    with _probe_lock:
+        hit = _probe.get(key)
+    if hit and max_age and time.time() - hit[0] < max_age:
+        return hit[1], hit[2]
+    try:
+        with socket.create_connection(key, timeout=PROBE_TIMEOUT_S):
+            up, detail = True, "connected"
+    except OSError as exc:
+        up, detail = False, f"TCP {host}:{port} not reachable ({exc})"
+    with _probe_lock:
+        _probe[key] = (time.time(), up, detail)
+    return up, detail
+
+
+def syslog_probe(module, config) -> Optional[str]:
+    """Why *module*'s syslog port is not usable per the probe, or None (up, or probe off)."""
+    host = os.getenv("SYSLOG_HOST")
+    if not host or not syslog_probe_enabled(config):
+        return None
+    up, detail = probe_syslog(host, target("syslog", module, config), probe_seconds(config))
+    return None if up else detail
 
 
 # ── The decision ─────────────────────────────────────────────────────────────
@@ -235,15 +287,25 @@ def resolve(module, config) -> str:
     pref = preferred(module, config)
     if pref == CRIBL:
         return CRIBL
-    ok, why = native_ready(pref, module, config)
-    if ok:
-        why = down_reason(pref, module, config)
-        if why is None:
-            return pref
+    why = _unusable(pref, module, config)
+    if why is None:
+        _recovered(module, pref)
+        return pref
     if not can_fall_back(module, config):
         return pref
     _announce(module, pref, why)
     return CRIBL
+
+
+def _unusable(pref, module, config) -> Optional[str]:
+    """Why the module's pipe cannot take this send, or None."""
+    ok, why = native_ready(pref, module, config)
+    if not ok:
+        return why
+    why = down_reason(pref, module, config)
+    if why is None and pref == "syslog":
+        why = syslog_probe(module, config)
+    return why
 
 
 def _announce(module, pref, why):
@@ -256,16 +318,23 @@ def _announce(module, pref, why):
     _log(f"{name}: {pref} unavailable ({why}) -> Cribl receiver ({cribl_label(module)})")
 
 
+def _recovered(module, pref):
+    name = getattr(module, "NAME", "?")
+    with _down_lock:
+        if _announced.pop((name, pref), None) is None:
+            return
+    _log(f"{name}: {pref} is back -> sending natively again")
+
+
 def describe(module, config) -> Dict[str, Any]:
     """Routing summary for health checks and the dashboard."""
     pref = preferred(module, config)
-    ok, why = native_ready(pref, module, config)
-    down = down_reason(pref, module, config) if ok else None
+    why = _unusable(pref, module, config) if pref != CRIBL else None
     return {
         "module": getattr(module, "NAME", "?"),
         "preferred": pref,
-        "native_ready": ok and down is None,
-        "reason": why or down or "",
+        "native_ready": why is None,
+        "reason": why or "",
         "effective": resolve(module, config),
         "fallback_enabled": fallback_enabled(module, config),
         "cribl_route": cribl_label(module) if has_cribl_route(module) else None,
