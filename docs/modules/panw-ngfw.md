@@ -262,6 +262,13 @@ client's User-Agent in `user_agent`.
 | `threat_php_memory_corruption` | threat logs only: an internet attacker, 2–5 crafted HTTP requests at a DMZ web server, reset-server |
 | `threat_scanner_campaign` | one internal host: port scan → failed connections → Nmap NSE, OpenVAS and portmapper hits on the same server within the hour. The firewall's own threat alerts and the XDR analytics on the traffic land on one host, the shape of case 68482's "Multiple network-related alerts…" roll-up |
 
+**Ten more from the pa440's native CSV feed (2026-11-16).** The same device also wrote its plain
+PAN-OS CSV syslog into `unknown_unknown_raw` (unparsed `_raw_log`, ~2M rows in 13 h). Collapsing its
+34,500 vulnerability rows gave 203 distinct Threat IDs: 193 were already here (name, severity, subtype
+and action all agree) and 10 were new (30514, 33338, 38531, 37008, 55358, 58435, 96441, 95922, 37765,
+56480), added with the category, action and `$misc` the real rows carry. The catalog now holds 196
+tenant signatures; the family counts below include them.
+
 **Tenant-confirmed signature catalog (2026-11-16).** After a burst of generated threat traffic the
 tenant's `panw_ngfw_threat_raw` (one pa440, ~1000-minute window) carried **195 Threat IDs**; 186 were
 not yet in the catalog and were added from the rows (id, name, severity, category and `sub_type` exactly as
@@ -274,10 +281,10 @@ one signature per fire at random):
 
 | Event | Family | Signatures |
 |---|---|---|
-| `threat_web_rce` | code-execution vulnerability, blocked (reset-server / reset-both / reset-client / drop) | 92 |
-| `threat_web_infoleak` | info-leak (traversal, disclosure, auth bypass), blocked | 41 |
-| `threat_web_detect_only` | signatures the policy only alerts on (XSS, /etc/passwd, directory traversal, scanner probes) | 40 |
-| `threat_web_sqli_overflow_dos` | sql-injection, overflow, dos, code-obfuscation, brute-force, insecure-credentials, blocked | 9 |
+| `threat_web_rce` | code-execution vulnerability, blocked (reset-server / reset-both / reset-client / drop) | 95 |
+| `threat_web_infoleak` | info-leak (traversal, disclosure, auth bypass), blocked | 42 |
+| `threat_web_detect_only` | signatures the policy only alerts on (XSS, /etc/passwd, directory traversal, scanner probes) | 45 |
+| `threat_web_sqli_overflow_dos` | sql-injection, overflow, dos, code-obfuscation, brute-force, insecure-credentials, blocked | 10 |
 | `threat_legacy_service_exploit` | FTP (tcp/21) and TFTP (udp/69) exploits | 3 |
 | `threat_wd_mycloud_backdoor` | the one spyware signature (18011) | 1 |
 
@@ -286,7 +293,7 @@ of the `alerts` dataset (alert_source `PAN_NGFW`, last 48 h) returned **0 rows**
 is confirmed for any of them; they are still selectable by name through the dispatch. Ports for the
 non-HTTP apps are assumed standard (ftp 21, tftp 69); everything web rides 80/8080.
 
-<details><summary>All 186 added signatures</summary>
+<details><summary>All 196 added signatures</summary>
 
 | Threat ID | Name | Severity | Category | Subtype | Action | App-ID |
 |---|---|---|---|---|---|---|
@@ -476,6 +483,16 @@ non-HTTP apps are assumed standard (ftp 21, tftp 69); everything web rides 80/80
 | 97413 | SolarView Compact Command Injection Vulnerability | critical | code-execution | vulnerability | reset-server | `web-browsing` |
 | 97417 | HTTP Bash History Access Attempt | high | info-leak | vulnerability | reset-server | `web-browsing` |
 | 510004 | Palo Alto Networks GlobalProtect Cross-Site Scripting Vulnerability | high | code-execution | vulnerability | reset-server | `web-browsing` |
+| 30514 | HTTP SQL Injection Attempt | medium | sql-injection | vulnerability | alert | `web-browsing` |
+| 33338 | HTTP SQL Injection Attempt | medium | sql-injection | vulnerability | alert | `web-browsing` |
+| 38531 | HTTP SQL Injection Attempt | medium | sql-injection | vulnerability | alert | `web-browsing` |
+| 37008 | PHP-Charts PHP Code Execution Vulnerability | medium | code-execution | vulnerability | alert | `web-browsing` |
+| 55358 | Ruby on Rails File Content Disclosure Vulnerability | high | info-leak | vulnerability | reset-server | `web-browsing` |
+| 58435 | Brother MFC-J6520DW Authentication Bypass Vulnerability | critical | code-execution | vulnerability | reset-server | `web-browsing` |
+| 96441 | TBK DVR-4104 and DVR-4216 Command Injection Vulnerability | medium | code-execution | vulnerability | reset-server | `web-browsing` |
+| 95922 | jQuery File Upload Plugin Unrestricted File Upload Vulnerability | medium | code-execution | vulnerability | alert | `web-browsing` |
+| 37765 | PHPMoAdmin Object Parameter Handling Code Execution Vulnerability | high | code-execution | vulnerability | reset-server | `web-browsing` |
+| 56480 | Flexible Poll 1.2 SQL Injection Vulnerability | critical | sql-injection | vulnerability | reset-server | `web-browsing` |
 
 </details>
 

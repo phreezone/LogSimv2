@@ -942,6 +942,16 @@ _TENANT_SIGS = [
     (97413, 'SolarView Compact Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'downloader.php'),
     (97417, 'HTTP Bash History Access Attempt', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '.bash_history'),
     (510004, 'Palo Alto Networks GlobalProtect Cross-Site Scripting Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'getconfig.esp'),
+    (30514, 'HTTP SQL Injection Attempt', 'medium', 'sql-injection', 'vulnerability', 'alert', 'web-browsing', 'view.php'),
+    (33338, 'HTTP SQL Injection Attempt', 'medium', 'sql-injection', 'vulnerability', 'alert', 'web-browsing', 'printdetail.asp'),
+    (38531, 'HTTP SQL Injection Attempt', 'medium', 'sql-injection', 'vulnerability', 'alert', 'web-browsing', 'forum_answer.php'),
+    (37008, 'PHP-Charts PHP Code Execution Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'url.php'),
+    (55358, 'Ruby on Rails File Content Disclosure Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'profiles'),
+    (58435, 'Brother MFC-J6520DW Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'status.html'),
+    (96441, 'TBK DVR-4104 and DVR-4216 Command Injection Vulnerability', 'medium', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'device.rsp'),
+    (95922, 'jQuery File Upload Plugin Unrestricted File Upload Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'index.php'),
+    (37765, 'PHPMoAdmin Object Parameter Handling Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'moadmin.php'),
+    (56480, 'Flexible Poll 1.2 SQL Injection Vulnerability', 'critical', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'index.php'),
 ]
 for _r in _TENANT_SIGS:
     _THREAT_SIGS["t%d" % _r[0]] = _r[:5]
