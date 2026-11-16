@@ -5895,13 +5895,15 @@ def _threat_adminsdholder_acl_modification(config, session_context):
       - SubjectUserName is NOT a DC$ machine account or SYSTEM
       - XSIAM rule: "Suspicious modification of the AdminSDHolder's ACL"
 
-    STATUS (2026-11-16): WIP. Two batches delivered the events below with every
-    field verified in `xdr_data` and raised nothing. The blocker is NOT the
+    STATUS (2026-11-16): WIP. Three batches delivered the events below with
+    every field verified in `xdr_data` and raised nothing. The blocker is NOT the
     target object type: a differential probe fired "Possible shadow credentials
     addition" on the same AdminSDHolder `container` DN (alert 799066, whose
-    description says "The account type: container"). What remains untested is
-    this analytic's ACE/SDDL handling or whether it is active for WEC-only data.
-    See "Container targets are evaluated" in docs/modules/windows.md.
+    description says "The account type: container"). Batch 3 also added an ACE
+    for WD/Everyone and named the nTSecurityDescriptor GUID in the WRITE_DAC
+    4662, with no change. What remains untested is this analytic's ACE/SDDL
+    handling or whether it is active for WEC-only data. See "Container targets
+    are evaluated" in docs/modules/windows.md.
     """
     u = _pick_windows_user(session_context)
     if not u:
