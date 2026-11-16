@@ -5894,6 +5894,14 @@ def _threat_adminsdholder_acl_modification(config, session_context):
         AccessMask=0x40000 (WRITE_DACL) from a regular user
       - SubjectUserName is NOT a DC$ machine account or SYSTEM
       - XSIAM rule: "Suspicious modification of the AdminSDHolder's ACL"
+
+    STATUS (2026-11-16): WIP, blocked on the engine, not on this shape. Two
+    batches delivered the events below with every field verified in `xdr_data`
+    and raised nothing. A differential probe showed the Identity Analytics engine
+    only evaluates a 5136 attribute change on a target it can resolve to an
+    account: the same `sIDHistory` record fires on a user DN and is silent on
+    this `container` DN. See "Target object must resolve to an entity" in
+    docs/modules/windows.md.
     """
     u = _pick_windows_user(session_context)
     if not u:

@@ -64,6 +64,12 @@ prefix; the old `WIP_` names still dispatch.
 
 **WIP** (events are correctly shaped; the detection depends on an identity-graph baseline or is still under investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_PASSWORD_NEVER_EXPIRES`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
 
+`WIP_ADMINSDHOLDER_ACL_MODIFICATION` is now blocked on **object resolution**, not
+event shape: the Identity Analytics engine only evaluates a 5136 attribute change
+on a target it can resolve to an account, and AdminSDHolder is a `container`. See
+"Target object must resolve to an entity" below. `WIP_SCCM_CONTAINER_RECON`
+targets another `container` DN and is expected to share that blocker.
+
 **On-demand firing** offers the threats in the module's `ANALYTIC_ALERTS` table: everything
 above plus the four remaining `WIP_` detections, which target published analytics. Not
 offered, background-only: `WIP_IRREGULAR_SERVICE_TGS`, `LSASS_HANDLE_ACCESS` (an XDR-agent
@@ -129,6 +135,7 @@ after three or more isolated probe batches each, so they are **WIP**.
 | `pkinit_auth` | **WIP** | 4 batches, 0 alerts. Tried the Microsoft-documented smart-card shape (4768 `PreAuthType=15`, `PreAuthEncryptionType=0x12`, cert issuer/serial/thumbprint), `PreAuthType` 14/16/17, rogue and enterprise issuers, short/full issuer DN, machine and user targets, missing cert, `4771` failure, `TicketOptions=0x60810010`, loopback `::1`, realm-qualified `ServiceName`, and a 4768 correlated with a preceding `msDS-KeyCredentialLink` write. All shapes ingested with the fields intact in both `microsoft_windows_raw` and `xdr_data`. |
 | `spn_cleared` | **WIP** | 5 batches, 0 alerts. Tried 4742 `ServicePrincipalNames` empty / `-` / absent, 5136 `%%14675` delete pairs, 5136 `%%14674` add-with-empty-value, 4662 write-property, and a same-account state transition (4742 with real SPNs, then 4742 with `-`). Batches 4–5 added the missing realism: `UserAccountControl` `%%2080` / `0x1000` (instead of `-`), the "only SPN changed" 4742 shape (`SamAccountName`/`DnsHostName` left as `-`), a real tenant asset (`FS01$`) as well as a new machine, and deleted-value renderings `-` / empty / absent. All shapes ingested; none alerted. Batch 6 re-ran the module's full sequence after the CRLF fix (9 events, real CRLF) — still 0 alerts. |
 | `kerberos_relay` | **WIP** | 7 batches, 0 alerts. Tried the published KrbRelayUp endpoint signature alone (4624 type 3, Kerberos, local Administrator RID 500, loopback) with `127.0.0.1` / `::1` / `::ffff:127.0.0.1` and `WorkstationName` `FS01` / `-`, then the full sequence 4768 → DC 4624 → 4769 → endpoint 4624 → 4672 → 4688 → 4689 against the real `FS01` asset. Batch 4 varied the target SID (machine-local vs synthetic-domain vs the tenant's real domain `S-1-5-21-2795392456-4107320412-3908095700` Administrator), the subject (machine account + `0x3e7` + `lsass.exe` vs anonymous `S-1-0-0`), and the target host (`FS01` vs `DC01`); all six events ingested with the fields intact and produced no alert. **Batches 5–7 ran after the CRLF fix below.** The stored `action_evtlog_message` now carries real CRLF (58–59 per 4624, 0 bare LF) and the published XQL hunt for this analytic returns the synthetic rows verbatim (`auth_package=Kerberos`, `logon_type=3`, `network=127.0.0.1`, `sid` ending `-500`). Batch 6 covered machine-local and real-domain Administrator SIDs; batch 7 fired the module's own full 7-event sequence against `SQL01`. Neither the Cribl receiver path nor attributing the WEC event to a real agent hostname (`Windows10-Workstation1`) changed anything — both still land as `EVENT_LOG_DOMAIN_CONTROLLER` with null `agent_ip_addresses`/`identity_enrichment`. That collector class is now the standing blocker: real agent 4624s are stamped `EVENT_LOG_AGENT_EVENT_LOG`, and no WEC/Cribl record can be. See "event_sub_type: WEC vs agent" below. |
+| `adminsdholder_acl_modification` | **WIP** | 2 batches, 0 alerts. Batch 1 delivered the canonical shape — 5136 `nTSecurityDescriptor` pair on `CN=AdminSDHolder,CN=System,DC=examplecorp,DC=local` with `ObjectClass=container`, `OperationType` `%%14675`/`%%14674` under one `OpCorrelationID`, and a new ACE `(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;<user SID>)` (Full control for a non-machine principal), plus the 4662 read `0x10`, WRITE_DAC `0x40000` and write-property `0x20` legs. This matches the published logic for the same detection (Splunk ESCU `00d877c3-7b7b-443d-9562-6b231e2abab9`: `EventCode=5136 ObjectClass=container ObjectDN="CN=AdminSDHolder,CN=System*"`, new ACE with Full control). Every field verified in `xdr_data`. Batch 2 was a differential probe; see "Target object must resolve to an entity" below. |
 | `mailbox_export`, `mailbox_export_log_removal`, `mailbox_cas_change` | **WIP** | 3 batches, 0 alerts. Tried 4104 `ScriptBlockText` carrying `New-MailboxExportRequest` / `Remove-MailboxExportRequest` / `Set-CASMailbox`, 4688 process creation, and native `MSExchange Management` EventID 1 `CmdletName`/`CmdletParameters` (simple and full field sets: `ObjectModified`, `User`, `Organization`, `OriginatingServer`, `Succeeded`, `RunspaceId`, `Timestamp`). The `MSExchange Management` channel **does** ingest and normalize (`microsoft_windows_raw` → `xdr_data`, `action_evtlog_event_id=1`), so channel availability is not the blocker. |
 
 What was ruled out as a common cause:
@@ -160,6 +167,41 @@ What was ruled out as a common cause:
   only referenced Windows events were 5136, 4781, 4720, 4728 and 4768 — never
   4624). That points at 4624 handling, not at the relay discriminator, as the
   hard blocker.
+
+### Target object must resolve to an entity (2026-11-16)
+
+`wip_adminsdholder_acl_modification` is the first case where the blocker is
+**not** the event shape. The published page puts it in the **Identity Analytics**
+module, the same module as two analytics that do fire here (`User added SID
+History to an account`, `Key credential attribute modification`), so the module
+itself is live.
+
+Batch 2 was a differential probe: the two 5136 attributes that fire today were
+retargeted at the AdminSDHolder container and everything else was left alone.
+
+| Probe (all delivered, all verified in `xdr_data`) | Alerts |
+|---|---|
+| 5136 `sIDHistory` on `CN=AdminSDHolder,CN=System,...`, `ObjectClass=container` | 0 |
+| 5136 `msDS-KeyCredentialLink` on the same DN, `ObjectClass=container` | 0 |
+| 5136 `nTSecurityDescriptor` pair on the same DN (attempt 2 of the target) | 0 |
+| **Positive control, same generator run 9 min later:** 5136 `sIDHistory` on `CN=c.ford,CN=Users,...`, `ObjectClass=user` | **"Suspicious SID History Addition" Medium** |
+
+The control alert reads "The user examplecorp\j.castillo added SID history to the
+account examplecorp\c.ford", i.e. the engine resolves the modified object to an
+**account** before it evaluates the change. On a `container` DN it never
+resolves, so no attribute-change analytic can fire against
+`CN=AdminSDHolder,CN=System,...` from WEC-only data. That is an engine-side
+requirement, not something the event can carry: the object would have to exist
+in the tenant's identity inventory (an AD/Identity connector), which WEC
+ingestion does not populate.
+
+Caveat, deliberately not over-claimed: the probe changed the DN **and**
+`ObjectClass` together, so which of the two the engine keys on is untested. Both
+are `container` for a real AdminSDHolder, so the practical conclusion is the same.
+
+This also predicts the same blocker for `wip_sccm_container_recon`
+("Suspicious access of the System Management Container"), which targets another
+`container` DN — **predicted, not yet tested**.
 
 Also fixed in this pass: `_build_4768` / `_build_4769` / `_build_4771` used to
 prepend `::ffff:` unconditionally, double-prefixing an already-mapped override to
