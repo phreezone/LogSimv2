@@ -984,8 +984,11 @@ def _threat_record(config, tf, sig, action, ts, misc=None, user_agent=None, repe
         "action":              action,
         "misc":                misc,
         "file_name":           misc,                 # the live column that holds $misc
-        "threat_id":           str(tid),
-        "threat_name":         f"{tname}({tid})",    # live CEF rows: $threat_name carries the ID suffix
+        # Live CEF rows: the documented `threat_id=$threatid` expands to "Name(ID)" and the tenant
+        # turns it into the numeric ID column; a bare number sent from here is dropped instead
+        # (all 56 of our rows lacked threat_id while all 613 of the pa440's had it).
+        "threat_id":           f"{tname}({tid})",
+        "threat_name":         f"{tname}({tid})",
         "threat_name_firewall": tname,
         "threat_category":     cat,
         "direction":           "client-to-server",
