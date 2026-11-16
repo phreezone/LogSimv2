@@ -735,6 +735,201 @@ _THREAT_SIGS = {
     "trendnet_tew432brp": (97650, "TRENDnet TEW-432BRP Firmware Command Injection Vulnerability", "critical", "code-execution", "vulnerability"),
     "php_memcorrupt": (543004, "PHP Memory Corruption Vulnerability",         "critical", "code-execution", "vulnerability"),
 }
+# Signatures read from the tenant's pa440 feed (read-only query 2026-11-16, last ~1000 min; 195
+# Threat IDs, of which 186 were not in the catalog yet): (id, name, severity, category, subtype,
+# action, app, file_name/$misc). Every field is as the tenant row carries it; the action/app/$misc
+# are each signature's own dominant values. Host names and IPs seen inside $misc were dropped.
+_TENANT_SIGS = [
+    (18011, 'Western Digital My Cloud Backdoor', 'critical', 'backdoor', 'spyware', 'reset-server', 'web-browsing', 'nas_sharing.cgi'),
+    (30101, 'Webhints Improper URI Sanitization Remote Command Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', '/hints.pl?|id|'),
+    (30554, 'Netgear Routers Arbitrary Command Injection Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '/cgi-bin/;cat$IFS/etc/passwd'),
+    (30844, 'HTTP Directory Traversal Request Attempt', 'medium', 'info-leak', 'vulnerability', 'alert', 'jaspersoft', 'win.ini'),
+    (30847, 'Generic HTTP Cross Site Scripting Attempt', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/<script>foo</script>'),
+    (30851, 'Microsoft Windows win.ini Access Attempt Detected', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'win.ini'),
+    (30852, 'HTTP /etc/passwd Access Attempt', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/../../etc/passwd'),
+    (31002, 'Multiple Products Arbitrary File Location Upload Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '/ap_spec_rec/upload/'),
+    (31003, 'Squid Proxy TRACE Request Denial of Service', 'medium', 'dos', 'vulnerability', 'reset-server', 'webdav', '/'),
+    (31475, 'Generic HTTP Cross Site Scripting Attempt', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/profil.php?id=1%20<script>foo</script>'),
+    (31476, 'Generic HTTP Cross Site Scripting Attempt', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', "/search=<script>alert('XSS')</script>"),
+    (31477, 'Generic HTTP Cross Site Scripting Attempt', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', "/index.php?gadget=Glossary&action=ViewTerm&term=<script>alert('crtx397162412');</script>"),
+    (31699, 'Trihedral VTScada WAP Filter Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/file://etc/passwd'),
+    (32658, 'HTTP Cross Site Scripting Attempt', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', "/index.php?gadget=Glossary&action=ViewTerm&term=<script>alert('crtx397162412');</script>"),
+    (32721, 'Alcatel OmniPCX Office MasterCGI Remote Command Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/cgi-bin/masterCGI?ping=nomip&user=;id;'),
+    (32775, 'Microsoft IIS 5.0 Form_JScript.asp XSS Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'Form_JScript.asp_889426325'),
+    (33073, 'Microsoft IIS ServerVariables_JScript. asp Information Disclosure', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/iissamples/sdk/asp/interaction/ServerVariables_Jscript.asp_471833835'),
+    (33452, 'Adobe ColdFusion Multiple Directory Traversal Vulnerabilities', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'enter.cfm'),
+    (33678, 'OPIE and Konica FTP Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'ftp', None),
+    (33756, 'Oracle 9i Application Server Dynamic Monitoring Services Anonymous Access', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/fcgi-bin/echo?foo=<SCRIPT>alert(document.domain)</SCRIPT>'),
+    (34181, 'IBM Rational Quality Manager and Test Lab Manager Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/manager/html'),
+    (34804, 'PHP CGI Query String Parameter Handling Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/php-cgi/php?-d%20allow_url_include=on%20-d%20safe_mode=off%20-d%20suhosin.simulation=on%2'),
+    (35107, 'HTTP /etc/passwd Access Attempt', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'weblogin.cgi'),
+    (35283, 'Dahua HDCVI and IPC Backdoor Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'Account1'),
+    (36102, 'PCCS Mysql Database Admin Tool Username and Password Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/pccsmysqladm/incs/dbconnect.inc_1167841198'),
+    (36124, 'Oracle 9I Application Server PL/SQL Apache Module Buffer Overflow Vulnerability', 'critical', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (36274, 'Spring Data Commons Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', '/account'),
+    (36729, 'Bash Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', 'test'),
+    (36736, 'Bash Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'ftp', None),
+    (37040, 'Rejetto HTTP File Server Remote Command Execution Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '/?search=='),
+    (37610, 'Microsoft Windows HTTP.sys Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/'),
+    (38768, 'D-Link Routers Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'passwd'),
+    (38926, 'Dahua Security DVR Appliances Authentication Bypass Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'passwd'),
+    (39268, 'ElasticSearch Groovy Script Engine Remote Command Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '_search'),
+    (39766, 'Novell ZENworks Mobile Management Cross-Site Scripting Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', "/index.php?gadget=Glossary&action=ViewTerm&term=<script>alert('crtx397162412');</script>"),
+    (40031, 'HTTP Unauthorized Brute Force Attack', 'high', 'brute-force', 'vulnerability', 'alert', 'web-browsing', 'run'),
+    (40483, 'PAN-OS Authentication Bypass Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-client', 'web-browsing', '/esp/cms_changeDeviceContext.esp?device=aaaaa:a\'";user|s."1337";'),
+    (40627, 'Drupal Core Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'register'),
+    (40740, 'Linksys Devices Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', '/error.php?err=404'),
+    (40797, 'Cisco Adaptive Security Appliance Web Services Denial of Service Vulnerability', 'high', 'dos', 'vulnerability', 'reset-both', 'web-browsing', 'file_list.json'),
+    (40992, 'Pivotal Spring Data Commons Remote File Read XXE Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'autodiscover'),
+    (54119, 'Novell File Reporter FSFUI Arbitrary File Retrieval Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/FSF/CMD'),
+    (54426, 'Squid HTTP Header Remote Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', 'openid-configuration'),
+    (54505, 'DLink DSL Remote OS Command Injection Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/login.cgi?username=&command=simple&do=edit&password=&file=|id|'),
+    (54519, 'IBM Lotus Domino HTTP Redirect Buffer Overflow Vulnerability', 'medium', 'overflow', 'vulnerability', 'alert', 'web-browsing', 'openid-configuration'),
+    (54701, 'HTTP Directory Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'webspirs.cgi'),
+    (54817, 'Multiple Products Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'upgrade_handle.php'),
+    (54825, 'ThinkPHP Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'index.php'),
+    (55025, 'Cisco RV320/RV325 Router Unauthenticated Configuration Export Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'config.exp'),
+    (55155, 'Sonatype Nexus Repository Manager Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'extdirect'),
+    (55385, 'Drupal core Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/node/1?_format=hal_json'),
+    (55462, 'Atlassian Confluence Directory Traversal Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'preview'),
+    (55505, 'Zimbra Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'ms-exchange', 'Autodiscover.xml'),
+    (55558, 'Spring Cloud Config Server Directory Traversal Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/etc/passwd'),
+    (55570, 'Oracle WebLogic wls9-async Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/wls-wsat/CoordinatorPortType'),
+    (55852, 'phpunit Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php'),
+    (56365, 'Fortinet FortiOS SSL VPN Path Traversal Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'fgt_lang'),
+    (56609, 'Ysoserial Java Object Deserialization Payloads Detection', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'amf'),
+    (56613, 'D-Link DNS-320 ShareCenter Remote Command Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'login_mgr.cgi'),
+    (56635, 'Ysoserial Java Object Deserialization Payloads Detection', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'amf'),
+    (56815, 'Ysoserial Java Object Deserialization Payloads Detection', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'amf'),
+    (56868, 'Jenkins Script Security Plugin Sandbox Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'checkScriptCompile'),
+    (56954, 'Webmin Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'password_change.cgi'),
+    (57497, 'Citrix Application Delivery Controller And Gateway Directory Traversal Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'smb.conf'),
+    (57557, 'Siemens Solid Edge ST4 Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/cgi-bin/chklogin.cgi?file=config.ini'),
+    (57806, 'Zyxel Multiple Products Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'weblogin.cgi'),
+    (57887, 'Liferay Portal Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'invoke'),
+    (57897, 'Draytek Vigor Remote Command Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'mainfunction.cgi'),
+    (57993, 'Unraid Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/webGui/images/green-on.png/?path=x&site[x][text]=<?php%20echo%20md5("CVE-2020-5847");%20?'),
+    (58062, 'Liferay Portal JSON Web Service Insecure Deserialization Vulnerability', 'critical', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'invoke'),
+    (58132, 'Apache Shiro Improper Authentication Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'test'),
+    (58460, 'Possible HTTP Malicious Payload Detection', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'index.php'),
+    (58465, 'Amcrest IPM-721S Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'Sha1Account1'),
+    (58618, 'YAWS Unauthenticated Remote File Disclosure Vulnerability', 'high', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/../../../../../../etc/passwd'),
+    (58623, 'F5 Traffic Management User Interface Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'fileRead.jsp'),
+    (58628, 'DataLife Engine Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '/datalife/engine/preview.php'),
+    (58671, 'Citrix Multiple Products Authorization Bypass Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'report'),
+    (58688, 'F5 Traffic Management User Interface Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'hsqldb'),
+    (58986, 'SAP NetWeaver AS JAVA Authentication Vulnerability', 'critical', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'ConfigServlet'),
+    (59021, 'Cisco ASA and FTD Arbitrary File Read Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'translation-table'),
+    (59133, 'vBulletin Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'widget_tabbedcontainer_tab_panel'),
+    (59315, 'phpMyadmin Scripts Deserialization Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'setup.php'),
+    (59335, 'MobileIron Core and Connector Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'LogService'),
+    (59505, 'Nette Code Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/index.php/nette.micro/?callback=shell_exec&cmd=id&what=-1'),
+    (59623, 'Oracle WebLogic Server Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'console.portal'),
+    (59940, 'Oracle WebLogic Server Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'console.portal'),
+    (90136, 'Car Rental Management System File Inclusion Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/index.php?page=../../../../../../../../../../../etc/passwd'),
+    (90152, 'WordPress Duplicator Plugin Directory Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/wp-admin/admin-ajax.php?action=duplicator_download&file=../../../../../etc/passwd'),
+    (90183, 'Zyxel USG Backdoor Account Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/?username=zyfwp&password=PrOw!aN_fXp'),
+    (90196, 'Apache Flink Directory Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '3MAYwwxfqaTJDraP0BYB3zrm9wY.txt'),
+    (90244, 'Elasticsearch Groovy Script Engine Remote Command Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '_search'),
+    (90776, 'Yealink DM Pre Auth Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'getPingData'),
+    (90879, 'F5 BIG-IP Authentication Bypass Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'login'),
+    (91201, 'VMware vCenter Server Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'getClusterCapabilityData'),
+    (91314, 'Cisco Adaptive Security Appliance Cross-Site Scripting Vulnerability', 'medium', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/+CSCOE+/saml/sp/acs?tgname=a'),
+    (91368, 'Microsoft Exchange Server SSRF Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'autodiscover.json'),
+    (91443, 'Microsoft Outlook Web Access Login Form Remote URI Redirection Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'outlook-web', '/exchweb/bin/auth/owalogon.asp?url=http://12345678910'),
+    (91471, 'Buffalo WSR-2533DHPL2 Path Traversal Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'info.html'),
+    (91594, 'Confluence Server OGNL Injection Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'doenterpagevariables.action'),
+    (91676, 'ZOHOcorp ManageEngine Improper Authentication Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'LogonCustomization'),
+    (91752, 'Apache HTTP Server Path Traversal Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/../../../../../../../etc/passwd'),
+    (91805, 'Draytek VigoConnect Local File Inclusion Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'WebServlet'),
+    (91832, 'Atlassian Confluence Server Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'web.xml'),
+    (91940, 'Metabase Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/api/geojson?url=file:///c://windows/win.ini'),
+    (91970, 'SonicWall SMA SQL Injection Vulnerability', 'high', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'supportInstaller'),
+    (91991, 'Apache Log4j Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'utils.js'),
+    (92271, 'D-LINK DIR Information Disclosure Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'getcfg.php'),
+    (92295, 'Primetek Primefaces Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'dynamiccontent.properties.xhtml'),
+    (92329, 'Grafana Labs Grafana Snapshot Authentication Bypass Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/api/snapshots/:key'),
+    (92386, 'Ivanti Endpoint Manager Cloud Services Appliance Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'index.php'),
+    (92389, 'Spring Cloud SPEL Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/functionRouter'),
+    (92397, 'Eclipse Jetty Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'concat'),
+    (92483, 'VMware Server-Side Template Injection Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'verify'),
+    (92526, 'Sophos Firewall Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'Controller'),
+    (92570, 'F5 BIG-IP Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'bash'),
+    (92626, 'SolarView Compact Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'conf_mail.php'),
+    (92712, 'Eclipse Jetty Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'web.xml'),
+    (92934, 'Atlassian Confluence Authentication Bypass Vulnerability', 'critical', 'insecure-credentials', 'vulnerability', 'reset-server', 'web-browsing', 'dologin.action'),
+    (93079, 'GLPI htmlawed Module Code Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'htmLawedTest.php'),
+    (93114, 'Adobe ColdFusion Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'ChannelListener.cfc'),
+    (93295, 'Dahua Improper Authentication Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'RPC2_Login'),
+    (93512, 'Joomla Improper Access Control Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/api/index.php/v1/config/application?public=true'),
+    (93588, 'JAI-EXT Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'wms'),
+    (93713, 'Adobe ColdFusion Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'iedit.cfc'),
+    (94087, 'Adobe ColdFusion Improper Access Control Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'utils.cfc'),
+    (94246, 'TOTOlink A7100RU Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'cstecgi.cgi'),
+    (94248, 'Chamilo Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'additional_webservices.php'),
+    (94261, 'vBulletin Deserialization Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'save'),
+    (94275, 'Adobe ColdFusion IPFilterUtils Improper Access Control Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'utils.cfc'),
+    (94299, 'PaperCut NG and MF Path Traversal Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/../../deployment/sharp/icons/home-app.png'),
+    (94328, 'Generic Cross-Site Scripting Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '/calendar_scheduler.php?start="><script>alert(document.cookie)</script>'),
+    (94344, 'Stakater Forecastle Directory Traversal Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'test'),
+    (94409, 'JetBrains TeamCity Authentication Bypass Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/app/rest/users/id:1/tokens/RPC2'),
+    (94413, 'Cacti Group Cacti SQL Injection Vulnerability', 'critical', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'graph_view.php'),
+    (94475, 'IBM Aspera Faspex Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'relay_package'),
+    (94666, 'Qlik Sense Enterprise HTTP Request Smuggling Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', 'CVE-2023-41265.ttf'),
+    (94701, 'ownCloud Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/apps/graphapi/vendor/microsoft/microsoft-graph/tests/GetPhpInfo.php/YARg.css'),
+    (94842, 'Qlik Sense Enterprise Path Traversal Vulnerability', 'medium', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'localhost:8080/qrs/ReloadTask?xrfkey=1333333333333337&filter=.ttf'),
+    (94845, 'cPanel ErrorPage Cross-Site Scripting Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '<img src=x onerror="prompt(document.domain)">9264863'),
+    (94885, 'Ivanti Multiple Products Authentication Bypass Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'system-information'),
+    (94975, 'D-Link D-View TftpSendFileThread Directory Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'drop', 'tftp', None),
+    (95095, 'JetBrains TeamCity Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'hax'),
+    (95102, 'JetBrains TeamCity Path Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'diagnostic.jsp'),
+    (95132, 'aiohttp Directory Traversal Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/../../../../../../../../etc/passwd.'),
+    (95258, 'Check Point Security Gateway Directory Traversal Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'MyCRL'),
+    (95295, 'PHP CGI Argument Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'status.php'),
+    (95308, 'Microsoft Exchange Server Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'autodiscover.json'),
+    (95311, 'Zoho ManageEngine Desktop Central Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'agentLogUploader'),
+    (95373, 'SAP Solution Manager Privilege Escalation Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'soap', 'EemAdmin'),
+    (95382, 'Progress Kemp LoadMaster REST API Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'set'),
+    (95393, 'Splunk Enterprise Path Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'passwd'),
+    (95408, 'TerraMaster TOS Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'api.php'),
+    (95410, 'Minio Information Disclosure Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'verify'),
+    (95415, 'ServiceNow Platform Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'login.do'),
+    (95423, 'Openfire Directory Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'log.jsp'),
+    (95433, 'Apache Airflow Experimental API Authentication Bypass Vulnerability', 'critical', 'code-obfuscation', 'vulnerability', 'reset-server', 'web-browsing', '/api/experimental/latest_runs'),
+    (95567, 'SolarWinds Web Help Desk Hardcoded Credential Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/helpdesk/WebObjects/Helpdesk.woa/ra/OrionTickets/'),
+    (95568, 'Apache HTTP Server on Windows Server-Side Request Forgery Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/etc/passwd#vt/test'),
+    (95792, 'Ivanti Cloud Services Appliance Broker Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'users.php'),
+    (96109, 'Ingress Nginx Admission Controller Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/'),
+    (96143, 'Langflow Unauthenticated Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'code'),
+    (96194, 'Apache HTTP Server Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'temp.db?.1.1.1.1a-1.css'),
+    (96267, 'Ivanti Endpoint Manager Mobile Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/mifs/rs/api/v2/featureusage?format=${4427*4428}'),
+    (96314, 'Oracle Business Intelligence Local File Inclusion Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'saw.dll'),
+    (96343, 'Cisco IOS XE WLC Arbitrary File Upload Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/ap_spec_rec/upload/'),
+    (96481, 'Microsoft Sharepoint Authentication Bypass Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'ToolPane.aspx'),
+    (96497, 'Fortinet FortiWeb SQL Injection Vulnerability', 'critical', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'status'),
+    (96509, 'Microsoft Sharepoint Authentication Bypass Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'ToolPane.aspx'),
+    (96606, 'PTZOptics PT30X-SDINDI Cameras param.cgi Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'param.cgi'),
+    (96611, 'SimpleHelp SimpleHelp WebDownloadServer Directory Traversal Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'serverconfig.xml'),
+    (96643, 'Cisco Secure Firewall ASA and Cisco Secure FTD Authentication Bypass Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'file_action.html'),
+    (96671, 'Fortra GoAnywhere MFT Insecure Deserialization Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/goanywhere/license/Unlicensed.xhtml/xjprn?javax.faces.ViewState=xjprn&GARequestAction=act'),
+    (96700, 'Kentico Xperience Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'soap', 'SyncServer.asmx'),
+    (96738, 'Apache Tomcat Rewrite Rules Relative Path Traversal Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'confluence-base', 'web.xml'),
+    (96742, 'Fortinet FortiWeb Path Traversal Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'fwbcgi'),
+    (96755, 'Oracle Identity Manager REST WebServices Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'groovyscriptstatus;.wadl'),
+    (96787, 'React Server Components Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/'),
+    (96795, 'Apache Tika XML External Entity Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', 'tika'),
+    (97003, 'Zimbra Collaboration Server RestFilter Local File Inclusion Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'rest'),
+    (97012, 'Ivanti Endpoint Manager Remote Control logintype Authentication Bypass Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'Auth'),
+    (97127, 'GeoServer GetMap XML External Entity Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'wfs'),
+    (97135, 'XWiki SolrSearchMacros Code Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'SolrSearch'),
+    (97291, 'Ivanti Sentry Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'handleMessage'),
+    (97413, 'SolarView Compact Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'downloader.php'),
+    (97417, 'HTTP Bash History Access Attempt', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '.bash_history'),
+    (510004, 'Palo Alto Networks GlobalProtect Cross-Site Scripting Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'getconfig.esp'),
+]
+for _r in _TENANT_SIGS:
+    _THREAT_SIGS["t%d" % _r[0]] = _r[:5]
+_TENANT_PROFILE = {"t%d" % _r[0]: (_r[5], _r[6], _r[7]) for _r in _TENANT_SIGS}
 # Actions that end the session: the matching traffic log ends with session_end_reason=threat.
 _SESSION_ENDING_ACTIONS = ("drop", "reset-server", "reset-client", "reset-both", "block-ip")
 
@@ -1082,6 +1277,12 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "threat_php_memory_corruption", "weight": 2, "analytic": True, "xsiam_alert": "PHP Memory Corruption Vulnerability"},
     # Informational: never surfaces in the alerts table; background only.
     {"event": "threat_default_credentials_http", "weight": 2, "analytic": False, "xsiam_alert": None},
+    {"event": "threat_web_rce",          "weight": 4, "analytic": False, "xsiam_alert": None},
+    {"event": "threat_web_infoleak",     "weight": 3, "analytic": False, "xsiam_alert": None},
+    {"event": "threat_web_detect_only",  "weight": 3, "analytic": False, "xsiam_alert": None},
+    {"event": "threat_web_sqli_overflow_dos", "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "threat_legacy_service_exploit", "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "threat_wd_mycloud_backdoor", "weight": 1, "analytic": False, "xsiam_alert": None},
     {"event": "threat_scanner_campaign", "weight": 1, "analytic": True, "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
     # Realistic network patterns whose dedicated analytic needs EAL-decoded fields the CEF
     # traffic log cannot carry — kept for hunts / correlation, NOT offered on demand.
@@ -2237,7 +2438,7 @@ _PROBE_PATHS = ["/", "/login", "/api/v1/auth", "/index.jsp", "/admin", "/manager
 
 
 def _inbound_threat(config, key, app, ports, actions, *, proto="tcp", n=(3, 8), rule="Allow-Inbound-Web",
-                    cleartext_web=False, threat_only=False):
+                    cleartext_web=False, threat_only=False, misc=None):
     """An internet attacker repeatedly tripping signature `key` against a published DMZ server
     (untrust -> dmz). Web exploits ride cleartext HTTP so PAN can see the request (it cannot
     inspect undecrypted TLS), and carry the request path in `misc` and the client User-Agent."""
@@ -2256,7 +2457,7 @@ def _inbound_threat(config, key, app, ports, actions, *, proto="tcp", n=(3, 8), 
         out += _threat_session(config, key, attacker, dst, random.choice(ports), app,
                                action=random.choice(actions), end=t, dhost=dname, from_zone="untrust",
                                to_zone="dmz", proto=proto, rule=rule, src_category="unknown",
-                               misc=(random.choice(_PROBE_PATHS) if cleartext_web else None),
+                               misc=(misc or (random.choice(_PROBE_PATHS) if cleartext_web else None)),
                                user_agent=(ua if cleartext_web else None), threat_only=threat_only)
     return out
 
@@ -2451,6 +2652,68 @@ def _sim_threat_php_memory_corruption(config, session_context):
                            n=(2, 5), cleartext_web=True, threat_only=True)
 
 
+def _tenant_keys(pred):
+    return sorted(k for k, (act, app, _m) in _TENANT_PROFILE.items() if pred(_THREAT_SIGS[k], act, app))
+
+
+_WEB_APPS_EXCLUDED = ("ftp", "tftp")
+_TENANT_FAMILIES = {
+    "web_rce":    lambda g, a, p: g[3] == "code-execution" and a != "alert" and p not in _WEB_APPS_EXCLUDED and g[4] == "vulnerability",
+    "web_leak":   lambda g, a, p: g[3] == "info-leak" and a != "alert" and p not in _WEB_APPS_EXCLUDED,
+    "web_detect": lambda g, a, p: a == "alert" and p not in _WEB_APPS_EXCLUDED,
+    "web_other":  lambda g, a, p: (g[3] in ("sql-injection", "overflow", "dos", "code-obfuscation", "brute-force",
+                                            "insecure-credentials") and a != "alert" and p not in _WEB_APPS_EXCLUDED),
+    "legacy":     lambda g, a, p: p in _WEB_APPS_EXCLUDED,
+    "spyware":    lambda g, a, p: g[4] == "spyware",
+}
+
+
+def _tenant_family_event(config, family):
+    """One internet attacker tripping a tenant-confirmed signature of `family` against a DMZ
+    server: the signature's own action, App-ID and $misc as the tenant feed carries them.
+    Threat logs only, like the other catalog-driven exploit events."""
+    key = random.choice(_tenant_keys(_TENANT_FAMILIES[family]))
+    act, app, misc = _TENANT_PROFILE[key]
+    if app == "tftp":
+        return _inbound_threat(config, key, app, [69], [act], proto="udp", n=(1, 3),
+                               rule="Allow-Inbound-FTP-Legacy", threat_only=True)
+    if app == "ftp":
+        return _inbound_threat(config, key, app, [21], [act], n=(1, 3),
+                               rule="Allow-Inbound-FTP-Legacy", threat_only=True)
+    return _inbound_threat(config, key, app, [80, 8080], [act], n=(1, 4), cleartext_web=True,
+                           threat_only=True, misc=misc)
+
+
+def _sim_threat_web_rce(config, session_context):
+    """Code-execution web exploits (115+ signatures, blocked with reset-*): cleartext HTTP."""
+    return _tenant_family_event(config, "web_rce")
+
+
+def _sim_threat_web_infoleak(config, session_context):
+    """Information-disclosure / traversal / auth-bypass signatures, blocked (reset-server)."""
+    return _tenant_family_event(config, "web_leak")
+
+
+def _sim_threat_web_detect_only(config, session_context):
+    """Signatures the policy only alerts on (XSS, /etc/passwd, directory traversal requests, ...)."""
+    return _tenant_family_event(config, "web_detect")
+
+
+def _sim_threat_web_sqli_overflow_dos(config, session_context):
+    """SQL injection, buffer overflow, DoS and other categories, blocked."""
+    return _tenant_family_event(config, "web_other")
+
+
+def _sim_threat_legacy_service_exploit(config, session_context):
+    """FTP / TFTP service exploits (buffer overflow, directory traversal)."""
+    return _tenant_family_event(config, "legacy")
+
+
+def _sim_threat_wd_mycloud_backdoor(config, session_context):
+    """Spyware-subtype signature (Western Digital My Cloud Backdoor), reset-server, cleartext HTTP."""
+    return _tenant_family_event(config, "spyware")
+
+
 def _sim_threat_scanner_campaign(config, session_context):
     """One internal host works through a whole recon sequence within the hour: a port scan,
     failed connections, then scanner-signature hits (Nmap NSE, OpenVAS, portmapper) on the
@@ -2532,6 +2795,11 @@ _THREAT_DISPATCH = {
     "threat_moxa_tn5900_injection": _sim_threat_moxa_tn5900_injection,
     "threat_trendnet_tew432brp_injection": _sim_threat_trendnet_tew432brp_injection,
     "threat_php_memory_corruption": _sim_threat_php_memory_corruption,
+    "threat_web_rce": _sim_threat_web_rce, "threat_web_infoleak": _sim_threat_web_infoleak,
+    "threat_web_detect_only": _sim_threat_web_detect_only,
+    "threat_web_sqli_overflow_dos": _sim_threat_web_sqli_overflow_dos,
+    "threat_legacy_service_exploit": _sim_threat_legacy_service_exploit,
+    "threat_wd_mycloud_backdoor": _sim_threat_wd_mycloud_backdoor,
     "threat_iax2_dos": _sim_threat_iax2_dos, "threat_bot_backdoor_beacon": _sim_threat_bot_backdoor_beacon, "threat_scanner_campaign": _sim_threat_scanner_campaign,
 }
 
