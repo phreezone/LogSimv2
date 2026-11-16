@@ -4993,7 +4993,7 @@
     "mgmt_ip": "10.0.0.1",
     "syslog_hostname_format": "hostname",
     "_comment_syslog_hostname_format": "What PAN stamps in the syslog header HOSTNAME field (Device -> Setup -> Management -> Syslog HOSTNAME Format): 'hostname' uses the firewall name, 'ipv4-address' uses mgmt_ip.",
-    "sw_version": "11.1.4",
+    "sw_version": "12.2.4-h1",
     "threat_severity_format": "number",
     "_comment_threat_severity_format": "THREAT logs: 'number' sends the documented $number-of-severity (1-5) as severity and the word as vendor_severity; 'word' sends the word as severity (the live CLCS column). threat_signatures adds signatures whose Threat ID is known: {key: [id, name, severity, category, subtype]}.",
     "threat_signatures": {},

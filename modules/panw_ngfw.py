@@ -223,7 +223,7 @@ _URL_CAT_RISKY   = ["malware", "command-and-control", "phishing", "proxy-avoidan
                     "peer-to-peer", "questionable", "grayware", "ransomware", "compromised-website",
                     "scanning-activity", "parked"]
 
-_SW_VERSION = "11.1.4"       # PAN-OS release stamped in the CEF device-version slot
+_SW_VERSION = "12.2.4-h1"    # PAN-OS release stamped in the CEF device-version slot (the lab pa440's)
 _SYSLOG_PRI = 14             # facility LOG_USER(1)*8 + notice(6)=14 (PAN syslog default LOG_USER)
 
 # Device-ID OS families seen on endpoints, for source_device_osfamily.
@@ -280,8 +280,20 @@ def _session_id():
     return str(random.randint(100000, 2147483647))
 
 
+_SEQ = [random.randint(7000000000000000000, 7999999999999999000)]
+
+
 def _seqno():
-    return str(random.randint(7000000000000000000, 7999999999999999999))
+    """sequence_no is a per-device counter shared by every log type (the live pa440 rows rise
+    monotonically: ...642205570 -> ...642224005 over 35 min), not a random number per log."""
+    _SEQ[0] += random.randint(1, 3)
+    return str(_SEQ[0])
+
+
+def _pan_time(t):
+    """log_time/time_generated as PAN-OS writes them in the CEF custom format: the live pa440
+    Syslog rows show 'Nov 16 2026 18:46:43 GMT'."""
+    return time.strftime("%b %d %Y %H:%M:%S GMT", time.gmtime(t))
 
 
 def _random_mac(host=None):
@@ -454,7 +466,7 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
     """
     t = ts if ts is not None else time.time()
     serial, name = _serial(config), _fw_name(config)
-    iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t))
+    pan_ts = _pan_time(t)
     # The documented __timestamp is $start (session START) and __tz is $high_res_timestamp;
     # time_generated is when the log was written, i.e. the session end.
     try:
@@ -470,12 +482,12 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
         # The Syslog Collector routes on __firewall_type but does NOT rename the body: each
         # key lands as a column of that name. So the documented `subtype` is sent alongside
         # `sub_type`, the column the dataset (and its modeling rule's FAILED-on-deny/drop
-        # outcome) actually reads, and log_type is lowercase as in the live CLCS rows.
-        "log_type":        log_type.lower(),
+        # outcome) actually reads, and log_type is uppercase as in the live pa440 Syslog rows.
+        "log_type":        log_type.upper(),
         "subtype":         subtype,
         "sub_type":        subtype,
-        "log_time":        iso,
-        "time_generated":  iso,
+        "log_time":        pan_ts,
+        "time_generated":  pan_ts,
         "rt":              str(int(t * 1000)),   # event time; _time is still the ingest time
         "time_generated_high_res": hires,
         "session_start_time": start_iso,
@@ -498,7 +510,7 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
             merged[uf] = f"EXAMPLECORP\\{uv}"
     ext = " ".join(f"{k}={_cef_escape(v)}" for k, v in merged.items() if v is not None and v != "")
     sw = _get_config(config).get("sw_version", _SW_VERSION)
-    header = f"CEF:0|PANW|NGFW_CEF|{sw}|{sig or subtype}|{log_type.lower()}|{severity}|"
+    header = f"CEF:0|PANW|NGFW_CEF|{sw}|{sig or subtype}|{log_type.upper()}|{severity}|"
     syslog_ts = time.strftime("%b %d %H:%M:%S", time.gmtime(t))
     return f"<{_SYSLOG_PRI}>{syslog_ts} {_syslog_host(config)} {header} {ext}"
 
@@ -590,6 +602,10 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
     if outbound:
         f["nat_source"]      = nat_src or _nat_for(src_ip, config)
         f["nat_source_port"] = random.randint(20000, 65000)
+    else:
+        # The live pa440 rows send the NAT columns on every log, zeroed when no NAT applied.
+        f["nat_source"], f["nat_source_port"] = "0.0.0.0", 0
+    f["nat_dest"], f["nat_dest_port"] = "0.0.0.0", 0
     return f
 
 

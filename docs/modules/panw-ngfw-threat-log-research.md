@@ -239,3 +239,14 @@ signatures, content 9162) were added the same way, as threat logs only.
   https://cortex-docs.paloaltonetworks.com/analytics-alerts/alerts-by-data-source/palo-alto-networks-firewall-threat-logs
 - Elastic `panw` integration test fixtures (open source):
   https://github.com/elastic/integrations/tree/main/packages/panw/data_stream/panos/_dev/test/pipeline
+
+## 8. Live pa440 CEF traffic rows (2026-11-16)
+
+The first genuine PAN-OS 12.2.4-h1 CEF rows (3 traffic logs, `_collector_type: Syslog`,
+`log_source_name: pa440`; one delivered twice) were compared with ours. Traffic keys matched
+closely; the generator now follows the real rows for: `log_time`/`time_generated` format
+(`Nov 16 2026 18:46:43 GMT`), uppercase `log_type`/header type, the device version, NAT keys
+always present (zeroed), and a rising `sequence_no` counter. Threat/URL syslog rows from the
+pa440 had not arrived yet, so the threat and URL logs adopt the same conventions by
+assumption, not from evidence. Open: whether syslog threat rows carry a `threat_id` column and
+a word `severity`, and whether they raise native PAN NGFW alerts (our 2026-11-15 probe did not).

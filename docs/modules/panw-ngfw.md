@@ -61,7 +61,10 @@ dataset's modeling rule and the live CLCS rows carry. Checked field by field 202
 |---|---|
 | `__firewall_type` `log_type` `subtype` | `firewall.traffic` / `firewall.url`; `log_type` lowercase as in the live rows; `subtype` **and** `sub_type` (the column the modeling rule reads) |
 | `__timestamp=$start`, `__tz=$high_res_timestamp` | session start; high-res timestamp (`…ss.mmm+00:00`), also as `time_generated_high_res` |
-| `log_time`, `time_generated`, `session_start_time` | ISO-8601 (the dataset types `time_generated` as a timestamp) |
+| `log_time`, `time_generated` | PAN's native `Nov 16 2026 18:46:43 GMT`, as the live pa440 Syslog rows write them; `session_start_time` stays ISO-8601 |
+| `log_type` / header type | uppercase (`TRAFFIC`, `THREAT`), as the live pa440 Syslog rows |
+| `nat_source`, `nat_dest`, `nat_*_port` | always sent; `0.0.0.0` / `0` when no NAT applied (as the pa440 does) |
+| `sequence_no` | a rising per-device counter shared by every log type |
 | `log_source_id` / `log_source_name` / `sequence_no` / `vsys` / `vsys_name` | from `panw_ngfw_config` |
 | `source_ip/port`, `dest_ip/port`, `nat_source/dest(_port)`, `protocol`, `action` | as documented; NAT only toward the internet |
 | `source_user`, `dest_user`, `users` | `EXAMPLECORP\user`; `users` falls back to the source address (as the live rows do without User-ID) |
@@ -645,7 +648,7 @@ these values.
 | `hostname` | `PA-VM-01` | firewall name (`log_source_name` / `device_name`, and the syslog header host when `syslog_hostname_format=hostname`) |
 | `mgmt_ip` | `10.0.0.1` | firewall management/source IP (used as the syslog header host when `syslog_hostname_format=ipv4-address`) |
 | `syslog_hostname_format` | `hostname` | what PAN stamps in the syslog header HOSTNAME field: `hostname` or `ipv4-address` (uses `mgmt_ip`) |
-| `sw_version` | `11.1.4` | PAN-OS release in the CEF device-version slot |
+| `sw_version` | `12.2.4-h1` | PAN-OS release in the CEF device-version slot |
 | `vsys` | `vsys1` | virtual system |
 | `interface_lan` / `interface_wan` | `ethernet1/2` / `ethernet1/1` | inbound / outbound interfaces |
 | `default_rule` | `Allow-Users-Outbound` | benign `rule_matched` |
