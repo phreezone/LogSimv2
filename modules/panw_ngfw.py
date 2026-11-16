@@ -1329,6 +1329,10 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "dos_anomaly",          "weight": 3,  "analytic": False, "xsiam_alert": None},
     {"event": "external_port_scan",   "weight": 3,  "analytic": False, "xsiam_alert": None},
     {"event": "snmp_unexpected_source","weight": 1, "analytic": False, "xsiam_alert": None},
+    # File Data logs (firewall.filedata): file-type identification, severity low, never an alert.
+    {"event": "file_data_web",        "weight": 3,  "analytic": False, "xsiam_alert": None},
+    {"event": "file_data_internal",   "weight": 3,  "analytic": False, "xsiam_alert": None},
+    {"event": "file_data_ocsp",       "weight": 2,  "analytic": False, "xsiam_alert": None},
 ]
 
 _EVENT_DISPLAY_NAMES = {e["event"]: e["event"] for e in _DEFAULT_THREAT_EVENTS}
@@ -2652,6 +2656,137 @@ def _sim_rare_external_rdp(config, session_context):
                   duration_s=random.randint(120, 3000), url_cat="unknown")]
 
 
+# --- File Data logs (log_type THREAT, subtype file -> __firewall_type firewall.filedata) ----------
+# The file-type identification entries the live pa440 writes when a profile alerts on a file type
+# (read-only pull of its native CSV feed, 2026-11-16: ~12k rows, all severity low, action alert,
+# threat category N/A, direction server-to-client). Name and Threat ID are as the device records
+# them; the `filetype` token is each signature's file extension / type word (assumed: the native CSV
+# has no such column) and `file_url` / `filedigest` are not in the CSV either (digest stays empty:
+# only a WildFire verdict carries one).
+_FILE_SIGS = {
+    "bin":  (52081, "Unknown Binary File",                      "bin"),
+    "php":  (52256, "Hypertext Preprocessor PHP File",          "php"),
+    "xml":  (52384, "XML File",                                 "xml"),
+    "jsp":  (52255, "JavaServer Pages JSP File",                "jsp"),
+    "asp":  (52239, "Active Server Page ASP File",              "asp"),
+    "aspx": (52257, "Active Server Page Extended ASPX File",    "aspx"),
+    "json": (52380, "JSON File",                                "json"),
+    "pdf":  (52021, "Adobe Portable Document Format (PDF)",     "pdf"),
+    "der":  (52209, "DER Encoded X509 Certificate",             "der"),
+    "crt":  (52390, "X509 Certificate File",                    "crt"),
+    "perl": (52017, "Perl Script",                              "pl"),
+    "py":   (52193, "Python File",                              "py"),
+    "dat":  (52418, "DAT file",                                 "dat"),
+}
+# (signature key, file name pool, weight) as the live feed's name distribution
+_FILE_WEB_NAMES = [
+    ("php",  ["index.php", "login.php", "main.php", "calendar.php", "setup.php"], 8),
+    ("xml",  ["sitemap.xml", "device-desc.xml", "dd.xml", "web.xml"], 5),
+    ("jsp",  ["login.jsp", "index.jsp", "welcome.jsp"], 3),
+    ("asp",  ["index.asp", "default.asp", "login.asp", "home.asp"], 3),
+    ("aspx", ["Login.aspx", "Default.aspx", "index.aspx"], 3),
+    ("json", ["composer.json", "manifest.json"], 2),
+    ("pdf",  ["report.pdf", "brochure.pdf"], 2),
+    ("crt",  ["gd_tls_issuing_dv-r1v1.crt"], 1),
+    ("perl", ["index.pl"], 1),
+    ("py",   ["index.py"], 1),
+    ("dat",  ["users.dat"], 1),
+    ("bin",  ["inform", "update", "firmware"], 6),
+]
+_OCSP_HOSTS = ["ocsp.digicert.com", "ocsp.pki.goog", "ocsp.sectigo.com", "ocsp.godaddy.com",
+               "ocsp.entrust.net", "r3.o.lencr.org"]
+
+
+def _file_record(config, tf, sigkey, misc, ts, file_url=None, action="alert"):
+    """One PAN-OS file-type THREAT log (documented File Data format: firewall.filedata).
+
+    Header signature slot is the Threat ID. `tf` is the traffic-field dict of the session it
+    fired in, so the file log shares its addresses, ports, zones, users, App-ID and session_id.
+    """
+    tid, tname, ftype = _FILE_SIGS[sigkey]
+    f = {k: tf[k] for k in _URL_SHARED_KEYS if tf.get(k) not in (None, "")}
+    fmt = str(_get_config(config).get("threat_severity_format", "number")).lower()
+    f.update({
+        "action":              action,
+        "misc":                misc,
+        "file_name":           misc,
+        "threat_id":           str(tid),
+        "threat_name":         tname,
+        "threat_name_firewall": tname,
+        "threat_category":     "N/A",
+        "direction":           "server-to-client",
+        "direction_of_attack": "server to client",
+        "severity":            ("Low" if fmt == "word" else str(_SEVERITY_NUM["low"])),
+        "vendor_severity":     "Low",
+        "count_of_repeats":    1,
+        "file_url":            file_url,
+        "filetype":            ftype,
+        "pcap_id":             0,
+    })
+    return _format_cef(config, "file", f, log_type="THREAT", severity=_SEVERITY_NUM["low"], ts=ts,
+                       fw_type="firewall.filedata", sig=str(tid))
+
+
+def _file_session(config, src, dst, dpt, app, domain, sigkey, name, *, suser=None, shost=None,
+                  from_zone="trust", to_zone="untrust", url_cat=None, path=None, with_url=True,
+                  dhost=None, url_host=None):
+    """[traffic:end, (url), file] for one cleartext download: all three share one session_id."""
+    dur = random.randint(1, 12)
+    f = _traffic_fields(config, src, dst, dpt, app, shost=shost, suser=suser, dhost=dhost or domain,
+                        from_zone=from_zone, to_zone=to_zone, url_cat=url_cat, duration_s=dur,
+                        bytes_sent=random.randint(300, 1500), bytes_received=random.randint(800, 90000))
+    end = time.time() - random.uniform(0, 3)
+    out = [_format_cef(config, "end", dict(f), ts=end)]
+    host = url_host or domain
+    path = path or f"/{name}"
+    if with_url:
+        out.append(_url_record(config, f, host, path=path, category=url_cat, ts=end - dur / 2))
+    out.append(_file_record(config, f, sigkey, name, ts=end - dur / 2,
+                            file_url=f"{host}{path}"))
+    return out
+
+
+def _sim_file_data_web(config, session_context):
+    """A user fetching a file over cleartext HTTP from an Internet web server: the device
+    identifies the file type and logs it (alert) next to the URL and traffic logs."""
+    src, user, shost = _user_src(config, session_context)
+    dests = config.get("benign_egress_destinations") or [{}]
+    domain, dst = resolver.benign_target(config, weighted_destination(user, dests))
+    sigkey, names, _w = random.choices(_FILE_WEB_NAMES, weights=[w[2] for w in _FILE_WEB_NAMES])[0]
+    name = random.choice(names)
+    print(f"    - PAN NGFW simulating: file data {_FILE_SIGS[sigkey][1]} {domain} -> {src}")
+    return _file_session(config, src, dst, 80, "web-browsing", domain, sigkey, name, suser=user,
+                         shost=shost, url_cat=random.choice(_URL_CAT_BENIGN))
+
+
+def _sim_file_data_internal(config, session_context):
+    """A host fetching a file from an internal web application on 8080 / 9080 (intranet
+    portals, device description XML, admin pages): the bulk of the live file-type rows."""
+    src, user, shost = _user_src(config, session_context)
+    servers = [s for s in (config.get("internal_servers") or ["10.0.10.50"]) if s != src] or ["10.0.10.50"]
+    dst = random.choice(stable_subset(servers, "panw_ngfw:file_data_internal") or servers)
+    sigkey, names, _w = random.choices(_FILE_WEB_NAMES, weights=[w[2] for w in _FILE_WEB_NAMES])[0]
+    name = random.choice(names)
+    port = random.choices([8080, 9080, 80], weights=[5, 3, 2])[0]
+    host = resolver.internal_fqdn(config, dst)
+    print(f"    - PAN NGFW simulating: file data (internal) {_FILE_SIGS[sigkey][1]} {dst}:{port} -> {src}")
+    return _file_session(config, src, dst, port, "web-browsing", host, sigkey, name, suser=user,
+                         shost=shost, from_zone="trust", to_zone="trust", url_cat="private-ip-addresses",
+                         url_host=f"{host}:{port}" if port != 80 else host)
+
+
+def _sim_file_data_ocsp(config, session_context):
+    """Certificate validation: the client's OCSP lookup returns a DER X509 certificate blob
+    (App-ID ocsp, tcp/80), logged as a file-type identification."""
+    src, user, shost = _user_src(config, session_context)
+    host = random.choice(_OCSP_HOSTS)
+    dst = rare_external_ip()
+    print(f"    - PAN NGFW simulating: file data OCSP {host} -> {src}")
+    return _file_session(config, src, dst, 80, "ocsp", host, "der", random.choice(["ocsp", "responder", "ocsp"]),
+                         suser=user, shost=shost, url_cat="computer-and-internet-info", path="/",
+                         with_url=random.random() < 0.5)
+
+
 # --- Threat-log scenarios (THREAT + the matching traffic log of each session) ---------------
 _SCANNER_UA = {
     "nmap_nse": "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)",
@@ -2994,6 +3129,8 @@ _THREAT_DISPATCH = {
     "rare_external_rdp": _sim_rare_external_rdp, "large_download": _sim_large_download,
     "dos_anomaly": _sim_dos_anomaly, "external_port_scan": _sim_external_port_scan,
     "snmp_unexpected_source": _sim_snmp_unexpected_source,
+    "file_data_web": _sim_file_data_web, "file_data_internal": _sim_file_data_internal,
+    "file_data_ocsp": _sim_file_data_ocsp,
     "port_scan_aggressive": _sim_port_scan_aggressive, "ipfs_peering": _sim_ipfs_peering,
     "rare_domain_attack_port": _sim_rare_domain_attack_port,
     "recurring_rare_domain_attack_port": _sim_recurring_rare_domain_attack_port,

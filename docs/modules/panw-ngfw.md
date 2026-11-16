@@ -230,7 +230,7 @@ as soon as a real tenant row shows them.
 
 Threat IDs are never invented. Signatures whose ID is known can be added without code in
 `panw_ngfw_config.threat_signatures` (`{key: [id, name, severity, category, subtype]}`); spyware,
-virus, wildfire-virus and file-data logs need that (see *Not built yet* below).
+virus and wildfire-virus logs need that (see *Not built yet* below). File-type logs are built (see *File Data logs*).
 
 **Each threat is a pair of logs.** The threat log shares its session with a traffic log:
 same 5-tuple, zones, interfaces, rule, users, App-ID and `session_id`. The firewall logs the
@@ -502,9 +502,21 @@ and NFS alerts from the real pa440). The ambient benign mix deliberately carries
 logs: each one is self-alerting, and the lesson from the Entra baseline is that a benign draw
 that raises alerts pollutes every later test. Threats fire only through the threat gate or on demand.
 
-**Not built yet, and what is needed.** Virus, wildfire-virus, wildfire, url, data, scan and flood logs,
-and the file fields (`file_url`, `filedigest`, `filetype`), still have no rows in the tenant feed
-(the 2026-11-16 pull held only `vulnerability` plus one `spyware` signature, 195 IDs in all), so no
+**File Data logs (`firewall.filedata`).** The documented File Data format (header signature slot = Threat ID,
+type THREAT, severity number) is built as three background-only events (`analytic: False`, severity low,
+action alert, direction server-to-client, threat category N/A): `file_data_web` (a user fetching a file over
+cleartext HTTP from an Internet server), `file_data_internal` (a host fetching from an internal web app on
+8080/9080/80) and `file_data_ocsp` (an OCSP lookup returning a DER X509 certificate, App-ID `ocsp`, tcp/80).
+Each fires traffic + file (+ URL) logs on one `session_id`. Names, IDs and the file-name distribution come
+from the pa440's native CSV feed (2026-11-16, ~12k `file` rows): 52081 Unknown Binary File, 52256 PHP,
+52384 XML, 52255 JSP, 52239 ASP, 52257 ASPX, 52380 JSON, 52021 PDF, 52209 DER X509, 52390 X509 file, 52017
+Perl, 52193 Python, 52418 DAT. **Assumed:** the `filetype` token (extension), `file_url` (host + path) and the
+empty `filedigest` (only a WildFire verdict carries one); the CSV has none of these three. How XSIAM parses
+the CEF File Data route is unconfirmed until the pa440 sends it.
+
+**Not built yet, and what is needed.** Virus, wildfire-virus, wildfire, data, scan and flood logs
+still have no rows in the tenant feed (the 2026-11-16 pull held only `vulnerability`, `file`, `url` and 21
+`spyware` rows), so no
 IDs, names or subtype-specific columns can be copied. Spyware C2/DNS signatures beyond 18011 likewise. Supplying real IDs and names (or enough threat
 rows to read them from) is all that is needed to add them. Whether the syslog-delivered logs
 raise the same native `PAN_NGFW` alerts as the CLCS rows, and which `severity` form the platform
@@ -613,6 +625,7 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 | `dos_anomaly` | *(non-analytic)* | 80–150 tiny sessions from distinct external sources to one published server | ported |
 | `external_port_scan` | *(non-analytic)* | Internet host probing 20–24 privileged ports on a published server, mostly denied | ported |
 | `snmp_unexpected_source` | *(non-analytic)* | a workstation walking every network device on UDP/161 (traffic only; the SNMP config logs are a different PAN log type) | ported |
+| `file_data_web` / `file_data_internal` / `file_data_ocsp` | *(non-analytic)* | File Data (`firewall.filedata`) logs: file-type identification alongside traffic and URL logs | native CSV |
 
 The *ported* events replicate the traffic-based hits of the other firewall generators (their alert targets are the same names those registries use; several of those detectors have never fired in this tenant from any feed). `dns_tunneling` and `reverse_ssh_tunnel` are already covered by `dns_tunnel_pattern` and the SSH events above.
 
