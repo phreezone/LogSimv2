@@ -8116,10 +8116,16 @@ def _threat_sensitive_password_reset(config, session_context):
     return events
 
 
-_SENSITIVE_GROUP_ACCOUNTS = [
-    "Administrator", "krbtgt", "svc_sql_prod", "svc_backup",
-    "svc_exchange", "svc_sccm",
-]
+# The Low variation ("A sensitive account was modified to password never
+# expires") needs the target to be in a sensitive built-in group *according to the
+# tenant's identity inventory*, not according to an event we can send. A
+# 2026-11-16 probe showed only the built-in Administrator qualifies here: the
+# identical 4738 flag delta for krbtgt (RID 502) and for svc_sql_prod /
+# svc_exchange raised nothing, and no group-add event ever places those service
+# accounts in a privileged group. Choosing randomly from that set (the previous
+# behaviour) made most runs silent, so this generator always targets
+# Administrator.
+_PNE_TARGET_ACCOUNT = "Administrator"
 
 
 def _threat_password_never_expires(config, session_context):
@@ -8132,7 +8138,8 @@ def _threat_password_never_expires(config, session_context):
       - The "A sensitive account was modified to password never expires" variation (Low)
         additionally requires the target to be a member of a sensitive built-in AD group,
         which XSIAM resolves from its own identity inventory, not from a group-add event
-        emitted seconds earlier in the same burst.
+        emitted seconds earlier in the same burst. In this tenant only the built-in
+        Administrator satisfies that (see `_PNE_TARGET_ACCOUNT`), so that is the target.
 
     Sequence:
       1. Attacker authenticates → DC 4624 + endpoint 4624 + 4672
@@ -8145,13 +8152,8 @@ def _threat_password_never_expires(config, session_context):
     if not u:
         return None
 
-    target_acct = random.choice(_SENSITIVE_GROUP_ACCOUNTS)
-    if target_acct == "Administrator":
-        target_sid = f"{_SYNTH_DOMAIN_SID}-500"
-    elif target_acct == "krbtgt":
-        target_sid = f"{_SYNTH_DOMAIN_SID}-502"
-    else:
-        target_sid = _stable_user_sid(target_acct)
+    target_acct = _PNE_TARGET_ACCOUNT
+    target_sid = f"{_SYNTH_DOMAIN_SID}-500"
 
     events = []
     t = time.time()
@@ -8393,6 +8395,7 @@ _RENAMED_THREATS = {
     "WIP_AS_REP_ROASTING":          "AS_REP_ROASTING",
     "WIP_DMSA_PRIVESC":             "DMSA_PRIVESC",
     "WIP_SENSITIVE_PASSWORD_RESET": "SENSITIVE_PASSWORD_RESET",
+    "WIP_PASSWORD_NEVER_EXPIRES":   "PASSWORD_NEVER_EXPIRES",
 }
 
 # ── Exchange mailbox abuse via PowerShell (4104 ScriptBlock) ──────────────────
@@ -9798,7 +9801,7 @@ _THREAT_WEIGHTS = {
     "suspicious_account_creation": 5,
     "mass_account_deletion":       4,
     "sensitive_password_reset": 4,
-    "wip_password_never_expires":  3,
+    "password_never_expires":  3,
     "default_account_enabled":     3,
     # LSASS handle access is a high-signal credential-dumping path, so it is
     # weighted with the other privilege-abuse threats rather than rarely.
@@ -9850,7 +9853,7 @@ _THREAT_GENERATORS = {
     "suspicious_account_creation":      _threat_suspicious_account_creation,
     "mass_account_deletion":            _threat_mass_account_deletion,
     "sensitive_password_reset":     _threat_sensitive_password_reset,
-    "wip_password_never_expires":       _threat_password_never_expires,
+    "password_never_expires":       _threat_password_never_expires,
     "default_account_enabled":          _threat_default_account_enabled,
     "lsass_handle_access":              _threat_lsass_handle_access,
     "account_access_removal":           _threat_account_access_removal,
@@ -9905,7 +9908,7 @@ ANALYTIC_ALERTS = {
     "suspicious_account_creation": "Suspicious hidden user created",
     "mass_account_deletion":       "A user deleted multiple users for the first time",
     "sensitive_password_reset":    "Sensitive account password reset attempt for the first time",
-    "wip_password_never_expires":  "A user account was modified to password never expires",
+    "password_never_expires":  "A sensitive account was modified to password never expires",
     "default_account_enabled":     "A user enabled the Windows DefaultAccount",
     # WIP (2026-11-10): the three mailbox detectors ingest on 4104, 4688 and the
     # native MSExchange Management channel but raised no alert after 3 probe
@@ -10126,7 +10129,7 @@ def _generate_scenario_event(scenario_event, config, context):
         "SUSPICIOUS_ACCOUNT_CREATION":      _threat_suspicious_account_creation,
         "MASS_ACCOUNT_DELETION":            _threat_mass_account_deletion,
         "SENSITIVE_PASSWORD_RESET":     _threat_sensitive_password_reset,
-        "WIP_PASSWORD_NEVER_EXPIRES":       _threat_password_never_expires,
+        "PASSWORD_NEVER_EXPIRES":       _threat_password_never_expires,
         "DEFAULT_ACCOUNT_ENABLED":          _threat_default_account_enabled,
         "LSASS_HANDLE_ACCESS":              _threat_lsass_handle_access,
         "ACCOUNT_ACCESS_REMOVAL":           _threat_account_access_removal,

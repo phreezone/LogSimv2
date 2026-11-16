@@ -58,11 +58,13 @@ Named threat generators (via `scenario_event` = the key below, or fired individu
 | `AS_REP_ROASTING` | An excessive number of TGT requests were sent for users that do not require Kerberos pre-authentication | XDR Analytics |
 | `DMSA_PRIVESC` | Possible Privilege Escalation using Delegated MSA account attempt | XDR Analytics |
 | `SENSITIVE_PASSWORD_RESET` | Sensitive account password reset attempt for the first time | Analytics BIOC |
+| `PASSWORD_NEVER_EXPIRES` | A sensitive account was modified to password never expires (base variation: A user account was modified to password never expires, Informational) | Analytics BIOC |
 
-`AS_REP_ROASTING`, `DMSA_PRIVESC` and `SENSITIVE_PASSWORD_RESET` dropped their `WIP_`
-prefix; the old `WIP_` names still dispatch.
+`AS_REP_ROASTING`, `DMSA_PRIVESC`, `SENSITIVE_PASSWORD_RESET` and
+`PASSWORD_NEVER_EXPIRES` dropped their `WIP_` prefix; the old `WIP_` names still
+dispatch.
 
-**WIP** (events are correctly shaped; the detection depends on an identity-graph baseline or is still under investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_PASSWORD_NEVER_EXPIRES`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
+**WIP** (events are correctly shaped; the detection depends on an identity-graph baseline or is still under investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
 
 `WIP_ADMINSDHOLDER_ACL_MODIFICATION` is **not** blocked on object resolution. A
 differential probe fired "Possible shadow credentials addition" on the
@@ -222,6 +224,37 @@ alert name.
 `wip_sccm_container_recon` ("Suspicious access of the System Management
 Container") is **not** blocked by object type for the same reason — it still
 needs its own probe.
+
+### Sensitive-account classification is inventory-driven (2026-11-16)
+
+`PASSWORD_NEVER_EXPIRES` was WIP because the generator picked its target with
+`random.choice()` from Administrator, krbtgt and four `svc_*` accounts. The Low
+variation ("A sensitive account was modified to password never expires") needs
+the target to be in a sensitive built-in group **in the tenant's identity
+inventory**, and in this tenant only the built-in Administrator qualifies.
+
+Evidence, all from `xdr_data` and `alerts`:
+
+| 4738 target | Flag delta | Alert |
+|---|---|---|
+| `Administrator` (RID 500), 2026-10-30 | `0x10` → `0x210`, `%%2089` | "A sensitive account was modified to password never expires" **Low** (723849) |
+| `svc_exchange`, 2026-10-29 | same | none |
+| `svc_sql_prod`, 2026-11-03 | same | none |
+| `Administrator` (RID 500), probe 2026-11-16 05:37:43Z | same | **Low** (799250) |
+| `krbtgt` (RID 502), same probe, +60 s | same | none |
+
+No 4728/4732/4756 event ever names those service accounts, so nothing puts them
+in a privileged group in the identity graph. The generator now always targets
+Administrator (`_PNE_TARGET_ACCOUNT`) rather than drawing from a list whose
+other entries are silent here.
+
+The base **Informational** variation ("A user account was modified to password
+never expires") has never appeared in `dataset = alerts` in 30 days, even for the
+Administrator 4738s that raised the Low variation — so the Low variation is the
+observable outcome and is what the generator is measured against.
+
+`PASSWORD_NEVER_EXPIRES` therefore dropped its `WIP_` prefix; `WIP_PASSWORD_NEVER_EXPIRES`
+still dispatches through `_RENAMED_THREATS`.
 
 Also fixed in this pass: `_build_4768` / `_build_4769` / `_build_4771` used to
 prepend `::ffff:` unconditionally, double-prefixing an already-mapped override to

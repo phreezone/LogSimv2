@@ -119,16 +119,16 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `as_rep_roasting` | Excessive TGT requests for users that do not require Kerberos pre-authentication | Medium | T1558.004 |
 | `dmsa_privesc` | Possible Privilege Escalation using Delegated MSA account attempt | High | T1098 |
 | `sensitive_password_reset` | Sensitive account password reset attempt for the first time | Medium | T1098 |
+| `password_never_expires` | Sensitive account modified to password never expires | Low | T1098 |
 
-`as_rep_roasting`, `dmsa_privesc` and `sensitive_password_reset` were previously
-`wip_`-prefixed. The old names still work.
+`as_rep_roasting`, `dmsa_privesc`, `sensitive_password_reset` and
+`password_never_expires` were previously `wip_`-prefixed. The old names still work.
 
 **WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 
 | Generator | Reason |
 |---|---|
-| `wip_adminsdholder_acl_modification` | Identity graph dependent — needs real AD object GUIDs/SIDs |
-| `wip_password_never_expires` | Training period — needs identity graph baseline |
+| `wip_adminsdholder_acl_modification` | ACL analytic does not fire on the canonical 5136/4662 shape; container targets *are* evaluated (see `docs/modules/windows.md`) |
 | `wip_irregular_service_tgs` | Only ever raises the weak-encryption ticket alert that `multiple_service_tickets` owns; `irregular_tgt_burst` covers its intended detection. Background only — not offered on demand |
 | `wip_priv_cert_request` | Not yet investigated |
 | `wip_sccm_container_recon` | Environment dependent — requires SCCM/ConfigMgr deployment |
