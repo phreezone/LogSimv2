@@ -35,7 +35,7 @@ _DEFAULTS = {
     # Named network-team accounts plus the config-backup service account.
     "admins":          ["netadmin.jlee", "netadmin.pkhan", "netadmin.rortiz", "fw_ops"],
     "backup_account":  "svc_netbackup",
-    "backup_host":     "10.0.20.11",
+    "backup_host":     "10.1.5.20",   # BACKUP01
     "snmp_pollers":    ["10.0.30.40"],
     "snmp_community":  "n0c-r3ad",
     # Infrastructure behind the firewall that the poller reads over SNMP.

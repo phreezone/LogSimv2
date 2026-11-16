@@ -96,7 +96,7 @@ All offices appear to share one logical internal address plan; per-site subnets 
 | Mobile devices | 10.10.50.0/24 | Mobile | Phones (iPhone, Pixel, Galaxy) named `<USER>-<MODEL>` | |
 | Home / remote devices | 172.16.100.0/24 | Remote | Home-office devices | `<DEPT>-HM-nnn` |
 | Web / public services | 10.0.10.0/24 | DMZ / servers | www.examplecorp.com web farm | 10.0.10.50-52 (public web farm only), 10.0.10.1 (Zscaler VPN gw), 10.0.10.254 (network device), 10.0.10.10 (DC01) |
-| Server / data infrastructure | 10.0.20.0/24 | Server | Databases, backup, vCenter, monitoring | 10.0.20.10 DC02, 10.0.20.11-14 databases (10.0.20.11 also the network-config backup host and APP01), 10.0.20.15 VM backup proxy, 10.0.20.20 vCenter, 10.0.20.30-32 file servers FS01/FS02/FILE01, 10.0.20.40 Exchange, 10.0.20.41 SharePoint, 10.0.20.50 print server, 10.0.20.1 gateway |
+| Server / data infrastructure | 10.0.20.0/24 | Server | Databases, backup, vCenter, monitoring | 10.0.20.10 DC02, 10.0.20.11-14 databases, 10.0.20.15 VM backup proxy, 10.0.20.16 APP01, 10.0.20.20 vCenter, 10.0.20.30-32 file servers FS01/FS02/FILE01, 10.0.20.40 Exchange, 10.0.20.41 SharePoint, 10.0.20.50 print server, 10.0.20.1 gateway |
 | Management / admin | 10.0.30.0/24 | Management | NOC and firewall administration | Jump hosts 10.0.30.30 and 10.0.30.31; 10.0.30.40 SNMP poller; 10.0.30.5 Check Point management server; 10.0.30.11-14 firewall management (see 2c); 10.0.30.1 gateway |
 | Infrastructure services | 10.1.0.0/16 | Server | DNS/DHCP and application servers | 10.1.1.2 Infoblox DC1, 10.1.5.20-21 servers, 10.1.100.10-11 databases, 10.1.255.254 network device |
 | Data center B | 10.100.0.0/16 | Server | Servers and databases | 10.100.1.1-2, 10.100.10.10-11 |
@@ -125,7 +125,7 @@ Probing of paths such as `/admin.php`, `/wp-login.php`, `/.env`, `/.git/config`,
 | Internal DNS names | examplecorp.local, ad.examplecorp.local, dc01/dc02, fileserver, exchange, sharepoint, vcenter (all `.examplecorp.local`) | |
 | Domain controllers | DC01.examplecorp.local (10.0.10.10), DC02.examplecorp.local (10.0.20.10) | Windows events arrive through Windows Event Collector. See section 6a-1 for further DC names. |
 | VMware vCenter | vcenter.corp.examplecorp.local, 10.0.20.20 | Manages three ESXi hosts |
-| Network-config backup host | 10.0.20.11 | Account `svc_netbackup` |
+| Network-config backup host | 10.1.5.20 (BACKUP01) | Account `svc_netbackup` |
 | VM backup proxy | 10.0.20.15 | Account `svc_vmbackup` |
 | SNMP poller | 10.0.30.40 | Polls 8 network devices |
 | Admin jump hosts | 10.0.30.30, 10.0.30.31 | Only these should originate admin protocols |
@@ -253,7 +253,7 @@ Change freeze applies to the **last weekend of each month**: from Saturday 00:00
 | Job | Schedule | Hosts / accounts | Expected activity |
 |---|---|---|---|
 | Backup jobs | Nightly at 02:00 UTC (21:00 Eastern the previous evening in EST, 22:00 in EDT) | Backup servers: BACKUP01 VM; VM backup proxy 10.0.20.15 (`svc_vmbackup`) | VM snapshot create and remove, bulk reads of whole VM disks from the ESXi hosts, large transfers, service-account logons |
-| Network-config backup | Nightly at 02:00 UTC | `svc_netbackup` from 10.0.20.11 | `show running-config` or config export on firewalls |
+| Network-config backup | Nightly at 02:00 UTC | `svc_netbackup` from 10.1.5.20 (BACKUP01) | `show running-config` or config export on firewalls |
 | SNMP polling | Continuous | 10.0.30.40 to 8 network devices over UDP/161 | Constant low-volume SNMP |
 | Patching / maintenance windows | TODO | TODO | TODO |
 | On-call rotation | TODO | TODO | TODO |
@@ -337,7 +337,7 @@ Behavior is correlated by department: users in one department tend to visit simi
 
 | Account | Purpose | Expected source | Expected targets | Interactive logon expected? |
 |---|---|---|---|---|
-| svc_netbackup | Network device config backup | 10.0.20.11 | Firewalls (show running-config / config export) | No |
+| svc_netbackup | Network device config backup | 10.1.5.20 | Firewalls (show running-config / config export) | No |
 | svc_vmbackup | VM backup | 10.0.20.15 | ESXi hosts (snapshots, NFC disk reads) | No |
 | svc_vcenter | vCenter management of ESXi | vcenter 10.0.20.20 | ESXi hosts | No |
 | vpxuser | vCenter's built-in account on ESXi hosts | vCenter | ESXi hosts | No |
@@ -415,7 +415,7 @@ Every employee device is named after the department that owns it, so a hostname 
 | FILE01 | File server | 10.0.20.32 (simulator assignment, owner to confirm) | ESXi VM |
 | SQL01 | SQL Server | 192.168.1.101 (DNS) | ESXi VM; see 6a-1 |
 | WEB01 | Web server | TODO | ESXi VM |
-| APP01 | Application server | 10.0.20.11 (DNS) | ESXi VM; see 6a-1 |
+| APP01 | Application server | 10.0.20.16 (DNS) | ESXi VM; see 6a-1 |
 | EXCH01 | Exchange server | 10.0.20.40 (DNS name `exchange`) | ESXi VM; see 6a-1 |
 | BACKUP01 | Backup server | 10.1.5.20 (DNS) | ESXi VM; backup jobs run nightly at 02:00 UTC |
 | esxi01 / esxi02 / esxi03 .corp.examplecorp.local | VMware ESXi hosts | TODO | Managed by vCenter 10.0.20.20; datastores `datastore1`, `ds-prod-nfs01`, `ds-vsan-01` |
@@ -447,7 +447,7 @@ Every employee device is named after the department that owns it, so a hostname 
 | vcenter | 10.0.20.20 | Matches the ESXi configuration |
 | sql01 | 192.168.1.101 | |
 | print01 | 10.0.20.50 | |
-| app01 | 10.0.20.11 | |
+| app01 | 10.0.20.16 | |
 | backup01 | 10.1.5.20 | |
 | radius | 10.1.5.21 | |
 | infoblox-dc1-01 / infoblox-dc2-01 | 10.1.1.2 / 10.1.1.3 | DNS grid members |

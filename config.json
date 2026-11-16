@@ -2377,7 +2377,8 @@
     "10.0.20.32",
     "10.0.20.40",
     "10.0.20.41",
-    "10.0.20.50"
+    "10.0.20.50",
+    "10.0.20.16"
   ],
   "_comment_file_servers": "Workstation SMB/FTP goes to these only (modules/resolver.file_servers); the firewalls used to draw the destination from all of internal_servers. FS01/FS02/FILE01 addresses are simulator assignments in the 10.0.20.0/24 server subnet, not owner-confirmed.",
   "file_servers": [
@@ -2396,7 +2397,7 @@
     "vcenter": "10.0.20.20",
     "sql01": "192.168.1.101",
     "print01": "10.0.20.50",
-    "app01": "10.0.20.11",
+    "app01": "10.0.20.16",
     "backup01": "10.1.5.20",
     "radius": "10.1.5.21"
   },
@@ -2414,7 +2415,7 @@
       "fw_ops"
     ],
     "backup_account": "svc_netbackup",
-    "backup_host": "10.0.20.11",
+    "backup_host": "10.1.5.20",
     "snmp_pollers": [
       "10.0.30.40"
     ],
