@@ -1018,21 +1018,38 @@ def pick_by_role(config, roles, departments=None, owner_of=None):
     return _norm(u, profiles[u])
 
 
-# Business-hours activity profile (US Eastern, fixed offset). Interactive/admin activity
-# follows the workday; token refreshes continue overnight. Gives 'unusual time' detectors a
-# real diurnal baseline to judge against.
-TZ_OFFSET_HOURS = -5
+# Business-hours activity profile (US Eastern, DST-aware). Interactive/admin activity
+# follows the owner's 07:00-18:00 Mon-Fri workday; token refreshes continue overnight.
+# Gives 'unusual time' detectors a real diurnal baseline to judge against.
+WORK_START_HOUR = 7
+WORK_END_HOUR = 18
+
+try:
+    from dateutil import tz as _dtz
+    _EASTERN = _dtz.gettz("America/New_York")
+except Exception:                      # pragma: no cover - dateutil is a hard requirement
+    _EASTERN = None
+
+
+def eastern_now(now_ts=None):
+    """Wall-clock datetime in America/New_York (EST/EDT) for a UTC epoch (default: now).
+    Falls back to fixed UTC-5 only if no tz database is available."""
+    import time as _t
+    from datetime import datetime, timezone, timedelta
+    ts = now_ts if now_ts is not None else _t.time()
+    if _EASTERN is not None:
+        return datetime.fromtimestamp(ts, tz=_EASTERN)
+    return datetime.fromtimestamp(ts, tz=timezone(timedelta(hours=-5)))
 
 
 def activity_weight(now_ts=None):
     """0..1 likelihood that a human-driven event happens right now."""
-    import time as _t
-    t = _t.gmtime((now_ts or _t.time()) + TZ_OFFSET_HOURS * 3600)
-    h, weekday = t.tm_hour, t.tm_wday < 5
+    t = eastern_now(now_ts)
+    h, weekday = t.hour, t.weekday() < 5
     if weekday:
-        if 8 <= h < 18:
+        if WORK_START_HOUR <= h < WORK_END_HOUR:
             return 1.0
-        if h == 7 or 18 <= h < 21:
+        if h == WORK_START_HOUR - 1 or WORK_END_HOUR <= h < 21:
             return 0.35
         return 0.06
     return 0.15 if 9 <= h < 17 else 0.04

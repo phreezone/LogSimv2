@@ -161,9 +161,19 @@ def _internal_zone(config):
     # a name always resolves to the same host the firewalls target.
     roles = ["fileserver", "exchange", "sharepoint", "vcenter", "sql01",
              "print01", "app01", "backup01", "radius"]
+    # config["server_roles"] pins a name to the address the estate really gives it
+    # (and lists names the defaults do not carry: fs01, fs02, file01). Listed first,
+    # in config order, so the reverse record for an address is its first-listed name.
+    # Only the roles it does NOT pin fall back to the positional pick below, which
+    # is what made vcenter/print01/fileserver land on unrelated hosts.
+    pinned = {str(k).lower(): v for k, v in (config.get("server_roles") or {}).items()
+              if not str(k).startswith("_") and v}
+    for role, ip in pinned.items():
+        zone[f"{role}.{ad_domain}"] = [ip]
     if servers:
         for i, role in enumerate(roles):
-            zone[f"{role}.{ad_domain}"] = [servers[i % len(servers)]]
+            if role not in pinned:
+                zone[f"{role}.{ad_domain}"] = [servers[i % len(servers)]]
 
     # The Infoblox grid members themselves, so every module that names the DNS
     # server a client talks to uses the name the grid answers for.
@@ -177,6 +187,14 @@ def _internal_zone(config):
         if ip not in named:
             zone[_srv_name(ip, ad_domain)] = [ip]
     return ad_domain, zone
+
+
+def file_servers(config):
+    """Addresses of the file servers (FS01, FS02, FILE01): the destinations for
+    workstation SMB/FTP. config["file_servers"], else the whole internal_servers
+    list so an unconfigured estate behaves as before."""
+    fs = [ip for ip in ((config or {}).get("file_servers") or []) if ip]
+    return fs or list((config or {}).get("internal_servers") or [])
 
 
 def _srv_name(ip, ad_domain):

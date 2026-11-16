@@ -1614,6 +1614,7 @@
     "transport": "tcp",
     "syslog_port": 1514,
     "hostname": "ASA-FW-01",
+    "management_ip": "10.0.30.11",
     "nat_pool_cidr": "203.0.113.0/28",
     "event_mix": {
       "benign": [
@@ -1800,6 +1801,7 @@
   },
   "checkpoint_config": {
     "hostname": "CP-FW-1",
+    "management_server_ip": "10.0.30.5",
     "gateway_ip": "203.0.113.10",
     "blocked_url_categories": {
       "Gambling": "www.online-casino-world.com",
@@ -1993,7 +1995,7 @@
     "serial_number": "FGVM08TM21000001",
     "hostname": "FG-FW-01",
     "vdom": "root",
-    "management_ip": "172.16.200.1",
+    "management_ip": "10.0.30.14",
     "interface_lan": "port10",
     "interface_wan": "port1",
     "vpn_gateway_ip": "203.0.113.20",
@@ -2368,8 +2370,36 @@
     "10.0.10.254",
     "10.1.255.254",
     "172.16.255.254",
-    "192.168.10.1"
+    "192.168.10.1",
+    "10.0.20.20",
+    "10.0.20.30",
+    "10.0.20.31",
+    "10.0.20.32",
+    "10.0.20.40",
+    "10.0.20.41",
+    "10.0.20.50"
   ],
+  "_comment_file_servers": "Workstation SMB/FTP goes to these only (modules/resolver.file_servers); the firewalls used to draw the destination from all of internal_servers. FS01/FS02/FILE01 addresses are simulator assignments in the 10.0.20.0/24 server subnet, not owner-confirmed.",
+  "file_servers": [
+    "10.0.20.30",
+    "10.0.20.31",
+    "10.0.20.32"
+  ],
+  "_comment_server_roles": "Internal DNS name -> address (modules/resolver._internal_zone). Pinned so no two roles share an address and vcenter matches esxi_config.vcenter_ip. Names not listed fall back to the positional pick over internal_servers. Appended internal_servers entries (10.0.20.20 and up) keep every earlier index stable.",
+  "server_roles": {
+    "fs01": "10.0.20.30",
+    "fs02": "10.0.20.31",
+    "file01": "10.0.20.32",
+    "fileserver": "10.0.20.30",
+    "exchange": "10.0.20.40",
+    "sharepoint": "10.0.20.41",
+    "vcenter": "10.0.20.20",
+    "sql01": "192.168.1.101",
+    "print01": "10.0.20.50",
+    "app01": "10.0.20.11",
+    "backup01": "10.1.5.20",
+    "radius": "10.1.5.21"
+  },
   "management_plane": {
     "_comment": "Device administration baseline shared by the firewall modules (modules/mgmt_plane.py). Admin logins from outside admin_subnet, SNMP from anything but snmp_pollers and config reads by anyone but backup_account are the management-plane threats.",
     "admin_subnet": "10.0.30.0/24",
@@ -2386,7 +2416,7 @@
     "backup_account": "svc_netbackup",
     "backup_host": "10.0.20.11",
     "snmp_pollers": [
-      "10.0.20.10"
+      "10.0.30.40"
     ],
     "network_devices": [
       "10.0.10.254",
@@ -2400,7 +2430,6 @@
     ]
   },
   "database_servers": [
-    "10.0.20.10",
     "10.0.20.11",
     "10.0.20.12",
     "10.0.20.13",
@@ -3271,6 +3300,968 @@
       "ports": [
         443,
         80
+      ]
+    },
+    {
+      "name": "Microsoft Teams",
+      "domain": "teams.microsoft.com",
+      "ip_range": "52.112.0.0/14",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Microsoft Entra Sign-in",
+      "domain": "login.microsoftonline.com",
+      "ip_range": "20.190.128.0/18",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Microsoft Graph",
+      "domain": "graph.microsoft.com",
+      "ip_range": "40.126.0.0/18",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Microsoft OneDrive",
+      "domain": "examplecorp-my.sharepoint.com",
+      "ip_range": "13.107.136.0/22",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Microsoft SharePoint",
+      "domain": "examplecorp.sharepoint.com",
+      "ip_range": "13.107.136.0/22",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Microsoft Azure Portal",
+      "domain": "portal.azure.com",
+      "ip_range": "20.50.0.0/16",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Microsoft Telemetry",
+      "domain": "vortex.data.microsoft.com",
+      "ip_range": "52.182.0.0/16",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Microsoft Delivery Optimization",
+      "domain": "dl.delivery.mp.microsoft.com",
+      "ip_range": "2.16.0.0/13",
+      "country": "US",
+      "asn": 20940,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Microsoft VS Code Updates",
+      "domain": "update.code.visualstudio.com",
+      "ip_range": "13.107.246.0/24",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Microsoft Office Portal",
+      "domain": "www.office.com",
+      "ip_range": "13.107.6.0/24",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Microsoft Copilot",
+      "domain": "copilot.microsoft.com",
+      "ip_range": "13.107.21.0/24",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Bing",
+      "domain": "www.bing.com",
+      "ip_range": "13.107.21.0/24",
+      "country": "US",
+      "asn": 8075,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Google Search",
+      "domain": "www.google.com",
+      "ip_range": "142.250.0.0/15",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Gmail",
+      "domain": "mail.google.com",
+      "ip_range": "142.250.0.0/15",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Google Docs",
+      "domain": "docs.google.com",
+      "ip_range": "142.250.0.0/15",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Google Meet",
+      "domain": "meet.google.com",
+      "ip_range": "142.250.0.0/15",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Google Cloud Console",
+      "domain": "console.cloud.google.com",
+      "ip_range": "142.250.0.0/15",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Google Gemini",
+      "domain": "gemini.google.com",
+      "ip_range": "142.250.0.0/15",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Google Chrome Updates",
+      "domain": "dl.google.com",
+      "ip_range": "172.217.0.0/16",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "YouTube",
+      "domain": "www.youtube.com",
+      "ip_range": "172.217.0.0/16",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Spotify",
+      "domain": "open.spotify.com",
+      "ip_range": "35.186.224.0/19",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Zoom Client Updates",
+      "domain": "zoom.com",
+      "ip_range": "170.114.0.0/16",
+      "country": "US",
+      "asn": 396998,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Webex",
+      "domain": "www.webex.com",
+      "ip_range": "170.72.0.0/16",
+      "country": "US",
+      "asn": 13445,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Box",
+      "domain": "www.box.com",
+      "ip_range": "74.112.184.0/22",
+      "country": "US",
+      "asn": 33011,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "WhatsApp Web",
+      "domain": "web.whatsapp.com",
+      "ip_range": "157.240.0.0/16",
+      "country": "US",
+      "asn": 32934,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Facebook",
+      "domain": "www.facebook.com",
+      "ip_range": "157.240.0.0/16",
+      "country": "US",
+      "asn": 32934,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Instagram",
+      "domain": "www.instagram.com",
+      "ip_range": "157.240.0.0/16",
+      "country": "US",
+      "asn": 32934,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "LinkedIn",
+      "domain": "www.linkedin.com",
+      "ip_range": "108.174.0.0/20",
+      "country": "US",
+      "asn": 14413,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "X (Twitter)",
+      "domain": "x.com",
+      "ip_range": "104.244.40.0/21",
+      "country": "US",
+      "asn": 13414,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Reddit",
+      "domain": "www.reddit.com",
+      "ip_range": "151.101.0.0/16",
+      "country": "US",
+      "asn": 54113,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Wikipedia",
+      "domain": "en.wikipedia.org",
+      "ip_range": "208.80.152.0/22",
+      "country": "US",
+      "asn": 14907,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Netflix",
+      "domain": "www.netflix.com",
+      "ip_range": "45.57.0.0/17",
+      "country": "US",
+      "asn": 2906,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Vimeo",
+      "domain": "vimeo.com",
+      "ip_range": "151.101.0.0/16",
+      "country": "US",
+      "asn": 54113,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Amazon Retail",
+      "domain": "www.amazon.com",
+      "ip_range": "52.94.0.0/16",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "eBay",
+      "domain": "www.ebay.com",
+      "ip_range": "66.211.160.0/19",
+      "country": "US",
+      "asn": 62955,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "PayPal",
+      "domain": "www.paypal.com",
+      "ip_range": "64.4.250.0/24",
+      "country": "US",
+      "asn": 17012,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Trello",
+      "domain": "trello.com",
+      "ip_range": "104.192.140.0/22",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Bitbucket",
+      "domain": "bitbucket.org",
+      "ip_range": "104.192.136.0/21",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Asana",
+      "domain": "app.asana.com",
+      "ip_range": "52.0.0.0/11",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Monday.com",
+      "domain": "monday.com",
+      "ip_range": "104.16.0.0/12",
+      "country": "US",
+      "asn": 13335,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Notion",
+      "domain": "www.notion.so",
+      "ip_range": "52.0.0.0/11",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Miro",
+      "domain": "miro.com",
+      "ip_range": "52.0.0.0/11",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Figma",
+      "domain": "www.figma.com",
+      "ip_range": "52.0.0.0/11",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Adobe Creative Cloud",
+      "domain": "acrobat.adobe.com",
+      "ip_range": "192.150.0.0/16",
+      "country": "US",
+      "asn": 15224,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "HubSpot",
+      "domain": "app.hubspot.com",
+      "ip_range": "104.16.0.0/12",
+      "country": "US",
+      "asn": 13335,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Mailchimp",
+      "domain": "mailchimp.com",
+      "ip_range": "205.201.128.0/20",
+      "country": "US",
+      "asn": 30684,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Intuit QuickBooks",
+      "domain": "quickbooks.intuit.com",
+      "ip_range": "52.0.0.0/11",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "SAP Concur",
+      "domain": "www.concursolutions.com",
+      "ip_range": "52.0.0.0/11",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "ADP Workforce Now",
+      "domain": "workforcenow.adp.com",
+      "ip_range": "192.64.0.0/16",
+      "country": "US",
+      "asn": 15136,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "BambooHR",
+      "domain": "app.bamboohr.com",
+      "ip_range": "52.0.0.0/11",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Greenhouse",
+      "domain": "boards.greenhouse.io",
+      "ip_range": "52.0.0.0/11",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Expensify",
+      "domain": "www.expensify.com",
+      "ip_range": "52.0.0.0/11",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Oracle NetSuite",
+      "domain": "system.netsuite.com",
+      "ip_range": "148.87.0.0/16",
+      "country": "US",
+      "asn": 31898,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "GitLab",
+      "domain": "gitlab.com",
+      "ip_range": "172.65.0.0/16",
+      "country": "US",
+      "asn": 13335,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "GitHub Raw Content",
+      "domain": "raw.githubusercontent.com",
+      "ip_range": "185.199.108.0/22",
+      "country": "US",
+      "asn": 54113,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "AWS Management Console",
+      "domain": "console.aws.amazon.com",
+      "ip_range": "54.239.0.0/16",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Docker Hub",
+      "domain": "registry-1.docker.io",
+      "ip_range": "44.192.0.0/10",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "npm Registry",
+      "domain": "registry.npmjs.org",
+      "ip_range": "104.16.0.0/12",
+      "country": "US",
+      "asn": 13335,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "PyPI",
+      "domain": "pypi.org",
+      "ip_range": "151.101.0.0/16",
+      "country": "US",
+      "asn": 54113,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Stack Overflow",
+      "domain": "stackoverflow.com",
+      "ip_range": "151.101.0.0/16",
+      "country": "US",
+      "asn": 54113,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "JetBrains",
+      "domain": "plugins.jetbrains.com",
+      "ip_range": "52.0.0.0/11",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Datadog",
+      "domain": "app.datadoghq.com",
+      "ip_range": "3.233.144.0/20",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "PagerDuty",
+      "domain": "app.pagerduty.com",
+      "ip_range": "54.69.0.0/16",
+      "country": "US",
+      "asn": 16509,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Apple Software Update (MESU)",
+      "domain": "mesu.apple.com",
+      "ip_range": "17.253.0.0/16",
+      "country": "US",
+      "asn": 714,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Mozilla Updates",
+      "domain": "aus5.mozilla.org",
+      "ip_range": "34.160.0.0/12",
+      "country": "US",
+      "asn": 15169,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Ubuntu Security Updates",
+      "domain": "security.ubuntu.com",
+      "ip_range": "91.189.88.0/21",
+      "country": "GB",
+      "asn": 41231,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "ChatGPT",
+      "domain": "chatgpt.com",
+      "ip_range": "104.18.0.0/15",
+      "country": "US",
+      "asn": 13335,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Claude",
+      "domain": "claude.ai",
+      "ip_range": "160.79.104.0/23",
+      "country": "US",
+      "asn": 399358,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Perplexity",
+      "domain": "www.perplexity.ai",
+      "ip_range": "104.18.0.0/15",
+      "country": "US",
+      "asn": 13335,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "CNN",
+      "domain": "www.cnn.com",
+      "ip_range": "151.101.0.0/16",
+      "country": "US",
+      "asn": 54113,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "BBC",
+      "domain": "www.bbc.co.uk",
+      "ip_range": "151.101.0.0/16",
+      "country": "GB",
+      "asn": 54113,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "The New York Times",
+      "domain": "www.nytimes.com",
+      "ip_range": "151.101.0.0/16",
+      "country": "US",
+      "asn": 54113,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "Weather.com",
+      "domain": "weather.com",
+      "ip_range": "23.0.0.0/12",
+      "country": "US",
+      "asn": 20940,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
+      ]
+    },
+    {
+      "name": "cdnjs",
+      "domain": "cdnjs.cloudflare.com",
+      "ip_range": "104.16.0.0/12",
+      "country": "US",
+      "asn": 13335,
+      "service_types": [
+        "Web Browsing"
+      ],
+      "ports": [
+        443
       ]
     },
     {
@@ -4647,10 +5638,18 @@
       "198.51.100.12"
     ],
     "locations": [
-      "Denver_CO_USA",
+      "Columbus_OH_USA",
+      "Austin_TX_USA",
+      "Seattle_WA_USA",
+      "NewYork_NY_USA",
+      "Chicago_IL_USA",
+      "Fremont_CA_USA",
+      "Atlanta_GA_USA",
+      "Dublin_IE",
       "London_UK",
-      "Sydney_AU"
+      "Toronto_ON_CA"
     ],
+    "_comment_locations": "One Zscaler location per office site (same ten as the office egress pools), so location-level events never name a site ExampleCorp does not have. Denver and Sydney used to be here and match no office.",
     "benign_url_categories": [
       "Search Engines",
       "Business and Economy",
@@ -5004,7 +6003,7 @@
     "syslog_port": 514,
     "serial_number": "007051000012345",
     "hostname": "PA-VM-01",
-    "mgmt_ip": "10.0.0.1",
+    "mgmt_ip": "10.0.30.13",
     "syslog_hostname_format": "hostname",
     "_comment_syslog_hostname_format": "What PAN stamps in the syslog header HOSTNAME field (Device -> Setup -> Management -> Syslog HOSTNAME Format): 'hostname' uses the firewall name, 'ipv4-address' uses mgmt_ip.",
     "sw_version": "11.1.4",
@@ -5027,6 +6026,7 @@
   },
   "firepower_config": {
     "hostname": "DC1-FTD-01",
+    "management_ip": "10.0.30.12",
     "device_id": "ftd-9a8b7c6d-5e4f-3a2b-1c0d",
     "access_control_policy": "Default_Access_Control_Policy",
     "inbound_interface": "inside",
@@ -5453,7 +6453,7 @@
     "server_ip": "10.1.1.2",
     "dns_server_ips": [
       "10.1.1.2",
-      "10.2.1.2"
+      "10.1.1.3"
     ],
     "nios_version": "9.0.3-33548",
     "admin_users": [

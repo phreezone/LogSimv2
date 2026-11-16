@@ -185,9 +185,14 @@ _APP = {
 # identified as, so `app` stays coherent with the destination name and port (the real
 # feed's App-ID always matches the actual service).  Substring match on the domain.
 _DOMAIN_APP = [
+    # Specific hosts first. A bare "microsoft" substring used to label Teams, Entra
+    # sign-in, Graph, Copilot and telemetry traffic ms-update; "google" swallowed Gmail.
+    ("teams.microsoft", "ms-teams"), ("mail.google", "gmail-base"),
+    ("microsoftonline", "ssl"), ("graph.microsoft", "ssl"), ("copilot.microsoft", "ssl"),
+    ("data.microsoft", "ssl"), ("delivery.mp.microsoft", "ms-update"),
     ("office365", "ms-office365-base"), ("outlook", "outlook-web-online"),
     ("sharepoint", "sharepoint-online"), ("onedrive", "ms-onedrive-base"),
-    ("windowsupdate", "ms-update"), ("microsoft", "ms-update"),
+    ("windowsupdate", "ms-update"), ("update.microsoft", "ms-update"),
     ("googleapis", "google-base"), ("google", "google-base"),
     ("zoom", "zoom-base"), ("slack", "slack-base"), ("salesforce", "salesforce-base"),
     ("github", "ssl"), ("gmail", "gmail-base"),
@@ -197,7 +202,7 @@ _DOMAIN_APP = [
     ("paloaltonetworks", "paloalto-updates"), ("apple", "apple-update"),
     ("okta", "ssl"), ("service-now", "ssl"), ("zendesk", "ssl"), ("atlassian", "ssl"),
     ("docusign", "ssl"), ("workday", "ssl"), ("twilio", "ssl"), ("stripe", "ssl"),
-    ("fedex", "ssl"), ("ups", "ssl"), ("ubuntu", "web-browsing"), ("redhat", "web-browsing"),
+    ("fedex", "ssl"), (".ups.com", "ssl"), ("ubuntu", "web-browsing"), ("redhat", "web-browsing"),
 ]
 
 
@@ -266,7 +271,24 @@ _URL_CAT_RISKY   = ["malware", "command-and-control", "phishing", "proxy-avoidan
 _DOMAIN_URLCAT = [
     ("youtube", "streaming-media"), ("netflix", "streaming-media"), ("spotify", "streaming-media"),
     ("facebook", "social-networking"), ("linkedin", "social-networking"),
-    ("drive", "online-storage-and-backup"),
+    ("drive", "online-storage-and-backup"), ("dropbox", "online-storage-and-backup"),
+    ("box.com", "online-storage-and-backup"), ("sharepoint", "business-and-economy"),
+    ("onedrive", "online-storage-and-backup"), ("instagram", "social-networking"),
+    ("reddit", "social-networking"),
+    ("whatsapp", "internet-communications-and-telephony"),
+    ("zoom", "internet-communications-and-telephony"), ("webex", "internet-communications-and-telephony"),
+    ("vimeo", "streaming-media"), ("mail.google", "web-based-email"), ("outlook", "web-based-email"),
+    ("bing.com", "search-engines"), ("www.google.com", "search-engines"),
+    ("www.amazon.com", "shopping"), ("ebay", "shopping"),
+    ("cnn.com", "news"), ("bbc.co", "news"), ("nytimes", "news"), ("weather.com", "news"),
+    ("wikipedia", "reference-and-research"),
+    ("github", "computer-and-internet-info"), ("gitlab", "computer-and-internet-info"),
+    ("bitbucket", "computer-and-internet-info"), ("stackoverflow", "computer-and-internet-info"),
+    ("npmjs", "computer-and-internet-info"), ("pypi", "computer-and-internet-info"),
+    ("docker", "computer-and-internet-info"), ("jetbrains", "computer-and-internet-info"),
+    ("paypal", "financial-services"), ("stripe", "financial-services"),
+    ("salesforce", "business-and-economy"), ("workday", "business-and-economy"),
+    ("service-now", "business-and-economy"), ("zendesk", "business-and-economy"),
 ]
 
 _SW_VERSION = "12.1.12"      # PAN-OS release stamped in the CEF device-version slot
@@ -336,7 +358,7 @@ def _fw_ip(config):
     """The firewall's own management/source IP — user-customisable via
     panw_ngfw_config.mgmt_ip (PAN stamps this in the syslog header when the device's
     'Syslog HOSTNAME Format' is set to ipv4-address)."""
-    return _get_config(config).get("mgmt_ip", "10.0.0.1")
+    return _get_config(config).get("mgmt_ip", "10.0.30.13")
 
 
 def _syslog_host(config):
@@ -1024,6 +1046,9 @@ def _benign_internal(config, session_context):
         # controllers. XSIAM classifies a host as a DC from exactly this traffic, which the
         # SMB-from-DC and DCSync-from-non-DC detectors depend on.
         dst_ip = random.choice(_dcs(config))
+    elif app.startswith("ms-ds-smb"):
+        # Workstation SMB to a file server (the other 70% of SMB; 30% went to a DC above).
+        dst_ip = random.choice(resolver.file_servers(config) or ["10.0.10.50"])
     else:
         dst_ip = random.choice(config.get("internal_servers") or ["10.0.10.50"])
     dpt = (_APP.get(app, (None,)*5)[4] or [445])[0]

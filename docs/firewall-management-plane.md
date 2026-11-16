@@ -16,7 +16,7 @@ Shared identity lives in `modules/mgmt_plane.py`. It can be overridden with
 | Admin subnet (NOC / jump hosts) | `10.0.30.0/24`; jump hosts `10.0.30.30`, `.31` |
 | Admin accounts | `netadmin.jlee`, `netadmin.pkhan`, `netadmin.rortiz`, `fw_ops` |
 | Config-backup job | `svc_netbackup` from `10.0.20.11`, once per UTC day at 02:00 |
-| SNMP poller | `10.0.20.10` → 8 infrastructure devices behind the firewalls |
+| SNMP poller | `10.0.30.40` → 8 infrastructure devices behind the firewalls |
 
 ## Baseline (benign)
 

@@ -583,7 +583,11 @@ def _generate_benign_log(config, session_context=None):
     if log_type == 'ad_auth':
         return _generate_ldap_kerberos_benign(config, src_ip, user, shost)
 
-    destination = weighted_destination(user, config.get('benign_egress_destinations', [{}]))
+    _all_dests = config.get('benign_egress_destinations', [{}])
+    # Web browsing/ICMP go to sites that serve web; the DNS, NTP and SSH hosts in the
+    # list are reached by their own services (below), not as HTTP(S).
+    _web_dests = [d for d in _all_dests if set(d.get('ports') or [443]) & {80, 443}] or _all_dests
+    destination = weighted_destination(user, _web_dests)
     # The address the destination's NAME resolves to -- the same answer Infoblox gives.
     _dom, dest_ip = resolver.benign_target(config, destination)
     # Real FQDN, not a slugified service name. Check Point's modeling rule maps this
@@ -724,7 +728,7 @@ def _generate_benign_log(config, session_context=None):
 
     elif log_type == 'smb_internal':
         # Internal SMB file-share access — workstation to file server (intra-zone, both Internal)
-        file_server = random.choice(config.get('internal_servers', [src_ip]))
+        file_server = random.choice(resolver.file_servers(config) or [src_ip])
         extensions = {
             "act": "Accept",
             "src": src_ip, "dst": file_server,
@@ -766,7 +770,7 @@ def _generate_benign_log(config, session_context=None):
 
     elif log_type == 'ftp_download':
         # Internal FTP download — workstation pulling files from internal FTP server
-        ftp_server = random.choice(config.get('internal_servers', [src_ip]))
+        ftp_server = random.choice(resolver.file_servers(config) or [src_ip])
         ftp_dur = random.randint(10, 300)
         extensions = {
             "act": "Accept",
@@ -844,7 +848,9 @@ def _generate_benign_log(config, session_context=None):
         return _format_checkpoint_cef(config, extensions, device_product="Identity Awareness")
 
     else:  # HTTP/HTTPS traffic
-        dest_port  = random.choice([80, 443])
+        # Only ports the site serves: an HTTPS-only SaaS is not reached over plaintext :80.
+        _web_ports = [p for p in (destination.get('ports') or [443]) if p in (80, 443)] or [443]
+        dest_port  = random.choices(_web_ports, weights=[4 if p == 443 else 1 for p in _web_ports])[0]
         proto_name = "HTTPS" if dest_port == 443 else "HTTP"
         extensions = {
             "act": "Accept",

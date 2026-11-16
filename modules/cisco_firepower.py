@@ -588,6 +588,10 @@ def _generate_connection_event(config, src_ip, user, shost=None):
     """
     fields = _base_fields(config, src_ip, user, shost)
     destinations = config.get('benign_egress_destinations', [{}])
+    # Browsing goes to sites that serve web (80/443), not to the DNS, NTP or SSH
+    # hosts that share the list.
+    destinations = [d for d in destinations
+                    if set(d.get('ports') or [443]) & {80, 443}] or destinations
     destination = weighted_destination(user, destinations)
     # Name and address from the shared resolver, so the connection goes where
     # Infoblox said the name lives.
@@ -596,7 +600,10 @@ def _generate_connection_event(config, src_ip, user, shost=None):
     start_ms, end_ms = _conn_timing(random.randint(100, 8_000))
 
     if random.random() > 0.15:  # 85% — outbound web browsing allowed
-        dest_port  = random.choice([80, 443])
+        # Only the ports the site actually serves: an HTTPS-only SaaS is never reached
+        # over plaintext :80 (it used to be a 50/50 draw for every destination).
+        _web_ports = [p for p in (destination.get('ports') or [443]) if p in (80, 443)] or [443]
+        dest_port  = (random.choices(_web_ports, weights=[4 if p == 443 else 1 for p in _web_ports])[0])
         app        = "HTTPS" if dest_port == 443 else "HTTP"
         act        = "Allow"
         rule       = "Allow_Outbound_Web"
@@ -615,6 +622,9 @@ def _generate_connection_event(config, src_ip, user, shost=None):
         req_url    = f"{scheme}://{domain}{random.choice(_URL_PATHS)}" if domain else None
     else:  # 15% — non-standard port blocked
         dest_port  = random.choice([23, 137, 138, 666, 4444, 31337])
+        # Not the SaaS address a user browses to: a telnet/4444 attempt at Okta's IP
+        # is not a thing.
+        dest_ip    = _random_external_ip()
         app        = "UNKNOWN"
         act        = "Block"
         rule       = "Block_Suspicious_Ports"
@@ -975,8 +985,7 @@ def _generate_benign_smb_event(config, src_ip, user, shost=None):
     """
     firepower_conf = _get_config(config)
     internal_iface = firepower_conf.get('inbound_interface', 'inside')
-    internal_servers = config.get('internal_servers', ['10.0.10.50'])
-    dest_ip = random.choice(internal_servers)
+    dest_ip = random.choice(resolver.file_servers(config) or ['10.0.10.50'])
     start_ms, end_ms = _conn_timing(random.randint(500, 60_000))
 
     fields = _base_fields(config, src_ip, user, shost)
@@ -3623,7 +3632,7 @@ def _ftd_admin_session(config, user, src_ip, commands, start=None, hostname=None
     pairs = mgmt_plane.cisco_admin_session(
         "FTD", user, src_ip, commands,
         aaa_server=fc.get('aaa_server', config.get('cisco_asa_config', {}).get('aaa_server', '10.0.1.10')),
-        mgmt_ip=fc.get('management_ip', '10.0.30.2'), outside_ip=fc.get('outside_ip', '203.0.113.30'),
+        mgmt_ip=fc.get('management_ip', '10.0.30.12'), outside_ip=fc.get('outside_ip', '203.0.113.30'),
         iface=iface, start=start, aaa_failures=aaa_failures, gap=gap,
         write_mem=write_mem, logout=logout)
     return [_ftd_syslog(config, m, t, hostname) for t, m in pairs]

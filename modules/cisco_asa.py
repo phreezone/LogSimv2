@@ -1027,6 +1027,9 @@ def _simulate_internal_traffic(config, session_context=None):
         k=1,
     )[0]
     service_name, dest_port = service_cfg
+    if dest_port == 445:
+        # Workstation SMB goes to a file server, not any server in the estate.
+        dest_ip = random.choice(resolver.file_servers(config) or [dest_ip])
 
     bytes_sent = random.randint(1_000, 500_000)
     bytes_recv = random.randint(1_000, 50_000_000)
@@ -2540,7 +2543,7 @@ def _asa_admin_session(config, user, src_ip, commands, proto="ssh", iface=None,
     pairs = mgmt_plane.cisco_admin_session(
         "ASA", user, src_ip, commands,
         aaa_server=asa_conf.get('aaa_server', '10.0.1.10'),
-        mgmt_ip=asa_conf.get('management_ip', '10.0.30.1'),
+        mgmt_ip=asa_conf.get('management_ip', '10.0.30.11'),
         outside_ip=asa_conf.get('outside_ip', '203.0.113.1'),
         proto=proto, iface=iface, start=start, aaa_failures=aaa_failures, gap=gap,
         write_mem=write_mem, logout=logout)
@@ -2976,8 +2979,8 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     elif log_choice == "ftp_internal_benign":
         # Internal FTP download from file server
-        if config.get('internal_servers'):
-            ftp_dest = random.choice(config['internal_servers'])
+        if resolver.file_servers(config):
+            ftp_dest = random.choice(resolver.file_servers(config))
             user = _get_user_from_ip(config, internal_host_ip, session_context)
             _result = _generate_connection_session(
                 config, "TCP", internal_host_ip, ftp_dest, 21, user,
