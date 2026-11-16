@@ -585,6 +585,19 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 | `ntlm_relay_pattern` | *(non-analytic)* | SMB auth fan-out (relay shape) | — |
 | `dns_tunnel_pattern` | *(non-analytic)* | high-volume DNS to one resolver | — |
 | `ldap_recon` | *(non-analytic)* | LDAP (389/636) enumeration against a DC | — |
+| `tor_connection` | Recurring access to rare IP | DNS lookup, then a long Tor session (443/9001/9030) to an exit address | ported |
+| `server_outbound_http` | Recurring access to rare IP | internal server (DMZ) making plain HTTP to one rare external host, with a URL log | ported |
+| `dns_c2_beacon` | Abnormal Recurring Communications to a Rare Domain | one fixed host querying a rare external DNS server on a steady cadence (8–15 queries) | ported |
+| `smb_new_host_lateral` | Rare SMB session to a remote host | one workstation → 5–10 internal hosts on 445 | ported |
+| `smb_rare_file_transfer` | Rare SMB session to a remote host | one 100 MB–1 GB SMB session to a rarely-contacted workstation | ported |
+| `smb_share_enumeration` | Rare SMB session to a remote host | tiny 445 sessions to 15–40 distinct internal hosts | ported |
+| `rare_external_rdp` | Rare RDP session to a remote host | workstation → rare Internet host on 3389 | ported |
+| `large_download` | *(non-analytic)* | 500–4000 MB inbound HTTPS (received ≫ sent) + URL log | ported |
+| `dos_anomaly` | *(non-analytic)* | 80–150 tiny sessions from distinct external sources to one published server | ported |
+| `external_port_scan` | *(non-analytic)* | Internet host probing 20–24 privileged ports on a published server, mostly denied | ported |
+| `snmp_unexpected_source` | *(non-analytic)* | a workstation walking every network device on UDP/161 (traffic only; the SNMP config logs are a different PAN log type) | ported |
+
+The *ported* events replicate the traffic-based hits of the other firewall generators (their alert targets are the same names those registries use; several of those detectors have never fired in this tenant from any feed). `dns_tunneling` and `reverse_ssh_tunnel` are already covered by `dns_tunnel_pattern` and the SSH events above.
 
 All sequences end at or before the current time.
 

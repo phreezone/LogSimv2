@@ -1306,6 +1306,19 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "ntlm_relay_pattern",   "weight": 2,  "analytic": False, "xsiam_alert": None},
     {"event": "dns_tunnel_pattern",   "weight": 2,  "analytic": False, "xsiam_alert": None},
     {"event": "ldap_recon",           "weight": 2,  "analytic": False, "xsiam_alert": None},
+    # Traffic-based hits ported from the other firewall generators (names and alert targets
+    # match the FortiGate / Check Point / ASA / Firepower registries).
+    {"event": "tor_connection",       "weight": 3,  "analytic": True,  "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "server_outbound_http", "weight": 2,  "analytic": True,  "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "dns_c2_beacon",        "weight": 3,  "analytic": True,  "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
+    {"event": "smb_new_host_lateral", "weight": 4,  "analytic": True,  "xsiam_alert": "Rare SMB session to a remote host"},
+    {"event": "smb_rare_file_transfer","weight": 3, "analytic": True,  "xsiam_alert": "Rare SMB session to a remote host"},
+    {"event": "smb_share_enumeration","weight": 5,  "analytic": True,  "xsiam_alert": "Rare SMB session to a remote host"},
+    {"event": "rare_external_rdp",    "weight": 2,  "analytic": True,  "xsiam_alert": "Rare RDP session to a remote host"},
+    {"event": "large_download",       "weight": 3,  "analytic": False, "xsiam_alert": None},
+    {"event": "dos_anomaly",          "weight": 3,  "analytic": False, "xsiam_alert": None},
+    {"event": "external_port_scan",   "weight": 3,  "analytic": False, "xsiam_alert": None},
+    {"event": "snmp_unexpected_source","weight": 1, "analytic": False, "xsiam_alert": None},
 ]
 
 _EVENT_DISPLAY_NAMES = {e["event"]: e["event"] for e in _DEFAULT_THREAT_EVENTS}
@@ -2442,6 +2455,193 @@ def _sim_ldap_recon(config, session_context):
     return out
 
 
+# --- Traffic-based hits ported from the other firewall generators -----------------------------
+# Same behaviours the ASA / FortiGate / Check Point / Firepower modules fire (Tor, SMB lateral
+# movement, server egress, DNS C2, DoS, SNMP walk ...), expressed as PAN-OS traffic logs.
+def _tor_exit(config):
+    nodes = config.get("tor_exit_nodes") or []
+    if nodes:
+        n = random.choice(nodes)
+        return n.get("ip") if isinstance(n, dict) else n
+    return rare_external_ip()
+
+
+def _sim_tor_connection(config, session_context):
+    """DNS lookup of the Tor project, then one long Tor session to an exit/relay address."""
+    src, user, shost = _threat_actor(config, session_context)
+    gname, gip = resolver.dns_server_for(config, src)
+    port = random.choices([443, 9001, 9030], weights=[60, 30, 10])[0]
+    tor_ip = _tor_exit(config)
+    print(f"    - PAN NGFW simulating: Tor connection {src} -> {tor_ip}:{port}")
+    now = time.time()
+    return [
+        _conn(config, src, gip, 53, "dns-base", suser=user, shost=shost, proto="udp",
+              dhost=f"{gname}.{resolver.internal_domain(config)}", from_zone="trust", to_zone="trust",
+              bytes_sent=random.randint(70, 120), bytes_received=random.randint(100, 300),
+              duration_s=0, ts=now - 3),
+        _conn(config, src, tor_ip, port, "tor" if port != 443 else "ssl", suser=user, shost=shost,
+              bytes_sent=random.randint(10000, 100000), bytes_received=random.randint(50000, 500000),
+              duration_s=random.randint(60, 3600), url_cat="proxy-avoidance-and-anonymizers"),
+    ]
+
+
+def _sim_server_outbound_http(config, session_context):
+    """An internal server (never a browsing host) making plain HTTP to a rare external host."""
+    servers = config.get("internal_servers") or ["10.0.10.50"]
+    src = random.choice(stable_subset(servers, "panw_ngfw:server_outbound_http") or servers)
+    ip, dom = _beacon_dst(config, "srv_http", src)
+    dom = dom or rare_domain(f"srvhttp|{src}")
+    print(f"    - PAN NGFW simulating: server outbound HTTP {src} -> {dom}")
+    return _web(config, src, ip, 80, "web-browsing", dom, url_cat="unknown", suser=None,
+                shost=None, from_zone="dmz", to_zone="untrust", src_category="server",
+                user_agent=random.choice(_CLIENT_UAS[:3]),
+                bytes_sent=random.randint(300, 4000), bytes_received=random.randint(500, 60000),
+                duration_s=random.randint(5, 120))
+
+
+def _smb_conns(config, src, user, shost, dests, step=20):
+    out, t0 = [], time.time() - len(dests) * step
+    for i, d in enumerate(dests):
+        out.append(_conn(config, src, d, 445, "ms-ds-smbv3", suser=user, shost=shost,
+                         dhost=resolver.internal_fqdn(config, d), from_zone="trust", to_zone="trust",
+                         bytes_sent=random.randint(2000, 60000), bytes_received=random.randint(2000, 200000),
+                         duration_s=random.randint(5, 120), ts=t0 + i * step))
+    return out
+
+
+def _sim_smb_new_host_lateral(config, session_context):
+    """SMB from one workstation to 5-10 internal hosts it has never talked to."""
+    src, user, shost = _threat_actor(config, session_context)
+    n, dests = random.randint(5, 10), []
+    for _ in range(30):
+        peer = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
+        if peer and peer.get("ip") and peer["ip"] != src and peer["ip"] not in dests:
+            dests.append(peer["ip"])
+        if len(dests) >= n:
+            break
+    while len(dests) < n:
+        dests.append(rare_internal_host(config, exclude=(src,)))
+    print(f"    - PAN NGFW simulating: SMB new-host lateral movement {src} -> {len(dests)} hosts")
+    return _smb_conns(config, src, user, shost, dests)
+
+
+def _sim_smb_rare_file_transfer(config, session_context):
+    """One 100 MB - 1 GB SMB session to a rarely-contacted workstation (data staging)."""
+    src, user, shost = _threat_actor(config, session_context)
+    dst = rare_known_host(config, exclude=(src,), avoid_subnet_of=src)
+    size = random.randint(100 * 1024 * 1024, 1024 * 1024 * 1024)
+    print(f"    - PAN NGFW simulating: SMB rare file transfer {src} -> {dst} {size // (1024 * 1024)}MB")
+    return [_conn(config, src, dst, 445, "ms-ds-smbv3", suser=user, shost=shost,
+                  dhost=resolver.internal_fqdn(config, dst), from_zone="trust", to_zone="trust",
+                  bytes_sent=size, bytes_received=random.randint(1000, 50000),
+                  duration_s=random.randint(120, 900))]
+
+
+def _sim_smb_share_enumeration(config, session_context):
+    """Rapid, tiny TCP/445 sessions to 15-40 distinct internal hosts: share hunting."""
+    src, user, shost = _threat_actor(config, session_context)
+    n = random.randint(15, 40)
+    pool = list(sweep_targets(config, exclude=(src,)))
+    random.shuffle(pool)
+    dests = pool[:n]
+    while len(dests) < n:
+        dests.append(rare_internal_host(config, exclude=(src,)))
+    print(f"    - PAN NGFW simulating: SMB share enumeration {src} -> {len(dests)} hosts")
+    out, t0 = [], time.time() - n * 3
+    for i, d in enumerate(dests):
+        out.append(_conn(config, src, d, 445, "ms-ds-smbv3", suser=user, shost=shost,
+                         from_zone="trust", to_zone="trust", bytes_sent=random.randint(40, 200),
+                         bytes_received=random.randint(40, 200), duration_s=0, ts=t0 + i * 3))
+    return out
+
+
+def _sim_large_download(config, session_context):
+    """One multi-GB INBOUND HTTPS session (huge received, tiny sent): the mirror of an upload."""
+    src, user, shost = _threat_actor(config, session_context)
+    dom, dst, url, is_tail = exfil_destination(config, "download")
+    tail = url.split("://", 1)[-1]
+    path = "/" + tail.split("/", 1)[1] if "/" in tail else "/"
+    recv_mb = random.randint(500, 4000)
+    print(f"    - PAN NGFW simulating: large download {dom} -> {src} {recv_mb}MB")
+    return _web(config, src, dst, 443, "ssl", dom, path=path,
+                url_cat="unknown" if is_tail else "online-storage-and-backup", suser=user, shost=shost,
+                bytes_sent=random.randint(20000, 200000), bytes_received=recv_mb * 1024 * 1024,
+                duration_s=random.randint(300, 2400))
+
+
+def _sim_dns_c2_beacon(config, session_context):
+    """One fixed host querying a rare external DNS server on a steady cadence (DNS C2)."""
+    src, user, shost = _beacon_host(config, session_context, "panw_dns_c2")
+    ip, dom = _beacon_dst(config, "dns_c2", src)
+    n = random.randint(8, 15)
+    step = random.randint(60, 240)
+    print(f"    - PAN NGFW simulating: DNS C2 beacon {src} -> {ip} ({n} queries)")
+    t = time.time() - n * step
+    out = []
+    for _ in range(n):
+        t += step + random.randint(-10, 10)
+        out.append(_conn(config, src, ip, 53, "dns-base", suser=user, shost=shost, proto="udp", dhost=dom,
+                         bytes_sent=random.randint(80, 200), bytes_received=random.randint(100, 500),
+                         duration_s=0, ts=min(t, time.time())))
+    return out
+
+
+def _sim_dos_anomaly(config, session_context):
+    """80-150 tiny sessions from distinct external sources to one published server: a flood."""
+    target = random.choice(config.get("internal_servers") or ["10.0.10.50"])
+    port, app = random.choice([(80, "web-browsing"), (443, "ssl")])
+    n = random.randint(80, 150)
+    print(f"    - PAN NGFW simulating: DoS flood -> {target}:{port} ({n} sources)")
+    out, t0 = [], time.time() - n * 0.5
+    for i in range(n):
+        out.append(_conn(config, random_external_ip(), target, port, app,
+                         action=random.choice(["allow", "allow", "drop"]), from_zone="untrust",
+                         to_zone="dmz", bytes_sent=random.randint(60, 200),
+                         bytes_received=random.randint(0, 200), duration_s=0, ts=t0 + i * 0.5,
+                         rule="Allow-Inbound-Web"))
+    return out
+
+
+def _sim_snmp_unexpected_source(config, session_context):
+    """A workstation walking every network device on UDP/161 (the SNMP-harvest shape; the
+    failed-community config logs are a different PAN log type and are not modelled)."""
+    src, user, shost = _threat_actor(config, session_context)
+    devs = mgmt_plane.network_devices(config)
+    print(f"    - PAN NGFW simulating: SNMP walk {src} -> {len(devs)} devices")
+    out, t = [], time.time() - 60
+    for dev in devs:
+        out.append(_conn(config, src, dev, 161, "snmp-base", suser=user, shost=shost, proto="udp",
+                         from_zone="trust", to_zone="trust", bytes_sent=random.randint(60, 200),
+                         bytes_received=random.randint(800, 40000), duration_s=random.randint(0, 3), ts=t))
+        t += random.randint(1, 4)
+    return out
+
+
+def _sim_external_port_scan(config, session_context):
+    """An Internet host probing 20-24 privileged ports on a published server; mostly blocked."""
+    src = random_external_ip()
+    target = random.choice(config.get("internal_servers") or ["10.0.10.50"])
+    ports = random.sample(_PRIV_PORTS, min(len(_PRIV_PORTS), random.randint(20, 24)))
+    print(f"    - PAN NGFW simulating: external port scan {src} -> {target} ({len(ports)} ports)")
+    out, t0 = [], time.time() - len(ports) * 2
+    for i, p in enumerate(ports):
+        act = random.choices(["deny", "drop", "allow"], weights=[5, 3, 1])[0]
+        out.append(_conn(config, src, target, p, "incomplete" if act != "allow" else _APP_for_port(p),
+                         action=act, from_zone="untrust", to_zone="dmz", ts=t0 + i * 2,
+                         rule="Deny-Inbound-Default" if act != "allow" else "Allow-Inbound-Web"))
+    return out
+
+
+def _sim_rare_external_rdp(config, session_context):
+    """RDP from a workstation straight to a rare Internet host."""
+    src, user, shost = _threat_actor(config, session_context)
+    dom, dst = _rare_ext(config, f"extrdp|{user}")
+    print(f"    - PAN NGFW simulating: rare external RDP {src} -> {dst}")
+    return [_conn(config, src, dst, 3389, "ms-rdp", suser=user, shost=shost, dhost=dom,
+                  bytes_sent=random.randint(40000, 400000), bytes_received=random.randint(200000, 4000000),
+                  duration_s=random.randint(120, 3000), url_cat="unknown")]
+
+
 # --- Threat-log scenarios (THREAT + the matching traffic log of each session) ---------------
 _SCANNER_UA = {
     "nmap_nse": "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)",
@@ -2778,6 +2978,12 @@ _THREAT_DISPATCH = {
     "new_admin_behavior": _sim_new_admin_behavior, "dormant_host_conn": _sim_dormant_host_conn,
     "kerberos_preauth_pattern": _sim_kerberos_preauth_pattern, "ntlm_relay_pattern": _sim_ntlm_relay_pattern,
     "dns_tunnel_pattern": _sim_dns_tunnel_pattern, "ldap_recon": _sim_ldap_recon,
+    "tor_connection": _sim_tor_connection, "server_outbound_http": _sim_server_outbound_http,
+    "dns_c2_beacon": _sim_dns_c2_beacon, "smb_new_host_lateral": _sim_smb_new_host_lateral,
+    "smb_rare_file_transfer": _sim_smb_rare_file_transfer, "smb_share_enumeration": _sim_smb_share_enumeration,
+    "rare_external_rdp": _sim_rare_external_rdp, "large_download": _sim_large_download,
+    "dos_anomaly": _sim_dos_anomaly, "external_port_scan": _sim_external_port_scan,
+    "snmp_unexpected_source": _sim_snmp_unexpected_source,
     "port_scan_aggressive": _sim_port_scan_aggressive, "ipfs_peering": _sim_ipfs_peering,
     "rare_domain_attack_port": _sim_rare_domain_attack_port,
     "recurring_rare_domain_attack_port": _sim_recurring_rare_domain_attack_port,
