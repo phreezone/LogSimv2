@@ -689,11 +689,15 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
         "url_domain":        domain,      # no parser derives it from uri on this path
         "url_category":      cat,
         "url_category_list": f"{cat},{risk}",
-        "threat_id":         "9999",
-        "threat_name":       "",
+        # Live CEF URL rows: threat_id and threat_name are both "9999(9999)", threat_category
+        # N/A, severity the number 1 and pcap_id 0.
+        "threat_id":         "9999(9999)",
+        "threat_name":       "9999(9999)",
+        "threat_category":   "N/A",
         "direction":         "client-to-server",
         "direction_of_attack": "client to server",   # the live column (doc key: direction)
-        "severity":          "Informational",          # the live column's value
+        "severity":          "1",
+        "pcap_id":           0,
         "http2_connection":  0,
     })
     if clear:
@@ -981,7 +985,7 @@ def _threat_record(config, tf, sig, action, ts, misc=None, user_agent=None, repe
         "misc":                misc,
         "file_name":           misc,                 # the live column that holds $misc
         "threat_id":           str(tid),
-        "threat_name":         tname,
+        "threat_name":         f"{tname}({tid})",    # live CEF rows: $threat_name carries the ID suffix
         "threat_name_firewall": tname,
         "threat_category":     cat,
         "direction":           "client-to-server",
@@ -994,8 +998,9 @@ def _threat_record(config, tf, sig, action, ts, misc=None, user_agent=None, repe
         "count_of_repeats":    repeats,
         "user_agent":          user_agent,
     })
+    # Live CEF rows put "Name(ID)" in the header signature slot ($threatid expands to it).
     return _format_cef(config, subtype, f, log_type="THREAT", severity=_SEVERITY_NUM[sev], ts=ts,
-                       fw_type="firewall.threat", sig=str(tid))
+                       fw_type="firewall.threat", sig=f"{tname}({tid})")
 
 
 def _threat_session(config, key, src, dst, dpt, app, *, action, end, suser=None, shost=None,
@@ -2710,8 +2715,9 @@ def _file_record(config, tf, sigkey, misc, ts, file_url=None, action="alert"):
         "action":              action,
         "misc":                misc,
         "file_name":           misc,
-        "threat_id":           str(tid),
-        "threat_name":         tname,
+        # Live CEF File Data rows: threat_id, threat_name and the header signature are all "Name(ID)".
+        "threat_id":           f"{tname}({tid})",
+        "threat_name":         f"{tname}({tid})",
         "threat_name_firewall": tname,
         "threat_category":     "N/A",
         "direction":           "server-to-client",
@@ -2724,7 +2730,7 @@ def _file_record(config, tf, sigkey, misc, ts, file_url=None, action="alert"):
         "pcap_id":             0,
     })
     return _format_cef(config, "file", f, log_type="THREAT", severity=_SEVERITY_NUM["low"], ts=ts,
-                       fw_type="firewall.filedata", sig=str(tid))
+                       fw_type="firewall.filedata", sig=f"{tname}({tid})")
 
 
 def _file_session(config, src, dst, dpt, app, domain, sigkey, name, *, suser=None, shost=None,

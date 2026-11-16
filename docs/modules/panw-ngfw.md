@@ -118,7 +118,8 @@ writes one for web sessions, keyed to the traffic log by `session_id`:
 ```
 CEF:0|PANW|NGFW_CEF|<sw>|url|threat|1| __firewall_type=firewall.url log_type=threat
     subtype=url sub_type=url action=alert uri=<host><path> url_domain=<host>
-    url_category=.. url_category_list=<cat>,<low|high>-risk http_method=unknown threat_id=9999 ..
+    url_category=.. url_category_list=<cat>,<low|high>-risk http_method=unknown threat_id=9999(9999) threat_name=9999(9999)
+    threat_category=N/A severity=1 pcap_id=0 ..
 ```
 
 Shape learned from the live `panw_ngfw_url_raw` rows (`action=alert` for an allowed, logged
@@ -180,12 +181,13 @@ Syslog Collector*):
 CEF:0|PANW|NGFW_CEF|<sw>|<threatid>|threat|<number-of-severity>| __firewall_type=firewall.threat
     __timestamp=<time_generated> __tz=<high_res> log_type=threat subtype=vulnerability ... <the
     common traffic block: addresses, ports, NAT, users, app, rule, zones, interfaces, session_id,
-    source/dest device> ... misc=<uri or file name> threat_id=<id> threat_name=<name>
+    source/dest device> ... misc=<uri or file name> threat_id=<id> threat_name=<name>(<id>)
     threat_category=<category> direction=client-to-server user_agent=<UA> severity=<1-5>
 ```
 
-The header's signature slot is the **Threat ID** (traffic and URL logs put the subtype there),
-and `severity` is the numeric `$number-of-severity` (1 informational … 5 critical). The live
+The header's signature slot is **`Name(ID)`** (traffic and URL logs put the subtype there), and
+`threat_name` is the same `Name(ID)` string while `threat_id` stays the bare number: that is what the
+pa440's own CEF rows carry (read-only diff, 2026-11-16; `$threatid` expands to name and ID). `severity` is the numeric `$number-of-severity` (1 informational … 5 critical). The live
 CLCS rows spell several of these differently, so the module also sends the column names the
 tenant's own rows use: `file_name` (holds `$misc`), `direction_of_attack`, `vendor_severity`
 (the severity word) and `threat_name_firewall`. `panw_ngfw_config.threat_severity_format`
@@ -502,8 +504,8 @@ and NFS alerts from the real pa440). The ambient benign mix deliberately carries
 logs: each one is self-alerting, and the lesson from the Entra baseline is that a benign draw
 that raises alerts pollutes every later test. Threats fire only through the threat gate or on demand.
 
-**File Data logs (`firewall.filedata`).** The documented File Data format (header signature slot = Threat ID,
-type THREAT, severity number) is built as three background-only events (`analytic: False`, severity low,
+**File Data logs (`firewall.filedata`).** The documented File Data format (header signature slot, `threat_id` and
+`threat_name` all `Name(ID)` as the pa440's own File Data rows carry them; type THREAT, severity number) is built as three background-only events (`analytic: False`, severity low,
 action alert, direction server-to-client, threat category N/A): `file_data_web` (a user fetching a file over
 cleartext HTTP from an Internet server), `file_data_internal` (a host fetching from an internal web app on
 8080/9080/80) and `file_data_ocsp` (an OCSP lookup returning a DER X509 certificate, App-ID `ocsp`, tcp/80).
