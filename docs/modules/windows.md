@@ -277,11 +277,11 @@ or Cribl paths changes that — the same wall documented for `kerberos_relay`. T
 is consistent with the published Required Data listing the agent path separately.
 The generator keeps the `1644` leg because it is the correct real-world shape.
 
-### AD CS template detectors: one is a data-source wall, one is unverifiable (2026-11-17)
+### AD CS detectors: what is reachable and what is not (2026-11-17)
 
 The AD CS module itself is live: alert 799505 carries
 `DT:Active Directory Certificate Services Analytics`, so these analytics are
-evaluating events in this tenant. Two of them are nonetheless out of reach, for
+evaluating events in this tenant. Three of them are nonetheless out of reach, for
 different reasons.
 
 **"Vulnerable certificate template loaded" — WIP on an unverifiable field.**
@@ -310,12 +310,33 @@ Hunting (XTH)* only, with Detector Tags `LDAP Analytics (Client)` and
 event, so WEC cannot feed it at all — the same agent-class wall as
 `kerberos_relay` and the `1644` leg of SCCM recon. No generator is added for it.
 
-**"A user certificate was issued with a mismatch" — probed separately.** It has
-WEC-or-agent data and keys on `4887` `Requester` vs `Subject`, both of which the
-existing CA builders already emit. Every earlier `4887` came from
-`priv_cert_request`, where the requester was the sensitive `Administrator`; the
-probe therefore used an ordinary user requesting on behalf of a *different*
-ordinary user.
+**"A user certificate was issued with a mismatch" — WIP after three probes.** It
+has WEC-or-agent data and keys on `4887` `Requester` vs `Subject`, both of which
+the existing CA builders already emit. Every earlier `4887` came from
+`priv_cert_request`, where the requester was the sensitive `Administrator`, so
+all three probes used an ordinary requester:
+
+| Attempt | Requester | Issued subject | Request SAN (`4886`) | Alert |
+|---|---|---|---|---|
+| 14:02Z | `i.fontaine` | `CN=v.brooks,CN=Users,DC=examplecorp,DC=local` | none | none |
+| 14:11Z | `i.nielsen` | `CN=b.alvarez,CN=Users,DC=examplecorp,DC=local` | `b.alvarez@examplecorp.local` on both events | none |
+| 14:20Z | `a.petit` | `CN=Administrator,CN=Users,DC=examplecorp,DC=local` | `Administrator@examplecorp.local` on both events | none |
+
+All three ingested with `Requester`, `Subject` and `Attributes` intact (attempt 1
+was re-read from `xdr_data` to confirm), and the detector has never fired in 30
+days, so its 1-Day dedup cannot be responsible. Silence is also not a
+missing-identity problem: ordinary LogSim users are well established in this
+tenant (`v.brooks` 3,350 `4624`s, `i.fontaine` 3,454, `j.james` 3,505 over 90
+days). The remaining unknown is what the analytic actually compares — the `4887`
+`Requester` string, the SAN inside the `4886` `Attributes` blob, or something the
+CA does not record at all — and it is not documented. WIP.
+
+Two more AD CS detectors are out of reach for reasons unrelated to shape.
+**"Deletion of AD CS certificate database entries"** needs the CA
+database-deletion audit events (`4896`–`4902`), and Microsoft does not publish
+field layouts for those either, so it would be a second unverifiable builder.
+**"Unusual certificate management activity"** is a Cloud-module analytic fed by
+AWS/Azure/GCP audit logs, not by Windows events at all.
 
 ### Sensitive-account classification is inventory-driven (2026-11-16)
 
