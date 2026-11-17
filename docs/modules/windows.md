@@ -8,7 +8,7 @@ Generates native Windows Security-channel Event XML targeting XSIAM's Identity A
 
 - **Rendering:** `_render_event_xml()` uses `lxml` for correct namespace/prefix control and single-quoted attributes, matching real Windows XML byte-for-byte (lowercase GUIDs, nanosecond timestamps, `%%` message codes).
 - **Event modeling:** every record is built through `_build_event(event_id, computer, event_data, …)` so `microsoft_windows_raw` modeling rules, correlation rules, and UEBA analytics process it identically to real WEC-collected events. `_raw_log` is the Windows Event **XML** (not JSON) — extract fields with `regextract(_raw_log, "Name='<Field>'>([^<]+)<")`.
-- **Covered Event IDs:** 4624, 4625, 4634, 4647, 4648, 4656, 4662, 4663, 4672, 4688, 4689, 4697, 4720, 4722, 4724, 4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4741, 4742, 4756, 4757, 4767, 4768, 4769, 4771, 4776, 4781, 4886, 4887, 4888, 5136, 5137, 1102.
+- **Covered Event IDs:** 1644, 4624, 4625, 4634, 4647, 4648, 4656, 4662, 4663, 4672, 4688, 4689, 4697, 4720, 4722, 4724, 4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4741, 4742, 4756, 4757, 4767, 4768, 4769, 4771, 4776, 4781, 4886, 4887, 4888, 5136, 5137, 1102.
 
 > **WEC subscription filter:** the Broker VM's WEC subscription must **forward the Event IDs** LogSim emits for them to reach XSIAM. If a newly added Event ID (e.g. 1102) doesn't appear in search, confirm it's in the subscription's query filter. See **WEC Transport Setup** in the [README](../../README.md) for broker configuration.
 
@@ -224,8 +224,58 @@ credentials addition", which matches neither that nor "adminsdholder". Poll by
 alert name.
 
 `wip_sccm_container_recon` ("Suspicious access of the System Management
-Container") is **not** blocked by object type for the same reason — it still
-needs its own probe.
+Container") is **not** blocked by object type for the same reason; it has since
+been probed, and the probe is described in the next section.
+
+### System Management container: the LDAP query was the missing event (2026-11-17)
+
+The generator emitted the container read as `4662` only. That shape is silent, but
+so is everything else about it until you look at what the tenant's own Directory
+Service telemetry contains:
+
+| Fact | Value |
+|---|---|
+| Real `1644` events (LDAP search diagnostics) in 90 days | **185,646**, all agent-collected on `ExampleCorp-DC1` |
+| Distinct search bases those 1644s ever used | **2** — `CN=Schema,CN=Configuration,DC=corp,DC=examplecorp,DC=com` (the DC's own `pGMSA_…$` schema poll, `onelevel`, 2,694) and `DC=corp,DC=examplecorp,DC=com` (`Administrator`, `subtree`, 253) |
+| `1644` events whose starting node is the System Management container | **0** |
+
+`1644` is the only record that names the *search base*; `4662` says which object
+was touched but not that an LDAP query enumerated it. The published investigative
+action for this analytic is "look for the suspicious LDAP query that may trigger
+this event", so the generator now emits one, using the field layout read off the
+tenant's own rows:
+
+| Field | Meaning | Synthetic value |
+|---|---|---|
+| `param1` | starting node | `CN=System Management,CN=System,DC=examplecorp,DC=local` |
+| `param2` | filter | `( (objectClass=*) )` |
+| `param3` / `param4` | visited / returned entries | object count of the burst (28–35) |
+| `param5` | client | `[::ffff:<user ip>]:<port>` |
+| `param6` | search scope | `subtree` |
+| `param7` | attribute selection | `*` |
+| `param9` | used indexes | `idx_objectClass:1:N;` |
+| `param17` | user | `EXAMPLECORP\<user>` |
+
+Provider (`Microsoft-Windows-ActiveDirectory_DomainService`), provider GUID
+(`{0E8478C5-3605-4E8C-8497-1E730C959516}`) and channel (`Directory Service`) come
+from the same rows, so `_build_event` now takes per-event provider/channel/keyword
+overrides via `_EVENT_META`. Verified in the tenant: the synthetic 1644 lands with
+every `param*` intact and real CRLF in `action_evtlog_message`.
+
+Probe history for this detector, all with zero alerts:
+
+| When | Shape |
+|---|---|
+| 11-09, 11-10, 11-15 (background) | `4662` read of the container + 27–34 child objects, before the 30-day training period completed |
+| 11-17 13:31Z | same, plus a `List Contents` (`0x4`) read on the container itself (a real LDAP search emits both that and `Read Property`) |
+| 11-17 13:43Z | same, plus the `1644` search naming the container |
+
+The remaining candidate blocker is the **event class**, not the shape: every real
+`1644` in this tenant is `EVENT_LOG_AGENT_EVENT_LOG` (XDR agent with XTH), while
+WEC-delivered events land as `EVENT_LOG_DOMAIN_CONTROLLER` and nothing in the WEC
+or Cribl paths changes that — the same wall documented for `kerberos_relay`. That
+is consistent with the published Required Data listing the agent path separately.
+The generator keeps the `1644` leg because it is the correct real-world shape.
 
 ### Sensitive-account classification is inventory-driven (2026-11-16)
 
@@ -301,19 +351,22 @@ Two secondary observations from the same batch:
   also carries certificate fields.
 
 **This analytic deduplicates for 1 Day** (published Deduplication Period), and the
-key is the **requester**, not the subject — inferred from two post-fire batches
+key is the **requester**, not the subject — inferred from three post-fire batches
 that used subjects never seen before and still stayed silent:
 
 | Batch | Requester | Subject | Template | Alert |
 |---|---|---|---|---|
-| 17:36Z (shipped generator) | `Administrator` | `n.okafor` | `WebServerV2` | none |
-| 17:47Z (shipped generator, template pinned) | `Administrator` | `e.wu` | `UserAuth-Legacy` | none |
+| 11-16 17:36Z (shipped generator) | `Administrator` | `n.okafor` | `WebServerV2` | none |
+| 11-16 17:47Z (shipped generator, template pinned) | `Administrator` | `e.wu` | `UserAuth-Legacy` | none |
+| 11-17 13:24Z (shipped generator) | `Administrator` | `v.kato` | random | none |
 
-Both ingested correctly (`4886` + `4887`, requester `EXAMPLECORP\Administrator`)
-and stayed silent 14 and 25 minutes after 799505. Repeating the exact template
-that fired changed nothing, so the template is not the discriminator and the
-generator can keep drawing from `_CERT_TEMPLATES_VULNERABLE`. To re-verify this
-detector, wait a full day after its last alert rather than sending a second batch.
+All three ingested correctly (`4886` + `4887`, requester `EXAMPLECORP\Administrator`)
+and stayed silent 14 minutes, 25 minutes and 20 hours after 799505. Repeating the
+exact template that fired changed nothing, so the template is not the
+discriminator and the generator can keep drawing from
+`_CERT_TEMPLATES_VULNERABLE`. The 20-hour data point also rules out a
+calendar-day reset: the window is a rolling period measured from the last alert,
+so re-verify by waiting a full day after it rather than sending another batch.
 
 ### CRLF reaches `action_evtlog_message`, not the EventData JSON (2026-11-16)
 

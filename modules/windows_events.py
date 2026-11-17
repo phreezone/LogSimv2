@@ -235,6 +235,17 @@ _EVENT_META = {
     4699: {"task": 12804, "category": "Other Object Access Events", "version": 1, "outcome": "success"},
     5140: {"task": 12808, "category": "File Share",                 "version": 1, "outcome": "success"},
     5145: {"task": 12811, "category": "Detailed File Share",        "version": 0, "outcome": "success"},
+    # Directory Service (LDAP interface) diagnostics. Not a Security-channel audit
+    # event: the provider, channel and keyword differ, so they are carried here
+    # rather than at the _build_event call sites. Provider GUID and channel are the
+    # values the tenant's own agent-collected 1644 events report; the task value
+    # (LDAP Interface) is documented but is not stored by the tenant's parser and is
+    # not read by any detector.
+    1644: {"task": 1408, "category": "LDAP Interface", "version": 0, "outcome": "success",
+           "provider_name": "Microsoft-Windows-ActiveDirectory_DomainService",
+           "provider_guid": "{0E8478C5-3605-4E8C-8497-1E730C959516}",
+           "channel": "Directory Service",
+           "keywords": "0x8000000000000000"},
 }
 
 def _format_message(event_id: int, ed: dict) -> str:
@@ -658,6 +669,39 @@ def _msg_4662(d):
         "Additional Information:\r\n"
         f"\tParameter 1:\t\t{d.get('AdditionalInfo','-')}\r\n"
         f"\tParameter 2:\t\t"
+    )
+
+
+def _msg_1644(d):
+    """1644 — Directory Service LDAP search diagnostics.
+
+    Layout copied from the tenant's own agent-collected 1644 rows
+    (`ExampleCorp-DC1`, provider Microsoft-Windows-ActiveDirectory_DomainService),
+    including the blank line before each label and the trailing value space that
+    the real rendering carries. Parameter names follow what that parser stores:
+    param1 starting node, param2 filter, param3/param4 visited/returned entries,
+    param5 client, param6 scope, param7 attribute selection, param9 used indexes,
+    param17 user. Zero-valued counters are omitted, as the real rows do.
+    """
+    return (
+        "Internal event: A client issued a search operation with the following options. \r\n\r\n"
+        f" Client:\r\n{d.get('param5','')} \r\n"
+        f"Starting node:\r\n{d.get('param1','')} \r\n"
+        f"Filter:\r\n{d.get('param2','')} \r\n"
+        f"Search scope:\r\n{d.get('param6','')} \r\n"
+        f"Attribute selection:\r\n{d.get('param7','')} \r\n"
+        "Server controls:\r\n \r\n"
+        f"Visited entries:\r\n{d.get('param3','')} \r\n"
+        f"Returned entries:\r\n{d.get('param4','')} \r\n"
+        f"Used indexes:\r\n{d.get('param9','')} \r\n"
+        "Pages referenced:\r\n0 \r\n"
+        "Pages read from disk:\r\n0 \r\n"
+        "Pages preread from disk:\r\n0 \r\n"
+        "Clean pages modified:\r\n0 \r\n"
+        "Dirty pages modified:\r\n0 \r\n"
+        "Search time (ms):\r\n1 \r\n"
+        "Attributes returned:\r\n0 \r\n"
+        f"Additional Data\r\nUser:\r\n{d.get('param17','')} "
     )
 
 
@@ -1418,6 +1462,7 @@ _MSG_BUILDERS = {
     4725: _msg_4725,
     4726: _msg_4726,
     4738: _msg_4738,
+    1644: _msg_1644,
 }
 
 # 4625 Status/SubStatus → FailureReason mapping.  Status is the primary
@@ -2296,14 +2341,14 @@ def _build_event(event_id: int, computer: str, event_data: dict,
     record = {
         # --- Fields matching the microsoft_windows_raw dataset schema ---
         "event_id":          str(event_id),
-        "provider_name":     _PROVIDER_NAME,
-        "provider_guid":     _PROVIDER_GUID,
-        "channel":           _CHANNEL,
+        "provider_name":     meta.get("provider_name", _PROVIDER_NAME),
+        "provider_guid":     meta.get("provider_guid", _PROVIDER_GUID),
+        "channel":           meta.get("channel", _CHANNEL),
         "computer_name":     computer,
         "host_name":         computer,
         "time_created":      ts_str,
         "message":           message,
-        "keywords":          kw,
+        "keywords":          meta.get("keywords", kw),
         "log_level":         "Information",
         "event_result":      "success" if success else "failure",
         "event_action":      meta["category"],
@@ -3241,6 +3286,43 @@ def _build_4662(user_info, config, *, object_type, object_name,
         "AdditionalInfo2":   "",
     }
     return _build_event(4662, dc_host, event_data, success=True, ts=ts)
+
+
+def _build_1644(user_info, config, *, search_base, ldap_filter="(objectClass=*)",
+                scope="subtree", attributes="*", visited=1, returned=1,
+                used_indexes="", ts=None) -> dict:
+    """1644 - Directory Service LDAP search diagnostics (DC, Directory Service log).
+
+    Windows writes this to the Directory Service log when a client issues a search
+    that exceeds the expensive-search threshold. It is the only record that names
+    the *search base*, so an analytic about "who queried this container" has to
+    read it: the matching 4662 says which object was touched but not that an LDAP
+    query enumerated it.
+
+    Field names and layout come from the tenant's own agent-collected 1644 rows
+    (provider Microsoft-Windows-ActiveDirectory_DomainService on ExampleCorp-DC1):
+    param1 search base, param2 filter, param3/param4 visited/returned entries,
+    param5 client "addr:port", param6 scope, param7 attribute selection,
+    param9 used indexes, param17 "DOMAIN\\user". Zero-valued counters are absent
+    in the real rows and are left out here too.
+    """
+    dc_host = _get_dc_hostname(config)
+    domain = _get_domain(config)
+    port = random.randint(49152, 65535)
+    ip = user_info.get("ip") or "10.20.30.40"
+    client = f"[::ffff:{ip}]:{port}"
+    event_data = {
+        "param1":  search_base,
+        "param2":  f" ( {ldap_filter} ) ",
+        "param3":  str(visited),
+        "param4":  str(returned),
+        "param5":  client,
+        "param6":  scope,
+        "param7":  attributes,
+        "param9":  used_indexes or "idx_objectClass:1:N;",
+        "param17": f"{domain}\\{user_info['username']}",
+    }
+    return _build_event(1644, dc_host, event_data, success=True, ts=ts)
 
 
 def _build_4656(user_info, config, *, object_type, object_name,
@@ -6707,6 +6789,22 @@ def _threat_sccm_container_recon(config, session_context):
                                          logon_id=logon_id, ts=t)))
     t += random.uniform(0.5, 1.5)
 
+    # 1644 on the DC: the LDAP search itself. The 4662s below say which objects were
+    # touched, but only 1644 names the search base, and the published investigative
+    # action for this analytic is literally "look for the suspicious LDAP query".
+    # The tenant has 185k real 1644s (all agent-collected on ExampleCorp-DC1), and
+    # none of them has ever had CN=System Management as the starting node.
+    events.append(json.dumps(_build_1644(
+        u, config,
+        search_base=sysm_container_dn,
+        ldap_filter="(objectClass=*)",
+        scope="subtree",
+        attributes="*",
+        visited=len(sccm_site_objects) + 1,
+        returned=len(sccm_site_objects) + 1,
+        ts=t)))
+    t += random.uniform(0.2, 0.5)
+
     # %%7684 = Read Property, %%7682 = List Contents (msobjs.dll). The old values were
     # %%1537 (DELETE) and %%1541 (SYNCHRONIZE) — the wrong bitmask family entirely, the
     # same defect that kept the 4662-based generators silent while DCSync worked.
@@ -6724,6 +6822,22 @@ def _threat_sccm_container_recon(config, session_context):
         object_name=sysm_container_dn,
         access_mask=_SCCM_READ_PROPERTY,
         properties=read_props,
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.5)
+
+    # A real LDAP search (`adfind -b <container>`, `Get-ADObject -SearchBase`) both
+    # lists the container's children and reads the container's own attributes, so it
+    # produces a List Contents 4662 on the container as well as the Read Property one
+    # above. The published analytic only says "a user accessed the System Management
+    # container"; which of the two ACEs it keys on is not documented, so emit both
+    # rather than betting on Read Property alone.
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=_SCCM_CONTAINER_OBJECT_TYPE,
+        object_name=sysm_container_dn,
+        access_mask=_SCCM_LIST_CHILDREN,
+        properties=list_props,
         operation_type="Object Access",
         logon_id=logon_id, ts=t)))
     t += random.uniform(0.2, 0.5)
