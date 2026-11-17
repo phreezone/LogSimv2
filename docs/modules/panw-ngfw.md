@@ -292,9 +292,12 @@ one signature per fire at random):
 | `threat_legacy_service_exploit` | FTP (tcp/21) and TFTP (udp/69) exploits | 3 |
 | `threat_wd_mycloud_backdoor` | the one spyware signature (18011) | 1 |
 
-All six are **background-only on the analytic flag (`analytic: False`, no `xsiam_alert`)**: a query
-of the `alerts` dataset (alert_source `PAN_NGFW`, last 48 h) returned **0 rows**, so no native alert name
-is confirmed for any of them; they are still selectable by name through the dispatch. Ports for the
+Five of the six are **background-only on the analytic flag (`analytic: False`, no `xsiam_alert`)**: the first
+query of the `alerts` dataset (alert_source `PAN_NGFW`, last 48 h) returned **0 rows**, and later probes
+(2026-11-16, with `threat_id` sent as `Name(ID)`) confirmed a native alert only for the spyware event, so
+`threat_wd_mycloud_backdoor` is **alert-targeted** (`analytic: True`, `xsiam_alert` `Western Digital My Cloud
+Backdoor(18011)`, critical, raised ~6-7 min after the send). The five web families are still selectable by
+name through the dispatch. Ports for the
 non-HTTP apps are assumed standard (ftp 21, tftp 69); everything web rides 80/8080.
 
 <details><summary>All 196 added signatures</summary>

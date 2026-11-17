@@ -1316,7 +1316,7 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "threat_web_detect_only",  "weight": 3, "analytic": False, "xsiam_alert": None},
     {"event": "threat_web_sqli_overflow_dos", "weight": 1, "analytic": False, "xsiam_alert": None},
     {"event": "threat_legacy_service_exploit", "weight": 1, "analytic": False, "xsiam_alert": None},
-    {"event": "threat_wd_mycloud_backdoor", "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "threat_wd_mycloud_backdoor", "weight": 1, "analytic": True, "xsiam_alert": "Western Digital My Cloud Backdoor(18011)"},
     {"event": "threat_scanner_campaign", "weight": 1, "analytic": True, "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
     # Realistic network patterns whose dedicated analytic needs EAL-decoded fields the CEF
     # traffic log cannot carry — kept for hunts / correlation, NOT offered on demand.
