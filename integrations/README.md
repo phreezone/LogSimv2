@@ -43,7 +43,8 @@ External integrations should use `/api/v1/*` (the UI-shaped legacy `/api/*` rout
 | `POST /api/v1/modules/{name}/reset` | Reset one module's counters |
 | `POST /api/v1/modules/start_all` / `stop_all` / `reset_all` | Bulk start / stop / reset counters |
 | `GET  /api/v1/baduser/users` | Simulated identities grouped by department |
-| `POST /api/v1/baduser/start` | Start a targeted insider-threat run. Body: `{username, duration_minutes?, threat_level?, event_interval?, selected_modules?}` |
+| `GET  /api/v1/baduser/playbooks` | Use-case playbooks Bad User can run as an ordered story (see [docs/bad-user-playbooks.md](../docs/bad-user-playbooks.md)) |
+| `POST /api/v1/baduser/start` | Start a targeted insider-threat run. Body: `{username, duration_minutes?, threat_level?, event_interval?, selected_modules?, playbook?}` |
 | `POST /api/v1/baduser/stop` | Stop the active Bad User run (idempotent) |
 | `GET  /api/v1/baduser/status` | Bad User progress: `remaining_seconds`, `per_module` tallies |
 | `GET  /api/v1/threat_levels` | Valid threat-level names |
@@ -128,7 +129,7 @@ into https://editor.swagger.io).
 - **Modules** — `list_modules`, `start_module`, `stop_module`, `list_module_threats`,
   `fire_event`, `set_module_interval`, `set_module_threat_level`, `reset_module_metrics`,
   `reset_all_metrics`
-- **Bad User** — `list_users`, `start_bad_user`, `stop_bad_user`, `get_bad_user_status`
+- **Bad User** — `list_users`, `list_bad_user_playbooks`, `start_bad_user`, `stop_bad_user`, `get_bad_user_status`
 - **Status** — `list_threat_levels`, `get_status`, `get_health_alerts`
 
 `/api/v1/timeline` has no tool: its 60-bucket × per-module payload is chart data, too bulky to

@@ -123,6 +123,61 @@
       ]
     },
     {
+      "name": "Campaigns",
+      "item": [
+        {
+          "name": "State of the random identity-campaign runner (enabled, rate, last/next launch)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/campaigns/random",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "campaigns",
+                "random"
+              ]
+            },
+            "description": "State of the random identity-campaign runner (enabled, rate, last/next launch)"
+          }
+        },
+        {
+          "name": "Turn random identity campaigns on or off (~1 every 12 h, >= 2 h apart by default)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/campaigns/random",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "campaigns",
+                "random"
+              ]
+            },
+            "description": "Turn random identity campaigns on or off (~1 every 12 h, >= 2 h apart by default)",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "Modules",
       "item": [
         {
@@ -451,6 +506,24 @@
           }
         },
         {
+          "name": "List the use-case playbooks Bad User can run",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/baduser/playbooks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "baduser",
+                "playbooks"
+              ]
+            },
+            "description": "List the use-case playbooks Bad User can run"
+          }
+        },
+        {
           "name": "Start a targeted insider-threat run against one user",
           "request": {
             "method": "POST",
@@ -473,7 +546,7 @@
             "description": "Start a targeted insider-threat run against one user",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"username\": \"a.garcia\",\n  \"duration_minutes\": 15,\n  \"threat_level\": \"Extreme\"\n}",
+              "raw": "{\n  \"username\": \"a.garcia\",\n  \"duration_minutes\": 15,\n  \"threat_level\": \"Extreme\",\n  \"playbook\": \"insider_data_theft\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -516,6 +589,154 @@
               ]
             },
             "description": "Progress of the active Bad User run"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Attack",
+      "item": [
+        {
+          "name": "XDR orchestration preflight",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/attack/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "attack",
+                "health"
+              ]
+            },
+            "description": "XDR orchestration preflight"
+          }
+        },
+        {
+          "name": "List XDR attack stories",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/attack/stories",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "attack",
+                "stories"
+              ]
+            },
+            "description": "List XDR attack stories"
+          }
+        },
+        {
+          "name": "Start an XDR attack story run (async)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/attack/run",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "attack",
+                "run"
+              ]
+            },
+            "description": "Start an XDR attack story run (async)",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"story_id\": \"xdr_quick\",\n  \"dry_run\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Get an attack run's status, manifest and technique results",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/attack/runs/:run_id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "attack",
+                "runs",
+                ":run_id"
+              ],
+              "variable": [
+                {
+                  "key": "run_id",
+                  "value": "REPLACE_WITH_RUN_ID"
+                }
+              ]
+            },
+            "description": "Get an attack run's status, manifest and technique results"
+          }
+        },
+        {
+          "name": "Download the target-workstation Kickstarter script",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/attack/kickstarter",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "attack",
+                "kickstarter"
+              ]
+            },
+            "description": "Download the target-workstation Kickstarter script"
+          }
+        },
+        {
+          "name": "Kickstarter phone-home",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/attack/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "attack",
+                "register"
+              ]
+            },
+            "description": "Kickstarter phone-home",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           }
         }
       ]

@@ -584,6 +584,7 @@ _baduser_state = {
     "selected_modules": [],  # module names chosen by user (empty = all)
     "private_modules": [],   # per-run module copies (Windows) whose workers must be stopped
     "egress_ip": None,       # the target's one public egress, shown by every feed
+    "playbook": None,        # the running use-case playbook (steps, progress), or None
 }
 
 
@@ -735,8 +736,45 @@ def _baduser_matcher(username, profile, egress_ip):
     return is_target
 
 
+def _baduser_emit(module, config, context, threat_name, threat_level, is_target,
+                  metrics_key, stop_event):
+    """Run `module` once for the target and queue what is theirs.
+
+    threat_name set: fire that threat by name (the on-demand path fire_event uses);
+    otherwise one benign batch. Only records `is_target` accepts are queued. Counts them in
+    the run's metrics and returns (records_queued, fired). Raises on a module error: the
+    caller decides whether to retry."""
+    if threat_name:
+        result = module.generate_log(config=config, threat_level=threat_level,
+                                     benign_only=False, context=context,
+                                     scenario_event=threat_name)
+    else:
+        result = module.generate_log(config=config, threat_level="Benign Traffic Only",
+                                     benign_only=True, context=context)
+    if isinstance(result, tuple) and len(result) == 2:
+        log_content = result[0]
+    else:
+        log_content = result
+    logs = log_content if isinstance(log_content, list) else [log_content]
+    valid = [m for m in logs if m and is_target(m)]
+    # A campaign sends itself (Cribl + WEC) and returns nothing: count it as fired.
+    fired = bool(threat_name) and (bool(valid) or (
+        result is None and module.NAME == "Identity Threat Campaigns"))
+    if valid or fired:
+        with _baduser_lock:
+            m = _baduser_state["metrics"].get(metrics_key, {"logs": 0, "threats": 0})
+            m["logs"] += len(valid)
+            if fired:
+                m["threats"] += 1
+            _baduser_state["metrics"][metrics_key] = m
+    for msg in valid:
+        if not _enqueue_send((msg, module, config, threat_name), stop_event):
+            break
+    return len(valid), fired
+
+
 def _baduser_worker(module, config, context, stop_event, metrics_key,
-                    threat_level, event_interval_func, focus=None):
+                    threat_level, event_interval_func, focus=None, fire_threats=True):
     """Worker loop for a single module in bad-user mode.
 
     Every event must be something the target did from their own computer or account:
@@ -745,7 +783,9 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
       * threats: on Bad User's own clock (_baduser_threat_gap) one threat from the
         module's allow-list (modules/bad_user_policy.py -- outside-based threats such as
         scans, Tor/foreign sign-ins, sprays and other actors are excluded) is fired by
-        name, the same on-demand path fire_event uses;
+        name, the same on-demand path fire_event uses. With `fire_threats` False (a
+        playbook is running) the worker sends benign traffic only: the playbook runner
+        decides which threats fire and when;
       * `focus` = (username, profile, egress_ip) is set as this thread's focus user, so the
         identity pickers and source-address helpers name the target and their machine.
         Per-thread: the normal module worker running the same code is unaffected.
@@ -758,7 +798,7 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
         is_target = _baduser_matcher(*focus)
     else:
         is_target = lambda _rec: True
-    allowed = _policy.allowed_threats(module)
+    allowed = _policy.allowed_threats(module) if fire_threats else []
     benign = _policy.sends_benign(module)
     threat_due = (time.monotonic() + random.uniform(*_BADUSER_FIRST_THREAT_S)
                   if allowed and _baduser_threat_gap(threat_level) is not None else None)
@@ -776,37 +816,69 @@ def _baduser_worker(module, config, context, stop_event, metrics_key,
         if not threat_name and not benign:
             continue
         try:
-            if threat_name:
-                result = module.generate_log(config=config, threat_level=threat_level,
-                                             benign_only=False, context=context,
-                                             scenario_event=threat_name)
-            else:
-                result = module.generate_log(config=config, threat_level="Benign Traffic Only",
-                                             benign_only=True, context=context)
-            if isinstance(result, tuple) and len(result) == 2:
-                log_content = result[0]
-            else:
-                log_content = result
-            logs = log_content if isinstance(log_content, list) else [log_content]
-            valid = [m for m in logs if m and is_target(m)]
-            # A campaign sends itself (Cribl + WEC) and returns nothing: count it as fired.
-            fired = bool(threat_name) and (bool(valid) or (
-                result is None and module.NAME == "Identity Threat Campaigns"))
-            if valid or fired:
-                with _baduser_lock:
-                    m = _baduser_state["metrics"].get(metrics_key, {"logs": 0, "threats": 0})
-                    m["logs"] += len(valid)
-                    if fired:
-                        m["threats"] += 1
-                    _baduser_state["metrics"][metrics_key] = m
-            for msg in valid:
-                if not _enqueue_send((msg, module, config, threat_name), stop_event):
-                    break
-
+            _baduser_emit(module, config, context, threat_name, threat_level, is_target,
+                          metrics_key, stop_event)
         except Exception as exc:
             print(f"[bad-user][{module.NAME}] {threat_name or 'benign'} error: {exc}")
             stop_event.wait(timeout=5)
             continue
+
+
+def _baduser_playbook_update(index, **fields):
+    """Record progress on one step of the running playbook."""
+    with _baduser_lock:
+        pb = _baduser_state.get("playbook")
+        if not pb:
+            return
+        for step in pb["steps"]:
+            if step["index"] == index:
+                step.update(fields)
+                return
+
+
+def _baduser_playbook_runner(steps, registry, stop_event, threat_level, focus, t0):
+    """Fire a playbook's steps in order, each at its planned offset from `t0`.
+
+    One thread for the whole playbook, running as the target (`focus`) and sending through
+    the same path as the module workers (_baduser_emit): the same allow-list, record filter
+    and send queue. A step that errors or yields nothing is recorded and the story carries
+    on. `registry` maps module name -> (module, config, context)."""
+    _ensure_send_workers()
+    from modules import bad_user_playbooks as _playbooks
+    from modules import session_utils as _su
+    _su.set_focus_user(*focus)
+    is_target = _baduser_matcher(*focus)
+    for step in steps:
+        if step["state"] != "pending":
+            continue
+        if stop_event.wait(timeout=max(0.0, t0 + step["offset_s"] - time.monotonic())):
+            return
+        mod, cfg, ctx = registry[step["module"]]
+        _baduser_playbook_update(step["index"], state="running")
+        try:
+            # Some generators pick an outside operator a share of the time; the record
+            # filter drops those, so try again (each try re-rolls) before giving up.
+            n, fired = 0, False
+            for _attempt in range(_playbooks.RETRIES):
+                n, fired = _baduser_emit(mod, cfg, ctx, step["threat"], threat_level,
+                                         is_target, step["module"], stop_event)
+                if fired or stop_event.is_set():
+                    break
+            if fired:
+                _baduser_playbook_update(step["index"], state="fired", records=n,
+                                         fired_at=time.time(), note=None)
+            else:
+                _baduser_playbook_update(
+                    step["index"], state="no_output", records=0, fired_at=time.time(),
+                    note="ran, but none of its records carried the target's identity")
+        except Exception as exc:
+            print(f"[bad-user][playbook] {step['module']} {step['threat']} error: {exc}")
+            _baduser_playbook_update(step["index"], state="error", fired_at=time.time(),
+                                     note=str(exc)[:200])
+    with _baduser_lock:
+        pb = _baduser_state.get("playbook")
+        if pb:
+            pb["finished_at"] = time.time()
 
 
 def _baduser_watchdog(duration_seconds, stop_event):
@@ -821,11 +893,19 @@ def _baduser_watchdog(duration_seconds, stop_event):
 
 
 def _start_baduser(username, duration_minutes, threat_level, event_interval,
-                   selected_modules=None):
-    """Spin up bad-user worker threads for selected (or all) modules."""
+                   selected_modules=None, playbook=None):
+    """Spin up bad-user worker threads for selected (or all) modules.
+
+    `playbook` (a key of modules/bad_user_playbooks.PLAYBOOKS) tells one use case as an
+    ordered story instead of the random mix: the workers send benign traffic only and a
+    runner thread fires the playbook's steps in order, paced to fit the duration."""
     with _baduser_lock:
         if _baduser_state["active"]:
             return False, "Bad user mode is already active"
+    if playbook:
+        from modules import bad_user_playbooks as _playbooks
+        if _playbooks.get(playbook) is None:
+            return False, f"Unknown playbook '{playbook}'"
 
     context = _build_baduser_context(username)
     if context is None:
@@ -860,6 +940,7 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval,
         _baduser_state["selected_modules"] = selected_modules or []
         _baduser_state["private_modules"] = []
         _baduser_state["egress_ip"] = egress_ip
+        _baduser_state["playbook"] = None
 
     # Closure so workers always read current interval
     def _get_interval():
@@ -870,18 +951,23 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval,
 
     _sel = set(selected_modules) if selected_modules else None
     from modules import bad_user_policy as _policy
+    registry = {}        # module name -> (module, config, context), for the playbook runner
+    skipped = {}         # module name -> why it is not running for this target
     for name, mod in MODULES.items():
         if _sel and name not in _sel:
+            skipped[name] = "module not selected"
             continue
         if not _policy.sends_benign(mod) and not _policy.allowed_threats(mod):
             print(f"[bad-user] Skipping {name} -- nothing in it is the target's own doing "
                   f"({_policy.NO_BENIGN.get(name, 'no allowed threats')})")
+            skipped[name] = "nothing in this module is the target's own doing"
             continue
         # AWS special handling — skip if no IAM mapping
         if name == "aws":
             aws_cfg = _build_baduser_aws_config(username, base_config)
             if aws_cfg is None:
                 print(f"[bad-user] Skipping {name} — no aws_iam_user mapping for {username}")
+                skipped[name] = "this user has no AWS IAM user"
                 continue
             worker_config = aws_cfg
             worker_context = context  # AWS ignores session_context but we pass it anyway
@@ -898,23 +984,64 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval,
                 mod = _private_module_copy(mod)
             except Exception as exc:
                 print(f"[bad-user] Skipping {name} -- private copy failed: {exc}")
+                skipped[name] = "module could not start"
                 continue
             with _baduser_lock:
                 _baduser_state["private_modules"].append(mod)
 
         with _baduser_lock:
             _baduser_state["metrics"][name] = {"logs": 0, "threats": 0}
+        registry[name] = (mod, worker_config, worker_context)
 
+        if playbook and not _policy.sends_benign(mod):
+            continue        # nothing to send between playbook steps: the runner fires it
         t = threading.Thread(
             target=_baduser_worker,
             args=(mod, worker_config, worker_context, stop_event, name,
                   threat_level, _get_interval, focus),
+            kwargs={"fire_threats": not playbook},
             daemon=True,
             name=f"baduser-{name}",
         )
         with _baduser_lock:
             _baduser_state["threads"].append(t)
         t.start()
+
+    if playbook:
+        def _availability(module_name, threat):
+            entry = registry.get(module_name)
+            if entry is None:
+                return skipped.get(module_name, "module not loaded")
+            if threat not in _policy.allowed_threats(entry[0]):
+                return "threat not available for this module"
+            if module_name == "Windows Event Log" and \
+                    (profile.get("primary_os_type") or "").lower() != "windows":
+                # The module has no Windows computer to attribute events to for this user.
+                return f"this user's computer runs {profile.get('primary_os_type') or 'a non-Windows OS'}"
+            return None
+        pb_plan = _playbooks.plan(playbook, duration_seconds, _availability)
+        if not any(s["state"] == "pending" for s in pb_plan["steps"]):
+            _stop_baduser()
+            return False, ("None of this playbook's steps can run for this user with the "
+                           "selected modules")
+        pb = _playbooks.get(playbook)
+        with _baduser_lock:
+            _baduser_state["playbook"] = {
+                "key": playbook, "name": pb["name"], "summary": pb["summary"],
+                "scale": pb_plan["scale"], "span_seconds": pb_plan["span_seconds"],
+                "steps": pb_plan["steps"], "finished_at": None,
+                "skipped": sum(1 for s in pb_plan["steps"] if s["state"] == "skipped"),
+            }
+        runner = threading.Thread(
+            target=_baduser_playbook_runner,
+            args=(pb_plan["steps"], registry, stop_event, threat_level, focus,
+                  time.monotonic()),
+            daemon=True,
+            name="baduser-playbook",
+        )
+        with _baduser_lock:
+            _baduser_state["threads"].append(runner)
+        runner.start()
 
     # Watchdog thread for auto-stop
     wd = threading.Thread(
@@ -929,8 +1056,8 @@ def _start_baduser(username, duration_minutes, threat_level, event_interval,
 
     n_threads = len(_baduser_state["threads"]) - 1  # exclude watchdog
     print(f"[bad-user] Started — {username} ({profile.get('display_name')}) | "
-          f"{n_threads} modules | {duration_minutes}min | {threat_level} | "
-          f"{1/event_interval:.1f}/sec")
+          f"{n_threads} threads | {duration_minutes}min | {threat_level} | "
+          f"{1/event_interval:.1f}/sec" + (f" | playbook {playbook}" if playbook else ""))
     return True, None
 
 
@@ -3034,6 +3161,13 @@ def api_baduser_users():
     return jsonify(groups)
 
 
+@app.get("/api/baduser/playbooks")
+def api_baduser_playbooks():
+    """Use-case playbooks Bad User can run: key, name, summary, ordered steps."""
+    from modules import bad_user_playbooks as _playbooks
+    return jsonify(_playbooks.list_playbooks())
+
+
 @app.post("/api/baduser/start")
 def api_baduser_start():
     body = request.get_json(silent=True) or {}
@@ -3052,12 +3186,30 @@ def api_baduser_start():
     selected_modules = body.get("selected_modules")  # list of module names or None
     if selected_modules is not None and not isinstance(selected_modules, list):
         return jsonify({"error": "selected_modules must be a list"}), 400
+    playbook = body.get("playbook") or None          # a key from GET /baduser/playbooks
+    if playbook is not None:
+        from modules import bad_user_playbooks as _playbooks
+        if not isinstance(playbook, str) or _playbooks.get(playbook) is None:
+            return jsonify({"error": f"Unknown playbook '{playbook}'",
+                            "playbooks": list(_playbooks.PLAYBOOKS)}), 400
 
     ok, err = _start_baduser(username, duration, threat_level, event_interval,
-                             selected_modules=selected_modules)
+                             selected_modules=selected_modules, playbook=playbook)
     if not ok:
         return jsonify({"error": err}), 409
-    return jsonify({"started": True, "username": username})
+    out = {"started": True, "username": username}
+    with _baduser_lock:
+        pb = _baduser_state.get("playbook")
+        if pb:
+            out["playbook"] = {
+                "key": pb["key"], "name": pb["name"],
+                "steps": len(pb["steps"]), "skipped": pb["skipped"],
+                "skipped_steps": [{"index": s["index"], "module": s["module"],
+                                   "threat": s["threat"], "reason": s["note"]}
+                                  for s in pb["steps"] if s["state"] == "skipped"],
+                "planned_minutes": round(pb["span_seconds"] / 60.0, 1),
+            }
+    return jsonify(out)
 
 
 @app.post("/api/baduser/stop")
@@ -3095,6 +3247,7 @@ def api_baduser_status():
             "per_module": metrics,
             "selected_modules": list(_baduser_state["selected_modules"]),
             "egress_ip": _baduser_state.get("egress_ip"),
+            "playbook": copy.deepcopy(_baduser_state.get("playbook")),
         })
 
 
@@ -3135,6 +3288,7 @@ def _register_v1_aliases():
         ("/api/v1/modules/reset_all",         "api_reset_all",       ["POST"]),
         # Targeted insider-threat simulation against one named user.
         ("/api/v1/baduser/users",             "api_baduser_users",   ["GET"]),
+        ("/api/v1/baduser/playbooks",         "api_baduser_playbooks", ["GET"]),
         ("/api/v1/baduser/start",             "api_baduser_start",   ["POST"]),
         ("/api/v1/baduser/stop",              "api_baduser_stop",    ["POST"]),
         ("/api/v1/baduser/status",            "api_baduser_status",  ["GET"]),

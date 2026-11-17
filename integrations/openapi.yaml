@@ -84,11 +84,39 @@ components:
         total_logs:        { type: integer }
         total_threats:     { type: integer }
         selected_modules:  { type: array, items: { type: string } }
+        egress_ip:         { type: string, nullable: true }
         per_module:
           type: object
           additionalProperties:
             type: object
             properties: { logs: { type: integer }, threats: { type: integer } }
+        playbook:
+          type: object
+          nullable: true
+          description: Present when the run was started with a playbook; null otherwise.
+          properties:
+            key:          { type: string }
+            name:         { type: string }
+            summary:      { type: string }
+            scale:        { type: number, description: "Pace factor fitted to the run's duration." }
+            span_seconds: { type: number, description: "Seconds into the run when the last step is planned." }
+            finished_at:  { type: number, nullable: true }
+            skipped:      { type: integer }
+            steps:
+              type: array
+              items:
+                type: object
+                properties:
+                  index:    { type: integer }
+                  module:   { type: string }
+                  threat:   { type: string }
+                  tactic:   { type: string }
+                  label:    { type: string }
+                  state:    { type: string, enum: [pending, running, fired, no_output, error, skipped] }
+                  offset_s: { type: number, nullable: true, description: "Planned seconds after the run starts." }
+                  fired_at: { type: number, nullable: true }
+                  records:  { type: integer }
+                  note:     { type: string, nullable: true }
     PreflightReport:
       type: object
       description: >
@@ -308,12 +336,47 @@ paths:
                 additionalProperties:
                   type: array
                   items: { $ref: "#/components/schemas/User" }
+  /baduser/playbooks:
+    get:
+      summary: List the use-case playbooks Bad User can run
+      description: >
+        Each playbook tells one use case as an ordered story (phishing click to data theft,
+        insider data theft, cloud privilege escalation, ...). Source of valid `playbook`
+        values for POST /baduser/start.
+      responses:
+        "200":
+          description: Playbooks in definition order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    key:             { type: string, example: "insider_data_theft" }
+                    name:            { type: string }
+                    summary:         { type: string }
+                    nominal_minutes: { type: number }
+                    modules:         { type: array, items: { type: string } }
+                    steps:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          index:  { type: integer }
+                          module: { type: string }
+                          threat: { type: string }
+                          tactic: { type: string }
+                          label:  { type: string }
   /baduser/start:
     post:
       summary: Start a targeted insider-threat run against one user
       description: >
         Drives every selected module as a single named identity for a fixed duration.
-        Only one Bad User run at a time — a second start returns 409.
+        Only one Bad User run at a time — a second start returns 409. With `playbook`
+        the module workers send benign traffic only and the playbook's steps fire in
+        order, paced to fit the duration; a step whose module is not running for this
+        user (not selected, or AWS without an IAM user) is skipped and reported.
       requestBody:
         required: true
         content:
@@ -331,7 +394,11 @@ paths:
                   nullable: true
                   description: Module names to drive; omit or null for all modules.
                   items: { type: string }
-            example: { username: "a.garcia", duration_minutes: 15, threat_level: "Extreme" }
+                playbook:
+                  type: string
+                  nullable: true
+                  description: A key from GET /baduser/playbooks; omit or null for the random mix.
+            example: { username: "a.garcia", duration_minutes: 15, threat_level: "Extreme", playbook: "insider_data_theft" }
       responses:
         "200":
           description: Started
@@ -339,9 +406,29 @@ paths:
             application/json:
               schema:
                 type: object
-                properties: { started: { type: boolean }, username: { type: string } }
+                properties:
+                  started:  { type: boolean }
+                  username: { type: string }
+                  playbook:
+                    type: object
+                    description: Present when a playbook was started.
+                    properties:
+                      key:             { type: string }
+                      name:            { type: string }
+                      steps:           { type: integer }
+                      skipped:         { type: integer }
+                      planned_minutes: { type: number }
+                      skipped_steps:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            index:  { type: integer }
+                            module: { type: string }
+                            threat: { type: string }
+                            reason: { type: string }
         "400":
-          description: Missing username, or duration/threat_level/event_interval out of range
+          description: Missing username, unknown playbook, or duration/threat_level/event_interval out of range
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "409":
           description: A Bad User run is already active
