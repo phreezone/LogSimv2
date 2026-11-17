@@ -277,6 +277,46 @@ or Cribl paths changes that — the same wall documented for `kerberos_relay`. T
 is consistent with the published Required Data listing the agent path separately.
 The generator keeps the `1644` leg because it is the correct real-world shape.
 
+### AD CS template detectors: one is a data-source wall, one is unverifiable (2026-11-17)
+
+The AD CS module itself is live: alert 799505 carries
+`DT:Active Directory Certificate Services Analytics`, so these analytics are
+evaluating events in this tenant. Two of them are nonetheless out of reach, for
+different reasons.
+
+**"Vulnerable certificate template loaded" — WIP on an unverifiable field.**
+Seven `4898` deliveries since 2026-10-29 (six of them on 2026-11-16/17) carried
+an ESC1-shaped `TemplateContent` (`msPKI-Certificate-Name-Flag: 0x1`, Client Auth
+EKU, `Authenticated Users` enroll in the SDDL) under five different template
+names, including one literally named `ESC1-Vulnerable`. Zero alerts, and one of
+those batches *did* fire a sibling AD CS analytic. The `TemplateContent` format
+is hand-rolled and there is no way to check it against ground truth:
+
+- the tenant holds only 7 `4898` events and all 7 are this generator's own
+  output, so there is no captured real event to copy;
+- Microsoft does not publish a per-event page for `4898`;
+- the Cortex page explicitly declines to say which event ID or which fields the
+  detector reads ("The detector page does not specify Windows event IDs or
+  certificate-template parsing rules").
+
+The `_build_4898` docstring already warned about this. Until a real `4898`
+becomes available, further deliveries would be guessing at the same unknown, so
+the detector is parked as WIP rather than probed again.
+
+**"Discovery of misconfigured certificate templates using LDAP" — blocked by data
+source, not shape.** Published Required Data is *XDR Agent with eXtended Threat
+Hunting (XTH)* only, with Detector Tags `LDAP Analytics (Client)` and
+`LDAP Analytics (Server)`. That is the agent's own LDAP parser, not a Windows
+event, so WEC cannot feed it at all — the same agent-class wall as
+`kerberos_relay` and the `1644` leg of SCCM recon. No generator is added for it.
+
+**"A user certificate was issued with a mismatch" — probed separately.** It has
+WEC-or-agent data and keys on `4887` `Requester` vs `Subject`, both of which the
+existing CA builders already emit. Every earlier `4887` came from
+`priv_cert_request`, where the requester was the sensitive `Administrator`; the
+probe therefore used an ordinary user requesting on behalf of a *different*
+ordinary user.
+
 ### Sensitive-account classification is inventory-driven (2026-11-16)
 
 `PASSWORD_NEVER_EXPIRES` was WIP because the generator picked its target with

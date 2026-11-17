@@ -3736,19 +3736,23 @@ def _build_4898(user_info, config, *, template_name, enrollee_supplies_subject=T
                 schema_version="2", template_version="100.2", ts=None) -> dict:
     """4898 - Certificate Services loaded a template (CA event).
 
-    Why this exists: 4898 is the only event that tells XSIAM a certificate template is
-    *abusable*. It is in XSIAM's published Object Access intake list and feeds
-    "Vulnerable certificate template loaded" and "Suspicious certificate template
-    modification" (ESC4). `msPKI-Certificate-Name-Flag = 0x1`
-    (CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT) inside Template Content is the literal ESC1
-    condition — a requester may name any subject, including a privileged one.
+    Why this exists: 4898 is the CA's "template loaded" record, and the only event
+    that hands a detector the template's *contents* rather than its DN.
+    `msPKI-Certificate-Name-Flag = 0x1` (CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT) inside
+    Template Content is the literal ESC1 condition: a requester may name any
+    subject, including a privileged one. It targets "Vulnerable certificate
+    template loaded" only; "Suspicious certificate template modification" (ESC4) is
+    a directory-service change to the template object, not a load.
 
-    CAVEAT: the exact EventData parameter names below could not be confirmed against a
-    captured 4898 from this environment; they follow the published field list
-    (TemplateInternalName / TemplateVersion / TemplateSchemaVersion / TemplateOID /
-    TemplateDSObjectFQDN / TemplateContent / SecurityDescriptor). If the detector stays
-    silent with a correct-looking event, verify these names against a real 4898 before
-    changing anything else — a wrong EventData key is invisible in the rendered XML.
+    CAVEAT - measured, not theoretical. Seven deliveries since 2026-10-29 (six of
+    them on 2026-11-16/17) under five template names, including one literally
+    called `ESC1-Vulnerable`, produced zero alerts - one of them in a batch that
+    did fire a sibling AD CS analytic. The EventData names and the TemplateContent
+    layout below cannot be checked against anything: the tenant's only 4898 events
+    are this generator's own output, Microsoft publishes no page for 4898, and the
+    Cortex detector page explicitly does not say which event or fields it reads.
+    Treat this builder as unverified; do not tune it further without a captured
+    real 4898 to compare against.
     """
     ca_host = _get_ca_hostname(config)
     dns_domain = _get_dns_domain(config)
