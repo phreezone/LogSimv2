@@ -59,12 +59,13 @@ Named threat generators (via `scenario_event` = the key below, or fired individu
 | `DMSA_PRIVESC` | Possible Privilege Escalation using Delegated MSA account attempt | XDR Analytics |
 | `SENSITIVE_PASSWORD_RESET` | Sensitive account password reset attempt for the first time | Analytics BIOC |
 | `PASSWORD_NEVER_EXPIRES` | A sensitive account was modified to password never expires (base variation: A user account was modified to password never expires, Informational) | Analytics BIOC |
+| `PRIV_CERT_REQUEST` | Suspicious privileged certificate request via certificate template | Analytics BIOC |
 
-`AS_REP_ROASTING`, `DMSA_PRIVESC`, `SENSITIVE_PASSWORD_RESET` and
-`PASSWORD_NEVER_EXPIRES` dropped their `WIP_` prefix; the old `WIP_` names still
-dispatch.
+`AS_REP_ROASTING`, `DMSA_PRIVESC`, `SENSITIVE_PASSWORD_RESET`,
+`PASSWORD_NEVER_EXPIRES` and `PRIV_CERT_REQUEST` dropped their `WIP_` prefix; the
+old `WIP_` names still dispatch.
 
-**WIP** (events are correctly shaped; the detection depends on an identity-graph baseline or is still under investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_PRIV_CERT_REQUEST`, `WIP_SCCM_CONTAINER_RECON`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
+**WIP** (events are correctly shaped; the detection depends on an identity-graph baseline or is still under investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_SCCM_CONTAINER_RECON`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
 
 `WIP_ADMINSDHOLDER_ACL_MODIFICATION` is **not** blocked on object resolution. A
 differential probe fired "Possible shadow credentials addition" on the
@@ -76,7 +77,7 @@ evaluated" below. `WIP_SCCM_CONTAINER_RECON` is therefore **not** presumed
 blocked by object type either.
 
 **On-demand firing** offers the threats in the module's `ANALYTIC_ALERTS` table: everything
-above plus the four remaining `WIP_` detections, which target published analytics. Not
+above plus the three remaining `WIP_` detections, which target published analytics. Not
 offered, background-only: `WIP_IRREGULAR_SERVICE_TGS`, `LSASS_HANDLE_ACCESS` (an XDR-agent
 detection, not a Windows Event Collector analytic) and `ACCOUNT_ACCESS_REMOVAL` (no
 matching published analytic).
@@ -137,6 +138,7 @@ after three or more isolated probe batches each, so they are **WIP**.
 |---|---|---|
 | `shadow_credentials` | **Confirmed** | Medium "Possible shadow credentials addition" fired 2026-11-08 and again 2026-11-10 04:46Z on `WEB43$`/`BACKUP31$` (actors `j.fedorov2`, `o.curtis`). A length sweep proved the Medium variation is selected by the 5136 `AttributeValue` DN-Binary length: only `B:828:` fires Medium; every other length fires the Low "Key credential attribute addition" variation. The generator therefore emits an 828-hex-character KEY_CREDENTIAL blob. |
 | `suspicious_sam_change` | **Confirmed** | Low "Suspicious sAMAccountName change" fired 2026-11-08 18:59Z. The state-carrying **4781** rename record is what the analytic keys on, not the 4742 alone. The Medium "to DC hostname" variation is not selected by `NewTargetUserName=DC01` alone; its discriminator remains unknown. |
+| `priv_cert_request` | **Confirmed** | Low "Suspicious privileged certificate request via certificate template" fired 2026-11-16 17:22Z (alert 799505) on a request submitted **by** `Administrator` for an ordinary user. The reverse shape (ordinary requester, privileged requested subject/SAN) is silent, as is the same requester again within the 1-day dedup window. See "Privileged certificate request: the *requester* is the privileged identity" below. |
 | `pkinit_auth` | **WIP** | 4 batches, 0 alerts. Tried the Microsoft-documented smart-card shape (4768 `PreAuthType=15`, `PreAuthEncryptionType=0x12`, cert issuer/serial/thumbprint), `PreAuthType` 14/16/17, rogue and enterprise issuers, short/full issuer DN, machine and user targets, missing cert, `4771` failure, `TicketOptions=0x60810010`, loopback `::1`, realm-qualified `ServiceName`, and a 4768 correlated with a preceding `msDS-KeyCredentialLink` write. All shapes ingested with the fields intact in both `microsoft_windows_raw` and `xdr_data`. |
 | `spn_cleared` | **WIP** | 5 batches, 0 alerts. Tried 4742 `ServicePrincipalNames` empty / `-` / absent, 5136 `%%14675` delete pairs, 5136 `%%14674` add-with-empty-value, 4662 write-property, and a same-account state transition (4742 with real SPNs, then 4742 with `-`). Batches 4–5 added the missing realism: `UserAccountControl` `%%2080` / `0x1000` (instead of `-`), the "only SPN changed" 4742 shape (`SamAccountName`/`DnsHostName` left as `-`), a real tenant asset (`FS01$`) as well as a new machine, and deleted-value renderings `-` / empty / absent. All shapes ingested; none alerted. Batch 6 re-ran the module's full sequence after the CRLF fix (9 events, real CRLF) — still 0 alerts. |
 | `kerberos_relay` | **WIP** | 7 batches, 0 alerts. Tried the published KrbRelayUp endpoint signature alone (4624 type 3, Kerberos, local Administrator RID 500, loopback) with `127.0.0.1` / `::1` / `::ffff:127.0.0.1` and `WorkstationName` `FS01` / `-`, then the full sequence 4768 → DC 4624 → 4769 → endpoint 4624 → 4672 → 4688 → 4689 against the real `FS01` asset. Batch 4 varied the target SID (machine-local vs synthetic-domain vs the tenant's real domain `S-1-5-21-2795392456-4107320412-3908095700` Administrator), the subject (machine account + `0x3e7` + `lsass.exe` vs anonymous `S-1-0-0`), and the target host (`FS01` vs `DC01`); all six events ingested with the fields intact and produced no alert. **Batches 5–7 ran after the CRLF fix below.** The stored `action_evtlog_message` now carries real CRLF (58–59 per 4624, 0 bare LF) and the published XQL hunt for this analytic returns the synthetic rows verbatim (`auth_package=Kerberos`, `logon_type=3`, `network=127.0.0.1`, `sid` ending `-500`). Batch 6 covered machine-local and real-domain Administrator SIDs; batch 7 fired the module's own full 7-event sequence against `SQL01`. Neither the Cribl receiver path nor attributing the WEC event to a real agent hostname (`Windows10-Workstation1`) changed anything — both still land as `EVENT_LOG_DOMAIN_CONTROLLER` with null `agent_ip_addresses`/`identity_enrichment`. That collector class is now the standing blocker: real agent 4624s are stamped `EVENT_LOG_AGENT_EVENT_LOG`, and no WEC/Cribl record can be. See "event_sub_type: WEC vs agent" below. |
@@ -255,6 +257,90 @@ observable outcome and is what the generator is measured against.
 
 `PASSWORD_NEVER_EXPIRES` therefore dropped its `WIP_` prefix; `WIP_PASSWORD_NEVER_EXPIRES`
 still dispatches through `_RENAMED_THREATS`.
+
+### Privileged certificate request: the *requester* is the privileged identity (2026-11-16)
+
+`PRIV_CERT_REQUEST` was WIP because the generator put the privileged account in
+the **requested subject** and left the requester an ordinary user. That shape is
+silent. The analytic fires on the opposite arrangement.
+
+Attempt 1 (17:04Z) — normal user `a.petit` requests a cert with
+`san:upn=Administrator@examplecorp.local`, `Subject=CN=Administrator,CN=Users,...`,
+template `ESC1-Vulnerable`, 4886 + 4887 + PKINIT: **0 alerts**.
+
+Attempt 2 (17:22Z) — two enrollments 120 s apart, distinct templates:
+
+| Leg | Requester | Issued to | Template | Alert |
+|---|---|---|---|---|
+| A | `Administrator` | `j.james` (ordinary) | `UserAuth-Legacy` | **"Suspicious privileged certificate request via certificate template" Low (799505)** |
+| B | `j.james` (ordinary) | `Administrator` | `VPN-Certificate` | none |
+
+Alert 799505, verbatim: "A privileged certificate was requested by
+EXAMPLECORP\Administrator via certificate template. This certificate was
+requested via the template UserAuth. This certificate was issued for
+CN=j.james,CN=Users,DC=examplecorp,DC=local. Certificate requests from this
+account for this subject were never seen in the last 30 days. **This requester is
+a sensitive user.** This may indicate abuse of the ESC8 ADCS attack". Its tags
+include `R:Certificate Authority (CA) Servers` and `R:Privileged Accounts`, and
+`user_name` is `EXAMPLECORP\Administrator` — the requester, not the subject.
+
+So the analytic answers "did a sensitive account request a certificate", not "was
+a certificate issued to a sensitive account". The generator now submits as
+`Administrator` (`_PRIV_CERT_REQUESTER`) and requests the certificate for an
+ordinary user drawn fresh each run, because the Low variation also requires the
+`(requester, subject)` pair to be novel over 30 days.
+
+Two secondary observations from the same batch:
+
+- The Medium **denied** variation (4886 + 4888) was never probed. The generator
+  no longer emits it, so `PRIV_CERT_REQUEST` always produces the verified issued
+  path rather than gambling on an unverified variant.
+- The `4768` PKINIT leg now carries `preauth_type=15` (PA-PK-AS-REP_OLD) and
+  `preauth_encryption=0x12`. It previously used the default `2`
+  (PA-ENC-TIMESTAMP), which renders a password pre-authentication record that
+  also carries certificate fields.
+
+**This analytic deduplicates for 1 Day** (published Deduplication Period), and the
+key is the **requester**, not the subject — inferred from two post-fire batches
+that used subjects never seen before and still stayed silent:
+
+| Batch | Requester | Subject | Template | Alert |
+|---|---|---|---|---|
+| 17:36Z (shipped generator) | `Administrator` | `n.okafor` | `WebServerV2` | none |
+| 17:47Z (shipped generator, template pinned) | `Administrator` | `e.wu` | `UserAuth-Legacy` | none |
+
+Both ingested correctly (`4886` + `4887`, requester `EXAMPLECORP\Administrator`)
+and stayed silent 14 and 25 minutes after 799505. Repeating the exact template
+that fired changed nothing, so the template is not the discriminator and the
+generator can keep drawing from `_CERT_TEMPLATES_VULNERABLE`. To re-verify this
+detector, wait a full day after its last alert rather than sending a second batch.
+
+### CRLF reaches `action_evtlog_message`, not the EventData JSON (2026-11-16)
+
+The 17:04Z CA batch was the first 4886/4887/4898 data with the renderer fix
+applied. Measured on the stored rows:
+
+| Field | CR | LF |
+|---|---|---|
+| `action_evtlog_message` | **yes** | yes |
+| `action_evtlog_data_fields` → `Attributes` / `TemplateContent` | no | yes |
+
+The rendered message carries real `\r\n` (`Requester:\tEXAMPLECORP\a.petit\r\n
+Attributes:\tCertificateTemplate:...\r\nsan:upn=...`), while the EventData JSON is
+stored LF-only. Analytics that parse the message see correct line endings; ones
+that parse the JSON do not. The 2026-10-29 CA batch predates the fix and is
+LF-only in both places, so it is not evidence about message parsing either way.
+
+Also worth knowing when probing ADCS: `agent_hostname=CA01.examplecorp.local`
+appears in exactly **nine** events in 90 days, all of them 4886/4887/4898. The
+CA host has no other telemetry (no 4624, no 4688, no service events), unlike
+DC01 and the user accounts the working identity analytics key on.
+
+One unverified rendering detail, unchanged by this pass: `_msg_4898` renders the
+template name inside the `Version:` line (`Version:\t<name> v100.2 (Schema V2)`)
+and emits no `Template Internal Name:` line. No captured real 4898 exists here to
+confirm whether that trailing line is part of the Windows message, so it was left
+as is. The analytic that fired does not depend on the 4898 message.
 
 Also fixed in this pass: `_build_4768` / `_build_4769` / `_build_4771` used to
 prepend `::ffff:` unconditionally, double-prefixing an already-mapped override to

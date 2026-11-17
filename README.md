@@ -120,9 +120,11 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `dmsa_privesc` | Possible Privilege Escalation using Delegated MSA account attempt | High | T1098 |
 | `sensitive_password_reset` | Sensitive account password reset attempt for the first time | Medium | T1098 |
 | `password_never_expires` | Sensitive account modified to password never expires | Low | T1098 |
+| `priv_cert_request` | Suspicious privileged certificate request via certificate template | Low | T1078.002 |
 
-`as_rep_roasting`, `dmsa_privesc`, `sensitive_password_reset` and
-`password_never_expires` were previously `wip_`-prefixed. The old names still work.
+`as_rep_roasting`, `dmsa_privesc`, `sensitive_password_reset`,
+`password_never_expires` and `priv_cert_request` were previously `wip_`-prefixed.
+The old names still work.
 
 **WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 
@@ -130,7 +132,6 @@ The Windows Events module generates native Windows Security Event XML targeting 
 |---|---|
 | `wip_adminsdholder_acl_modification` | ACL analytic does not fire on the canonical 5136/4662 shape; container targets *are* evaluated (see `docs/modules/windows.md`) |
 | `wip_irregular_service_tgs` | Only ever raises the weak-encryption ticket alert that `multiple_service_tickets` owns; `irregular_tgt_burst` covers its intended detection. Background only — not offered on demand |
-| `wip_priv_cert_request` | Not yet investigated |
 | `wip_sccm_container_recon` | Environment dependent — requires SCCM/ConfigMgr deployment |
 | `wip_shadow_credentials` | Added 2026-10-21 — *Key credential attribute modification* (5136 `msDS-KeyCredentialLink` + PKINIT 4768) |
 | `wip_default_account_masquerade` | Added 2026-10-21 — *Masquerading as a default local account* (local 4720 `DefaultAccount` / `Guest` on a member server) |

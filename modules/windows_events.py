@@ -7718,34 +7718,38 @@ def _threat_priv_group_add_remove(config, session_context):
     return events
 
 
-# Privileged accounts and templates used for ADCS attack simulation
-# krbtgt is disabled and never enrolls, so a krbtgt certificate subject will never
-# resolve against an identity XSIAM has ever seen authenticate.
-_PRIV_CERT_TARGETS = ["Administrator", "DC01$", "svc_sql_prod"]
+# The account that must *submit* the request. Verified 2026-11-16: the tenant's
+# analytic fires on a sensitive Requester regardless of the requested subject, and
+# only the built-in Administrator is *known* to be classified as sensitive here
+# (the same inventory rule that made password_never_expires target Administrator).
+# The requested subject is deliberately an ordinary user, chosen fresh each run,
+# because the Low variation also requires the (requester, subject) pair to be
+# novel over 30 days.
+_PRIV_CERT_REQUESTER = "Administrator"
+
 
 def _threat_priv_cert_request(config, session_context):
-    """Privileged certificate request via certificate template (ADCS ESC attacks).
+    r"""Privileged certificate request via certificate template (ADCS ESC attacks).
 
-    Three XSIAM detection variants:
-      - "Privileged certificate request via certificate template" (Low) —
-        4886 + 4887 with a vulnerable template and SAN for a privileged account
-      - "Suspicious privileged certificate request via certificate template" (Low) —
-        same pattern but using a template that is more obviously suspicious
-      - "Suspicious privileged certificate request denied via certificate template" (Medium) —
-        4886 + 4888 where the CA denied the request
+    Verified live 2026-11-16 (alert 799505, Low). The tenant's analytic fires when
+    the *Requester* is a sensitive account, whatever the certificate is issued to:
+    "A privileged certificate was requested by EXAMPLECORP\Administrator via
+    certificate template. ... This certificate was issued for CN=<ordinary user>.
+    ... This requester is a sensitive user."
+
+    The same shape with a normal requester and a privileged subject (attempt 1)
+    and the requester/subject permutations (attempt 2, burst B) raised nothing.
 
     Sequence:
-      1. Attacker authenticates → DC-side 4624 + endpoint 4624 + 4672
+      1. Administrator authenticates → DC-side 4624 + endpoint 4624 + 4672
       2. 4688 Certify.exe / certreq.exe / PowerShell process creation
-      3. 4886 certificate request received on CA (KEY TRIGGER)
-      4. 4887 certificate issued (success variants) OR 4888 request denied
-      5. Optional: 4768 PKINIT TGT request using the issued certificate
+      3. 4898 the CA loads an ESC1 template (enrollee supplies subject)
+      4. 4886 request received, 4887 issued to an ordinary user
+      5. 4768 PKINIT TGT request as the certificate subject
       6. 4689 process exit
 
-    Detection keys:
-      - 4886/4887/4888 with CertificateTemplate pointing to a vulnerable template
-      - SAN (san:upn=) in Attributes specifying a different identity than the Requester
-      - Certificate used for PKINIT auth shortly after issuance
+    Not emitted: the Medium "denied" variation (4886 + 4888). It was never probed,
+    and the issued path is the one verified to fire.
     """
     u = _pick_windows_user(session_context)
     if not u:
@@ -7753,29 +7757,13 @@ def _threat_priv_cert_request(config, session_context):
 
     dns_domain = _get_dns_domain(config)
 
-    # The issued path carries the detection: 4887 is the only event in the family that
-    # states both Requester and the issued certificate's Subject, and every AD CS analytic
-    # (privileged request / user-cert mismatch / machine-cert mismatch) compares those two.
-    # A denial gives XSIAM a requester and nothing to compare it against, so keep it a
-    # minority.
-    variant = random.choices(
-        ["suspicious_issued", "denied"],
-        weights=[80, 20], k=1)[0]
-
-    priv_target = random.choice(_PRIV_CERT_TARGETS)
-    is_machine_target = priv_target.endswith("$")
-    san_kind = "dns" if is_machine_target else "upn"
-    san_value = (f"{priv_target.rstrip('$').lower()}.{dns_domain}"
-                 if is_machine_target else f"{priv_target}@{dns_domain}")
-
-    # The certificate is issued to the *privileged target*, not to the attacker who
-    # submitted the request — that Requester/Subject divergence is the ESC1 signal.
-    # Without it Requester == Subject and nothing fires.
+    # Requester = the sensitive account; subject = an ordinary user. Reversing these
+    # (privileged subject, normal requester) is silent in this tenant.
+    requester = {**u, "username": _PRIV_CERT_REQUESTER}
+    subject = u["username"]
+    san_value = f"{subject}@{dns_domain}"
     cert_base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
-    priv_subject_dn = (
-        f"CN={priv_target.rstrip('$')}, CN=Computers, {cert_base_dn}"
-        if is_machine_target else
-        f"CN={priv_target}, CN=Users, {cert_base_dn}")
+    subject_dn = f"CN={subject}, CN=Users, {cert_base_dn}"
 
     template = random.choice(_CERT_TEMPLATES_VULNERABLE)
 
@@ -7784,31 +7772,32 @@ def _threat_priv_cert_request(config, session_context):
 
     logon_id = _new_logon_id()
 
-    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+    events.append(json.dumps(_dc_logon_event(requester, config,
+                                             ip_override=requester.get("ip"),
                                              logon_id=logon_id, ts=t)))
     t += 1.0
-    events.append(json.dumps(_build_4624(u, config, logon_type=2,
+    events.append(json.dumps(_build_4624(requester, config, logon_type=2,
                                          auth_pkg=_NEG_PACKAGE,
                                          target_logon_id=logon_id,
                                          elevated=True, ts=t)))
     t += 0.05
-    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
+    events.append(json.dumps(_build_4672(requester, config, logon_id=logon_id,
                                          is_admin=True, ts=t)))
     t += random.uniform(2.0, 5.0)
 
     tool = random.choice([
         ("C:\\Users\\Public\\Certify.exe",
          f"Certify.exe request /ca:{_get_ca_hostname(config)} "
-         f"/template:{template} /altname:{priv_target}"),
+         f"/template:{template} /altname:{subject}"),
         ("C:\\Windows\\System32\\certreq.exe",
          f"certreq.exe -submit -attrib \"CertificateTemplate:{template}"
          f"\\nsan:upn={san_value}\" request.req"),
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
          f"powershell.exe -ep bypass -c \"Get-Certificate -Template {template} "
-         f"-DnsName {priv_target.rstrip('$').lower()}.{dns_domain} "
+         f"-DnsName {subject}.{dns_domain} "
          f"-CertStoreLocation Cert:\\CurrentUser\\My\""),
     ])
-    events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
+    events.append(json.dumps(_build_4688(requester, config, process_name=tool[0],
                                          command_line=tool[1],
                                          logon_id=logon_id, ts=t)))
     t += random.uniform(0.5, 1.5)
@@ -7820,48 +7809,45 @@ def _threat_priv_cert_request(config, session_context):
     # Client Auth EKU + Authenticated Users enroll = ESC1), and it is in XSIAM's Object
     # Access intake list. Without it the request events describe an enrollment against a
     # template the tenant has no reason to consider vulnerable.
-    events.append(json.dumps(_build_4898(u, config, template_name=template,
+    events.append(json.dumps(_build_4898(requester, config, template_name=template,
                                          enrollee_supplies_subject=True, ts=t)))
     t += random.uniform(0.1, 0.4)
 
     # 4886 — CA received the request
-    events.append(json.dumps(_build_4886(u, config,
+    events.append(json.dumps(_build_4886(requester, config,
                                          template_name=template,
                                          request_id=request_id,
                                          san_override=san_value,
-                                         san_kind=san_kind,
+                                         san_kind="upn",
                                          ts=t)))
     t += random.uniform(0.1, 0.5)
 
-    if variant == "denied":
-        events.append(json.dumps(_build_4888(u, config,
-                                             template_name=template,
-                                             request_id=request_id,
-                                             san_override=san_value,
-                                             san_kind=san_kind,
-                                             subject_dn=priv_subject_dn,
-                                             ts=t)))
-    else:
-        events.append(json.dumps(_build_4887(u, config,
-                                             template_name=template,
-                                             request_id=request_id,
-                                             san_override=san_value,
-                                             san_kind=san_kind,
-                                             subject_dn=priv_subject_dn,
-                                             ts=t)))
-        t += random.uniform(2.0, 5.0)
+    # 4887 — issued. This is the record that states both Requester and the issued
+    # certificate's Subject, which is what the analytic reports.
+    events.append(json.dumps(_build_4887(requester, config,
+                                         template_name=template,
+                                         request_id=request_id,
+                                         san_override=san_value,
+                                         san_kind="upn",
+                                         subject_dn=subject_dn,
+                                         ts=t)))
+    t += random.uniform(2.0, 5.0)
 
-        # Attacker uses the cert for PKINIT TGT request
-        priv_user = {**u, "username": priv_target.rstrip("$")}
-        events.append(json.dumps(_build_4768(priv_user, config,
-                                             ip_override=u.get("ip"),
-                                             cert_issuer=f"{_get_domain(config)}-CA01-CA",
-                                             cert_serial="6100000005a4b31a47c8b1ae9f000000000005",
-                                             cert_thumbprint=_random_ski().replace(" ", ""),
-                                             ts=t)))
+    # Attacker uses the cert for a PKINIT TGT request as the certificate subject.
+    # preauth_type 15 (PA-PK-AS-REP_OLD) is the smart-card/PKINIT code; leaving the
+    # default 2 would render a password pre-auth record that also carries cert fields.
+    cert_user = {**u, "username": subject}
+    events.append(json.dumps(_build_4768(cert_user, config,
+                                         ip_override=u.get("ip"),
+                                         cert_issuer=f"{_get_domain(config)}-CA01-CA",
+                                         cert_serial="6100000005a4b31a47c8b1ae9f000000000005",
+                                         cert_thumbprint=_random_ski().replace(" ", ""),
+                                         preauth_type="15",
+                                         preauth_encryption="0x12",
+                                         ts=t)))
     t += random.uniform(0.5, 1.0)
 
-    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+    events.append(json.dumps(_build_4689(requester, config, process_name=tool[0],
                                          logon_id=logon_id, ts=t)))
     return events
 
@@ -8396,6 +8382,7 @@ _RENAMED_THREATS = {
     "WIP_DMSA_PRIVESC":             "DMSA_PRIVESC",
     "WIP_SENSITIVE_PASSWORD_RESET": "SENSITIVE_PASSWORD_RESET",
     "WIP_PASSWORD_NEVER_EXPIRES":   "PASSWORD_NEVER_EXPIRES",
+    "WIP_PRIV_CERT_REQUEST":        "PRIV_CERT_REQUEST",
 }
 
 # ── Exchange mailbox abuse via PowerShell (4104 ScriptBlock) ──────────────────
@@ -9797,7 +9784,7 @@ _THREAT_WEIGHTS = {
     "new_machine_delegation":      3,
     "multiple_service_tickets":    5,
     "priv_group_add_remove":       4,
-    "wip_priv_cert_request":       3,
+    "priv_cert_request":           3,
     "suspicious_account_creation": 5,
     "mass_account_deletion":       4,
     "sensitive_password_reset": 4,
@@ -9849,7 +9836,7 @@ _THREAT_GENERATORS = {
     "new_machine_delegation":           _threat_new_machine_delegation,
     "multiple_service_tickets":         _threat_multiple_service_tickets,
     "priv_group_add_remove":            _threat_priv_group_add_remove,
-    "wip_priv_cert_request":            _threat_priv_cert_request,
+    "priv_cert_request":                _threat_priv_cert_request,
     "suspicious_account_creation":      _threat_suspicious_account_creation,
     "mass_account_deletion":            _threat_mass_account_deletion,
     "sensitive_password_reset":     _threat_sensitive_password_reset,
@@ -9904,7 +9891,7 @@ ANALYTIC_ALERTS = {
     "new_machine_delegation":      "A new machine attempted Kerberos delegation",
     "multiple_service_tickets":    "Abnormal issuance of weakly encrypted service tickets to a user",
     "priv_group_add_remove":       "Rare privileged group addition and removal",
-    "wip_priv_cert_request":       "Privileged certificate request via certificate template",
+    "priv_cert_request":          "Suspicious privileged certificate request via certificate template",
     "suspicious_account_creation": "Suspicious hidden user created",
     "mass_account_deletion":       "A user deleted multiple users for the first time",
     "sensitive_password_reset":    "Sensitive account password reset attempt for the first time",
@@ -10125,7 +10112,7 @@ def _generate_scenario_event(scenario_event, config, context):
         "NEW_MACHINE_DELEGATION":           _threat_new_machine_delegation,
         "MULTIPLE_SERVICE_TICKETS":         _threat_multiple_service_tickets,
         "PRIV_GROUP_ADD_REMOVE":            _threat_priv_group_add_remove,
-        "WIP_PRIV_CERT_REQUEST":            _threat_priv_cert_request,
+        "PRIV_CERT_REQUEST":                _threat_priv_cert_request,
         "SUSPICIOUS_ACCOUNT_CREATION":      _threat_suspicious_account_creation,
         "MASS_ACCOUNT_DELETION":            _threat_mass_account_deletion,
         "SENSITIVE_PASSWORD_RESET":     _threat_sensitive_password_reset,
