@@ -380,7 +380,7 @@ a certificate issued to a sensitive account". The generator now submits as
 ordinary user drawn fresh each run, because the Low variation also requires the
 `(requester, subject)` pair to be novel over 30 days.
 
-Two secondary observations from the same batch:
+Three secondary observations from the same batch:
 
 - The Medium **denied** variation (4886 + 4888) was never probed. The generator
   no longer emits it, so `PRIV_CERT_REQUEST` always produces the verified issued
@@ -389,6 +389,12 @@ Two secondary observations from the same batch:
   `preauth_encryption=0x12`. It previously used the default `2`
   (PA-ENC-TIMESTAMP), which renders a password pre-authentication record that
   also carries certificate fields.
+- The `4887` `Subject` is a real distinguished name, so it carries no spaces
+  after the commas (`CN=j.james,CN=Users,DC=examplecorp,DC=local`). The builders
+  were emitting `CN=x, CN=Users, DC=...`; the analytic's own alert text reported
+  the no-space form, and real AD DNs never contain those spaces. All three
+  subject-DN constructions (`_build_4887`, `_build_4888`, `priv_cert_request`)
+  now match.
 
 **This analytic deduplicates for 1 Day** (published Deduplication Period), and the
 key is the **requester**, not the subject — inferred from three post-fire batches

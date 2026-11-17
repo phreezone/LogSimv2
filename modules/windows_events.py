@@ -3834,7 +3834,7 @@ def _build_4887(user_info, config, *, template_name, request_id=None,
     attrs = "\r\n".join(attrs_parts)
     dc_parts = dns_domain.split(".")
     base_dn = ",".join(f"DC={p}" for p in dc_parts)
-    subj = subject_dn or f"CN={user_info['username']}, CN=Users, {base_dn}"
+    subj = subject_dn or f"CN={user_info['username']},CN=Users,{base_dn}"
     event_data = {
         "RequestId":              req_id,
         "Requester":              requester,
@@ -3864,7 +3864,7 @@ def _build_4888(user_info, config, *, template_name, request_id=None,
     attrs = "\r\n".join(attrs_parts)
     dc_parts = dns_domain.split(".")
     base_dn = ",".join(f"DC={p}" for p in dc_parts)
-    subj = subject_dn or f"CN={user_info['username']}, CN=Users, {base_dn}"
+    subj = subject_dn or f"CN={user_info['username']},CN=Users,{base_dn}"
     event_data = {
         "RequestId":              req_id,
         "Requester":              requester,
@@ -7881,7 +7881,7 @@ def _threat_priv_cert_request(config, session_context):
     subject = u["username"]
     san_value = f"{subject}@{dns_domain}"
     cert_base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
-    subject_dn = f"CN={subject}, CN=Users, {cert_base_dn}"
+    subject_dn = f"CN={subject},CN=Users,{cert_base_dn}"
 
     template = random.choice(_CERT_TEMPLATES_VULNERABLE)
 
