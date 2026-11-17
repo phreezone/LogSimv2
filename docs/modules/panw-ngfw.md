@@ -270,7 +270,9 @@ client's User-Agent in `user_agent`.
 PAN-OS CSV syslog into `unknown_unknown_raw` (unparsed `_raw_log`, ~2M rows in 13 h). Collapsing its
 34,500 vulnerability rows gave 203 distinct Threat IDs: 193 were already here (name, severity, subtype
 and action all agree) and 10 were new (30514, 33338, 38531, 37008, 55358, 58435, 96441, 95922, 37765,
-56480), added with the category, action and `$misc` the real rows carry. The catalog now holds 196
+56480), added with the category, action and `$misc` the real rows carry. Two more were found from the
+alerts (97356 Adobe ColdFusion Path Traversal, 97710 Atlassian Web Resource Download Path Traversal) and added from the
+pa440's own CEF rows. The catalog now holds 198
 tenant signatures; the family counts below include them.
 
 **Tenant-confirmed signature catalog (2026-11-16).** After a burst of generated threat traffic the
@@ -285,22 +287,26 @@ one signature per fire at random):
 
 | Event | Family | Signatures |
 |---|---|---|
-| `threat_web_rce` | code-execution vulnerability, blocked (reset-server / reset-both / reset-client / drop) | 95 |
-| `threat_web_infoleak` | info-leak (traversal, disclosure, auth bypass), blocked | 42 |
+| `threat_web_rce` | code-execution vulnerability, blocked (reset-server / reset-both / reset-client / drop) | 96 |
+| `threat_web_infoleak` | info-leak (traversal, disclosure, auth bypass), blocked | 43 |
 | `threat_web_detect_only` | signatures the policy only alerts on (XSS, /etc/passwd, directory traversal, scanner probes) | 45 |
 | `threat_web_sqli_overflow_dos` | sql-injection, overflow, dos, code-obfuscation, brute-force, insecure-credentials, blocked | 10 |
 | `threat_legacy_service_exploit` | FTP (tcp/21) and TFTP (udp/69) exploits | 3 |
 | `threat_wd_mycloud_backdoor` | the one spyware signature (18011) | 1 |
 
-Five of the six are **background-only on the analytic flag (`analytic: False`, no `xsiam_alert`)**: the first
-query of the `alerts` dataset (alert_source `PAN_NGFW`, last 48 h) returned **0 rows**, and later probes
-(2026-11-16, with `threat_id` sent as `Name(ID)`) confirmed a native alert only for the spyware event, so
-`threat_wd_mycloud_backdoor` is **alert-targeted** (`analytic: True`, `xsiam_alert` `Western Digital My Cloud
-Backdoor(18011)`, critical, raised ~6-7 min after the send). The five web families are still selectable by
-name through the dispatch. Ports for the
+All six are **alert-capable** (`analytic: True`). The first query of the `alerts` dataset (alert_source
+`PAN_NGFW`, last 48 h) returned 0 rows, but that was before `threat_id` was sent as `Name(ID)`. A later 3-day
+pull (2026-11-17, 916 PAN NGFW alerts, 392 names) matched **209 of the 218 catalogue signatures by name**, all medium to
+critical (critical 106 of 113, high 56 of 57, medium 47 of 47), under both name forms (`Name(ID)` and the older bare name). The
+nine without an alert are the signatures never sent yet (Pastebin C2 x3, Schoolboy, Moxa, TRENDnet, PHP Memory
+Corruption, Agobot) and the informational default-credentials signature, which never alerts. Native alerts
+are named `Name(ID)` of the signature hit, so a family event's `xsiam_alert` is a descriptor
+("Name(ID) of the signature hit") rather than one fixed name. Probes confirmed the exact alert for the spyware event
+(`Western Digital My Cloud Backdoor(18011)`, critical, raised 4-7 min after the send). The name match does not prove which
+alerts came from this generator rather than the pa440's own traffic. Ports for the
 non-HTTP apps are assumed standard (ftp 21, tftp 69); everything web rides 80/8080.
 
-<details><summary>All 196 added signatures</summary>
+<details><summary>All 198 added signatures</summary>
 
 | Threat ID | Name | Severity | Category | Subtype | Action | App-ID |
 |---|---|---|---|---|---|---|
@@ -500,6 +506,8 @@ non-HTTP apps are assumed standard (ftp 21, tftp 69); everything web rides 80/80
 | 95922 | jQuery File Upload Plugin Unrestricted File Upload Vulnerability | medium | code-execution | vulnerability | alert | `web-browsing` |
 | 37765 | PHPMoAdmin Object Parameter Handling Code Execution Vulnerability | high | code-execution | vulnerability | reset-server | `web-browsing` |
 | 56480 | Flexible Poll 1.2 SQL Injection Vulnerability | critical | sql-injection | vulnerability | reset-server | `web-browsing` |
+| 97356 | Adobe ColdFusion Path Traversal Vulnerability | critical | code-execution | vulnerability | reset-server | `web-browsing` |
+| 97710 | Atlassian Web Resource Download Path Traversal Vulnerability | high | info-leak | vulnerability | reset-server | `web-browsing` |
 
 </details>
 

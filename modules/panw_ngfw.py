@@ -956,6 +956,8 @@ _TENANT_SIGS = [
     (95922, 'jQuery File Upload Plugin Unrestricted File Upload Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'index.php'),
     (37765, 'PHPMoAdmin Object Parameter Handling Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'moadmin.php'),
     (56480, 'Flexible Poll 1.2 SQL Injection Vulnerability', 'critical', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'index.php'),
+    (97356, 'Adobe ColdFusion Path Traversal Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'ide.cfm'),
+    (97710, 'Atlassian Web Resource Download Path Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'download/resources/jira.webresources:color-picker-popup/images/..::..::..::..::..::WEB-INF::web.xml'),
 ]
 for _r in _TENANT_SIGS:
     _THREAT_SIGS["t%d" % _r[0]] = _r[:5]
@@ -1311,11 +1313,11 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "threat_php_memory_corruption", "weight": 2, "analytic": True, "xsiam_alert": "PHP Memory Corruption Vulnerability(543004)"},
     # Informational: never surfaces in the alerts table; background only.
     {"event": "threat_default_credentials_http", "weight": 2, "analytic": False, "xsiam_alert": None},
-    {"event": "threat_web_rce",          "weight": 4, "analytic": False, "xsiam_alert": None},
-    {"event": "threat_web_infoleak",     "weight": 3, "analytic": False, "xsiam_alert": None},
-    {"event": "threat_web_detect_only",  "weight": 3, "analytic": False, "xsiam_alert": None},
-    {"event": "threat_web_sqli_overflow_dos", "weight": 1, "analytic": False, "xsiam_alert": None},
-    {"event": "threat_legacy_service_exploit", "weight": 1, "analytic": False, "xsiam_alert": None},
+    {"event": "threat_web_rce",          "weight": 4, "analytic": True, "xsiam_alert": "Name(ID) of the signature hit: code-execution signature, any of the web-RCE family"},
+    {"event": "threat_web_infoleak",     "weight": 3, "analytic": True, "xsiam_alert": "Name(ID) of the signature hit: info-leak signature, any of the web info-leak family"},
+    {"event": "threat_web_detect_only",  "weight": 3, "analytic": True, "xsiam_alert": "Name(ID) of the signature hit: alert-only signature, any of the detect-only family"},
+    {"event": "threat_web_sqli_overflow_dos", "weight": 1, "analytic": True, "xsiam_alert": "Name(ID) of the signature hit: sqli/overflow/dos signature, any of that family"},
+    {"event": "threat_legacy_service_exploit", "weight": 1, "analytic": True, "xsiam_alert": "Name(ID) of the signature hit: FTP/TFTP exploit signature, any of the legacy family"},
     {"event": "threat_wd_mycloud_backdoor", "weight": 1, "analytic": True, "xsiam_alert": "Western Digital My Cloud Backdoor(18011)"},
     {"event": "threat_scanner_campaign", "weight": 1, "analytic": True, "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
     # Realistic network patterns whose dedicated analytic needs EAL-decoded fields the CEF
