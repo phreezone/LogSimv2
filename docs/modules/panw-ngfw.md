@@ -181,13 +181,15 @@ Syslog Collector*):
 CEF:0|PANW|NGFW_CEF|<sw>|<threatid>|threat|<number-of-severity>| __firewall_type=firewall.threat
     __timestamp=<time_generated> __tz=<high_res> log_type=threat subtype=vulnerability ... <the
     common traffic block: addresses, ports, NAT, users, app, rule, zones, interfaces, session_id,
-    source/dest device> ... misc=<uri or file name> threat_id=<id> threat_name=<name>(<id>)
+    source/dest device> ... misc=<uri or file name> threat_id=<name>(<id>) threat_name=<name>(<id>)
     threat_category=<category> direction=client-to-server user_agent=<UA> severity=<1-5>
 ```
 
 The header's signature slot is **`Name(ID)`** (traffic and URL logs put the subtype there), and
-`threat_name` is the same `Name(ID)` string while `threat_id` stays the bare number: that is what the
-pa440's own CEF rows carry (read-only diff, 2026-11-16; `$threatid` expands to name and ID). `severity` is the numeric `$number-of-severity` (1 informational … 5 critical). The live
+`threat_name` and `threat_id` are the same `Name(ID)` string: that is what the
+pa440's own CEF rows carry (read-only diff, 2026-11-16; `$threatid` expands to name and ID). A bare
+numeric `threat_id` is silently dropped by the tenant, whereas `Name(ID)` is stored as the numeric `threat_id` column
+that the native PAN NGFW alerts need; they are named `Name(ID)` too, and the registry's alert targets use that form. `severity` is the numeric `$number-of-severity` (1 informational … 5 critical). The live
 CLCS rows spell several of these differently, so the module also sends the column names the
 tenant's own rows use: `file_name` (holds `$misc`), `direction_of_attack`, `vendor_severity`
 (the severity word) and `threat_name_firewall`. `panw_ngfw_config.threat_severity_format`
