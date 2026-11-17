@@ -380,6 +380,30 @@
       font-size: 10px; color: var(--yellow, #d29922); margin-left: 2px;
     }
     .baduser-mod-label.incompatible { opacity: 0.5; }
+    .baduser-pb-info { font-size: 12px; line-height: 1.45; margin-top: 6px; padding: 8px 10px;
+      color: var(--text-muted); background: var(--surface2); border-radius: 6px; }
+    .baduser-pb-info ol, .baduser-pb-steps { list-style: none; margin: 8px 0 0; padding: 0; }
+    .baduser-pb-info li, .baduser-pb-steps li { display: flex; gap: 8px; align-items: baseline;
+      padding: 3px 0; font-size: 12px; }
+    .pb-n { flex: none; width: 18px; text-align: right; color: var(--text-muted);
+      font-variant-numeric: tabular-nums; }
+    .pb-tactic { flex: none; font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
+      color: var(--purple); min-width: 112px; }
+    .pb-label { flex: 1; color: var(--text); }
+    .pb-where { color: var(--text-muted); white-space: nowrap; }
+    .pb-skip .pb-label, .pb-skip .pb-tactic { text-decoration: line-through; opacity: .5; }
+    .pb-skip .pb-where { color: var(--yellow); }
+    .baduser-pb-steps .pb-state { flex: none; width: 16px; text-align: center; }
+    .pb-pending .pb-state { color: var(--text-muted); }
+    .pb-running .pb-state { color: var(--accent); }
+    .pb-fired .pb-state { color: var(--green); }
+    .pb-no_output .pb-state { color: var(--yellow); }
+    .pb-error .pb-state { color: var(--red); }
+    .pb-pending .pb-label { color: var(--text-muted); }
+    .baduser-pb-card { margin: 14px 0 6px; padding: 10px 12px; background: var(--surface2);
+      border-radius: 8px; text-align: left; }
+    .baduser-pb-title { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+    .baduser-pb-sub { font-size: 12px; color: var(--text-muted); }
     .baduser-user-warn {
       font-size: 12px; line-height: 1.4; margin-top: 6px; padding: 6px 10px;
       color: var(--yellow, #d29922); background: var(--surface2); border-radius: 6px;
@@ -829,6 +853,14 @@
       </div>
 
       <div class="sched-field">
+        <label>Use case</label>
+        <select id="baduser-playbook" class="sched-input" onchange="onBadUserPlaybookChange()">
+          <option value="">Random mix of threats</option>
+        </select>
+        <div id="baduser-playbook-info" class="baduser-pb-info" style="display:none;"></div>
+      </div>
+
+      <div class="sched-field">
         <label>Duration (minutes)</label>
         <input type="number" id="baduser-duration" class="sched-input" min="1" max="480" step="1" value="15" />
       </div>
@@ -847,7 +879,7 @@
 
       <div class="sched-field">
         <label>Modules</label>
-        <div id="baduser-modules" class="baduser-module-checks">
+        <div id="baduser-modules" class="baduser-module-checks" onchange="onBadUserPlaybookChange()">
           <span style="color:var(--text-muted);font-size:12px;">Loading...</span>
         </div>
         <div style="margin-top:4px;">
@@ -898,6 +930,12 @@
           <div class="m-val accent" id="baduser-stat-level">—</div>
           <div class="m-label">Threat Level</div>
         </div>
+      </div>
+
+      <div id="baduser-pb-active" class="baduser-pb-card" style="display:none;">
+        <div class="baduser-pb-title" id="baduser-pb-title"></div>
+        <div class="baduser-pb-sub" id="baduser-pb-sub"></div>
+        <ol class="baduser-pb-steps" id="baduser-pb-steps"></ol>
       </div>
 
       <table class="baduser-module-table" id="baduser-module-table">
@@ -2063,6 +2101,66 @@
     }
   }
 
+  let _badUserPlaybooks = [];   // [{key, name, summary, steps:[{index, module, threat, tactic, label}]}]
+
+  async function loadBadUserPlaybooks() {
+    try {
+      _badUserPlaybooks = await api('/api/baduser/playbooks');
+      const sel = document.getElementById('baduser-playbook');
+      sel.innerHTML = '<option value="">Random mix of threats</option>' +
+        _badUserPlaybooks.map(pb =>
+          `<option value="${escHtml(pb.key)}">${escHtml(pb.name)} (${pb.steps.length} steps)</option>`
+        ).join('');
+    } catch (e) {
+      console.error('Failed to load bad user playbooks:', e);
+    }
+  }
+
+  // The selected user's facts, as the user list reports them (null before one is picked).
+  function _badUserSelected() {
+    const username = document.getElementById('baduser-user').value;
+    for (const users of Object.values(_badUserGroups)) {
+      const u = users.find(x => x.username === username);
+      if (u) return u;
+    }
+    return null;
+  }
+
+  // Why a step would be skipped for this user and module selection, or '' if it runs.
+  function _badUserStepSkip(step, user) {
+    const checked = new Set([...document.querySelectorAll('#baduser-modules input:checked')]
+      .map(cb => cb.value));
+    if (checked.size && !checked.has(step.module)) return 'module not selected';
+    if (user) {
+      if (step.module === 'Windows Event Log' && (user.primary_os || '').toLowerCase() !== 'windows')
+        return `${user.primary_os || 'non-Windows'} computer`;
+      if (step.module === 'aws' && !user.has_aws) return 'no AWS IAM user';
+    }
+    return '';
+  }
+
+  function onBadUserPlaybookChange() {
+    const key = document.getElementById('baduser-playbook').value;
+    const box = document.getElementById('baduser-playbook-info');
+    const pb = _badUserPlaybooks.find(p => p.key === key);
+    if (!pb) { box.style.display = 'none'; box.innerHTML = ''; return; }
+    const user = _badUserSelected();
+    let skipped = 0;
+    const rows = pb.steps.map(s => {
+      const why = _badUserStepSkip(s, user);
+      if (why) skipped++;
+      return `<li class="${why ? 'pb-skip' : ''}"><span class="pb-n">${s.index}</span>` +
+        `<span class="pb-tactic">${escHtml(s.tactic)}</span>` +
+        `<span class="pb-label">${escHtml(s.label)}</span>` +
+        `<span class="pb-where">${escHtml(why ? 'skipped: ' + why : s.module)}</span></li>`;
+    }).join('');
+    box.innerHTML = `${escHtml(pb.summary)}<br>The steps run in this order, as this user, ` +
+      `paced to fit the duration; normal activity continues underneath.` +
+      (skipped ? ` <span style="color:var(--yellow)">${skipped} of ${pb.steps.length} will be skipped for this user.</span>` : '') +
+      `<ol>${rows}</ol>`;
+    box.style.display = '';
+  }
+
   function onBadUserDeptChange() {
     const dept = document.getElementById('baduser-dept').value;
     const userSel = document.getElementById('baduser-user');
@@ -2083,6 +2181,7 @@
   }
 
   function onBadUserUserChange() {
+    onBadUserPlaybookChange();
     const username = document.getElementById('baduser-user').value;
     if (!username) { _clearBadUserModWarn(); return; }
     // Find the user profile in _badUserGroups
@@ -2139,6 +2238,7 @@
   function toggleBadUserModules(selectAll) {
     document.querySelectorAll('#baduser-modules input[type=checkbox]')
       .forEach(cb => cb.checked = selectAll);
+    onBadUserPlaybookChange();
   }
 
   async function startBadUser() {
@@ -2163,16 +2263,21 @@
     resultEl.style.color = 'var(--text-muted)';
     resultEl.textContent = 'Starting...';
 
+    const playbook = document.getElementById('baduser-playbook').value;
     try {
-      await api('/api/baduser/start', 'POST', {
+      const started = await api('/api/baduser/start', 'POST', {
         username,
         duration_minutes: duration,
         threat_level: level,
         event_interval: interval,
         selected_modules: selectedModules,
+        playbook: playbook || null,
       });
       resultEl.textContent = '';
-      showToast(`Bad User started: ${username} (${selectedModules.length} modules)`);
+      const pb = started && started.playbook;
+      showToast(pb
+        ? `Bad User started: ${username} — ${pb.name} (${pb.steps - pb.skipped} of ${pb.steps} steps)`
+        : `Bad User started: ${username} (${selectedModules.length} modules)`);
     } catch (e) {
       resultEl.style.color = 'var(--red)';
       resultEl.textContent = `Error: ${e.message}`;
@@ -2193,6 +2298,34 @@
     const m = Math.floor(secs / 60);
     const s = Math.floor(secs % 60);
     return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  function renderBadUserPlaybook(data) {
+    const card = document.getElementById('baduser-pb-active');
+    const pb = data.playbook;
+    if (!pb) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    const rel = ts => fmtTimer(Math.max(0, ts - data.started_at));
+    const done = pb.steps.filter(s => s.state === 'fired' || s.state === 'no_output' || s.state === 'error').length;
+    const runnable = pb.steps.filter(s => s.state !== 'skipped').length;
+    document.getElementById('baduser-pb-title').textContent = `Use case: ${pb.name}`;
+    document.getElementById('baduser-pb-sub').textContent = pb.finished_at
+      ? `Story complete (${done} of ${runnable} steps). Normal activity continues until the timer ends.`
+      : `Step ${Math.min(done + 1, runnable)} of ${runnable}. The story is paced to finish about ` +
+        `${fmtTimer(pb.span_seconds)} into the run.`;
+    const icon = { pending: '\u25CB', running: '\u25D0', fired: '\u2713', no_output: '!', error: '\u2717', skipped: '\u2013' };
+    document.getElementById('baduser-pb-steps').innerHTML = pb.steps.map(s => {
+      let where;
+      if (s.state === 'skipped') where = 'skipped: ' + (s.note || '');
+      else if (s.state === 'fired') where = `${rel(s.fired_at)} \u00b7 ${s.records} records`;
+      else if (s.state === 'no_output' || s.state === 'error') where = s.note || s.state;
+      else where = `planned ${fmtTimer(s.offset_s)}`;
+      return `<li class="pb-${s.state}${s.state === 'skipped' ? ' pb-skip' : ''}">` +
+        `<span class="pb-n">${s.index}</span><span class="pb-state">${icon[s.state] || ''}</span>` +
+        `<span class="pb-tactic">${escHtml(s.tactic)}</span>` +
+        `<span class="pb-label">${escHtml(s.label)} <span class="pb-where">(${escHtml(s.module)})</span></span>` +
+        `<span class="pb-where">${escHtml(where)}</span></li>`;
+    }).join('');
   }
 
   async function pollBadUserStatus() {
@@ -2234,6 +2367,8 @@
         : 0;
       document.getElementById('baduser-progress-fill').style.width = `${pct.toFixed(1)}%`;
 
+      renderBadUserPlaybook(data);
+
       // Per-module table
       const tbody = document.getElementById('baduser-module-tbody');
       const entries = Object.entries(data.per_module || {}).sort((a, b) => b[1].logs - a[1].logs);
@@ -2271,6 +2406,7 @@
       updateSchedFields();
       // Bad User tab setup
       loadBadUserUsers();
+      loadBadUserPlaybooks();
       const badModDiv = document.getElementById('baduser-modules');
       if (badModDiv && modules.length) {
         badModDiv.innerHTML = modules.map(m =>

@@ -176,6 +176,11 @@ EXCLUDED = {
         "uncommon_host_command", "ssh_brute_force", "vuln_scan", "root_login_rare_source",
         "kernel_module_load", "config_harvest", "datastore_upload", "mass_vm_power_off",
         "unplanned_reboot", "log_rotation_disabled",
+        # Added 2026-11-17 after the ESXi 8 rewrite: an external attacker address is the
+        # source, so none of their records ever carries the target (0 kept of 130 / 96 /
+        # 78 / 36 / 36 records fired as the target). They only used up threat slots.
+        "ssh_service_enabled", "local_account_created", "remote_syslog_disabled",
+        "promiscuous_mode", "snmp_external_target",
     },
     "Windows Event Log": {
         "kerberos_relay",                                                  # relayed machine auth

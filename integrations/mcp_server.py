@@ -213,9 +213,22 @@ def list_users() -> dict:
 
 
 @mcp.tool()
+def list_bad_user_playbooks() -> list:
+    """List the use-case playbooks start_bad_user can run.
+
+    Each is one use case told as an ordered story (phishing click to data theft, insider
+    data theft, cloud privilege escalation, ransomware precursor, mailbox takeover,
+    reconnaissance, endpoint beaconing), with its steps by module, threat and tactic.
+    Source of valid `playbook` values for start_bad_user.
+    """
+    return _req("GET", "/baduser/playbooks")
+
+
+@mcp.tool()
 def start_bad_user(username: str, duration_minutes: float = 15,
                    threat_level: str = "Extreme", event_interval: float = 0.5,
-                   selected_modules: Optional[list] = None) -> dict:
+                   selected_modules: Optional[list] = None,
+                   playbook: Optional[str] = None) -> dict:
     """Drive every selected module as one named malicious identity for a fixed duration.
 
     Unlike a scenario, this is a sustained run (duration_minutes 1-480) rather than a
@@ -223,11 +236,17 @@ def start_bad_user(username: str, duration_minutes: float = 15,
     for progress. Only one Bad User run can be active — starting a second fails.
 
     username: from list_users. selected_modules: module names to drive, or omit for all.
+    playbook: a key from list_bad_user_playbooks to tell one use case as an ordered story
+    (paced to fit duration_minutes); omit for the random mix of threats. Steps whose module
+    is not running for this user (not selected, or AWS for a user without an IAM user) are
+    skipped; the response lists them.
     """
     body: dict = {"username": username, "duration_minutes": duration_minutes,
                   "threat_level": threat_level, "event_interval": event_interval}
     if selected_modules is not None:
         body["selected_modules"] = selected_modules
+    if playbook:
+        body["playbook"] = playbook
     return _req("POST", "/baduser/start", body=body)
 
 
@@ -242,7 +261,8 @@ def get_bad_user_status() -> dict:
     """Progress of the active Bad User run.
 
     Returns {"active": false} when idle; otherwise the user, remaining_seconds, and
-    per-module log/threat tallies.
+    per-module log/threat tallies. When a playbook is running, `playbook.steps` gives each
+    step's state (pending, running, fired, no_output, error, skipped) and when it fired.
     """
     return _req("GET", "/baduser/status")
 
