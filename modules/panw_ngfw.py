@@ -436,17 +436,98 @@ def _is_internal(ip):
 
 _UNTRUST_ZONES = ("untrust", "internet", "external", "wan")
 _DMZ_ZONES = ("dmz",)
+# Interfaces of the zones beyond WAN / DMZ / LAN (the LAN interface faces the user zone). Every
+# one is overridable per zone in panw_ngfw_config.zones.<name>.interface.
+_ZONE_IF_DEFAULT = {"servers": "ethernet1/4", "database": "ethernet1/5", "identity": "ethernet1/6"}
 
 
 def _zone_if(forti, zone):
     """The firewall interface that faces `zone`: WAN for untrust, the DMZ interface for the
-    DMZ, the LAN interface for trust/internal zones."""
+    DMZ, a per-zone interface for the server / database / identity zones, the LAN interface for
+    the user zone and anything else internal."""
     z = str(zone or "").lower()
+    spec = (forti.get("zones") or {}).get(z) or {}
+    if spec.get("interface"):
+        return spec["interface"]
     if z in _UNTRUST_ZONES:
         return forti.get("interface_wan", "ethernet1/1")
     if z in _DMZ_ZONES:
         return forti.get("interface_dmz", "ethernet1/3")
+    if z in _ZONE_IF_DEFAULT:
+        return _ZONE_IF_DEFAULT[z]
     return forti.get("interface_lan", "ethernet1/2")
+
+
+# Zone model. An internal address belongs to the zone of the role it plays: the published DMZ
+# servers, the domain controllers (identity), the database servers, the other internal servers,
+# then anything covered by panw_ngfw_config.zones.<name>.{hosts,cidrs}, and otherwise the user
+# zone. Exact hosts beat CIDRs; a longer CIDR beats a shorter one; the configured hosts beat
+# the role lists. Everything that is not RFC1918 is untrust.
+_zone_cache = {"key": None, "hosts": {}, "nets": []}
+
+
+def _zone_tables(config):
+    forti = _get_config(config)
+    zc = forti.get("zones") or {}
+    ap = config.get("apache_config") or {}
+    key = (tuple(config.get("internal_servers") or ()), tuple(forti.get("domain_controllers") or ()),
+           tuple(config.get("domain_controllers") or ()), tuple(config.get("database_servers") or ()),
+           tuple(ap.get("server_ips") or ()), ap.get("server_ip"), repr(sorted(zc.items(), key=lambda kv: kv[0])))
+    if _zone_cache["key"] == key:
+        return _zone_cache["hosts"], _zone_cache["nets"]
+    hosts, nets = {}, []
+    for h in config.get("internal_servers") or ():
+        hosts[h] = "servers"
+    for h in config.get("database_servers") or ():
+        hosts[h] = "database"
+    for h in _dcs(config):
+        hosts[h] = "identity"
+    for h in _dmz_servers(config):
+        hosts[h] = "dmz"
+    for name, spec in zc.items():
+        for h in (spec or {}).get("hosts") or ():
+            hosts[h] = name
+        for c in (spec or {}).get("cidrs") or ():
+            try:
+                nets.append((ip_network(c, strict=False), name))
+            except ValueError:
+                pass
+    nets.sort(key=lambda t: -t[0].prefixlen)
+    _zone_cache.update(key=key, hosts=hosts, nets=nets)
+    return hosts, nets
+
+
+def _zone_of(config, ip):
+    """The security zone an address sits in (see the zone model above)."""
+    if not _is_internal(ip):
+        return "untrust"
+    hosts, nets = _zone_tables(config)
+    if ip in hosts:
+        return hosts[ip]
+    a = ip_address(ip)
+    for net, name in nets:
+        if a in net:
+            return name
+    return "users"
+
+
+def _resolve_zone(config, ip, hint):
+    """Callers pass the legacy generic internal zone ("trust") for any internal side; that is
+    replaced by the address's real zone. An explicit untrust / dmz / custom zone is kept."""
+    return _zone_of(config, ip) if str(hint or "trust").lower() == "trust" else hint
+
+
+def _zone_rule(forti, from_zone, to_zone, denied=False):
+    """The security rule a flow between two zones would hit when the caller names none."""
+    if to_zone in _UNTRUST_ZONES and from_zone not in ("dmz", "servers", "database", "identity")             and from_zone not in _UNTRUST_ZONES:
+        return forti.get("default_rule", "Allow-Users-Outbound")
+    lab = lambda z: "DMZ" if z == "dmz" else str(z).capitalize()
+    pre = "Deny" if denied else "Allow"
+    if from_zone in _UNTRUST_ZONES:
+        return f"{pre}-Inbound-{lab(to_zone)}"
+    if from_zone == to_zone:
+        return f"{pre}-{lab(from_zone)}-Internal"
+    return f"{pre}-{lab(from_zone)}-to-{lab(to_zone)}"
 
 
 # ---------------------------------------------------------------------------
@@ -517,11 +598,14 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
 
 def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
                     shost=None, suser=None, dhost=None, duser=None, proto=None,
-                    from_zone="trust", to_zone="untrust", bytes_sent=None, bytes_received=None,
+                    from_zone=None, to_zone=None, bytes_sent=None, bytes_received=None,
                     duration_s=None, end_reason=None, url_cat=None, nat_src=None, nat_dpt=None,
                     spt=None, src_category="workstation", rule=None):
-    """Common extension dict for a traffic:end session (or deny/drop)."""
+    """Common extension dict for a traffic:end session (or deny/drop). A zone left unset (or the
+    generic "trust") is taken from the address; an explicit untrust / dmz / custom zone stays."""
     forti = _get_config(config)
+    from_zone = _resolve_zone(config, src_ip, from_zone)
+    to_zone = _resolve_zone(config, dst_ip, to_zone)
     meta = _APP.get(app, _APP["incomplete"])
     proto = proto or _proto_for(app, dpt)
     end_reason = end_reason or _end_reason(proto)
@@ -559,7 +643,7 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
         "inbound_if":       in_if,
         "outbound_if":      out_if,
         "session_id":       _session_id(),
-        "rule_matched":     rule or forti.get("default_rule", "Allow-Users-Outbound"),
+        "rule_matched":     rule or _zone_rule(forti, from_zone, to_zone, denied),
         "rule_matched_uuid":str(uuid.uuid4()),
         "bytes_sent":       bytes_sent,
         "bytes_received":   bytes_received,
@@ -1379,7 +1463,7 @@ def _dcs(config):
 
 def _conn(config, src, dst, dpt, app, action="allow", *, suser=None, shost=None, duser=None,
           dhost=None, bytes_sent=None, bytes_received=None, duration_s=None, ts=None,
-          from_zone="trust", to_zone="untrust", url_cat=None, end_reason=None, proto=None,
+          from_zone=None, to_zone=None, url_cat=None, end_reason=None, proto=None,
           src_category="workstation", no_qualify=False, rule=None):
     """One PAN-OS traffic:end (or deny/drop) CEF line."""
     subtype = action if action in ("deny", "drop") else "end"
@@ -2739,7 +2823,7 @@ def _file_record(config, tf, sigkey, misc, ts, file_url=None, action="alert"):
 
 
 def _file_session(config, src, dst, dpt, app, domain, sigkey, name, *, suser=None, shost=None,
-                  from_zone="trust", to_zone="untrust", url_cat=None, path=None, with_url=True,
+                  from_zone=None, to_zone=None, url_cat=None, path=None, with_url=True,
                   dhost=None, url_host=None):
     """[traffic:end, (url), file] for one cleartext download: all three share one session_id."""
     dur = random.randint(1, 12)

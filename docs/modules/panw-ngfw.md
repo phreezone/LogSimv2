@@ -693,6 +693,28 @@ Enhanced-Application-Logging (EAL) decoded protocol fields, process data or an X
   to an uncommon cloud resource / external host; Suspicious DNS traffic needs EAL
   `dns_query_name` entropy.
 
+## Zones
+
+The firewall is modelled inline with six security zones, not the pa440's single `Tap` zone. An address
+belongs to the zone of the role it plays (`modules/panw_ngfw.py`, `_zone_of`), checked in this order:
+
+1. not RFC1918 -> `untrust`
+2. `panw_ngfw_config.zones.<name>.hosts` (exact address), then the role lists below
+3. the published DMZ servers (the Apache module's `server_ips`, else a stable pair of the internal servers) -> `dmz`
+4. `domain_controllers` -> `identity`
+5. `database_servers` -> `database`
+6. `internal_servers` -> `servers`
+7. `zones.<name>.cidrs` (longest prefix wins)
+8. any other internal address (the workstation /24s) -> `users`
+
+Callers still pass the generic internal zone, and `_traffic_fields` replaces it with the address's zone, so every
+traffic, URL, threat and file log carries `from_zone` / `to_zone`, the matching `inbound_if` / `outbound_if`
+(`users` ethernet1/2, `untrust` 1/1, `dmz` 1/3, `servers` 1/4, `database` 1/5, `identity` 1/6) and a rule named for the
+zone pair (`Allow-Users-to-Servers`, `Deny-Users-to-DMZ`, `Allow-DMZ-to-Untrust`, ...). A flow inside one zone is
+`Allow-<Zone>-Internal`. Events that name a rule (the inbound web, SSH and FTP rules) keep it, and an explicit
+`untrust` or `dmz` stays as given. Zone names are lower case; add a zone, move a host or change an interface in
+`panw_ngfw_config.zones`, for example `{"guest": {"cidrs": ["192.168.150.0/24"], "interface": "ethernet1/7"}}`.
+
 ## Config (`panw_ngfw_config`)
 
 All firewall identity is driven from config, so the firewall's name and IP can be set to
@@ -708,7 +730,8 @@ these values.
 | `syslog_hostname_format` | `hostname` | what PAN stamps in the syslog header HOSTNAME field: `hostname` or `ipv4-address` (uses `mgmt_ip`) |
 | `sw_version` | `12.2.4-h1` | PAN-OS release in the CEF device-version slot |
 | `vsys` | `vsys1` | virtual system |
-| `interface_lan` / `interface_wan` | `ethernet1/2` / `ethernet1/1` | inbound / outbound interfaces |
-| `default_rule` | `Allow-Users-Outbound` | benign `rule_matched` |
+| `interface_lan` / `interface_wan` / `interface_dmz` | `ethernet1/2` / `ethernet1/1` / `ethernet1/3` | the user-zone (LAN), untrust (WAN) and DMZ interfaces; the server, database and identity zones default to `ethernet1/4` / `1/5` / `1/6` |
+| `zones` | `{}` | extra or overriding zone definitions, `{name: {hosts: [ips], cidrs: [networks], interface: "ethernet1/N"}}`; see Zones |
+| `default_rule` | `Allow-Users-Outbound` | `rule_matched` of user-to-Internet flows; other zone pairs get `Allow-<From>-to-<To>` / `Deny-...` unless the event names a rule |
 | `nat_pool_cidr` | `203.0.113.0/27` | source-NAT egress pool |
 | `domain_controllers` | `["10.0.10.10","10.0.20.10"]` | DCs for SMB-from-DC / DCSync / Kerberos |

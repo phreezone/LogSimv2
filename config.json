@@ -5001,6 +5001,8 @@
     "interface_lan": "ethernet1/2",
     "interface_wan": "ethernet1/1",
     "interface_dmz": "ethernet1/3",
+    "zones": {},
+    "_comment_zones": "Optional zone overrides: {name: {hosts: [ips], cidrs: [networks], interface: ethernet1/N}}. Default zones: untrust (non-RFC1918), dmz (published servers), identity (domain controllers), database, servers (internal_servers), users (everything else internal).",
     "default_rule": "Allow-Users-Outbound",
     "nat_pool_cidr": "203.0.113.0/27",
     "domain_controllers": ["10.0.10.10", "10.0.20.10"]
