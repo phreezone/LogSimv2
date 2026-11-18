@@ -13,6 +13,7 @@
 # src_ip/hostname — is injected by the orchestrator, mirroring the proven
 # run_beaconing_implant_scenario pattern.)
 
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -35,6 +36,13 @@ class Step:
     technique: dict                       # {"id","test_numbers","executor"?, "input_args"?}
     params: dict = field(default_factory=dict)      # shared per-step vars (dest/port/app/domain/url)
     network: List[NetworkEvent] = field(default_factory=list)
+    # Detection expectations (Tier-1 #2): alert-name substrings this step should
+    # trigger (endpoint technique + its network events), and the ATT&CK mapping. Left
+    # empty here are filled from TECHNIQUE_CATALOG by _annotate(); set them explicitly
+    # (e.g. in a network-heavy step) to capture C2/exfil detections the technique id
+    # alone wouldn't imply. The scorecard scores observed alerts against these.
+    expected_alerts: List[str] = field(default_factory=list)
+    mitre: dict = field(default_factory=dict)        # {"tactic","technique_id","technique"}
     prereqs: bool = False                 # run the atomic's -GetPrereqs before firing (tests that
                                           # need a target file/tool staged first, e.g. file deletion)
     cleanup: bool = False                 # run the atomic's -Cleanup after the step (persistence etc.)
@@ -104,6 +112,61 @@ def _internal_lateral_net() -> List["NetworkEvent"]:
     ]
 
 
+# ── Detection / ATT&CK catalog ─────────────────────────────────────────────────
+# Maps each validated technique id to its ATT&CK (tactic, technique name) and a
+# best-effort set of alert-name substrings it should trigger. _annotate() fills any
+# Step that didn't set these explicitly. The expected_alerts are EXPECTATIONS the
+# user tunes against their own tenant's analytic names — a miss on the scorecard
+# means "not observed", which is itself the signal worth seeing. Low-signal recon
+# techniques intentionally carry no expected_alerts (they rarely alert alone) but
+# still carry their ATT&CK mapping for the coverage map.
+TECHNIQUE_CATALOG = {
+    "T1082":     {"tactic": "Discovery", "technique": "System Information Discovery", "expected_alerts": []},
+    "T1016":     {"tactic": "Discovery", "technique": "System Network Configuration Discovery", "expected_alerts": []},
+    "T1033":     {"tactic": "Discovery", "technique": "System Owner/User Discovery", "expected_alerts": []},
+    "T1057":     {"tactic": "Discovery", "technique": "Process Discovery", "expected_alerts": []},
+    "T1049":     {"tactic": "Discovery", "technique": "System Network Connections Discovery", "expected_alerts": []},
+    "T1087.001": {"tactic": "Discovery", "technique": "Account Discovery: Local Account", "expected_alerts": []},
+    "T1518.001": {"tactic": "Discovery", "technique": "Security Software Discovery", "expected_alerts": ["Security Software"]},
+    "T1105":     {"tactic": "Command and Control", "technique": "Ingress Tool Transfer", "expected_alerts": ["Ingress Tool", "LOLBin", "Download"]},
+    "T1003.001": {"tactic": "Credential Access", "technique": "OS Credential Dumping: LSASS Memory", "expected_alerts": ["LSASS", "Credential Dump", "comsvcs", "MiniDump"]},
+    "T1552.001": {"tactic": "Credential Access", "technique": "Unsecured Credentials: Credentials In Files", "expected_alerts": ["Unsecured Credential", "Credentials In Files", "password"]},
+    "T1070.004": {"tactic": "Defense Evasion", "technique": "Indicator Removal: File Deletion", "expected_alerts": ["Indicator Removal", "File Deletion"]},
+    "T1074.001": {"tactic": "Collection", "technique": "Data Staged: Local Data Staging", "expected_alerts": ["Data Staged", "Staging", "Archive"]},
+    "T1048.003": {"tactic": "Exfiltration", "technique": "Exfiltration Over Unencrypted Non-C2 Protocol", "expected_alerts": ["Exfiltration", "Exfil"]},
+    "T1547.001": {"tactic": "Persistence", "technique": "Boot/Logon Autostart: Registry Run Keys", "expected_alerts": ["Run Key", "Registry Run", "Autostart"]},
+    "T1053.005": {"tactic": "Persistence", "technique": "Scheduled Task/Job: Scheduled Task", "expected_alerts": ["Scheduled Task"]},
+}
+
+
+# Network-signal expectations for steps whose detection value is in the synthetic
+# network events, not the (often low-signal) endpoint technique. Each set is tied to
+# what the step ACTUALLY emits — a step is never given an expectation it can't
+# produce (e.g. only the DNS-tunnel-emitting steps expect "DNS Tunnel"), so a miss
+# on the scorecard always means "the detector didn't fire", never "we never sent it".
+C2_ALERTS        = ["Command and Control", "C2", "Beacon"]      # beacon + web C2 + egress
+C2_TUNNEL_ALERTS = C2_ALERTS + ["DNS Tunnel"]                   # + a DNS tunnel event
+EXFIL_ALERTS     = ["Exfiltration", "Exfil", "Data Exfil"]      # data_exfil upload + egress
+RECON_NET_ALERTS = ["Rare SMB session", "Port Scan"]           # netstat step: SMB enum ("Rare SMB session to a remote host") + scan
+LATERAL_ALERTS   = ["Lateral", "SMB", "RDP"]                    # pivot: SMB-to-host + RDP
+
+
+def _annotate(story: "Story") -> "Story":
+    """Fill each step's mitre + expected_alerts from TECHNIQUE_CATALOG where the step
+    didn't set them explicitly. Idempotent; returns the same story. Every consumer
+    (run_story, list_stories, mitre_coverage) annotates, so steps always carry their
+    ATT&CK mapping without the builders having to repeat it."""
+    for step in story.steps:
+        tid = (step.technique or {}).get("id")
+        cat = TECHNIQUE_CATALOG.get(tid, {})
+        if not step.mitre:
+            step.mitre = {"tactic": cat.get("tactic"), "technique_id": tid,
+                          "technique": cat.get("technique")}
+        if not step.expected_alerts:
+            step.expected_alerts = list(cat.get("expected_alerts") or [])
+    return story
+
+
 def get_reference_story() -> Story:
     """The full kill-chain arc: a broad real-endpoint recon sweep → C2 beacon (DNS +
     DNS-tunnel + web) → collection → persistence (two techniques), with synthetic
@@ -127,7 +190,8 @@ def get_reference_story() -> Story:
             Step("Discovery — Process Discovery (tasklist).", _wa("T1057")),
             Step("Discovery — System Network Connections (netstat), paired with synthetic "
                  "internal SMB share enumeration and a port scan from the box.",
-                 _wa("T1049"), network=_internal_recon_net()),
+                 _wa("T1049"), network=_internal_recon_net(),
+                 expected_alerts=RECON_NET_ALERTS),
             Step("Discovery — Local Account enumeration (net user).", _wa("T1087.001")),
             Step("Discovery — Security Software Discovery (find AV/EDR).", _wa("T1518.001")),
             # ── Command & Control (TA0011) — real recon + aligned synthetic C2 ────
@@ -136,6 +200,7 @@ def get_reference_story() -> Story:
                 "DNS tunnel, and web C2 to the same domain, from the same host and user.",
                 _wa("T1082"),
                 params={"domain": c2_domain, "protocol": "https", "port": 443},
+                expected_alerts=C2_TUNNEL_ALERTS,
                 network=[
                     NetworkEvent("Infoblox NIOS", "C2_BEACON", context={"domain": c2_domain}),
                     NetworkEvent("Infoblox NIOS", "DNS_TUNNEL"),
@@ -175,6 +240,7 @@ def get_quick_story() -> Story:
                 "egress, same host/user.",
                 _wa("T1082"),
                 params={"domain": c2_domain},
+                expected_alerts=C2_ALERTS,
                 network=[
                     NetworkEvent("Infoblox NIOS", "C2_BEACON", context={"domain": c2_domain}),
                     NetworkEvent("Zscaler Web Gateway", "web_c2_beacon",
@@ -250,6 +316,7 @@ def get_intrusion_story() -> Story:
                 params={"domain": exfil_domain, "protocol": "https", "port": 443,
                         "input_args": {"input_file": r"C:\Windows\win.ini",
                                        "ip_address": f"http://{exfil_domain}/upload"}},
+                expected_alerts=EXFIL_ALERTS,
                 network=[
                     NetworkEvent("Zscaler Web Gateway", "data_exfil",
                                  context={"domain": exfil_domain}, external=True),
@@ -285,7 +352,8 @@ def get_lateral_story() -> Story:
             Step("Discovery — System Owner/User (whoami).", _wa("T1033")),
             Step("Discovery — System Network Connections (netstat), paired with synthetic "
                  "internal SMB share enumeration and a port scan from the box.",
-                 _wa("T1049"), network=_internal_recon_net()),
+                 _wa("T1049"), network=_internal_recon_net(),
+                 expected_alerts=RECON_NET_ALERTS),
             Step("Discovery — Local Account enumeration (net user).", _wa("T1087.001")),
             Step("OS Credential Dumping — LSASS MiniDump via comsvcs.dll (native "
                  "rundll32); the dump file is cleaned up after.",
@@ -295,7 +363,8 @@ def get_lateral_story() -> Story:
             Step("Lateral Movement — endpoint process discovery paired with synthetic "
                  "SMB-to-new-host, an RDP pivot, and a rare SMB file transfer from the "
                  "same box and user.",
-                 _wa("T1057"), network=_internal_lateral_net(), post_delay=2.0),
+                 _wa("T1057"), network=_internal_lateral_net(),
+                 expected_alerts=LATERAL_ALERTS, post_delay=2.0),
         ],
     )
 
@@ -324,6 +393,7 @@ def get_persistence_story() -> Story:
                  "and perimeter-firewall egress to the persistence callback domain.",
                  _wa("T1082"),
                  params={"domain": c2_domain, "protocol": "https", "port": 443},
+                 expected_alerts=C2_ALERTS,
                  network=[
                      NetworkEvent("Infoblox NIOS", "C2_BEACON", context={"domain": c2_domain}),
                      NetworkEvent("Zscaler Web Gateway", "web_c2_beacon",
@@ -362,6 +432,7 @@ def get_fullchain_story() -> Story:
                  "tunnel, web C2 and perimeter egress to the same domain.",
                  _wa("T1082"),
                  params={"domain": c2_domain, "protocol": "https", "port": 443},
+                 expected_alerts=C2_TUNNEL_ALERTS,
                  network=[
                      NetworkEvent("Infoblox NIOS", "C2_BEACON", context={"domain": c2_domain}),
                      NetworkEvent("Infoblox NIOS", "DNS_TUNNEL"),
@@ -410,6 +481,85 @@ def get_fullchain_story() -> Story:
     )
 
 
+# ── Data-driven stories (YAML) ─────────────────────────────────────────────────
+# Tier-2 #4: author stories as YAML under modules/xdr_orchestration/stories/ without
+# touching Python. The built-in Python builders above are the validated canon; YAML
+# files ADD new stories (or override a built-in of the same id). YAML is optional —
+# if PyYAML isn't installed, the loader logs once and returns nothing.
+
+STORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stories")
+
+
+def story_from_dict(d: dict) -> Story:
+    """Build a Story (with Steps + NetworkEvents) from a plain dict — the shape a
+    YAML file deserializes to. Unknown keys are ignored; sensible defaults fill the
+    rest, so a minimal story file is just id/name/steps."""
+    steps = []
+    for sd in (d.get("steps") or []):
+        tech = sd.get("technique") or {}
+        if isinstance(tech, str):                     # allow `technique: T1033` shorthand
+            tech = {"id": tech, "test_numbers": "1", "executor": "winrm_atomic"}
+        tech.setdefault("executor", "winrm_atomic")
+        tech.setdefault("test_numbers", "1")
+        nets = []
+        for ne in (sd.get("network") or []):
+            nets.append(NetworkEvent(
+                module=ne["module"], event=ne["event"],
+                context=dict(ne.get("context") or {}), external=bool(ne.get("external", False))))
+        steps.append(Step(
+            narrative=sd.get("narrative", ""),
+            technique=tech,
+            params=dict(sd.get("params") or {}),
+            network=nets,
+            expected_alerts=list(sd.get("expected_alerts") or []),
+            mitre=dict(sd.get("mitre") or {}),
+            prereqs=bool(sd.get("prereqs", False)),
+            cleanup=bool(sd.get("cleanup", False)),
+            pre_delay=float(sd.get("pre_delay", 0.0)),
+            post_delay=float(sd.get("post_delay", 2.0)),
+        ))
+    return Story(
+        id=d["id"], name=d.get("name", d["id"]),
+        steps=steps,
+        tactics=list(d.get("tactics") or []),
+        anchor_dhcp=bool(d.get("anchor_dhcp", True)),
+        anchor_logon=bool(d.get("anchor_logon", True)),
+    )
+
+
+def load_yaml_stories(story_dir: str = STORY_DIR, *, verbose: bool = False) -> dict:
+    """Return {id: builder} for every *.yaml/*.yml in `story_dir`. Each builder is a
+    closure that rebuilds a fresh Story from the parsed dict on every call (so a run
+    can mutate its own copy). Best-effort: a bad file is skipped with a note, never
+    raised; a missing dir or missing PyYAML returns {}."""
+    if not os.path.isdir(story_dir):
+        return {}
+    try:
+        import yaml
+    except Exception as e:
+        print(f"[XDR] YAML stories skipped — PyYAML not installed ({e}); "
+              "`pip install pyyaml` to author stories as files.")
+        return {}
+    builders = {}
+    for fn in sorted(os.listdir(story_dir)):
+        if not fn.lower().endswith((".yaml", ".yml")):
+            continue
+        path = os.path.join(story_dir, fn)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            if not data.get("id"):
+                print(f"[XDR] YAML story {fn} skipped — no 'id'.")
+                continue
+            story_from_dict(data)                      # validate it builds now
+            builders[data["id"]] = (lambda dd: (lambda: story_from_dict(dd)))(data)
+            if verbose:
+                print(f"[XDR] loaded YAML story {data['id']} from {fn}")
+        except Exception as e:
+            print(f"[XDR] YAML story {fn} skipped — {e}")
+    return builders
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 _STORY_BUILDERS = {
@@ -420,21 +570,50 @@ _STORY_BUILDERS = {
     "xdr_persistence": get_persistence_story,
     "xdr_fullchain":   get_fullchain_story,
 }
+# YAML stories add to / override the built-ins (user-authored canon lives in files).
+_STORY_BUILDERS.update(load_yaml_stories())
 
 
 def list_stories() -> list:
-    """[{id, name, steps, techniques, tactics}] for the console story picker."""
+    """[{id, name, steps, techniques, tactics, expectations}] for the console picker."""
     out = []
     for sid, build in _STORY_BUILDERS.items():
-        s = build()
+        s = _annotate(build())
         out.append({
             "id": s.id,
             "name": s.name,
             "steps": len(s.steps),
             "techniques": [st.technique["id"] for st in s.steps],
             "tactics": list(s.tactics),
+            "expectations": sum(len(st.expected_alerts) for st in s.steps),
         })
     return out
+
+
+def mitre_coverage() -> dict:
+    """ATT&CK coverage map across all registered stories (Tier-1 #2): which tactics
+    and techniques the suite exercises, and which stories cover each technique.
+    Feeds a coverage heatmap in the console / an at-a-glance 'what do we cover?'."""
+    tactics = {}            # tactic -> {technique_id -> {"technique","stories":[...]}}
+    for sid, build in _STORY_BUILDERS.items():
+        s = _annotate(build())
+        for st in s.steps:
+            m = st.mitre or {}
+            tac = m.get("tactic") or "Unmapped"
+            tid = m.get("technique_id") or (st.technique or {}).get("id")
+            bucket = tactics.setdefault(tac, {})
+            row = bucket.setdefault(tid, {"technique": m.get("technique"), "stories": []})
+            if s.id not in row["stories"]:
+                row["stories"].append(s.id)
+    # Flatten to a stable, display-friendly structure.
+    out = []
+    for tac in sorted(tactics):
+        techs = [{"technique_id": tid, "technique": v["technique"], "stories": v["stories"]}
+                 for tid, v in sorted(tactics[tac].items(), key=lambda kv: kv[0] or "")]
+        out.append({"tactic": tac, "techniques": techs})
+    totals = {"tactics": len(tactics),
+              "techniques": len({tid for b in tactics.values() for tid in b})}
+    return {"totals": totals, "by_tactic": out}
 
 
 def override_domain(story: Story, new_domain: str) -> Story:
@@ -472,6 +651,7 @@ def all_technique_ids() -> list:
 
 
 def get_story(story_id: str) -> Optional[Story]:
-    """Resolve a story by id (defaults handled by the caller)."""
+    """Resolve a story by id (defaults handled by the caller). Annotated so every
+    step carries its ATT&CK mapping + detection expectations."""
     build = _STORY_BUILDERS.get(story_id)
-    return build() if build else None
+    return _annotate(build()) if build else None

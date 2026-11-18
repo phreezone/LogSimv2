@@ -537,18 +537,25 @@
       </div>
       <!-- Per-run options -->
       <div style="display:flex;gap:14px;align-items:center;margin-top:10px;flex-wrap:wrap;font-size:13px;color:var(--text-muted);">
-        <label style="display:flex;align-items:center;gap:6px;">Pace
-          <select id="xdr-pace" style="padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
-            <option value="1" selected>Normal</option>
-            <option value="0">Fast (no delays)</option>
-            <option value="2">Slow (2×)</option>
+        <label style="display:flex;align-items:center;gap:6px;">Timing
+          <select id="xdr-timing" style="padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+            <option value="normal" selected>Normal</option>
+            <option value="fast">Fast (no delays)</option>
+            <option value="realistic">Realistic (jittered)</option>
+            <option value="slow">Slow (2× dwell)</option>
           </select>
         </label>
         <label style="display:flex;align-items:center;gap:6px;">Domain override
-          <input type="text" id="xdr-domain" placeholder="e.g. my-c2.example.net" style="width:220px;padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+          <input type="text" id="xdr-domain" placeholder="e.g. my-c2.example.net" style="width:200px;padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
         </label>
         <label style="display:flex;align-items:center;gap:6px;">Skip steps
-          <input type="text" id="xdr-skip" placeholder="e.g. 1,2" style="width:90px;padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+          <input type="text" id="xdr-skip" placeholder="e.g. 1,2" style="width:80px;padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" id="xdr-prevention"> Prevention probe (canary first)
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" id="xdr-scorecard"> Scorecard (pull alerts after)
         </label>
       </div>
       <div id="xdr-story-techs" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>
@@ -556,9 +563,13 @@
 
     <!-- Result -->
     <div id="xdr-result" class="metrics-table-wrap" style="margin-top:16px;padding:14px 16px;display:none;">
-      <div style="display:flex;align-items:center;justify-content:space-between;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
         <strong>Run result</strong>
-        <span id="xdr-result-status" style="font-weight:700;"></span>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <button class="btn btn-sm" id="xdr-rescore-btn" onclick="xdrRescore()" style="display:none;"
+                  title="Re-pull alerts/incidents for this run without re-firing — use a few minutes after the run, once detectors have fired.">↻ Re-score</button>
+          <span id="xdr-result-status" style="font-weight:700;"></span>
+        </div>
       </div>
       <div id="xdr-result-body" style="margin-top:10px;font-size:13px;"></div>
     </div>
@@ -1518,12 +1529,17 @@
     } catch (e) { sel.innerHTML = `<option>Error: ${escHtml(e.message)}</option>`; }
   }
 
+  let xdrLastRunId = null, xdrLastResult = null;
+
   async function xdrRun() {
+    document.getElementById('xdr-rescore-btn').style.display = 'none';
     const story_id = document.getElementById('xdr-story-select').value;
     const dry_run = document.getElementById('xdr-dryrun').checked;
     const cleanup_prior_incidents = document.getElementById('xdr-cleanup').checked;
-    const pace = parseFloat(document.getElementById('xdr-pace').value);
+    const timing_profile = document.getElementById('xdr-timing').value;
     const domain_override = document.getElementById('xdr-domain').value.trim();
+    const prevention_probe = document.getElementById('xdr-prevention').checked;
+    const scorecard = document.getElementById('xdr-scorecard').checked;
     const skip_steps = document.getElementById('xdr-skip').value
       .split(',').map(x => parseInt(x.trim(), 10)).filter(n => Number.isInteger(n));
     const btn = document.getElementById('xdr-run-btn');
@@ -1536,12 +1552,14 @@
     bodyEl.innerHTML = '';
     try {
       const start = await api('/api/attack/run', 'POST', {
-        story_id, dry_run, cleanup_prior_incidents, pace,
+        story_id, dry_run, cleanup_prior_incidents, timing_profile,
+        prevention_probe, scorecard,
         domain_override: domain_override || null,
         skip_steps: skip_steps.length ? skip_steps : null,
       });
       statusEl.textContent = 'running…';
       const runId = start.run_id;
+      xdrLastRunId = runId;
       let done = false, tries = 0;
       while (!done && tries++ < 120) {
         await new Promise(r => setTimeout(r, 2000));
@@ -1552,13 +1570,37 @@
         }
       }
       if (!done) { statusEl.textContent = 'timed out (still running)'; statusEl.style.color = 'var(--yellow)'; }
+      // A finished run can be re-scored once detectors have had time to fire.
+      if (done && !(xdrLastResult && xdrLastResult.attack && xdrLastResult.attack.aborted)) {
+        document.getElementById('xdr-rescore-btn').style.display = '';
+      }
     } catch (e) {
       statusEl.textContent = 'error'; statusEl.style.color = 'var(--red)';
       bodyEl.textContent = e.message;
     } finally { btn.disabled = false; }
   }
 
+  // Re-pull the finished run's alerts/incidents without re-firing the story.
+  async function xdrRescore() {
+    if (!xdrLastRunId) return;
+    const btn = document.getElementById('xdr-rescore-btn');
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = '↻ scoring…';
+    try {
+      const r = await api(`/api/attack/runs/${encodeURIComponent(xdrLastRunId)}/rescore`, 'POST', {});
+      if (xdrLastResult) {
+        xdrLastResult.attack = xdrLastResult.attack || {};
+        xdrLastResult.attack.scorecard = r.scorecard;
+        xdrLastResult._rescored_at = new Date();
+        xdrRenderResult(xdrLastResult);
+      }
+    } catch (e) {
+      alert('Re-score failed: ' + e.message);
+    } finally { btn.disabled = false; btn.textContent = old; }
+  }
+
   function xdrRenderResult(v) {
+    xdrLastResult = v;
     const statusEl = document.getElementById('xdr-result-status');
     const bodyEl = document.getElementById('xdr-result-body');
     const a = v.attack || {};
@@ -1578,8 +1620,45 @@
              + ` <span style="color:var(--text-muted);">${escHtml(r.detail || '')}</span></div>`;
       }).join('');
     }
-    const emitted = v.emitted || (v.emitted_total != null ? v.emitted_total : null);
     html += `<div style="margin-top:8px;color:var(--text-muted);">Synthetic network events emitted: <strong>${a.emitted != null ? a.emitted : '—'}</strong></div>`;
+    if (a.prevention) {
+      const p = a.prevention;
+      const col = p.prevention_active ? 'var(--red)' : 'var(--green)';
+      html += `<div style="margin-top:6px;color:${col};">Prevention probe: ${p.prevention_active ? 'PREVENT' : 'OK'} — <span style="color:var(--text-muted);">${escHtml(p.detail || '')}</span></div>`;
+    }
+    if (a.scorecard) {
+      const s = a.scorecard;
+      if (!s.available) {
+        html += `<div style="margin-top:10px;color:var(--text-muted);"><strong>Scorecard</strong> — unavailable: ${escHtml(s.reason || '')}</div>`;
+      } else {
+        const pct = s.score != null ? Math.round(s.score * 100) + '%' : 'n/a';
+        // Tri-state incident coalescence: none yet / coalesced / split.
+        const ni = (s.incidents||[]).length;
+        let incTxt, incCol;
+        if (s.coalesced === null || s.coalesced === undefined || ni === 0) { incTxt = 'none yet'; incCol = 'var(--text-muted)'; }
+        else if (s.coalesced) { incTxt = 'coalesced'; incCol = 'var(--green)'; }
+        else { incTxt = 'SPLIT across ' + ni; incCol = 'var(--yellow)'; }
+        const when = v._rescored_at ? ` <span style="color:var(--text-muted);">(re-scored ${v._rescored_at.toLocaleTimeString()})</span>` : '';
+        html += `<div style="margin-top:10px;"><strong>Scorecard</strong> — matched `
+             + `<strong>${(s.matched||[]).length}/${s.expected_total}</strong> expected (${pct}); `
+             + `observed ${s.observed_alert_count} alerts; incidents ${ni} `
+             + `<span style="color:${incCol};">(${incTxt})</span>${when}</div>`;
+        (s.matched||[]).forEach(m => {
+          html += `<div style="margin:2px 0;color:var(--green);">✓ ${escHtml(m.needle)} <span style="color:var(--text-muted);">→ ${escHtml((m.alert&&m.alert.name)||'')}</span></div>`;
+        });
+        (s.missing||[]).forEach(m => {
+          html += `<div style="margin:2px 0;color:var(--yellow);">○ ${escHtml(m.needle)} <span style="color:var(--text-muted);">(not observed${m.technique_id ? ', '+escHtml(m.technique_id) : ''})</span></div>`;
+        });
+        // Show the alert names actually observed, so expected_alerts can be tuned to them.
+        const obs = s.observed_sample || [];
+        if (obs.length) {
+          html += `<div style="margin-top:8px;color:var(--text-muted);">Observed alerts (sample): `
+               + obs.map(n => `<span style="color:var(--text);">${escHtml(n)}</span>`).join(', ') + `</div>`;
+        } else if (s.observed_alert_count === 0) {
+          html += `<div style="margin-top:8px;color:var(--text-muted);">No analytics alerts in the window yet — detectors can take ~10 min. Click ↻ Re-score shortly.</div>`;
+        }
+      }
+    }
     bodyEl.innerHTML = html;
   }
 

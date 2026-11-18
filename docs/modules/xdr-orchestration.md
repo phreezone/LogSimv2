@@ -31,7 +31,7 @@ This closes the one gap synthetic feeds can't: the Cortex agent's own data model
 | `XDR_TARGET_TRANSPORT` | no | `winrm` | Set to `stub` for no-box development (uses `config.json` `stub_identity`) |
 | `XDR_TARGET_EGRESS_IP` | no | — | Org NAT/public IP that external-facing logs (Zscaler, perimeter FW) should carry; discovery only knows the internal IP |
 | `XDR_EMAIL_DOMAIN` | no | — | Derive user email when discovery can't |
-| `XSIAM_API_BASE` / `XSIAM_API_KEY_ID` / `XSIAM_API_KEY` | policy control only | — | Cortex `/public_api` management key for agent alert↔block + read-back |
+| `XSIAM_API_BASE` / `XSIAM_API_KEY_ID` / `XSIAM_API_KEY` | read-back (optional) | — | Cortex `/public_api` **Standard** key. Powers the detection **scorecard + Re-score** (which expected alerts fired, endpoint↔network coalescence), the prevention probe + policy control (agent alert↔block), and the dashboard "XSIAM tenant" HEALTH rows. All three required together; the run itself works without them, but the scorecard then reports *unavailable*. Set them and the dashboard Health tab turns green for the **XSIAM API · Public API credentials (read-back)** check. |
 
 The variable *names* are defined once as `ENV_*` constants on `WorkstationConnection` in `connection.py`.
 
@@ -68,7 +68,7 @@ The orchestrator refuses to fire any technique unless `WorkstationConnection.pre
 | **Identity discovery** | The live box reports a logged-in user + hostname + primary IPv4 (the triad the synthetic logs will carry) |
 | **Atomic present** | `Invoke-AtomicTest` is importable on the target |
 | **Cortex agent healthy** | The `cyserver` service is installed and Running (else no endpoint telemetry) |
-| **XSIAM API reachable** | Only when policy control is requested for the run |
+| **XSIAM API reachable** | Only when policy control is requested for the run (needs `XSIAM_API_*`; the read-back scorecard uses the same key) |
 
 ### Run it
 

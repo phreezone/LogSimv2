@@ -1849,6 +1849,20 @@ def api_attack_run():
     anchor_dhcp = bool(anchor_dhcp) if anchor_dhcp is not None else None
     anchor_logon = bool(anchor_logon) if anchor_logon is not None else None
 
+    # Tier-1/2 options: campaign timing, prevention gate, closed-loop scorecard.
+    timing_profile = (body.get("timing_profile") or "").strip().lower() or None
+    try:
+        jitter = float(body["jitter"]) if body.get("jitter") is not None else None
+    except (TypeError, ValueError):
+        jitter = None
+    prevention_probe = bool(body.get("prevention_probe", False))
+    on_prevention = (body.get("on_prevention") or "warn").strip().lower()
+    scorecard = bool(body.get("scorecard", False))
+    try:
+        scorecard_wait = float(body.get("scorecard_wait") or 0)
+    except (TypeError, ValueError):
+        scorecard_wait = 0
+
     cfg = copy.deepcopy(CONFIG)
     modules = {name: state.module for name, state in MODULE_STATES.items()}
     run_id = _new_run(f"attack:{story_id}", story.name)
@@ -1859,7 +1873,9 @@ def api_attack_run():
             mods, c, story_id, dry_run=dry_run, cleanup_prior_incidents=cleanup,
             only_steps=only_steps, skip_steps=skip_steps, pace=pace,
             domain_override=domain_override, anchor_dhcp=anchor_dhcp,
-            anchor_logon=anchor_logon)
+            anchor_logon=anchor_logon, timing_profile=timing_profile, jitter=jitter,
+            prevention_probe=prevention_probe, on_prevention=on_prevention,
+            scorecard=scorecard, scorecard_wait=scorecard_wait)
 
     t = threading.Thread(target=_run_scenario_and_flush, args=(_func, modules, cfg, run_id),
                          daemon=True, name=f"attack-{story_id}-{run_id[:8]}")
@@ -1867,8 +1883,28 @@ def api_attack_run():
     return jsonify({"started": True, "story": story.name, "story_id": story_id,
                     "dry_run": dry_run, "cleanup_prior_incidents": cleanup,
                     "only_steps": only_steps, "skip_steps": skip_steps, "pace": pace,
-                    "domain_override": domain_override,
+                    "domain_override": domain_override, "timing_profile": timing_profile,
+                    "jitter": jitter, "prevention_probe": prevention_probe,
+                    "scorecard": scorecard,
                     "run_id": run_id}), 202
+
+
+@app.get("/api/attack/coverage")
+def api_attack_coverage():
+    """ATT&CK coverage map across all registered stories (Tier-1 #2)."""
+    from modules.xdr_orchestration import mitre_coverage
+    return jsonify(mitre_coverage())
+
+
+@app.get("/api/attack/ledger")
+def api_attack_ledger():
+    """Recent persisted runs (Tier-1 #3), newest first. ?limit=N (default 50)."""
+    from modules.xdr_orchestration import read_runs
+    try:
+        limit = max(1, min(500, int(request.args.get("limit", 50))))
+    except (TypeError, ValueError):
+        limit = 50
+    return jsonify({"runs": read_runs(limit=limit)})
 
 
 @app.get("/api/attack/runs/<run_id>")
@@ -1882,6 +1918,42 @@ def api_attack_run_result(run_id: str):
         return jsonify({"error": f"Run '{run_id}' not found"}), 404
     view["attack"] = _ATTACK_SUMMARIES.get(run_id)
     return jsonify(view)
+
+
+@app.post("/api/attack/runs/<run_id>/rescore")
+def api_attack_rescore(run_id: str):
+    """Recompute a FINISHED run's scorecard by re-pulling XSIAM alerts/incidents for
+    its identity — WITHOUT re-firing the story. Use it a few minutes after a run,
+    once detectors have had time to fire (the inline scorecard pulls immediately and
+    usually reads 0). Optional ?minutes=N sets the lookback window; default is the
+    run's age + 10 min (floored at 15)."""
+    summary = _ATTACK_SUMMARIES.get(run_id)
+    if not summary:
+        return jsonify({"error": f"Run '{run_id}' not found or has no summary yet"}), 404
+    identity = summary.get("identity")
+    if not identity:
+        return jsonify({"error": "run has no discovered identity to score (aborted run?)"}), 400
+    from modules.xdr_orchestration import get_story, build_scorecard
+    story = get_story(summary.get("story_id") or "") or get_story("xdr_reference")
+
+    minutes_back = None
+    if request.args.get("minutes"):
+        try:
+            minutes_back = max(1, int(request.args.get("minutes")))
+        except (TypeError, ValueError):
+            minutes_back = None
+    if minutes_back is None:
+        with _RUNS_LOCK:
+            rec = _RUNS.get(run_id)
+        age_min = int((time.time() - rec["created_at"]) / 60) if rec else 0
+        minutes_back = max(15, age_min + 10)
+
+    try:
+        card = build_scorecard(story, summary, identity, minutes_back=minutes_back, verbose=True)
+    except Exception as e:
+        return jsonify({"error": f"rescore failed: {e}"}), 500
+    summary["scorecard"] = card
+    return jsonify({"run_id": run_id, "scorecard": card, "window_minutes": minutes_back})
 
 
 @app.get("/api/attack/kickstarter")
@@ -2562,6 +2634,37 @@ def _run_health_checks() -> dict:
             "status": "ok" if val else "warn",
             "detail": "set" if val else "not set — its sources fall back to Cribl (see Transport routing)",
         })
+
+    # ── XSIAM Public API credentials (read-back) ──────────────────────────────
+    # OPTIONAL — every module SENDS without these. They are the READ side
+    # (integrations/xsiam_client.py) and gate the "did it detect?" half: the XDR
+    # detection scorecard + Re-score, the prevention probe / policy control, the
+    # "XSIAM tenant" HEALTH rows below, and the _local_validation scripts. Missing
+    # creds make all of that silently report "unavailable" rather than fail loudly,
+    # so surface the gap here. All three are required together; only some set is a
+    # misconfiguration worth a louder nudge than none set.
+    _xsiam_vars = ("XSIAM_API_BASE", "XSIAM_API_KEY_ID", "XSIAM_API_KEY")
+    _xsiam_set = [v for v in _xsiam_vars if os.getenv(v)]
+    if len(_xsiam_set) == len(_xsiam_vars):
+        _xsiam_status = "ok"
+        _xsiam_detail = ("set — read-back enabled (XDR scorecard + Re-score, prevention "
+                         "probe, tenant HEALTH alerts, _local_validation)")
+    elif _xsiam_set:
+        _xsiam_missing = ", ".join(v for v in _xsiam_vars if v not in _xsiam_set)
+        _xsiam_status = "error"
+        _xsiam_detail = (f"PARTIAL — missing {_xsiam_missing}; all three are required "
+                         "together or read-back stays disabled")
+    else:
+        _xsiam_status = "warn"
+        _xsiam_detail = ("not set — XDR detection scorecard / Re-score, prevention probe, "
+                         "the XSIAM tenant HEALTH rows and _local_validation read-back are "
+                         "all disabled (see .env.example -> XSIAM Public API)")
+    results.append({
+        "group": "XSIAM API",
+        "check": "Public API credentials (read-back)",
+        "status": _xsiam_status,
+        "detail": _xsiam_detail,
+    })
 
     # ── Tor exit node list ────────────────────────────────────────────────────
     # Without it every Tor generator silently emits ordinary external IPs while
@@ -3314,6 +3417,9 @@ def _register_v1_aliases():
         ("/api/v1/attack/stories",            "api_attack_stories",      ["GET"]),
         ("/api/v1/attack/run",                "api_attack_run",          ["POST"]),
         ("/api/v1/attack/runs/<run_id>",      "api_attack_run_result",   ["GET"]),
+        ("/api/v1/attack/runs/<run_id>/rescore", "api_attack_rescore",   ["POST"]),
+        ("/api/v1/attack/coverage",           "api_attack_coverage",     ["GET"]),
+        ("/api/v1/attack/ledger",             "api_attack_ledger",       ["GET"]),
         ("/api/v1/attack/kickstarter",        "api_attack_kickstarter",  ["GET"]),
         ("/api/v1/attack/register",           "api_attack_register",     ["POST"]),
     ]
