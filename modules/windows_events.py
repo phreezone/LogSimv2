@@ -2293,6 +2293,19 @@ def _get_dc_short(config):
     return _get_dc_hostname(config).split(".")[0].upper()
 
 
+def _get_spoof_dc_fqdn(config):
+    """FQDN of a domain controller the tenant's identity graph actually knows.
+
+    The dNSHostName analytics ("Suspicious dNSHostName attribute change to DC
+    name" and "Suspicious account attribute modification that matches that of a
+    sensitive machine account") match the new value against real DC assets. A
+    synthetic name that merely *looks* like a DC (DC01.examplecorp.local) never
+    matches, so the spoof has to name a DC that exists in the graph.
+    """
+    return (_cf(config).get("spoof_dc_fqdn")
+            or "ExampleCorp-DC1.corp.examplecorp.com")
+
+
 def _domain_dn(config):
     """Base distinguished name for the simulated AD domain (DC=corp,DC=local)."""
     return ",".join(f"DC={p}" for p in _get_dns_domain(config).split("."))
@@ -7226,24 +7239,28 @@ def _threat_dnshostname_spoofing(config, session_context):
       1. Attacker authenticates → DC-side 4624 + endpoint 4624 + 4672
       2. 4741 or pre-existing machine account (attacker may create a new one)
       3. 4688 PowerShell / Certify process creation
-      4. 5136 dNSHostName modified to DC hostname (detection trigger)
+      4. 5136 dNSHostName modified to the DC's FQDN
       5. 5136 servicePrincipalName updated to match DC SPNs
-      6. 4769 TGS request using the spoofed identity
-      7. 4689 process exit
+      6. 4742 carrying the new DnsHostName — this is the event the detector reads
+      7. 4769 TGS request using the spoofed identity
+      8. 4689 process exit
 
-    Detection keys:
-      - 5136 with AttributeLDAPDisplayName=dNSHostName and AttributeValue
-        matching a DC hostname from a non-DC machine account
-      - Followed by certificate enrollment or TGS requests for DC services
+    Detection keys (verified against the tenant on 2026-11-18, alerts 803275 /
+    803276 / 803488):
+      - the **4742** state-carrying event, with `DnsHostName` set to the FQDN of
+        a domain controller the identity graph actually knows. A 5136 pair on
+        its own does not fire, and a synthetic DC-looking name
+        (`DC01.examplecorp.local`) never matches.
+      - the value has to name a real DC asset, which is why the spoof target
+        comes from `_get_spoof_dc_fqdn()` rather than `_get_dc_hostname()`.
     """
     u = _pick_windows_user(session_context)
     if not u:
         return None
 
+    spoof_dc = _get_spoof_dc_fqdn(config)
+
     dns_domain = _get_dns_domain(config)
-    domain = _get_domain(config)
-    dc_host = _get_dc_hostname(config)
-    dc_short = _get_dc_short(config)
     dc_parts = dns_domain.split(".")
     base_dn = ",".join(f"DC={p}" for p in dc_parts)
 
@@ -7288,13 +7305,13 @@ def _threat_dnshostname_spoofing(config, session_context):
     tool = random.choice([
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
          f'powershell.exe -ep bypass -c "Set-ADComputer {machine_name} '
-         f"-DnsHostName '{dc_host}'\""),
+         f"-DnsHostName '{spoof_dc}'\""),
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
          f'powershell.exe -ep bypass -c "Get-ADComputer {machine_name} | '
-         f"Set-ADComputer -DnsHostName '{dc_host}'\""),
+         f"Set-ADComputer -DnsHostName '{spoof_dc}'\""),
         ("C:\\Users\\Public\\Certipy.exe",
          f"Certipy.exe account update -u {u['username']}@{dns_domain} "
-         f"-p <password> -user {machine_name}$ -dns {dc_host}"),
+         f"-p <password> -user {machine_name}$ -dns {spoof_dc}"),
     ])
     events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
                                          command_line=tool[1],
@@ -7304,8 +7321,8 @@ def _threat_dnshostname_spoofing(config, session_context):
     old_dns = f"{machine_name.lower()}.{dns_domain}"
     old_spn_host = f"HOST/{old_dns}"
     old_spn_rkrb = f"RestrictedKrbHost/{old_dns}"
-    new_spn_host = f"HOST/{dc_host}"
-    new_spn_rkrb = f"RestrictedKrbHost/{dc_host}"
+    new_spn_host = f"HOST/{spoof_dc}"
+    new_spn_rkrb = f"RestrictedKrbHost/{spoof_dc}"
 
     # 5136 pair: dNSHostName Value Deleted (old) then Value Added (new)
     events.append(json.dumps(_build_5136(
@@ -7326,7 +7343,7 @@ def _threat_dnshostname_spoofing(config, session_context):
         object_class="computer",
         object_guid=machine_guid,
         attribute_name="dNSHostName",
-        attribute_value=dc_host,
+        attribute_value=spoof_dc,
         attribute_syntax_oid="2.5.5.12",
         operation_type="%%14674",
         op_correlation_id=op_corr_id,
@@ -7362,21 +7379,22 @@ def _threat_dnshostname_spoofing(config, session_context):
         t += 0.001
     t += 0.01
 
-    # 4742: computer account changed — final-state values
-    all_new_spns = f"{new_spn_host}\r\n\t{new_spn_rkrb}\r\n\tHOST/{dc_short}"
+    # 4742: computer account changed. Only DnsHostName is populated — that is
+    # exactly the shape the tenant's real 4742 uses for unchanged attributes
+    # ("-"), and it is the event the dNSHostName analytics read.
     events.append(json.dumps(_build_4742(
         u, config,
         target_computer_name=machine_sam,
         target_sid=machine_sid,
-        sam_account_name=machine_sam,
-        dns_host_name=dc_host,
-        spns=all_new_spns,
+        sam_account_name="-",
+        dns_host_name=spoof_dc,
+        spns="-",
         logon_id=logon_id, ts=t)))
     t += random.uniform(1.0, 3.0)
 
-    fake_machine_user = {**u, "username": machine_sam, "hostname": dc_host}
+    fake_machine_user = {**u, "username": machine_sam, "hostname": spoof_dc}
     events.append(json.dumps(_build_4769(fake_machine_user, config,
-                                         service_spn=f"ldap/{dc_host}",
+                                         service_spn=f"ldap/{spoof_dc}",
                                          encryption="0x12",
                                          ip_override=u.get("ip"),
                                          ts=t)))

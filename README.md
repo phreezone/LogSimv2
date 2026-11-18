@@ -126,6 +126,12 @@ The Windows Events module generates native Windows Security Event XML targeting 
 `password_never_expires` and `priv_cert_request` were previously `wip_`-prefixed.
 The old names still work.
 
+`dnshostname_spoofing` was verified on 2026-11-18 (alerts 803275/803276 and
+803488/803489). It takes its spoof target from `windows_events.spoof_dc_fqdn`,
+which must name a domain controller the tenant's identity graph actually knows
+(default `ExampleCorp-DC1.corp.examplecorp.com`); a synthetic DC-looking name
+such as `DC01.examplecorp.local` never matches.
+
 **WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 
 | Generator | Reason |

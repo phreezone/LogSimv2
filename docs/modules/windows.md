@@ -138,6 +138,7 @@ after three or more isolated probe batches each, so they are **WIP**.
 |---|---|---|
 | `shadow_credentials` | **Confirmed** | Medium "Possible shadow credentials addition" fired 2026-11-08 and again 2026-11-10 04:46Z on `WEB43$`/`BACKUP31$` (actors `j.fedorov2`, `o.curtis`). A length sweep proved the Medium variation is selected by the 5136 `AttributeValue` DN-Binary length: only `B:828:` fires Medium; every other length fires the Low "Key credential attribute addition" variation. The generator therefore emits an 828-hex-character KEY_CREDENTIAL blob. |
 | `suspicious_sam_change` | **Confirmed** | Low "Suspicious sAMAccountName change" fired 2026-11-08 18:59Z. The state-carrying **4781** rename record is what the analytic keys on, not the 4742 alone. The Medium "to DC hostname" variation is not selected by `NewTargetUserName=DC01` alone; its discriminator remains unknown. |
+| `dnshostname_spoofing` | **Confirmed** | Medium "Suspicious dNSHostName attribute change to DC name" fired 2026-11-18 04:44:08Z (alert 803275) and again 05:06:32Z (803488), together with "Suspicious account attribute modification that matches that of a sensitive machine account" (803276 / 803489). The carrier is the **4742**, and the new value has to equal the FQDN of a DC the identity graph actually knows. See "dNSHostName spoofing: the 4742 carries it, and the value must be a real DC" below. |
 | `priv_cert_request` | **Confirmed** | Low "Suspicious privileged certificate request via certificate template" fired 2026-11-16 17:22Z (alert 799505) on a request submitted **by** `Administrator` for an ordinary user. The reverse shape (ordinary requester, privileged requested subject/SAN) is silent, as is the same requester again within the 1-day dedup window. See "Privileged certificate request: the *requester* is the privileged identity" below. |
 | `pkinit_auth` | **WIP** | 4 batches, 0 alerts. Tried the Microsoft-documented smart-card shape (4768 `PreAuthType=15`, `PreAuthEncryptionType=0x12`, cert issuer/serial/thumbprint), `PreAuthType` 14/16/17, rogue and enterprise issuers, short/full issuer DN, machine and user targets, missing cert, `4771` failure, `TicketOptions=0x60810010`, loopback `::1`, realm-qualified `ServiceName`, and a 4768 correlated with a preceding `msDS-KeyCredentialLink` write. All shapes ingested with the fields intact in both `microsoft_windows_raw` and `xdr_data`. |
 | `spn_cleared` | **WIP** | 5 batches, 0 alerts. Tried 4742 `ServicePrincipalNames` empty / `-` / absent, 5136 `%%14675` delete pairs, 5136 `%%14674` add-with-empty-value, 4662 write-property, and a same-account state transition (4742 with real SPNs, then 4742 with `-`). Batches 4–5 added the missing realism: `UserAccountControl` `%%2080` / `0x1000` (instead of `-`), the "only SPN changed" 4742 shape (`SamAccountName`/`DnsHostName` left as `-`), a real tenant asset (`FS01$`) as well as a new machine, and deleted-value renderings `-` / empty / absent. All shapes ingested; none alerted. Batch 6 re-ran the module's full sequence after the CRLF fix (9 events, real CRLF) — still 0 alerts. |
@@ -145,6 +146,48 @@ after three or more isolated probe batches each, so they are **WIP**.
 | `adminsdholder_acl_modification` | **WIP** | 3 batches, 0 alerts. Batch 1 delivered the canonical shape — 5136 `nTSecurityDescriptor` pair on `CN=AdminSDHolder,CN=System,DC=examplecorp,DC=local` with `ObjectClass=container`, `OperationType` `%%14675`/`%%14674` under one `OpCorrelationID`, and a new ACE `(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;<user SID>)` (Full control for a non-machine principal), plus the 4662 read `0x10`, WRITE_DAC `0x40000` and write-property `0x20` legs. This matches the published logic for the same detection (Splunk ESCU `00d877c3-7b7b-443d-9562-6b231e2abab9`: `EventCode=5136 ObjectClass=container ObjectDN="CN=AdminSDHolder,CN=System*"`, new ACE with Full control). Every field verified in `xdr_data`. Batch 2 was a differential probe: the same `msDS-KeyCredentialLink` change fired on the container (alert 799066, "The account type: container"), so the target type is not the blocker. Batch 3 added a second ACE for `WD` and named the `nTSecurityDescriptor` GUID in the WRITE_DAC `Properties`; still 0. See "Container targets are evaluated" below. |
 | `wip_esc4_template_modification` | **WIP** | 3 batches, 0 alerts. Attempt 1 was `5136` only (`nTSecurityDescriptor` delete+add on the template granting Authenticated Users the write rights DA/SY hold, plus `msPKI-Certificate-Name-Flag=1`). Attempt 2 added the `4662` legs (`0x10` read, `0x40000` WRITE_DAC `%%1539`, `0x20` property write `%%7685`) with the documented schema GUIDs. Attempt 3 added `4899`/`4900` from the CA with old/new template content and old/new security descriptor. All events verified ingested. The detector's own event-collection reference names **4899, 4900 and 4662** (not 5136); the `4899`/`4900` EventData names remain unverifiable because Microsoft publishes no per-event page. See "AD CS detectors: what is reachable and what is not" below. |
 | `mailbox_export`, `mailbox_export_log_removal`, `mailbox_cas_change` | **WIP** | 3 batches, 0 alerts. Tried 4104 `ScriptBlockText` carrying `New-MailboxExportRequest` / `Remove-MailboxExportRequest` / `Set-CASMailbox`, 4688 process creation, and native `MSExchange Management` EventID 1 `CmdletName`/`CmdletParameters` (simple and full field sets: `ObjectModified`, `User`, `Organization`, `OriginatingServer`, `Succeeded`, `RunspaceId`, `Timestamp`). The `MSExchange Management` channel **does** ingest and normalize (`microsoft_windows_raw` → `xdr_data`, `action_evtlog_event_id=1`), so channel availability is not the blocker. |
+
+### dNSHostName spoofing: the 4742 carries it, and the value must be a real DC (2026-11-18)
+
+`dnshostname_spoofing` had never produced an alert in 90 days and had no
+verification note, so it was probed in three batches. The first two were silent
+and the third fired **both** dNSHostName analytics within six seconds of
+delivery.
+
+| Attempt | Shape | Alert |
+|---|---|---|
+| 04:01Z | shipped generator: new `DESKTOP####` account, 5136 dNSHostName pair → `DC01.examplecorp.local`, SPN pairs, 4742, 4769 | none |
+| 04:22Z | real `FS01$` asset, same shape plus 4662 legs (`0x10`, `0x8` Write Self, `0x20`) with the computer-class and dNSHostName schema GUIDs | none |
+| 04:44Z | two accounts, 4742 reduced to a **dNSHostName-only change** (other attributes `-`): `FS01$` → `DC01.examplecorp.local` and `BACKUP01$` → `ExampleCorp-DC1.corp.examplecorp.com` | **803275 / 803276** for `backup01$` only |
+
+Two bisects then separated the variables:
+
+* **05:03Z** — a lone 5136 dNSHostName old→new pair on `FS02$` with the real DC
+  FQDN produced no alert in 150 s. The 5136 pair is not what the analytic reads,
+  consistent with the sAMAccountName finding that the state-carrying 4742 is the
+  consumed event.
+* **05:06Z** — a **single 4742** for a brand-new `WKSTMP7741$`, `DnsHostName` =
+  `ExampleCorp-DC1.corp.examplecorp.com`, everything else `-`, fired both
+  analytics six seconds later (803488 / 803489). No baseline, no 5136, no 4662,
+  no 4768/4769 was needed.
+
+The second discriminator is the value. `DC01.examplecorp.local` is a synthetic
+host that only LogSim emits; the tenant's real DC is the computer account
+`EXAMPLECORP-DC1$` in realm `CORP.EXAMPLECORP.COM` (read from real 4769s, whose
+`ServiceName` is `EXAMPLECORP-DC1$` and `TargetDomainName` is
+`CORP.EXAMPLECORP.COM`). The analytics compare the new dNSHostName against that
+real asset, so a name that merely *looks* like a DC never matches. The generator
+therefore takes its spoof target from `windows_events.spoof_dc_fqdn`
+(default `ExampleCorp-DC1.corp.examplecorp.com`) instead of the synthetic
+`domain_controller_hostname`, and emits the 4742 with
+`SamAccountName`/`ServicePrincipalNames` as `-` exactly as the tenant's own real
+4742 does for unchanged attributes.
+
+Alert 803275 carries `DT:Identity Analytics`, `R:Domain Controllers` and
+`DS:Microsoft/Windows`; 803276 additionally carries
+`DT:Active Directory Certificate Services Analytics`. Dedup is per account:
+the two accounts fired separately, and a repeat for a third account 22 minutes
+later fired again.
 
 What was ruled out as a common cause:
 
