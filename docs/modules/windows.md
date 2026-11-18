@@ -467,6 +467,15 @@ discriminator and the generator can keep drawing from
 calendar-day reset: the window is a rolling period measured from the last alert,
 so re-verify by waiting a full day after it rather than sending another batch.
 
+**Confirmed on day 2.** The shipped generator was fired again at 2026-11-17
+17:25:00Z — 24 h 3 min after 799505 — and raised alert **800683** at 17:24:52Z
+(Low, `CA01.examplecorp.local`, `user_name=EXAMPLECORP\Administrator`, subject
+`CN=d.kapoor,CN=Users,DC=examplecorp,DC=local`). So `PRIV_CERT_REQUEST` is
+verified end to end from the shipped generator, not just from the probe, and the
+dedup window is a rolling ~1 day from the last alert. The same batch also
+delivered its `4898` leg, and "Vulnerable certificate template loaded" stayed
+silent — independent confirmation of that detector's WIP status.
+
 ### CRLF reaches `action_evtlog_message`, not the EventData JSON (2026-11-16)
 
 The 17:04Z CA batch was the first 4886/4887/4898 data with the renderer fix
