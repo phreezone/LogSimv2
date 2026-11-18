@@ -1925,8 +1925,9 @@ def api_attack_rescore(run_id: str):
     """Recompute a FINISHED run's scorecard by re-pulling XSIAM alerts/incidents for
     its identity — WITHOUT re-firing the story. Use it a few minutes after a run,
     once detectors have had time to fire (the inline scorecard pulls immediately and
-    usually reads 0). Optional ?minutes=N sets the lookback window; default is the
-    run's age + 10 min (floored at 15)."""
+    usually reads 0). Optional ?minutes=N sets the lookback window; default is from
+    the run's start (summary.started_at) to now plus a buffer, floored at 15 —
+    scorecard.run_window_minutes."""
     summary = _ATTACK_SUMMARIES.get(run_id)
     if not summary:
         return jsonify({"error": f"Run '{run_id}' not found or has no summary yet"}), 404
@@ -1942,7 +1943,8 @@ def api_attack_rescore(run_id: str):
             minutes_back = max(1, int(request.args.get("minutes")))
         except (TypeError, ValueError):
             minutes_back = None
-    if minutes_back is None:
+    if minutes_back is None and not summary.get("started_at"):
+        # Summary from before started_at was recorded: fall back to the run record.
         with _RUNS_LOCK:
             rec = _RUNS.get(run_id)
         age_min = int((time.time() - rec["created_at"]) / 60) if rec else 0
@@ -1953,7 +1955,8 @@ def api_attack_rescore(run_id: str):
     except Exception as e:
         return jsonify({"error": f"rescore failed: {e}"}), 500
     summary["scorecard"] = card
-    return jsonify({"run_id": run_id, "scorecard": card, "window_minutes": minutes_back})
+    return jsonify({"run_id": run_id, "scorecard": card,
+                    "window_minutes": card.get("window_minutes", minutes_back)})
 
 
 @app.get("/api/attack/kickstarter")

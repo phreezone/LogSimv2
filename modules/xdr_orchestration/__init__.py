@@ -48,6 +48,7 @@ from .kickstarter import render_kickstarter, DEFAULT_TECHNIQUES
 from .timing import resolve_timing, Timing, PACE_PROFILES
 from .policy import probe_prevention, PolicyController, PreventionResult
 from .scorecard import build_scorecard, collect_expectations
+from .validate import validate_story
 from .ledger import record_run, read_runs, summarize_run, ledger_path
 
 __all__ = [
@@ -92,6 +93,7 @@ __all__ = [
     "PolicyController",
     "PreventionResult",
     "build_scorecard",
+    "validate_story",
     "collect_expectations",
     "record_run",
     "read_runs",

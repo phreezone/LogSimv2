@@ -59,8 +59,12 @@ def summarize_run(summary: dict, *, story_id: Optional[str] = None,
             "matched": len(sc.get("matched") or []),
             "missing": len(sc.get("missing") or []),
             "by_source": sc.get("by_source"),
+            "unexpected": [u.get("name") for u in (sc.get("unexpected") or [])],
+            "alert_cases": sc.get("alert_cases"),
             "incidents": len(sc.get("incidents") or []),
             "coalesced": sc.get("coalesced"),
+            "coalesced_basis": sc.get("coalesced_basis"),
+            "uncased": len(sc.get("uncased") or []),
         }
     return {
         "ts": time.time(),

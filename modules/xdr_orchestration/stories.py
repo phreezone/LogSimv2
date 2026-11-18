@@ -537,7 +537,16 @@ def load_yaml_stories(story_dir: str = STORY_DIR, *, verbose: bool = False) -> d
             if not data.get("id"):
                 print(f"[XDR] YAML story {fn} skipped — no 'id'.")
                 continue
-            story_from_dict(data)                      # validate it builds now
+            built = story_from_dict(data)              # validate it builds now
+            # ...and that it names real modules/events (validate.py). Errors keep the
+            # file out of the registry so it can never be fired; warnings just print.
+            from .validate import validate_story, errors, format_problems
+            problems = validate_story(built)
+            if errors(problems):
+                print(f"[XDR] YAML story {fn} skipped — invalid:\n{format_problems(problems)}")
+                continue
+            if problems:
+                print(f"[XDR] YAML story {fn} loaded with warnings:\n{format_problems(problems)}")
             builders[data["id"]] = (lambda dd: (lambda: story_from_dict(dd)))(data)
             if verbose:
                 print(f"[XDR] loaded YAML story {data['id']} from {fn}")
@@ -561,13 +570,16 @@ _STORY_BUILDERS.update(load_yaml_stories())
 
 
 def list_stories() -> list:
-    """[{id, name, steps, techniques, tactics, expectations}] for the console picker.
-    `expectations` counts DETECTIONS (endpoint + derived network), not needles."""
+    """[{id, name, steps, techniques, tactics, expectations, problems}] for the console
+    picker. `expectations` counts DETECTIONS (endpoint + derived network), not needles;
+    `problems` is validate_story()'s list (warnings only -- errored stories never load)."""
     from .scorecard import collect_expectations   # lazy: scorecard reads module maps
+    from .validate import validate_story
     out = []
     for sid, build in _STORY_BUILDERS.items():
         s = _annotate(build())
         out.append({
+            "problems": validate_story(s),
             "id": s.id,
             "name": s.name,
             "steps": len(s.steps),

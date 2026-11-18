@@ -1522,8 +1522,15 @@
       sel.onchange = () => {
         const s = stories.find(x => x.id === sel.value);
         const tactics = (s && s.tactics && s.tactics.length) ? 'Tactics: ' + s.tactics.join(' → ') + '  ·  ' : '';
-        document.getElementById('xdr-story-techs').textContent =
-          s ? tactics + 'Techniques: ' + s.techniques.join(', ') : '';
+        // Story-check warnings (validate.py). Stories with errors never load, so
+        // anything listed here still runs.
+        const probs = (s && s.problems) || [];
+        const warn = probs.length
+          ? `<div style="color:var(--yellow);margin-top:3px;">⚠ story check: `
+            + probs.map(p => escHtml((p.step ? 'step ' + p.step + ': ' : '') + p.message)).join('<br>⚠ ')
+            + `</div>` : '';
+        document.getElementById('xdr-story-techs').innerHTML =
+          s ? escHtml(tactics + 'Techniques: ' + s.techniques.join(', ')) + warn : '';
       };
       sel.onchange();
     } catch (e) { sel.innerHTML = `<option>Error: ${escHtml(e.message)}</option>`; }
@@ -1609,6 +1616,11 @@
     statusEl.style.color = a.aborted || v.status === 'error' ? 'var(--red)' : (ok ? 'var(--green)' : 'var(--yellow)');
     let html = '';
     if (a.aborted) html += `<div style="color:var(--red);">${escHtml(a.aborted)}</div>`;
+    (a.validation || []).forEach(p => {
+      const col = p.level === 'error' ? 'var(--red)' : 'var(--yellow)';
+      html += `<div style="color:${col};">${p.level === 'error' ? '✗' : '⚠'} `
+           + `${escHtml((p.step ? 'step ' + p.step + ': ' : '') + p.message)}</div>`;
+    });
     if (a.identity) html += `<div style="color:var(--text-muted);margin-bottom:8px;">Identity: `
         + `user=${escHtml(a.identity.username)} host=${escHtml(a.identity.hostname)} ip=${escHtml(a.identity.ip)}</div>`;
     const execs = (a.results || []).filter(r => r.action === 'execute');
@@ -1632,12 +1644,16 @@
         html += `<div style="margin-top:10px;color:var(--text-muted);"><strong>Scorecard</strong> — unavailable: ${escHtml(s.reason || '')}</div>`;
       } else {
         const pct = s.score != null ? Math.round(s.score * 100) + '%' : 'n/a';
-        // Tri-state incident coalescence: none yet / coalesced / split.
+        // Tri-state coalescence: none yet / one case / split. Judged from the run's
+        // alerts' case_ids when any have one (exact), else the user/host incident lookup.
         const ni = (s.incidents||[]).length;
+        const nCases = s.coalesced_basis === 'alert_cases' ? (s.alert_cases||[]).length : ni;
+        const basis = s.coalesced_basis === 'alert_cases' ? ' by alert case_id'
+                    : (s.coalesced_basis === 'incident_lookup' ? ' by user/host lookup' : '');
         let incTxt, incCol;
-        if (s.coalesced === null || s.coalesced === undefined || ni === 0) { incTxt = 'none yet'; incCol = 'var(--text-muted)'; }
-        else if (s.coalesced) { incTxt = 'coalesced'; incCol = 'var(--green)'; }
-        else { incTxt = 'SPLIT across ' + ni; incCol = 'var(--yellow)'; }
+        if (s.coalesced === null || s.coalesced === undefined) { incTxt = 'none yet'; incCol = 'var(--text-muted)'; }
+        else if (s.coalesced) { incTxt = 'one case' + basis; incCol = 'var(--green)'; }
+        else { incTxt = 'SPLIT across ' + nCases + basis; incCol = 'var(--yellow)'; }
         const when = v._rescored_at ? ` <span style="color:var(--text-muted);">(re-scored ${v._rescored_at.toLocaleTimeString()})</span>` : '';
         // Detections, not needles: each row is one alert (its alternates count once),
         // tagged with where its signal comes from so a miss explains itself.
@@ -1647,13 +1663,39 @@
         html += `<div style="margin-top:10px;"><strong>Scorecard</strong> — detected `
              + `<strong>${(s.matched||[]).length}/${s.expected_total}</strong> (${pct})`
              + (split ? ` <span style="color:var(--text-muted);">[${escHtml(split)}]</span>` : '')
-             + `; observed ${s.observed_alert_count} alerts; incidents ${ni} `
+             + `; observed ${s.observed_alert_count} alerts`
+             + (s.run_alert_count !== undefined ? ` (${s.run_alert_count} tied to this run)` : '')
+             + `; cases `
              + `<span style="color:${incCol};">(${incTxt})</span>${when}</div>`;
         const tag = (m) => `<span style="color:var(--text-muted);font-size:11px;">[${escHtml(m.source || '?')}]</span>`;
         const stepTxt = (m) => `step ${m.step}${m.technique_id ? ', ' + escHtml(m.technique_id) : ''}`;
+        // case_id comes from the alert itself; unset means XSIAM never grouped it
+        // into a case (low-severity alerts on this tenant).
+        const caseTxt = (c) => c ? `case ${escHtml(String(c))}` : 'no case';
+        if (s.truncated) {
+          html += `<div style="color:var(--yellow);">⚠ Alert fetch hit its ${escHtml(String(s.fetch_limit))}-alert cap — `
+               + `the oldest alerts in the window (the run's first steps) may be missing, so early misses aren't reliable.</div>`;
+        }
+        const ac = s.alert_cases || [];
+        if (s.alert_cases !== undefined) {
+          html += `<div style="color:var(--text-muted);">Cases from the run's alerts: `
+               + (ac.length ? ac.map(c => escHtml(String(c))).join(', ')
+                    + (ac.length === 1 ? ' <span style="color:var(--green);">(one case)</span>'
+                                       : ' <span style="color:var(--yellow);">(split)</span>')
+                            : 'none — no attributed alert has a case_id yet')
+               + `</div>`;
+        }
+        const unc = s.uncased || [];
+        if (unc.length) {
+          html += `<div style="color:var(--text-muted);">Detected but not grouped into any case (no case_id):`
+               + unc.map(escHtml).join(', ') + `</div>`;
+        }
         (s.matched||[]).forEach(m => {
           html += `<div style="margin:2px 0;color:var(--green);">✓ ${tag(m)} ${escHtml(m.label || m.needle)} `
-               + `<span style="color:var(--text-muted);">→ ${escHtml((m.alert&&m.alert.name)||'')} (${stepTxt(m)})</span></div>`;
+               + `<span style="color:var(--text-muted);">→ ${escHtml((m.alert&&m.alert.name)||'')} (${stepTxt(m)}; `
+               + (m.matched_by === 'mitre' ? `by MITRE ${escHtml(m.needle||'')}; ` : '')
+               + (m.via ? `tied by ${escHtml(m.via)}; ` : '')
+               + `${caseTxt(m.alert&&m.alert.case_id)})</span></div>`;
         });
         (s.missing||[]).forEach(m => {
           // network: we sent it, the detector didn't fire. endpoint: no synthetic signal
@@ -1663,18 +1705,37 @@
             : `endpoint-only — no synthetic signal; the agent didn't alert`;
           const alts = (m.needles||[]).length > 1
             ? ` <span style="color:var(--text-muted);">looked for: ${(m.needles||[]).map(escHtml).join(' | ')}</span>` : '';
+          // A same-named alert fired, but carries none of the run's user/host/IP/domain:
+          // background traffic or another host, so it isn't counted.
+          const stray = m.unattributed
+            ? `<div style="margin-left:18px;color:var(--text-muted);font-size:12px;">a "${escHtml(m.unattributed.name||'')}" alert did fire, but not for this run's user/host/IP/domain — not counted</div>` : '';
           html += `<div style="margin:2px 0;color:var(--yellow);">○ ${tag(m)} ${escHtml(m.label || m.needle)} `
-               + `<span style="color:var(--text-muted);">(${stepTxt(m)}; ${why})</span>${alts}</div>`;
+               + `<span style="color:var(--text-muted);">(${stepTxt(m)}; ${why})</span>${alts}</div>${stray}`;
         });
         const un = s.untracked || [];
         if (un.length) {
           html += `<div style="margin-top:4px;color:var(--text-muted);">Emitted, no detection mapped (not scored): `
                + un.map(u => escHtml(u.emitted)).join(', ') + `</div>`;
         }
-        // Show the alert names actually observed, so expected_alerts can be tuned to them.
+        // Alerts carrying this run's user/host/IP/domain that no expectation claimed:
+        // an extra detection worth knowing about, or a needle that has drifted.
+        const ux = s.unexpected || [];
+        if (ux.length) {
+          html += `<div style="margin-top:8px;"><strong>Also fired for this run (not expected)</strong></div>`;
+          ux.forEach(u => {
+            const cases = (u.case_ids||[]).length ? (u.case_ids||[]).map(c => caseTxt(c)).join(', ') : 'no case';
+            html += `<div style="margin:2px 0;">• ${escHtml(u.name||'')}${u.count > 1 ? ' ×' + u.count : ''} `
+                 + `<span style="color:var(--text-muted);">(${escHtml(u.severity||'?')}, ${escHtml(u.source||'?')}; `
+                 + ((u.mitre||[]).length ? `${(u.mitre||[]).map(escHtml).join(', ')}; ` : '')
+                 + `matched on ${escHtml(u.via||'?')}; ${cases})</span></div>`;
+          });
+        } else if (s.unexpected !== undefined) {
+          html += `<div style="margin-top:8px;color:var(--text-muted);">Nothing unexpected fired for this run's user, host, IPs or domains.</div>`;
+        }
+        // Tenant-wide alert names in the window (not attributed to the run), for tuning.
         const obs = s.observed_sample || [];
         if (obs.length) {
-          html += `<div style="margin-top:8px;color:var(--text-muted);">Observed alerts (sample): `
+          html += `<div style="margin-top:8px;color:var(--text-muted);">Tenant alerts in window (sample, any source): `
                + obs.map(n => `<span style="color:var(--text);">${escHtml(n)}</span>`).join(', ') + `</div>`;
         } else if (s.observed_alert_count === 0) {
           html += `<div style="margin-top:8px;color:var(--text-muted);">No analytics alerts in the window yet — detectors can take ~10 min. Click ↻ Re-score shortly.</div>`;

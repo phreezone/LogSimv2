@@ -188,7 +188,10 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
                "results": [], "emitted": 0, "aborted": None,
                "selected_steps": [i for (i, _s) in selected],
                "domain_override": domain_override or None,
-               "timing": timing.to_dict(), "prevention": None, "scorecard": None}
+               "timing": timing.to_dict(), "prevention": None, "scorecard": None,
+               # Epoch seconds; the scorecard sizes its alert window from this so a
+               # long run (or a late Re-score) still covers the run's first alerts.
+               "started_at": time.time()}
     _run_options = {"dry_run": dry_run, "only_steps": only_steps,
                     "skip_steps": skip_steps, "domain_override": domain_override or None,
                     "timing": timing.to_dict(), "prevention_probe": prevention_probe,
@@ -213,6 +216,19 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
             _stream.reconfigure(encoding="utf-8")
         except (AttributeError, ValueError):
             pass
+
+    # 0) Story validation — offline, before touching the box. An unknown module or
+    #    event would emit nothing and score as a phantom miss, so refuse to fire.
+    from .validate import validate_story, errors as _errors, format_problems
+    problems = validate_story(story)
+    summary["validation"] = problems
+    if problems:
+        print(f"[XDR] story check:\n{format_problems(problems)}")
+    if _errors(problems):
+        summary["aborted"] = (f"story '{story.id}' failed validation "
+                              f"({len(_errors(problems))} error(s)) — orchestrator refuses to fire")
+        print(f"[XDR] ABORT — {summary['aborted']}")
+        return _finalize(summary)
 
     # 1) Connection.
     if connection is None:

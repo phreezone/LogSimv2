@@ -142,6 +142,39 @@ Stories (also registered as CLI scenarios 24/25/26):
 
 Every technique is non-destructive and cleanup-capable (test numbers validated live via `-ShowDetails`). The `xdr_intrusion` story uses the `Step.prereqs` hook to stage a technique's target (e.g. the file T1070.004 deletes) with `-GetPrereqs` before firing.
 
+### Story check (offline)
+
+`validate.py` checks every story against the repo before anything fires. It doesn't need a tenant or the box.
+
+- **Errors:**
+  - a network `module` that matches no module `NAME`
+  - an `event` that the named module never emits
+  - a step with no ATT&CK technique id
+  - malformed `test_numbers`
+
+  A YAML story with errors is **not registered**. The loader prints why. A run of an invalid story aborts before it connects to the box.
+- **Warnings:**
+  - a technique outside the validated palette
+  - a correlation rule name that is missing from `XSIAM imports/rule_ids.json`
+
+  The story still runs. The console's story picker shows the warnings.
+
+### Scorecard read-back
+
+- **Sources:** the analytics and correlation sources (`XDR Analytics`, `XDR Analytics BIOC`, `Correlation`) plus the agent sources (`XDR Agent`, `XDR BIOC`, `XDR IOC`). The box's own Cortex detections arrive as `XDR Agent`.
+- **Only the run's alerts count.** An expected detection is matched only by an alert that carries one of the run's markers (listed under "Also fired for this run" below). A same-named alert from background traffic or another host is shown on the missed row as "did fire, but not for this run" and is not counted.
+- **Endpoint rows match by technique:** the step's ATT&CK id is compared with the alert's `mitre_technique_id_and_name` tags. A tag of the same technique, its parent, or one of its sub-techniques counts. The step's name fragments are only a fallback.
+- **Fetch size:** alerts are fetched newest first, 30 per minute of window, between 300 and 3,000. When the cap is hit, the scorecard flags it as `truncated`, because the run's earliest alerts may have been cut off.
+- **Window:** from the run's `started_at`, minus 5 minutes, to now, with a minimum of 15 minutes. It is recomputed whenever the scorecard is pulled, so a later **Re-score** still reaches the run's first alerts.
+- **Also fired for this run:** alerts that no expectation claimed, but that carry one of the run's own markers. The markers are:
+  - the box user (`user`, `DOMAIN\user`, `user@…`)
+  - the box host's short name
+  - the box's internal IP
+  - a domain the run used
+
+  The egress IP is deliberately not a marker: it is the office's shared NAT address, so background traffic carries it too.
+- **Cases:** every alert from `get_alerts_multi_events` carries its `case_id`. The scorecard judges whether the run landed in one case from those ids. It falls back to the user/host incident lookup only when no run alert has a case yet. Detected alerts with no `case_id` are listed separately. Those alerts were not grouped into any case, and in a 2026-11-18 sample of this tenant they were all low severity.
+
 ## The Kickstarter (console-generated one-shot installer)
 
 `modules/xdr_orchestration/kickstarter.py` renders a self-contained PowerShell script from the running console's own values (its IP/URL, a scoped token, and exactly the atomics the stories need). Download it from the tab's **Generate workstation installer** button or `GET /api/v1/attack/kickstarter`. Run it **elevated** on a bare box and it: enables WinRM (firewall scoped to the console IP + `LocalAccountTokenFilterPolicy`), installs Invoke-AtomicRedTeam + the story prereqs **unattended** (NuGet/PSGallery/powershell-yaml pre-satisfied), verifies the Cortex agent, self-checks (mirrors preflight), and phones home readiness to `/api/v1/attack/register`. Idempotent; ships with `-Uninstall`. Lab-only, watermarked.
