@@ -133,6 +133,7 @@ The old names still work.
 | `wip_adminsdholder_acl_modification` | ACL analytic does not fire on the canonical 5136/4662 shape; container targets *are* evaluated (see `docs/modules/windows.md`) |
 | `wip_irregular_service_tgs` | Only ever raises the weak-encryption ticket alert that `multiple_service_tickets` owns; `irregular_tgt_burst` covers its intended detection. Background only — not offered on demand |
 | `wip_sccm_container_recon` | Full real shape (4662 reads + the DC's 1644 LDAP search naming the container) still silent; every real 1644 in the tenant is agent-collected, WEC lands as `EVENT_LOG_DOMAIN_CONTROLLER` (see `docs/modules/windows.md`) |
+| `wip_esc4_template_modification` | 3 batches (5136 only → +4662 legs → +CA 4899/4900) still silent. The detector's own collection reference names 4899/4900/4662; those EventData names are unverifiable because Microsoft publishes no per-event page (see `docs/modules/windows.md`) |
 | `wip_shadow_credentials` | Added 2026-10-21 — *Key credential attribute modification* (5136 `msDS-KeyCredentialLink` + PKINIT 4768) |
 | `wip_default_account_masquerade` | Added 2026-10-21 — *Masquerading as a default local account* (local 4720 `DefaultAccount` / `Guest` on a member server) |
 | `wip_samaccountname_change` | Added 2026-10-21 — *Suspicious sAMAccountName change* (4781 machine account renamed without `$`) |

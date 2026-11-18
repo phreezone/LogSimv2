@@ -211,6 +211,8 @@ _EVENT_META = {
     4887: {"task": 12290, "category": "Certification Services",    "version": 0, "outcome": "success"},
     4888: {"task": 12290, "category": "Certification Services",    "version": 0, "outcome": "failure"},
     4898: {"task": 12293, "category": "Certification Services",    "version": 0, "outcome": "success"},
+    4899: {"task": 12294, "category": "Certification Services",    "version": 0, "outcome": "success"},
+    4900: {"task": 12295, "category": "Certification Services",    "version": 0, "outcome": "success"},
     4720: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4722: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4724: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
@@ -1041,6 +1043,47 @@ def _msg_4898(d):
     )
 
 
+def _msg_4899(d):
+    # 4899 is the CA's "template updated" record. Message layout follows the published
+    # 4899 description: "%1 v%2 (Schema V%3)", the template DN, then an Old/New
+    # Template Content pair and the DC that performed the change.
+    return (
+        "A Certificate Services template was updated.\r\n\r\n"
+        f"\t{d.get('TemplateInternalName','')} "
+        f"v{d.get('TemplateVersion','')} "
+        f"(Schema V{d.get('TemplateSchemaVersion','')})\r\n"
+        f"\t{d.get('TemplateDSObjectFQDN','')}\r\n"
+        f"\t{d.get('TemplateOID','')}\r\n"
+        f"Template Change Information:\r\n"
+        f"\tOld Template Content:\t{d.get('OldTemplateContent','')}\r\n"
+        f"\tNew Template Content:\t{d.get('NewTemplateContent','')}\r\n"
+        f"Additional Information:\r\n"
+        f"\tDomain Controller:\t{d.get('DomainController','')}"
+    )
+
+
+def _msg_4900(d):
+    # 4900 is the CA's "template *security* updated" record — the ACL change on the
+    # template object. Published sample carries Old/New Template Content *and*
+    # Old/New Security Descriptor, which is exactly the before/after an ESC4
+    # analytic needs to see.
+    return (
+        "Certificate Services template security was updated.\r\n\r\n"
+        f"\t{d.get('TemplateInternalName','')} "
+        f"v{d.get('TemplateVersion','')} "
+        f"(Schema V{d.get('TemplateSchemaVersion','')})\r\n"
+        f"\t{d.get('TemplateDSObjectFQDN','')}\r\n"
+        f"\t{d.get('TemplateOID','')}\r\n"
+        f"Template Change Information:\r\n"
+        f"\tOld Template Content:\t{d.get('OldTemplateContent','')}\r\n"
+        f"\tNew Template Content:\t{d.get('NewTemplateContent','')}\r\n"
+        f"\tOld Security Descriptor:\t{d.get('OldSecurityDescriptor','')}\r\n"
+        f"\tNew Security Descriptor:\t{d.get('NewSecurityDescriptor','')}\r\n"
+        f"Additional Information:\r\n"
+        f"\tDomain Controller:\t{d.get('DomainController','')}"
+    )
+
+
 def _msg_4887(d):
     return (
         "Certificate Services approved a certificate request and issued a certificate.\r\n\r\n"
@@ -1442,6 +1485,8 @@ _MSG_BUILDERS = {
     4887: _msg_4887,
     4888: _msg_4888,
     4898: _msg_4898,
+    4899: _msg_4899,
+    4900: _msg_4900,
     4720: _msg_4720,
     4697: _msg_4697,
     1102: _msg_1102,
@@ -3792,6 +3837,91 @@ def _build_4898(user_info, config, *, template_name, enrollee_supplies_subject=T
     return _build_event(4898, ca_host, event_data, success=True, ts=ts)
 
 
+def _build_4899(user_info, config, *, template_name, old_content, new_content,
+                schema_version="2", template_version="100.2",
+                template_oid=None, logon_id=None, ts=None) -> dict:
+    """4899 – A Certificate Services template was updated (CA event).
+
+    This is the CA's record of a template *content* change: the before/after
+    template flags, EKUs and enrollment settings. 4898 says what a template looks
+    like when it is loaded; 4899 says someone just changed it, which is the only
+    CA-side evidence that a template was armed (for example by flipping
+    msPKI-Certificate-Name-Flag to 0x1).
+
+    XSIAM's event-collection reference lists 4899 for "Suspicious certificate
+    template modification" (the ESC4 detector) alongside 4900 and 4662.
+
+    Field names follow 4898's (TemplateInternalName / TemplateVersion /
+    TemplateSchemaVersion / TemplateOID / TemplateDSObjectFQDN) plus the
+    Old/New pair the published 4899 message template shows. Microsoft publishes
+    no per-event page for 4899, so treat the EventData names as inferred.
+    """
+    ca_host = _get_ca_hostname(config)
+    dns_domain = _get_dns_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    event_data = {
+        "SubjectUserSid":         _stable_user_sid(user_info["username"]),
+        "SubjectUserName":        user_info["username"],
+        "SubjectDomainName":      _get_domain(config),
+        "SubjectLogonId":         logon_id or _new_logon_id(),
+        "TemplateInternalName":   template_name,
+        "TemplateVersion":        template_version,
+        "TemplateSchemaVersion":  schema_version,
+        "TemplateOID":            template_oid or (
+            f"1.3.6.1.4.1.311.21.8.{random.randint(1000000, 9999999)}."
+            f"{random.randint(1000000, 9999999)}"),
+        "TemplateDSObjectFQDN":   (f"CN={template_name},CN=Certificate Templates,"
+                                   f"CN=Public Key Services,CN=Services,"
+                                   f"CN=Configuration,{base_dn}"),
+        "OldTemplateContent":     old_content,
+        "NewTemplateContent":     new_content,
+        "DomainController":       _get_dc_hostname(config),
+    }
+    return _build_event(4899, ca_host, event_data, success=True, ts=ts)
+
+
+def _build_4900(user_info, config, *, template_name, old_content, new_content,
+                old_security_descriptor, new_security_descriptor,
+                schema_version="2", template_version="100.2",
+                template_oid=None, logon_id=None, ts=None) -> dict:
+    """4900 – Certificate Services template security was updated (CA event).
+
+    Windows writes this when the *ACL* on a certificate template changes. It is
+    the CA-side twin of the DC's 5136 nTSecurityDescriptor record, and it is the
+    one event that carries the old and new SDDL side by side — which is exactly
+    what an ESC4 analytic needs in order to say a template was made exploitable
+    rather than merely edited.
+
+    Field names as in _build_4899 plus OldSecurityDescriptor /
+    NewSecurityDescriptor; Microsoft publishes no per-event page for 4900, so
+    they are inferred from the published message template and 4898's names.
+    """
+    ca_host = _get_ca_hostname(config)
+    dns_domain = _get_dns_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    event_data = {
+        "SubjectUserSid":         _stable_user_sid(user_info["username"]),
+        "SubjectUserName":        user_info["username"],
+        "SubjectDomainName":      _get_domain(config),
+        "SubjectLogonId":         logon_id or _new_logon_id(),
+        "TemplateInternalName":   template_name,
+        "TemplateVersion":        template_version,
+        "TemplateSchemaVersion":  schema_version,
+        "TemplateOID":            template_oid or (
+            f"1.3.6.1.4.1.311.21.8.{random.randint(1000000, 9999999)}."
+            f"{random.randint(1000000, 9999999)}"),
+        "TemplateDSObjectFQDN":   (f"CN={template_name},CN=Certificate Templates,"
+                                   f"CN=Public Key Services,CN=Services,"
+                                   f"CN=Configuration,{base_dn}"),
+        "OldTemplateContent":     old_content,
+        "NewTemplateContent":     new_content,
+        "OldSecurityDescriptor":  old_security_descriptor,
+        "NewSecurityDescriptor":  new_security_descriptor,
+        "DomainController":       _get_dc_hostname(config),
+    }
+    return _build_event(4900, ca_host, event_data, success=True, ts=ts)
+
+
 def _build_4886(user_info, config, *, template_name, request_id=None,
                 san_override=None, san_kind="upn", ts=None) -> dict:
     """4886 – Certificate Services received a certificate request (CA event)."""
@@ -5955,8 +6085,13 @@ def _threat_priv_group_addition(config, session_context):
 # Authoritative AD schema GUIDs.
 #   container class -> MS-ADSC "Class container", schemaIdGuid
 #   nTSecurityDescriptor attribute -> MS-ADA3, schemaIdGuid
+#   pKICertificateTemplate class -> MS-ADSC, Schema-Id-Guid e5209ca2-...
+#   msPKI-Certificate-Name-Flag attribute -> MS-ADA3, System-Id-Guid ea1dddc4-...
+# All four come from Microsoft's AD schema reference pages, not from a capture.
 _GUID_CLASS_CONTAINER           = "{bf967a8b-0de6-11d0-a285-00aa003049e2}"
 _GUID_ATTR_NTSECURITYDESCRIPTOR = "{bf9679e3-0de6-11d0-a285-00aa003049e2}"
+_GUID_CLASS_PKI_TEMPLATE        = "{e5209ca2-3bba-11d2-90cc-00c04fd91ab1}"
+_GUID_ATTR_MS_PKI_NAME_FLAG     = "{ea1dddc4-60ff-416e-8cc0-17cee534bce7}"
 
 
 def _threat_adminsdholder_acl_modification(config, session_context):
@@ -6858,6 +6993,220 @@ def _threat_sccm_container_recon(config, session_context):
         t += random.uniform(0.1, 0.3)
 
     t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_esc4_template_modification(config, session_context):
+    """Suspicious certificate template modification — AD CS ESC4.
+
+    ESC4 is the "own the template" step of the AD CS attack path: instead of
+    finding a template that already allows enrollee-supplied subjects (ESC1), the
+    attacker rewrites a template's ACL so a principal they control can edit it,
+    then arms ESC1 on it and enrolls. It is a *directory write* to
+    CN=<template>,CN=Certificate Templates,CN=Public Key Services,... which makes
+    it visible in two places at once:
+
+      - the DC records the directory-service access (4662) and the attribute
+        change (5136 nTSecurityDescriptor delete+add, then
+        msPKI-Certificate-Name-Flag);
+      - the CA records the template change itself (4899 content, 4900 security).
+
+    XSIAM's event-collection reference names **4899, 4900 and 4662** for
+    "Suspicious certificate template modification"; 5136 is not in that list.
+    The generator emits all four shapes so the analytic can key on whichever it
+    actually reads, and so the 5136 leg still tells the directory-service story.
+
+    Sequence:
+      1. Attacker authenticates → DC-side 4624 + endpoint 4624 + 4672
+      2. 4688 certipy template -write-default-configuration
+      3. 4899 the CA sees the template content change
+      4. 4900 the CA sees the template security descriptor change
+      5. 4662 read / WRITE_DAC / property writes on the template object
+      6. 5136 nTSecurityDescriptor delete+add, then msPKI-Certificate-Name-Flag
+      7. 4689 process exit
+
+    STATUS (2026-11-17): WIP. Three deliveries, zero alerts:
+
+      attempt 1 14:28Z  5136 only (SDDL delete+add granting Authenticated Users
+                        full control, plus name-flag = 1)
+      attempt 2 14:40Z  + the 4662 legs (0x10 read, 0x40000 WRITE_DAC %%1539,
+                        0x20 property write %%7685 for nTSecurityDescriptor and
+                        msPKI-Certificate-Name-Flag)
+      attempt 3 14:49Z  + 4899 and 4900 from the CA (old/new content and old/new
+                        security descriptor)
+
+    All three verified ingested with DN, class, attributes and SDDLs intact.
+    What remains unverified is the 4899/4900 EventData naming: Microsoft
+    publishes no per-event page for either, so they follow the published message
+    template plus 4898's field names. Do not tune this further without a captured
+    real 4899/4900 to compare against — the same wall as 4898.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    dns_domain = _get_dns_domain(config)
+    domain = _get_domain(config)
+    dc_host = _get_dc_hostname(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    template = random.choice(_CERT_TEMPLATES_VULNERABLE)
+    template_dn = (f"CN={template},CN=Certificate Templates,CN=Public Key Services,"
+                   f"CN=Services,CN=Configuration,{base_dn}")
+    template_guid = "{" + str(uuid.uuid4()) + "}"
+    template_oid = (f"1.3.6.1.4.1.311.21.8.{random.randint(1000000, 9999999)}."
+                    f"{random.randint(1000000, 9999999)}")
+
+    # Before: subject is built from AD (0x0). After: enrollee supplies subject
+    # (0x1) — the ESC1 condition the new ACL lets the attacker set.
+    def _content(name_flag):
+        return (f"msPKI-Certificate-Name-Flag: {name_flag}\r\n"
+                f"msPKI-Enrollment-Flag: 0x0\r\n"
+                f"msPKI-Private-Key-Flag: 0x10\r\n"
+                f"msPKI-RA-Signature: 0\r\n"
+                f"pKIExtendedKeyUsage: 1.3.6.1.5.5.7.3.2\r\n"
+                f"msPKI-Certificate-Application-Policy: 1.3.6.1.5.5.7.3.2")
+
+    old_content = _content("0x0")
+    new_content = _content("0x1")
+
+    # The class's documented default descriptor, then the ESC4 delta: Authenticated
+    # Users receive the same write rights DA and SY already hold.
+    old_sd = ("O:DAG:DAD:PAI(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)"
+              "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;SY)"
+              "(A;;RPLCLORC;;;AU)")
+    new_sd = ("O:DAG:DAD:PAI(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)"
+              "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;SY)"
+              "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;AU)")
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    op_corr_id = _new_logon_guid()
+
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(3.0, 9.0)
+
+    tool = random.choice([
+        ("C:\\Users\\Public\\certipy.exe",
+         f'certipy template -u {u["username"]}@{dns_domain} -p <redacted> '
+         f'-dc-ip {dc_host} -template {template} -write-default-configuration '
+         f'-save-old'),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f'powershell.exe -ep bypass -c "$acl = Get-Acl '
+         f"'AD:\\CN={template},CN=Certificate Templates,CN=Public Key Services,"
+         f"CN=Services,CN=Configuration,{base_dn}'; $acl.AddAccessRule("
+         f"(New-Object System.DirectoryServices.ActiveDirectoryAccessRule("
+         f"'\"Authenticated Users\",'GenericAll','Allow'))); Set-Acl -Path "
+         f"'AD:\\CN={template},CN=Certificate Templates,CN=Public Key Services,"
+         f"CN=Services,CN=Configuration,{base_dn}' -AclObject $acl\""),
+    ])
+    events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 2.0)
+
+    # The CA sees the change first: it holds the template definitions.
+    events.append(json.dumps(_build_4899(
+        u, config, template_name=template, old_content=old_content,
+        new_content=new_content, template_oid=template_oid,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 1.0)
+    events.append(json.dumps(_build_4900(
+        u, config, template_name=template, old_content=old_content,
+        new_content=new_content, old_security_descriptor=old_sd,
+        new_security_descriptor=new_sd, template_oid=template_oid,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 1.0)
+
+    # Directory-service access records: read the ACL, take WRITE_DAC, write the two
+    # attributes. ObjectType is the template class schemaIdGuid (e5209ca2-...), and
+    # the property GUIDs are the attributes' own schema IDs — the same construction
+    # that makes the DCSync and AdminSDHolder 4662 legs resolve.
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=f"%{_GUID_CLASS_PKI_TEMPLATE}",
+        object_name=template_dn,
+        access_mask="0x10",
+        properties=f"%%7684\n    {_GUID_CLASS_PKI_TEMPLATE}\n",
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.5)
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=f"%{_GUID_CLASS_PKI_TEMPLATE}",
+        object_name=template_dn,
+        access_mask="0x40000",
+        properties=f"%%1539\n    {_GUID_CLASS_PKI_TEMPLATE}\n",
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.1, 0.3)
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=f"%{_GUID_CLASS_PKI_TEMPLATE}",
+        object_name=template_dn,
+        access_mask="0x20",
+        properties=(f"%%7685\n    {_GUID_CLASS_PKI_TEMPLATE}\n    "
+                    f"{_GUID_ATTR_NTSECURITYDESCRIPTOR}\n"),
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.1, 0.3)
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=f"%{_GUID_CLASS_PKI_TEMPLATE}",
+        object_name=template_dn,
+        access_mask="0x20",
+        properties=(f"%%7685\n    {_GUID_CLASS_PKI_TEMPLATE}\n    "
+                    f"{_GUID_ATTR_MS_PKI_NAME_FLAG}\n"),
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 0.8)
+
+    # The DC's own record: value deleted then value added, then the flag write.
+    events.append(json.dumps(_build_5136(
+        u, config, object_dn=template_dn,
+        object_class="pKICertificateTemplate",
+        object_guid=template_guid,
+        attribute_name="nTSecurityDescriptor",
+        attribute_value=old_sd,
+        attribute_syntax_oid="2.5.5.15",
+        operation_type="%%14675",
+        op_correlation_id=op_corr_id,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.02, 0.1)
+    events.append(json.dumps(_build_5136(
+        u, config, object_dn=template_dn,
+        object_class="pKICertificateTemplate",
+        object_guid=template_guid,
+        attribute_name="nTSecurityDescriptor",
+        attribute_value=new_sd,
+        attribute_syntax_oid="2.5.5.15",
+        operation_type="%%14674",
+        op_correlation_id=op_corr_id,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.02, 0.1)
+    events.append(json.dumps(_build_5136(
+        u, config, object_dn=template_dn,
+        object_class="pKICertificateTemplate",
+        object_guid=template_guid,
+        attribute_name="msPKI-Certificate-Name-Flag",
+        attribute_value="1",
+        attribute_syntax_oid="2.5.5.9",
+        operation_type="%%14674",
+        op_correlation_id=op_corr_id,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+
     events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
                                          logon_id=logon_id, ts=t)))
     return events
@@ -9896,6 +10245,7 @@ _THREAT_WEIGHTS = {
     "sms_admins_addition":         3,
     "sms_admins_add_remove":       3,
     "wip_sccm_container_recon":    3,
+    "wip_esc4_template_modification": 3,
     "dnshostname_spoofing":        3,
     "samaccountname_spoofing":     3,
     "delegation_change":           3,
@@ -9948,6 +10298,7 @@ _THREAT_GENERATORS = {
     "sms_admins_addition":              _threat_sms_admins_addition,
     "sms_admins_add_remove":            _threat_sms_admins_add_remove,
     "wip_sccm_container_recon":         _threat_sccm_container_recon,
+    "wip_esc4_template_modification":   _threat_esc4_template_modification,
     "dnshostname_spoofing":             _threat_dnshostname_spoofing,
     "samaccountname_spoofing":          _threat_samaccountname_spoofing,
     "delegation_change":                _threat_delegation_change,
@@ -10003,6 +10354,7 @@ ANALYTIC_ALERTS = {
     "sms_admins_addition":         "User added to the SMS Admins local group",
     "sms_admins_add_remove":       "User added to the SMS Admins group and removed",
     "wip_sccm_container_recon":    "Suspicious access of the System Management Container",
+    "wip_esc4_template_modification": "Suspicious certificate template modification",
     "dnshostname_spoofing":        "Suspicious dNSHostName attribute change to DC name",
     "samaccountname_spoofing":     "Service ticket request with a spoofed sAMAccountName",
     "delegation_change":           "User account delegation to KRBTGT",
@@ -10224,6 +10576,7 @@ def _generate_scenario_event(scenario_event, config, context):
         "SMS_ADMINS_ADDITION":              _threat_sms_admins_addition,
         "SMS_ADMINS_ADD_REMOVE":            _threat_sms_admins_add_remove,
         "WIP_SCCM_CONTAINER_RECON":         _threat_sccm_container_recon,
+        "WIP_ESC4_TEMPLATE_MODIFICATION":   _threat_esc4_template_modification,
         "DNSHOSTNAME_SPOOFING":             _threat_dnshostname_spoofing,
         "SAMACCOUNTNAME_SPOOFING":          _threat_samaccountname_spoofing,
         "DELEGATION_CHANGE":                _threat_delegation_change,

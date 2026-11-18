@@ -8,7 +8,7 @@ Generates native Windows Security-channel Event XML targeting XSIAM's Identity A
 
 - **Rendering:** `_render_event_xml()` uses `lxml` for correct namespace/prefix control and single-quoted attributes, matching real Windows XML byte-for-byte (lowercase GUIDs, nanosecond timestamps, `%%` message codes).
 - **Event modeling:** every record is built through `_build_event(event_id, computer, event_data, …)` so `microsoft_windows_raw` modeling rules, correlation rules, and UEBA analytics process it identically to real WEC-collected events. `_raw_log` is the Windows Event **XML** (not JSON) — extract fields with `regextract(_raw_log, "Name='<Field>'>([^<]+)<")`.
-- **Covered Event IDs:** 1644, 4624, 4625, 4634, 4647, 4648, 4656, 4662, 4663, 4672, 4688, 4689, 4697, 4720, 4722, 4724, 4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4741, 4742, 4756, 4757, 4767, 4768, 4769, 4771, 4776, 4781, 4886, 4887, 4888, 5136, 5137, 1102.
+- **Covered Event IDs:** 1644, 4624, 4625, 4634, 4647, 4648, 4656, 4662, 4663, 4672, 4688, 4689, 4697, 4720, 4722, 4724, 4725, 4726, 4728, 4729, 4732, 4733, 4738, 4740, 4741, 4742, 4756, 4757, 4767, 4768, 4769, 4771, 4776, 4781, 4886, 4887, 4888, 4898, 4899, 4900, 5136, 5137, 1102.
 
 > **WEC subscription filter:** the Broker VM's WEC subscription must **forward the Event IDs** LogSim emits for them to reach XSIAM. If a newly added Event ID (e.g. 1102) doesn't appear in search, confirm it's in the subscription's query filter. See **WEC Transport Setup** in the [README](../../README.md) for broker configuration.
 
@@ -65,7 +65,7 @@ Named threat generators (via `scenario_event` = the key below, or fired individu
 `PASSWORD_NEVER_EXPIRES` and `PRIV_CERT_REQUEST` dropped their `WIP_` prefix; the
 old `WIP_` names still dispatch.
 
-**WIP** (events are correctly shaped; the detection depends on an identity-graph baseline or is still under investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_SCCM_CONTAINER_RECON`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
+**WIP** (events are correctly shaped; the detection depends on an identity-graph baseline or is still under investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_SCCM_CONTAINER_RECON`, `WIP_ESC4_TEMPLATE_MODIFICATION`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
 
 `WIP_ADMINSDHOLDER_ACL_MODIFICATION` is **not** blocked on object resolution. A
 differential probe fired "Possible shadow credentials addition" on the
@@ -143,6 +143,7 @@ after three or more isolated probe batches each, so they are **WIP**.
 | `spn_cleared` | **WIP** | 5 batches, 0 alerts. Tried 4742 `ServicePrincipalNames` empty / `-` / absent, 5136 `%%14675` delete pairs, 5136 `%%14674` add-with-empty-value, 4662 write-property, and a same-account state transition (4742 with real SPNs, then 4742 with `-`). Batches 4–5 added the missing realism: `UserAccountControl` `%%2080` / `0x1000` (instead of `-`), the "only SPN changed" 4742 shape (`SamAccountName`/`DnsHostName` left as `-`), a real tenant asset (`FS01$`) as well as a new machine, and deleted-value renderings `-` / empty / absent. All shapes ingested; none alerted. Batch 6 re-ran the module's full sequence after the CRLF fix (9 events, real CRLF) — still 0 alerts. |
 | `kerberos_relay` | **WIP** | 7 batches, 0 alerts. Tried the published KrbRelayUp endpoint signature alone (4624 type 3, Kerberos, local Administrator RID 500, loopback) with `127.0.0.1` / `::1` / `::ffff:127.0.0.1` and `WorkstationName` `FS01` / `-`, then the full sequence 4768 → DC 4624 → 4769 → endpoint 4624 → 4672 → 4688 → 4689 against the real `FS01` asset. Batch 4 varied the target SID (machine-local vs synthetic-domain vs the tenant's real domain `S-1-5-21-2795392456-4107320412-3908095700` Administrator), the subject (machine account + `0x3e7` + `lsass.exe` vs anonymous `S-1-0-0`), and the target host (`FS01` vs `DC01`); all six events ingested with the fields intact and produced no alert. **Batches 5–7 ran after the CRLF fix below.** The stored `action_evtlog_message` now carries real CRLF (58–59 per 4624, 0 bare LF) and the published XQL hunt for this analytic returns the synthetic rows verbatim (`auth_package=Kerberos`, `logon_type=3`, `network=127.0.0.1`, `sid` ending `-500`). Batch 6 covered machine-local and real-domain Administrator SIDs; batch 7 fired the module's own full 7-event sequence against `SQL01`. Neither the Cribl receiver path nor attributing the WEC event to a real agent hostname (`Windows10-Workstation1`) changed anything — both still land as `EVENT_LOG_DOMAIN_CONTROLLER` with null `agent_ip_addresses`/`identity_enrichment`. That collector class is now the standing blocker: real agent 4624s are stamped `EVENT_LOG_AGENT_EVENT_LOG`, and no WEC/Cribl record can be. See "event_sub_type: WEC vs agent" below. |
 | `adminsdholder_acl_modification` | **WIP** | 3 batches, 0 alerts. Batch 1 delivered the canonical shape — 5136 `nTSecurityDescriptor` pair on `CN=AdminSDHolder,CN=System,DC=examplecorp,DC=local` with `ObjectClass=container`, `OperationType` `%%14675`/`%%14674` under one `OpCorrelationID`, and a new ACE `(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;<user SID>)` (Full control for a non-machine principal), plus the 4662 read `0x10`, WRITE_DAC `0x40000` and write-property `0x20` legs. This matches the published logic for the same detection (Splunk ESCU `00d877c3-7b7b-443d-9562-6b231e2abab9`: `EventCode=5136 ObjectClass=container ObjectDN="CN=AdminSDHolder,CN=System*"`, new ACE with Full control). Every field verified in `xdr_data`. Batch 2 was a differential probe: the same `msDS-KeyCredentialLink` change fired on the container (alert 799066, "The account type: container"), so the target type is not the blocker. Batch 3 added a second ACE for `WD` and named the `nTSecurityDescriptor` GUID in the WRITE_DAC `Properties`; still 0. See "Container targets are evaluated" below. |
+| `wip_esc4_template_modification` | **WIP** | 3 batches, 0 alerts. Attempt 1 was `5136` only (`nTSecurityDescriptor` delete+add on the template granting Authenticated Users the write rights DA/SY hold, plus `msPKI-Certificate-Name-Flag=1`). Attempt 2 added the `4662` legs (`0x10` read, `0x40000` WRITE_DAC `%%1539`, `0x20` property write `%%7685`) with the documented schema GUIDs. Attempt 3 added `4899`/`4900` from the CA with old/new template content and old/new security descriptor. All events verified ingested. The detector's own event-collection reference names **4899, 4900 and 4662** (not 5136); the `4899`/`4900` EventData names remain unverifiable because Microsoft publishes no per-event page. See "AD CS detectors: what is reachable and what is not" below. |
 | `mailbox_export`, `mailbox_export_log_removal`, `mailbox_cas_change` | **WIP** | 3 batches, 0 alerts. Tried 4104 `ScriptBlockText` carrying `New-MailboxExportRequest` / `Remove-MailboxExportRequest` / `Set-CASMailbox`, 4688 process creation, and native `MSExchange Management` EventID 1 `CmdletName`/`CmdletParameters` (simple and full field sets: `ObjectModified`, `User`, `Organization`, `OriginatingServer`, `Succeeded`, `RunspaceId`, `Timestamp`). The `MSExchange Management` channel **does** ingest and normalize (`microsoft_windows_raw` → `xdr_data`, `action_evtlog_event_id=1`), so channel availability is not the blocker. |
 
 What was ruled out as a common cause:
@@ -281,8 +282,8 @@ The generator keeps the `1644` leg because it is the correct real-world shape.
 
 The AD CS module itself is live: alert 799505 carries
 `DT:Active Directory Certificate Services Analytics`, so these analytics are
-evaluating events in this tenant. Three of them are nonetheless out of reach, for
-different reasons.
+evaluating events in this tenant. Of its seven detectors, one is confirmed and
+the rest are out of reach — each for a different, individually measured reason.
 
 **"Vulnerable certificate template loaded" — WIP on an unverifiable field.**
 Seven `4898` deliveries since 2026-10-29 (six of them on 2026-11-16/17) carried
@@ -337,6 +338,37 @@ database-deletion audit events (`4896`–`4902`), and Microsoft does not publish
 field layouts for those either, so it would be a second unverifiable builder.
 **"Unusual certificate management activity"** is a Cloud-module analytic fed by
 AWS/Azure/GCP audit logs, not by Windows events at all.
+
+**"Suspicious certificate template modification" (ESC4) — WIP after three
+attempts.** This one produced the most useful negative result of the sweep,
+because the vendor documentation names its inputs if you ask it directly. The
+detector page does not describe its logic, but the XSIAM event-collection
+reference lists **4899** ("A Certificate Services template was updated"),
+**4900** ("Certificate Services template security was updated") and **4662** for
+it. `5136` is *not* in that list — which is why the first two attempts, built
+around the DC's directory-write record, could not have matched:
+
+| Attempt | Shape | Alert |
+|---|---|---|
+| 14:28Z | `5136` only: `nTSecurityDescriptor` `%%14675`+`%%14674` on the template (AU gains the write rights DA/SY hold), plus `msPKI-Certificate-Name-Flag=1`, `ObjectClass=pKICertificateTemplate` | none |
+| 14:40Z | the same, plus the established `4662` legs — `0x10` read, `0x40000` WRITE_DAC with `%%1539`, `0x20` property write with `%%7685` for `nTSecurityDescriptor` and the name flag | none |
+| 14:49Z | the same, plus `4899` and `4900` from the CA with old/new template content and old/new security descriptor | none |
+
+All three verified ingested: every `5136` carried the template DN, class,
+attribute and SDDL; every `4662` carried the template class schema GUID
+(`e5209ca2-3bba-11d2-90cc-00c04fd91ab1`, from MS-ADSC) and the attribute GUIDs
+(`bf9679e3-…` for `nTSecurityDescriptor`, `ea1dddc4-…` for
+`msPKI-Certificate-Name-Flag`, both from MS-ADA3); both `4899`/`4900` landed with
+the Old/New pairs and real CRLF in the message.
+
+What is left unverified is the `4899`/`4900` EventData naming. Microsoft
+publishes no per-event page for either, so the builders follow the published
+message template (`%1 v%2 (Schema V%3)`, template DN, Old/New Template Content,
+Old/New Security Descriptor, Domain Controller) plus `4898`'s field names. That
+is the same wall as `4898`, and it is why the generator is `WIP_`-prefixed rather
+than tuned further. It is shipped as `WIP_ESC4_TEMPLATE_MODIFICATION` so the
+full four-way shape stays available for a retry once a real `4899`/`4900` is
+captured.
 
 ### Sensitive-account classification is inventory-driven (2026-11-16)
 
