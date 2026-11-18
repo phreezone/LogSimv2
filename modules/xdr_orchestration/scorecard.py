@@ -2,8 +2,10 @@
 #
 # Closed-loop detection scorecard (Tier-1 #1). The orchestrator fires a story and
 # emits aligned network logs; this closes the loop — it pulls the alerts/incidents
-# the run actually produced from XSIAM and scores them against what each step SAID
-# it should trigger (Step.expected_alerts / Step.mitre, Tier-1 #2).
+# the run actually produced from XSIAM and scores them against the DETECTIONS the run
+# should produce: network ones derived from each emitting module (expectations.py),
+# endpoint ones from Step.expected_alerts. Every row says which kind it is, so a miss
+# reads as "sent, not detected" vs "endpoint-only, agent didn't alert".
 #
 # It answers the three questions a purple-team run exists to answer:
 #   1. Which expected detections actually fired? (coverage)
@@ -28,23 +30,51 @@ def _lower(s):
     return (s or "").lower()
 
 
-def collect_expectations(story, selected_steps: Optional[List[int]] = None) -> list:
-    """Flatten the story's per-step detection expectations into a match list.
-
-    Each expectation: {step, narrative, technique_id, mitre, needle}. `needle` is one
-    alert-name substring from a step's expected_alerts. Limited to `selected_steps`
-    (1-based) when given, so a partial run is scored only on what it fired."""
+def _selected(story, selected_steps):
     keep = set(selected_steps) if selected_steps else None
+    return [(i, s) for i, s in enumerate(story.steps, 1) if keep is None or i in keep]
+
+
+def collect_expectations(story, selected_steps: Optional[List[int]] = None) -> list:
+    """The DETECTIONS this run should produce -- one row per distinct alert, not per
+    alert-name guess, so the score counts detections rather than needles.
+
+    Each row: {step, narrative, technique_id, mitre, source, label, needles, emitted}.
+      source   "network"  -- we emitted a synthetic event built to trip this alert;
+                             a miss means the detector didn't fire on what we sent.
+               "endpoint" -- no synthetic signal; it rests on the Cortex agent seeing
+                             the real technique. A miss is an endpoint-detection gap.
+      needles  alternates of the ONE alert (any match counts the detection once).
+      emitted  for network rows, the "module/event"s that carry the signal.
+    Network rows are derived from each step's emitting modules (expectations.py);
+    endpoint rows come from step.expected_alerts (TECHNIQUE_CATALOG by default).
+    Limited to `selected_steps` (1-based) so a partial run is scored on what it fired."""
+    from .expectations import network_detections
     out = []
-    for idx, step in enumerate(story.steps, 1):
-        if keep is not None and idx not in keep:
-            continue
-        needles = getattr(step, "expected_alerts", None) or []
+    for idx, step in _selected(story, selected_steps):
         tech = (step.technique or {}).get("id")
         mitre = getattr(step, "mitre", None) or {}
-        for needle in needles:
-            out.append({"step": idx, "narrative": step.narrative,
-                        "technique_id": tech, "mitre": mitre, "needle": needle})
+        base = {"step": idx, "narrative": step.narrative,
+                "technique_id": tech, "mitre": mitre}
+        endpoint = list(getattr(step, "expected_alerts", None) or [])
+        if endpoint:
+            out.append({**base, "source": "endpoint",
+                        "label": mitre.get("technique") or tech or endpoint[0],
+                        "needles": endpoint, "emitted": []})
+        detections, _ = network_detections(getattr(step, "network", None))
+        for d in detections:
+            out.append({**base, "source": "network", **d})
+    return out
+
+
+def untracked_emissions(story, selected_steps: Optional[List[int]] = None) -> list:
+    """Network events the run emits that no known analytic or rule is built to detect
+    (e.g. Zscaler large_download). Shown for transparency; never scored."""
+    from .expectations import network_detections
+    out = []
+    for idx, step in _selected(story, selected_steps):
+        for tag in network_detections(getattr(step, "network", None))[1]:
+            out.append({"step": idx, "emitted": tag})
     return out
 
 
@@ -55,6 +85,15 @@ def _match_alert(needle, alerts):
         if n in _lower(a.get("name")):
             return a
     return None
+
+
+def _match_detection(needles, alerts):
+    """(needle, alert) for the first alternate that matches any alert, else (None, None)."""
+    for needle in needles:
+        a = _match_alert(needle, alerts)
+        if a:
+            return needle, a
+    return None, None
 
 
 def _alert_brief(a: dict) -> dict:
@@ -108,13 +147,19 @@ def build_scorecard(story, summary: dict, identity: dict, *, client=None,
                 "expected_total": len(expectations)}
 
     matched, missing = [], []
+    by_source = {"network": {"matched": 0, "total": 0},
+                 "endpoint": {"matched": 0, "total": 0}}
     for exp in expectations:
-        a = _match_alert(exp["needle"], alerts)
-        row = {"needle": exp["needle"], "step": exp["step"],
-               "technique_id": exp["technique_id"], "mitre": exp["mitre"]}
+        needle, a = _match_detection(exp["needles"], alerts)
+        row = {k: exp[k] for k in ("step", "source", "label", "needles", "emitted",
+                                   "technique_id", "mitre")}
+        bucket = by_source.setdefault(exp["source"], {"matched": 0, "total": 0})
+        bucket["total"] += 1
         if a:
+            row["needle"] = needle
             row["alert"] = _alert_brief(a)
             matched.append(row)
+            bucket["matched"] += 1
         else:
             missing.append(row)
 
@@ -146,9 +191,11 @@ def build_scorecard(story, summary: dict, identity: dict, *, client=None,
         "window_minutes": minutes_back,
         "waited_seconds": wait_seconds or 0,
         "identity": {"user": user, "host": host},
-        "expected_total": len(expectations),
+        "expected_total": len(expectations),     # detections, not needles
+        "by_source": by_source,
         "matched": matched,
         "missing": missing,
+        "untracked": untracked_emissions(story, summary.get("selected_steps")),
         "observed_alert_count": len(alerts),
         "observed_sample": [a.get("name") for a in alerts[:12]],
         "incidents": incidents,
@@ -158,6 +205,8 @@ def build_scorecard(story, summary: dict, identity: dict, *, client=None,
     if verbose:
         pct = f"{score*100:.0f}%" if score is not None else "n/a"
         state = "none yet" if coalesced is None else ("coalesced" if coalesced else "SPLIT")
-        print(f"[XDR] scorecard — matched {len(matched)}/{len(expectations)} expected "
-              f"({pct}); observed {len(alerts)} alerts; incidents={len(incidents)} ({state})")
+        net, ep = by_source["network"], by_source["endpoint"]
+        print(f"[XDR] scorecard — detected {len(matched)}/{len(expectations)} ({pct}): "
+              f"network {net['matched']}/{net['total']}, endpoint {ep['matched']}/{ep['total']}; "
+              f"observed {len(alerts)} alerts; incidents={len(incidents)} ({state})")
     return card

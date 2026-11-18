@@ -58,6 +58,7 @@ def summarize_run(summary: dict, *, story_id: Optional[str] = None,
             "score": sc.get("score"),
             "matched": len(sc.get("matched") or []),
             "missing": len(sc.get("missing") or []),
+            "by_source": sc.get("by_source"),
             "incidents": len(sc.get("incidents") or []),
             "coalesced": sc.get("coalesced"),
         }

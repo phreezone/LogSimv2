@@ -36,11 +36,11 @@ class Step:
     technique: dict                       # {"id","test_numbers","executor"?, "input_args"?}
     params: dict = field(default_factory=dict)      # shared per-step vars (dest/port/app/domain/url)
     network: List[NetworkEvent] = field(default_factory=list)
-    # Detection expectations (Tier-1 #2): alert-name substrings this step should
-    # trigger (endpoint technique + its network events), and the ATT&CK mapping. Left
-    # empty here are filled from TECHNIQUE_CATALOG by _annotate(); set them explicitly
-    # (e.g. in a network-heavy step) to capture C2/exfil detections the technique id
-    # alone wouldn't imply. The scorecard scores observed alerts against these.
+    # ENDPOINT detection expectation: alert-name substrings that are ALTERNATES of the
+    # one detection the technique itself should raise on the Cortex agent. Left empty,
+    # _annotate() fills it from TECHNIQUE_CATALOG. Network expectations are NOT set
+    # here -- the scorecard derives them from each NetworkEvent's emitting module
+    # (expectations.py), so they always match what the generator was built to trip.
     expected_alerts: List[str] = field(default_factory=list)
     mitre: dict = field(default_factory=dict)        # {"tactic","technique_id","technique"}
     prereqs: bool = False                 # run the atomic's -GetPrereqs before firing (tests that
@@ -139,16 +139,10 @@ TECHNIQUE_CATALOG = {
 }
 
 
-# Network-signal expectations for steps whose detection value is in the synthetic
-# network events, not the (often low-signal) endpoint technique. Each set is tied to
-# what the step ACTUALLY emits — a step is never given an expectation it can't
-# produce (e.g. only the DNS-tunnel-emitting steps expect "DNS Tunnel"), so a miss
-# on the scorecard always means "the detector didn't fire", never "we never sent it".
-C2_ALERTS        = ["Command and Control", "C2", "Beacon"]      # beacon + web C2 + egress
-C2_TUNNEL_ALERTS = C2_ALERTS + ["DNS Tunnel"]                   # + a DNS tunnel event
-EXFIL_ALERTS     = ["Exfiltration", "Exfil", "Data Exfil"]      # data_exfil upload + egress
-RECON_NET_ALERTS = ["Rare SMB session", "Port Scan"]           # netstat step: SMB enum ("Rare SMB session to a remote host") + scan
-LATERAL_ALERTS   = ["Lateral", "SMB", "RDP"]                    # pivot: SMB-to-host + RDP
+# Network-signal expectations are derived, not written here: the scorecard asks each
+# NetworkEvent's emitting module which analytic / correlation rule that event is built
+# to trip (expectations.py). A step can therefore never expect an alert it doesn't
+# emit, and a network miss always means "sent, the detector didn't fire".
 
 
 def _annotate(story: "Story") -> "Story":
@@ -190,8 +184,7 @@ def get_reference_story() -> Story:
             Step("Discovery — Process Discovery (tasklist).", _wa("T1057")),
             Step("Discovery — System Network Connections (netstat), paired with synthetic "
                  "internal SMB share enumeration and a port scan from the box.",
-                 _wa("T1049"), network=_internal_recon_net(),
-                 expected_alerts=RECON_NET_ALERTS),
+                 _wa("T1049"), network=_internal_recon_net()),
             Step("Discovery — Local Account enumeration (net user).", _wa("T1087.001")),
             Step("Discovery — Security Software Discovery (find AV/EDR).", _wa("T1518.001")),
             # ── Command & Control (TA0011) — real recon + aligned synthetic C2 ────
@@ -200,7 +193,6 @@ def get_reference_story() -> Story:
                 "DNS tunnel, and web C2 to the same domain, from the same host and user.",
                 _wa("T1082"),
                 params={"domain": c2_domain, "protocol": "https", "port": 443},
-                expected_alerts=C2_TUNNEL_ALERTS,
                 network=[
                     NetworkEvent("Infoblox NIOS", "C2_BEACON", context={"domain": c2_domain}),
                     NetworkEvent("Infoblox NIOS", "DNS_TUNNEL"),
@@ -240,7 +232,6 @@ def get_quick_story() -> Story:
                 "egress, same host/user.",
                 _wa("T1082"),
                 params={"domain": c2_domain},
-                expected_alerts=C2_ALERTS,
                 network=[
                     NetworkEvent("Infoblox NIOS", "C2_BEACON", context={"domain": c2_domain}),
                     NetworkEvent("Zscaler Web Gateway", "web_c2_beacon",
@@ -316,7 +307,6 @@ def get_intrusion_story() -> Story:
                 params={"domain": exfil_domain, "protocol": "https", "port": 443,
                         "input_args": {"input_file": r"C:\Windows\win.ini",
                                        "ip_address": f"http://{exfil_domain}/upload"}},
-                expected_alerts=EXFIL_ALERTS,
                 network=[
                     NetworkEvent("Zscaler Web Gateway", "data_exfil",
                                  context={"domain": exfil_domain}, external=True),
@@ -352,8 +342,7 @@ def get_lateral_story() -> Story:
             Step("Discovery — System Owner/User (whoami).", _wa("T1033")),
             Step("Discovery — System Network Connections (netstat), paired with synthetic "
                  "internal SMB share enumeration and a port scan from the box.",
-                 _wa("T1049"), network=_internal_recon_net(),
-                 expected_alerts=RECON_NET_ALERTS),
+                 _wa("T1049"), network=_internal_recon_net()),
             Step("Discovery — Local Account enumeration (net user).", _wa("T1087.001")),
             Step("OS Credential Dumping — LSASS MiniDump via comsvcs.dll (native "
                  "rundll32); the dump file is cleaned up after.",
@@ -363,8 +352,7 @@ def get_lateral_story() -> Story:
             Step("Lateral Movement — endpoint process discovery paired with synthetic "
                  "SMB-to-new-host, an RDP pivot, and a rare SMB file transfer from the "
                  "same box and user.",
-                 _wa("T1057"), network=_internal_lateral_net(),
-                 expected_alerts=LATERAL_ALERTS, post_delay=2.0),
+                 _wa("T1057"), network=_internal_lateral_net(), post_delay=2.0),
         ],
     )
 
@@ -393,7 +381,6 @@ def get_persistence_story() -> Story:
                  "and perimeter-firewall egress to the persistence callback domain.",
                  _wa("T1082"),
                  params={"domain": c2_domain, "protocol": "https", "port": 443},
-                 expected_alerts=C2_ALERTS,
                  network=[
                      NetworkEvent("Infoblox NIOS", "C2_BEACON", context={"domain": c2_domain}),
                      NetworkEvent("Zscaler Web Gateway", "web_c2_beacon",
@@ -432,7 +419,6 @@ def get_fullchain_story() -> Story:
                  "tunnel, web C2 and perimeter egress to the same domain.",
                  _wa("T1082"),
                  params={"domain": c2_domain, "protocol": "https", "port": 443},
-                 expected_alerts=C2_TUNNEL_ALERTS,
                  network=[
                      NetworkEvent("Infoblox NIOS", "C2_BEACON", context={"domain": c2_domain}),
                      NetworkEvent("Infoblox NIOS", "DNS_TUNNEL"),
@@ -575,7 +561,9 @@ _STORY_BUILDERS.update(load_yaml_stories())
 
 
 def list_stories() -> list:
-    """[{id, name, steps, techniques, tactics, expectations}] for the console picker."""
+    """[{id, name, steps, techniques, tactics, expectations}] for the console picker.
+    `expectations` counts DETECTIONS (endpoint + derived network), not needles."""
+    from .scorecard import collect_expectations   # lazy: scorecard reads module maps
     out = []
     for sid, build in _STORY_BUILDERS.items():
         s = _annotate(build())
@@ -585,7 +573,7 @@ def list_stories() -> list:
             "steps": len(s.steps),
             "techniques": [st.technique["id"] for st in s.steps],
             "tactics": list(s.tactics),
-            "expectations": sum(len(st.expected_alerts) for st in s.steps),
+            "expectations": len(collect_expectations(s)),
         })
     return out
 

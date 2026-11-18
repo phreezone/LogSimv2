@@ -1639,16 +1639,38 @@
         else if (s.coalesced) { incTxt = 'coalesced'; incCol = 'var(--green)'; }
         else { incTxt = 'SPLIT across ' + ni; incCol = 'var(--yellow)'; }
         const when = v._rescored_at ? ` <span style="color:var(--text-muted);">(re-scored ${v._rescored_at.toLocaleTimeString()})</span>` : '';
-        html += `<div style="margin-top:10px;"><strong>Scorecard</strong> — matched `
-             + `<strong>${(s.matched||[]).length}/${s.expected_total}</strong> expected (${pct}); `
-             + `observed ${s.observed_alert_count} alerts; incidents ${ni} `
+        // Detections, not needles: each row is one alert (its alternates count once),
+        // tagged with where its signal comes from so a miss explains itself.
+        const bs = s.by_source || {};
+        const part = (k) => bs[k] && bs[k].total ? `${k} ${bs[k].matched}/${bs[k].total}` : null;
+        const split = [part('network'), part('endpoint')].filter(Boolean).join(', ');
+        html += `<div style="margin-top:10px;"><strong>Scorecard</strong> — detected `
+             + `<strong>${(s.matched||[]).length}/${s.expected_total}</strong> (${pct})`
+             + (split ? ` <span style="color:var(--text-muted);">[${escHtml(split)}]</span>` : '')
+             + `; observed ${s.observed_alert_count} alerts; incidents ${ni} `
              + `<span style="color:${incCol};">(${incTxt})</span>${when}</div>`;
+        const tag = (m) => `<span style="color:var(--text-muted);font-size:11px;">[${escHtml(m.source || '?')}]</span>`;
+        const stepTxt = (m) => `step ${m.step}${m.technique_id ? ', ' + escHtml(m.technique_id) : ''}`;
         (s.matched||[]).forEach(m => {
-          html += `<div style="margin:2px 0;color:var(--green);">✓ ${escHtml(m.needle)} <span style="color:var(--text-muted);">→ ${escHtml((m.alert&&m.alert.name)||'')}</span></div>`;
+          html += `<div style="margin:2px 0;color:var(--green);">✓ ${tag(m)} ${escHtml(m.label || m.needle)} `
+               + `<span style="color:var(--text-muted);">→ ${escHtml((m.alert&&m.alert.name)||'')} (${stepTxt(m)})</span></div>`;
         });
         (s.missing||[]).forEach(m => {
-          html += `<div style="margin:2px 0;color:var(--yellow);">○ ${escHtml(m.needle)} <span style="color:var(--text-muted);">(not observed${m.technique_id ? ', '+escHtml(m.technique_id) : ''})</span></div>`;
+          // network: we sent it, the detector didn't fire. endpoint: no synthetic signal
+          // exists, so it rests on the Cortex agent alerting on the real technique.
+          const why = m.source === 'network'
+            ? `sent (${escHtml((m.emitted||[]).join(', '))}) — detector didn't fire`
+            : `endpoint-only — no synthetic signal; the agent didn't alert`;
+          const alts = (m.needles||[]).length > 1
+            ? ` <span style="color:var(--text-muted);">looked for: ${(m.needles||[]).map(escHtml).join(' | ')}</span>` : '';
+          html += `<div style="margin:2px 0;color:var(--yellow);">○ ${tag(m)} ${escHtml(m.label || m.needle)} `
+               + `<span style="color:var(--text-muted);">(${stepTxt(m)}; ${why})</span>${alts}</div>`;
         });
+        const un = s.untracked || [];
+        if (un.length) {
+          html += `<div style="margin-top:4px;color:var(--text-muted);">Emitted, no detection mapped (not scored): `
+               + un.map(u => escHtml(u.emitted)).join(', ') + `</div>`;
+        }
         // Show the alert names actually observed, so expected_alerts can be tuned to them.
         const obs = s.observed_sample || [];
         if (obs.length) {

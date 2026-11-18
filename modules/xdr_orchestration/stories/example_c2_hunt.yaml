@@ -4,8 +4,11 @@
 #
 # Only use technique ids your box already has prereqs for (the built-ins cover the
 # validated palette), and network module/event names the modules actually emit.
-# expected_alerts drive the post-run scorecard; mitre drives the coverage map
-# (it is auto-filled from the technique catalog when omitted).
+# The scorecard derives each network event's expected alert from the module that
+# emits it, so network steps need no expected_alerts. Set expected_alerts only to
+# override the ENDPOINT expectation (alternate names of the one alert the technique
+# should raise); mitre drives the coverage map. Both auto-fill from the technique
+# catalog when omitted.
 
 id: xdr_c2_hunt
 name: "XDR C2 Hunt (YAML): recon + layered beacon to one domain"
@@ -19,7 +22,6 @@ steps:
   - narrative: "Command & Control — recon paired with a DNS beacon, DNS tunnel, web C2 and perimeter egress to one domain."
     technique: {id: T1082, test_numbers: "1"}
     params: {domain: hunt-beacon-cdn.net, protocol: https, port: 443}
-    expected_alerts: ["Command and Control", "C2", "Beacon", "DNS Tunnel"]
     post_delay: 2.0
     network:
       - {module: Infoblox NIOS, event: C2_BEACON, context: {domain: hunt-beacon-cdn.net}}
