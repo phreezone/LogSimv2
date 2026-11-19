@@ -220,15 +220,27 @@ SCENARIOS = {
     "anonymous_ip_signin": scenario_anonymous_ip_signin,
     "impossible_travel_risk": scenario_impossible_travel_risk,
     "password_spray_risk": scenario_password_spray_risk,
+    # wip_ aliases for the on-demand catalog (see ANALYTIC_ALERTS note).
+    "wip_leaked_credentials": scenario_leaked_credentials,
+    "wip_malicious_ip_signin": scenario_malicious_ip_signin,
+    "wip_anonymous_ip_signin": scenario_anonymous_ip_signin,
+    "wip_impossible_travel_risk": scenario_impossible_travel_risk,
+    "wip_password_spray_risk": scenario_password_spray_risk,
 }
 
-# Provisional target alerts (UNCONFIRMED — pending a fire -> alert observation in the tenant).
+# WIP / prerequisite-gated. The records are field-correct and ingest into msft_azure_raw as
+# category=UserRiskEvents / Cloud Audit Log with riskEventType/riskLevel/riskState parsed (verified
+# 2026-11-19), but Entra Identity Protection risk detectors are Cortex Identity Analytics detections
+# that need Identity Analytics enabled + the Cloud Identity Engine + a multi-day baseline, so a
+# synthetic one-shot raises no standalone alert (confirmed no-fire 2026-11-19, same class as the
+# sign-in cred-attack family). Names are provisional until a fire -> alert is observed. See
+# [[azure-cred-attack-identity-analytics]].
 ANALYTIC_ALERTS = {
-    "leaked_credentials": "Azure AD leaked credentials risk detection",
-    "malicious_ip_signin": "Azure AD sign-in from a malicious IP address",
-    "anonymous_ip_signin": "Azure AD sign-in from an anonymized IP address",
-    "impossible_travel_risk": "Azure AD impossible travel risk detection",
-    "password_spray_risk": "Azure AD password spray risk detection",
+    "wip_leaked_credentials": "Azure AD leaked credentials risk detection",
+    "wip_malicious_ip_signin": "Azure AD sign-in from a malicious IP address",
+    "wip_anonymous_ip_signin": "Azure AD sign-in from an anonymized IP address",
+    "wip_impossible_travel_risk": "Azure AD impossible travel risk detection",
+    "wip_password_spray_risk": "Azure AD password spray risk detection",
 }
 
 
