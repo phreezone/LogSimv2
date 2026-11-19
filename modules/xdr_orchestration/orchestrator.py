@@ -69,6 +69,12 @@ def _emit(all_modules, module_key, event, context, config, verbose=True):
     return 0
 
 
+# Pre-run cleanup reaches open box-cases modified in the last 72 hours (~300 open
+# cases on this tenant, so ~4 pages). A stale box-case that still matters is one
+# still absorbing alerts, so it is always recently modified.
+CLEANUP_LOOKBACK_MIN = 72 * 60
+
+
 def _resolve_prior_incidents(identity, verbose=True):
     """Best-effort: resolve prior OPEN XSIAM incidents for the box identity so the
     upcoming run's fresh case is the only grouping target for its network alerts.
@@ -99,12 +105,20 @@ def _resolve_prior_incidents(identity, verbose=True):
         return 0
     try:
         # Match on user OR host: query each and union by incident_id so a case keyed
-        # on only one of the two entities is still caught.
+        # on only one of the two entities is still caught. Search by MODIFICATION
+        # time: an old box-case that is still open keeps absorbing each run's alerts,
+        # so it was modified recently even if it was opened days ago (a creation-time
+        # window missed case 70436, opened 11-07, and the run split across it).
+        # One sweep of recently-modified open cases, matched on user OR host locally
+        # (two filtered sweeps cost twice the paging for the same cases).
+        u, h = (user or "").lower(), (host or "").lower()
         found = {}
-        for kw in ({"user": user} if user else {}), ({"host": host} if host else {}):
-            if not kw:
-                continue
-            for inc in client.get_open_incidents(minutes_back=1440, **kw):
+        for inc in client.get_open_incidents(minutes_back=CLEANUP_LOOKBACK_MIN,
+                                             time_field="modification_time"):
+            users = [str(x).lower() for x in (inc.get("users") or [])]
+            hosts = [str(x).lower() for x in (inc.get("hosts") or [])]
+            if (u and any(x == u or x.endswith("\\" + u) for x in users)) or \
+               (h and any(h in x for x in hosts)):
                 found[inc.get("incident_id")] = inc
     except XsiamError as e:
         if verbose:
