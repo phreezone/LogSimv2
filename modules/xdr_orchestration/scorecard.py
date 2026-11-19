@@ -22,6 +22,8 @@
 # can be injected for offline testing.
 
 import math
+import os
+import re
 import time
 from typing import List, Optional
 
@@ -268,6 +270,35 @@ def _attribution(a: dict, m: dict) -> Optional[str]:
     return None
 
 
+# Console deep links, both taken from the tenant console on 2026-11-19:
+#   https://<tenant>.xdr.us.paloaltonetworks.com/issue-view/<alert id>
+#   https://<tenant>.xdr.us.paloaltonetworks.com/case?caseid=<case id>
+ISSUE_VIEW_PATH = "/issue-view/{id}"
+CASE_VIEW_PATH = "/case?caseid={id}"
+
+
+def console_base(api_base: Optional[str] = None) -> Optional[str]:
+    """The tenant's web console origin. XSIAM_CONSOLE_URL wins; otherwise it is the
+    API base with the leading 'api-' dropped (api-<tenant>.xdr... -> <tenant>.xdr...).
+    None when neither is known, and the UI then shows plain ids."""
+    explicit = (os.getenv("XSIAM_CONSOLE_URL") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    if not isinstance(api_base, str):
+        api_base = None
+    base = (api_base or os.getenv("XSIAM_API_BASE") or "").strip().rstrip("/")
+    m = re.match(r"^(https?://)api-([^/]+)", base)
+    return (m.group(1) + m.group(2)) if m else None
+
+
+def console_links(api_base: Optional[str] = None) -> Optional[dict]:
+    """URL templates the console UI fills with an id ({id}), or None."""
+    root = console_base(api_base)
+    if not root:
+        return None
+    return {"base": root, "issue": root + ISSUE_VIEW_PATH, "case": root + CASE_VIEW_PATH}
+
+
 def unexpected_alerts(alerts, matched_ids, markers, limit: int = 25, attrs=None) -> list:
     """Alerts attributed to this run (by marker) that no expectation claimed, grouped
     by name: [{name, count, severity, source, via, mitre, case_ids}]. These are the
@@ -282,8 +313,11 @@ def unexpected_alerts(alerts, matched_ids, markers, limit: int = 25, attrs=None)
         g = groups.setdefault(a.get("name"), {
             "name": a.get("name"), "count": 0, "severity": a.get("severity"),
             "source": a.get("source") or a.get("alert_source"), "via": via,
-            "mitre": sorted(_mitre_ids(a)), "case_ids": []})
+            "mitre": sorted(_mitre_ids(a)), "case_ids": [], "alert_ids": []})
         g["count"] += 1
+        aid = _alert_id(a)
+        if aid and len(g["alert_ids"]) < 10:
+            g["alert_ids"].append(aid)
         cid = a.get("case_id") or a.get("incident_id")
         if cid and cid not in g["case_ids"]:
             g["case_ids"].append(cid)
@@ -441,6 +475,7 @@ def build_scorecard(story, summary: dict, identity: dict, *, client=None,
         "coalesced_basis": coalesced_basis,
         "uncased": uncased,
         "score": score,
+        "console": console_links(getattr(client, "base", None)),
     }
     if verbose:
         pct = f"{score*100:.0f}%" if score is not None else "n/a"

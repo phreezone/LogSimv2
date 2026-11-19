@@ -1723,7 +1723,16 @@
         const stepTxt = (m) => `step ${m.step}${m.technique_id ? ', ' + escHtml(m.technique_id) : ''}`;
         // case_id comes from the alert itself; unset means XSIAM never grouped it
         // into a case (low-severity alerts on this tenant).
-        const caseTxt = (c) => c ? `case ${escHtml(String(c))}` : 'no case';
+        // Deep links into the tenant console (new tab). s.console holds URL templates
+        // with an {id} slot; older stored scorecards lack it and show plain text.
+        const cons = s.console || null;
+        const xlink = (kind, id, text) => (cons && cons[kind] && id != null && id !== '')
+          ? `<a href="${escHtml(cons[kind].replace('{id}', encodeURIComponent(String(id))))}" target="_blank" rel="noopener noreferrer" `
+            + `title="Open ${kind} ${escHtml(String(id))} in the Cortex console">${text}</a>`
+          : text;
+        const caseLink = (c) => xlink('case', c, escHtml(String(c)));
+        const issueLink = (a, text) => xlink('issue', a && a.id, text);
+        const caseTxt = (c) => c ? `case ${caseLink(c)}` : 'no case';
         if (s.truncated) {
           html += `<div style="color:var(--yellow);">⚠ Alert fetch hit its ${escHtml(String(s.fetch_limit))}-alert cap — `
                + `the oldest alerts in the window (the run's first steps) may be missing, so early misses aren't reliable.</div>`;
@@ -1731,7 +1740,7 @@
         const ac = s.alert_cases || [];
         if (s.alert_cases !== undefined) {
           html += `<div style="color:var(--text-muted);">Cases from the run's alerts: `
-               + (ac.length ? ac.map(c => escHtml(String(c))).join(', ')
+               + (ac.length ? ac.map(caseLink).join(', ')
                     + (ac.length === 1 ? ' <span style="color:var(--green);">(one case)</span>'
                                        : ' <span style="color:var(--yellow);">(split)</span>')
                             : 'none — no attributed alert has a case_id yet')
@@ -1744,7 +1753,7 @@
         }
         (s.matched||[]).forEach(m => {
           html += `<div style="margin:2px 0;color:var(--green);">✓ ${tag(m)} ${escHtml(m.label || m.needle)} `
-               + `<span style="color:var(--text-muted);">→ ${escHtml((m.alert&&m.alert.name)||'')} (${stepTxt(m)}; `
+               + `<span style="color:var(--text-muted);">→ ${issueLink(m.alert, escHtml((m.alert&&m.alert.name)||''))} (${stepTxt(m)}; `
                + (m.matched_by === 'mitre' ? `by MITRE ${escHtml(m.needle||'')}; ` : '')
                + (m.via ? `tied by ${escHtml(m.via)}; ` : '')
                + `${caseTxt(m.alert&&m.alert.case_id)})</span></div>`;
@@ -1760,7 +1769,7 @@
           // A same-named alert fired, but carries none of the run's user/host/IP/domain:
           // background traffic or another host, so it isn't counted.
           const stray = m.unattributed
-            ? `<div style="margin-left:18px;color:var(--text-muted);font-size:12px;">a "${escHtml(m.unattributed.name||'')}" alert did fire, but not for this run's user/host/IP/domain — not counted</div>` : '';
+            ? `<div style="margin-left:18px;color:var(--text-muted);font-size:12px;">a "${issueLink(m.unattributed, escHtml(m.unattributed.name||''))}" alert did fire, but not for this run's user/host/IP/domain — not counted</div>` : '';
           html += `<div style="margin:2px 0;color:var(--yellow);">○ ${tag(m)} ${escHtml(m.label || m.needle)} `
                + `<span style="color:var(--text-muted);">(${stepTxt(m)}; ${why})</span>${alts}</div>${stray}`;
         });
@@ -1776,7 +1785,12 @@
           html += `<div style="margin-top:8px;"><strong>Also fired for this run (not expected)</strong></div>`;
           ux.forEach(u => {
             const cases = (u.case_ids||[]).length ? (u.case_ids||[]).map(c => caseTxt(c)).join(', ') : 'no case';
-            html += `<div style="margin:2px 0;">• ${escHtml(u.name||'')}${u.count > 1 ? ' ×' + u.count : ''} `
+            // The name opens the newest of these alerts; with repeats, each one also
+            // gets a small numbered link (up to 10).
+            const ids = u.alert_ids || [];
+            const more = (cons && ids.length > 1)
+              ? ' <span style="font-size:11px;">' + ids.map((id, i) => xlink('issue', id, '#' + (i + 1))).join(' ') + '</span>' : '';
+            html += `<div style="margin:2px 0;">• ${xlink('issue', ids[0], escHtml(u.name||''))}${u.count > 1 ? ' ×' + u.count : ''}${more} `
                  + `<span style="color:var(--text-muted);">(${escHtml(u.severity||'?')}, ${escHtml(u.source||'?')}; `
                  + ((u.mitre||[]).length ? `${(u.mitre||[]).map(escHtml).join(', ')}; ` : '')
                  + `matched on ${escHtml(u.via||'?')}; ${cases})</span></div>`;

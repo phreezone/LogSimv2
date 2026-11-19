@@ -228,6 +228,7 @@ To turn it off, untick **Fresh C2 domain each run** in the console, or send `fre
 
   The egress IP is deliberately not a marker: it is the office's shared NAT address, so background traffic carries it too.
 - **Cases:** every alert from `get_alerts_multi_events` carries its `case_id`. The scorecard judges whether the run landed in one case from those ids. It falls back to the user/host incident lookup only when no run alert has a case yet. Detected alerts with no `case_id` are listed separately. Those alerts were not grouped into any case, and in a 2026-11-18 sample of this tenant they were all low severity.
+- **Console links:** case numbers and alert names open the item in the Cortex console in a new tab: cases at `/case?caseid=<case id>`, alerts at `/issue-view/<alert id>`. Repeated "also fired" alerts get a numbered link per alert (up to 10). The console address is `XSIAM_API_BASE` without `api-`, or `XSIAM_CONSOLE_URL` when set. Scorecards saved before this change show plain ids until re-scored.
 
 ## The Kickstarter (console-generated one-shot installer)
 
