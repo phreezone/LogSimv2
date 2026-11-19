@@ -3111,7 +3111,10 @@ def _sim_threat_schoolboy_downloader(config, session_context):
 def _sim_threat_php_rce(config, session_context):
     """Critical PHP RCE (one of three signature IDs), reset-server: an internet attacker's crafted
     HTTP requests to a DMZ web server. Threat logs only."""
-    key = random.choice(["php_rce_a", "php_rce_b", "php_rce_c"])
+    return _php_rce_event(config, random.choice(["php_rce_a", "php_rce_b", "php_rce_c"]))
+
+
+def _php_rce_event(config, key):
     return _inbound_threat(config, key, "web-browsing", [80, 8080], ["reset-server"], n=(2, 6),
                            cleartext_web=True, threat_only=True)
 
@@ -3135,6 +3138,29 @@ def _sim_threat_php_memory_corruption(config, session_context):
     Threat logs only."""
     return _inbound_threat(config, "php_memcorrupt", "web-browsing", [80, 8080], ["reset-server"],
                            n=(2, 5), cleartext_web=True, threat_only=True)
+
+
+# The hand-curated vulnerability signatures (not in the tenant catalogue) each have a dedicated event above.
+# This maps a signature key to the generator that fires exactly that signature, for the per-signature
+# Vulnerabilities module (modules/panw_ngfw_vulns.py).
+_CURATED_SIG_EVENTS = {
+    "log4j": _sim_threat_log4j_exploit, "dnsmasq": _sim_threat_dnsmasq_exploit,
+    "nmap_nse": _sim_threat_nmap_nse_scan, "openvas": _sim_threat_openvas_scan,
+    "rpc_dump": _sim_threat_rpc_portmapper_dump, "nfs_export": _sim_threat_nfs_export_probe,
+    "rpc_frag": _sim_threat_rpc_fragmentation_evasion, "ssh_brute": _sim_threat_ssh_bruteforce,
+    "iax2_dos": _sim_threat_iax2_dos, "default_creds": _sim_threat_default_credentials_http,
+    "php_rce_a": lambda c, s: _php_rce_event(c, "php_rce_a"),
+    "php_rce_b": lambda c, s: _php_rce_event(c, "php_rce_b"),
+    "php_rce_c": lambda c, s: _php_rce_event(c, "php_rce_c"),
+    "moxa_tn5900": _sim_threat_moxa_tn5900_injection,
+    "trendnet_tew432brp": _sim_threat_trendnet_tew432brp_injection,
+    "php_memcorrupt": _sim_threat_php_memory_corruption,
+}
+
+
+def curated_sig_event(config, session_context, key):
+    """Fire the one hand-curated signature `key` (a _THREAT_SIGS key that has a dedicated event)."""
+    return _CURATED_SIG_EVENTS[key](config, session_context)
 
 
 def _tenant_keys(pred):

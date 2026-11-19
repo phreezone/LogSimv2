@@ -17,9 +17,10 @@ named `<Name>(<ID>)` can be looked for.
     ride the grouped events of the Palo Alto Networks NGFW module; this module exists for
     on-demand use only.
 
-The hand-curated vulnerability signatures that have their own dedicated events in the NGFW module
-(Log4j, Dnsmasq, IAX2, the PHP/Moxa/TRENDnet exploits, the scanner and RPC detections) are not
-repeated here; only the tenant-confirmed catalogue is.
+Two kinds of entry: the tenant-confirmed catalogue (fired from each signature's own profile) and the
+16 hand-curated vulnerability signatures that have a dedicated event in the NGFW module (Log4j, Dnsmasq,
+IAX2, the PHP/Moxa/TRENDnet exploits, the scanner and RPC detections, SSH brute force, default
+credentials), each fired by exactly that event with its ID pinned. Spyware signatures are not listed.
 """
 import re
 
@@ -29,7 +30,7 @@ except ImportError:  # run from inside modules/
     import panw_ngfw as _panw
 
 NAME = "Palo Alto Networks NGFW Vulnerabilities"
-DESCRIPTION = ("On-demand only: one entry per tenant-confirmed PAN NGFW vulnerability signature, fired "
+DESCRIPTION = ("On-demand only: one entry per PAN NGFW vulnerability signature, fired "
                "as a threat log from an internet attacker to a DMZ server (alert named Name(ID)). "
                "Generates nothing in a long-running session.")
 XSIAM_PARSER = _panw.XSIAM_PARSER
@@ -39,15 +40,22 @@ last_threat_event_time = 0
 
 
 def _build():
-    """[{event, id, key, name, severity, category}] for every vulnerability-subtype tenant signature,
-    ordered by name then ID."""
+    """[{event, id, key, name, severity, category, curated}] for every vulnerability-subtype signature: the
+    tenant-confirmed catalogue (fired by its profile) plus the hand-curated ones that have a dedicated event
+    in the NGFW module (fired by that event). Ordered by name then ID."""
     rows = []
+    tenant_ids = {t[0] for t in _panw._TENANT_SIGS}
     for t in _panw._TENANT_SIGS:
         sid, name, severity, category, subtype = t[0], t[1], t[2], t[3], t[4]
         if subtype != "vulnerability":
             continue
         rows.append({"event": f"vuln_{sid}", "id": sid, "key": f"t{sid}", "name": name,
-                     "severity": severity, "category": category})
+                     "severity": severity, "category": category, "curated": False})
+    for key, (sid, name, severity, category, subtype) in _panw._THREAT_SIGS.items():
+        if sid in tenant_ids or subtype != "vulnerability" or key not in _panw._CURATED_SIG_EVENTS:
+            continue
+        rows.append({"event": f"vuln_{sid}", "id": sid, "key": key, "name": name,
+                     "severity": severity, "category": category, "curated": True})
     rows.sort(key=lambda r: (r["name"].lower(), r["id"]))
     return rows
 
@@ -61,7 +69,9 @@ _RENAMED_THREATS = {**{str(r["id"]): r["event"] for r in _SIGNATURES},
 
 
 def _alert_name(row):
-    return f"{row['name']}({row['id']})"
+    # Informational signatures never reach the alerts table; say so in the dropdown label.
+    suffix = " [informational: raises no alert]" if row["severity"] == "informational" else ""
+    return f"{row['name']}({row['id']}){suffix}"
 
 
 def get_threat_names():
@@ -89,4 +99,8 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
     row = _resolve(scenario_event)
     if row is None:
         return None
-    return _panw.tenant_sig_event(config, row["key"]), row["event"]
+    if row["curated"]:
+        logs = _panw.curated_sig_event(config, (context or {}).get("session_context"), row["key"])
+    else:
+        logs = _panw.tenant_sig_event(config, row["key"])
+    return logs, row["event"]
