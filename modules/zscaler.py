@@ -2686,8 +2686,17 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
     base_ms   = int(time.time() * 1000)
     interval  = random.randint(30, 90) * 1000          # fixed tempo per beacon
     jitter    = int(interval * 0.05)                   # small jitter, still regular
+    # One egress for the whole train: a host's NAT address doesn't change between
+    # callbacks a minute apart. _client_public_ip() picks a random location IP that
+    # _format_nss_log_as_cef only replaces for ROSTER users, so for anyone else
+    # (the XDR box user) a per-callback pick rotated the source across three
+    # addresses -- and "Zscaler — Web C2 Beacon (entity-mapped v2)" counts per
+    # source IP, so 19 callbacks split 7/5/4/3 and never reached its 8 (2026-11-18).
+    egress = _client_public_ip(zscaler_conf)
     logs = []
-    n_beacons = random.randint(12, 20)
+    # >= 16: the train spans up to ~28 min, so it can straddle the rule's 30-minute
+    # bin boundary; with 16+ callbacks the larger half still holds the >= 8 it needs.
+    n_beacons = random.randint(16, 20)
     for _i in range(n_beacons):
         method = random.choices(["GET", "POST"], weights=[70, 30])[0]
         uri    = random.choice(["/api/v1/checkin", "/gate.php", "/submit.php", "/beacon", "/j/collect"])
@@ -2703,7 +2712,7 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
             "eurl": f"http://{c2_domain}{uri}", "ehost": c2_domain,
             "cip": internal_host_ip, "sip": c2_ip, "proto": "HTTP",
             "bytesin": random.randint(120, 400), "bytesout": random.randint(200, 900),  # small, regular
-            "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
+            "sourceTranslatedAddress": egress,
             "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
             "cefSeverity": "5",
             # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the
