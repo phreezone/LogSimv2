@@ -7677,6 +7677,30 @@ def _threat_new_machine_delegation(config, session_context):
       5. 5136 userAccountControl -> TRUSTED_TO_AUTH_FOR_DELEGATION (corroboration)
       6. 4742 computer account CHANGED, AllowedToDelegateTo = DC SPN  (KEY TRIGGER)
       7. 4689 process exit
+
+    STATUS (2026-11-18): WIP. Three deliveries, zero alerts, all events verified
+    ingested in xdr_data:
+
+      attempt 1 05:17Z  config-only 4741 + clean 4742(AllowedToDelegateTo) + 5136;
+                        bare S4U2Self + S4U2Proxy (TransmittedServices = the new
+                        machine); and a new machine TGT + TGS to FS01
+      attempt 2 05:41Z  full RBCD chain on FS01 (5136 + 4662 with
+                        3f78c3e5-...); constrained delegation enabled at creation
+                        (4741 NewUacValue 0x1001000); unconstrained at creation
+                        (4741 NewUacValue 0x81000)
+      attempt 3 06:14Z  the same three chains, each preceded by a DC-side machine
+                        4624 (logon type 3, Kerberos, TargetUserName = <machine>$)
+                        and the machine's own TGT, so the identity graph has a
+                        machine node to attach the delegation to
+
+    A separate diagnostic explains why: a fresh 4741 by a user who had never
+    created a machine did NOT raise "Rare machine account creation" (a
+    single-event Identity Analytics detection), even though the 4741 was
+    ingested. 4741 is therefore not what feeds machine-creation analytics in
+    this tenant, so the detector cannot establish that the machine is "new".
+    The vendor page also declares a 12-hour Test Period, so a late alert cannot
+    be ruled out entirely. Re-probe only if a real 4741 ever drives a
+    machine-creation alert here.
     """
     u = _pick_windows_user(session_context)
     if not u:
@@ -10267,7 +10291,7 @@ _THREAT_WEIGHTS = {
     "dnshostname_spoofing":        3,
     "samaccountname_spoofing":     3,
     "delegation_change":           3,
-    "new_machine_delegation":      3,
+    "wip_new_machine_delegation":  3,
     "multiple_service_tickets":    5,
     "priv_group_add_remove":       4,
     "priv_cert_request":           3,
@@ -10320,7 +10344,7 @@ _THREAT_GENERATORS = {
     "dnshostname_spoofing":             _threat_dnshostname_spoofing,
     "samaccountname_spoofing":          _threat_samaccountname_spoofing,
     "delegation_change":                _threat_delegation_change,
-    "new_machine_delegation":           _threat_new_machine_delegation,
+    "wip_new_machine_delegation":       _threat_new_machine_delegation,
     "multiple_service_tickets":         _threat_multiple_service_tickets,
     "priv_group_add_remove":            _threat_priv_group_add_remove,
     "priv_cert_request":                _threat_priv_cert_request,
@@ -10376,7 +10400,7 @@ ANALYTIC_ALERTS = {
     "dnshostname_spoofing":        "Suspicious dNSHostName attribute change to DC name",
     "samaccountname_spoofing":     "Service ticket request with a spoofed sAMAccountName",
     "delegation_change":           "User account delegation to KRBTGT",
-    "new_machine_delegation":      "A new machine attempted Kerberos delegation",
+    "wip_new_machine_delegation":  "A new machine attempted Kerberos delegation",
     "multiple_service_tickets":    "Abnormal issuance of weakly encrypted service tickets to a user",
     "priv_group_add_remove":       "Rare privileged group addition and removal",
     "priv_cert_request":          "Suspicious privileged certificate request via certificate template",
@@ -10599,6 +10623,7 @@ def _generate_scenario_event(scenario_event, config, context):
         "SAMACCOUNTNAME_SPOOFING":          _threat_samaccountname_spoofing,
         "DELEGATION_CHANGE":                _threat_delegation_change,
         "NEW_MACHINE_DELEGATION":           _threat_new_machine_delegation,
+        "WIP_NEW_MACHINE_DELEGATION":       _threat_new_machine_delegation,
         "MULTIPLE_SERVICE_TICKETS":         _threat_multiple_service_tickets,
         "PRIV_GROUP_ADD_REMOVE":            _threat_priv_group_add_remove,
         "PRIV_CERT_REQUEST":                _threat_priv_cert_request,

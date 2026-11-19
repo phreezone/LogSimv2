@@ -65,7 +65,7 @@ Named threat generators (via `scenario_event` = the key below, or fired individu
 `PASSWORD_NEVER_EXPIRES` and `PRIV_CERT_REQUEST` dropped their `WIP_` prefix; the
 old `WIP_` names still dispatch.
 
-**WIP** (events are correctly shaped; the detection depends on an identity-graph baseline or is still under investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_SCCM_CONTAINER_RECON`, `WIP_ESC4_TEMPLATE_MODIFICATION`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
+**WIP** (events are correctly shaped; the detection depends on an identity-graph baseline or is still under investigation): `WIP_ADMINSDHOLDER_ACL_MODIFICATION`, `WIP_SCCM_CONTAINER_RECON`, `WIP_ESC4_TEMPLATE_MODIFICATION`, `WIP_NEW_MACHINE_DELEGATION`, and `WIP_IRREGULAR_SERVICE_TGS` — which only ever raises the weak-encryption alert owned by `MULTIPLE_SERVICE_TICKETS`, so it is background-only (`IRREGULAR_TGT_BURST` covers its intended detection).
 
 `WIP_ADMINSDHOLDER_ACL_MODIFICATION` is **not** blocked on object resolution. A
 differential probe fired "Possible shadow credentials addition" on the
@@ -77,7 +77,7 @@ evaluated" below. `WIP_SCCM_CONTAINER_RECON` is therefore **not** presumed
 blocked by object type either.
 
 **On-demand firing** offers the threats in the module's `ANALYTIC_ALERTS` table: everything
-above plus the three remaining `WIP_` detections, which target published analytics. Not
+above plus the four remaining `WIP_` detections, which target published analytics. Not
 offered, background-only: `WIP_IRREGULAR_SERVICE_TGS`, `LSASS_HANDLE_ACCESS` (an XDR-agent
 detection, not a Windows Event Collector analytic) and `ACCOUNT_ACCESS_REMOVAL` (no
 matching published analytic).
@@ -145,6 +145,7 @@ after three or more isolated probe batches each, so they are **WIP**.
 | `kerberos_relay` | **WIP** | 7 batches, 0 alerts. Tried the published KrbRelayUp endpoint signature alone (4624 type 3, Kerberos, local Administrator RID 500, loopback) with `127.0.0.1` / `::1` / `::ffff:127.0.0.1` and `WorkstationName` `FS01` / `-`, then the full sequence 4768 → DC 4624 → 4769 → endpoint 4624 → 4672 → 4688 → 4689 against the real `FS01` asset. Batch 4 varied the target SID (machine-local vs synthetic-domain vs the tenant's real domain `S-1-5-21-2795392456-4107320412-3908095700` Administrator), the subject (machine account + `0x3e7` + `lsass.exe` vs anonymous `S-1-0-0`), and the target host (`FS01` vs `DC01`); all six events ingested with the fields intact and produced no alert. **Batches 5–7 ran after the CRLF fix below.** The stored `action_evtlog_message` now carries real CRLF (58–59 per 4624, 0 bare LF) and the published XQL hunt for this analytic returns the synthetic rows verbatim (`auth_package=Kerberos`, `logon_type=3`, `network=127.0.0.1`, `sid` ending `-500`). Batch 6 covered machine-local and real-domain Administrator SIDs; batch 7 fired the module's own full 7-event sequence against `SQL01`. Neither the Cribl receiver path nor attributing the WEC event to a real agent hostname (`Windows10-Workstation1`) changed anything — both still land as `EVENT_LOG_DOMAIN_CONTROLLER` with null `agent_ip_addresses`/`identity_enrichment`. That collector class is now the standing blocker: real agent 4624s are stamped `EVENT_LOG_AGENT_EVENT_LOG`, and no WEC/Cribl record can be. See "event_sub_type: WEC vs agent" below. |
 | `adminsdholder_acl_modification` | **WIP** | 3 batches, 0 alerts. Batch 1 delivered the canonical shape — 5136 `nTSecurityDescriptor` pair on `CN=AdminSDHolder,CN=System,DC=examplecorp,DC=local` with `ObjectClass=container`, `OperationType` `%%14675`/`%%14674` under one `OpCorrelationID`, and a new ACE `(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;<user SID>)` (Full control for a non-machine principal), plus the 4662 read `0x10`, WRITE_DAC `0x40000` and write-property `0x20` legs. This matches the published logic for the same detection (Splunk ESCU `00d877c3-7b7b-443d-9562-6b231e2abab9`: `EventCode=5136 ObjectClass=container ObjectDN="CN=AdminSDHolder,CN=System*"`, new ACE with Full control). Every field verified in `xdr_data`. Batch 2 was a differential probe: the same `msDS-KeyCredentialLink` change fired on the container (alert 799066, "The account type: container"), so the target type is not the blocker. Batch 3 added a second ACE for `WD` and named the `nTSecurityDescriptor` GUID in the WRITE_DAC `Properties`; still 0. See "Container targets are evaluated" below. |
 | `wip_esc4_template_modification` | **WIP** | 3 batches, 0 alerts. Attempt 1 was `5136` only (`nTSecurityDescriptor` delete+add on the template granting Authenticated Users the write rights DA/SY hold, plus `msPKI-Certificate-Name-Flag=1`). Attempt 2 added the `4662` legs (`0x10` read, `0x40000` WRITE_DAC `%%1539`, `0x20` property write `%%7685`) with the documented schema GUIDs. Attempt 3 added `4899`/`4900` from the CA with old/new template content and old/new security descriptor. All events verified ingested. The detector's own event-collection reference names **4899, 4900 and 4662** (not 5136); the `4899`/`4900` EventData names remain unverifiable because Microsoft publishes no per-event page. See "AD CS detectors: what is reachable and what is not" below. |
+| `wip_new_machine_delegation` | **WIP** | 3 batches, 0 alerts. Attempt 1: config-only `4741` + clean `4742(AllowedToDelegateTo)` + `5136`, a bare S4U2Self/S4U2Proxy pair, and a new machine TGT + TGS. Attempt 2: full RBCD chain on `FS01` (`5136` + `4662` with `3f78c3e5-…`), constrained delegation at creation (`4741` UAC `0x1001000`), unconstrained at creation (`4741` UAC `0x81000`). Attempt 3: the same three chains, each preceded by a DC-side machine `4624` and the machine's own TGT. All events verified ingested. A `4741` diagnostic showed a fresh machine creation by a first-time creator does **not** raise "Rare machine account creation", so `4741` is not what feeds machine-creation analytics here. See "New machine delegation: `4741` does not make a machine 'new'" below. |
 | `mailbox_export`, `mailbox_export_log_removal`, `mailbox_cas_change` | **WIP** | 3 batches, 0 alerts. Tried 4104 `ScriptBlockText` carrying `New-MailboxExportRequest` / `Remove-MailboxExportRequest` / `Set-CASMailbox`, 4688 process creation, and native `MSExchange Management` EventID 1 `CmdletName`/`CmdletParameters` (simple and full field sets: `ObjectModified`, `User`, `Organization`, `OriginatingServer`, `Succeeded`, `RunspaceId`, `Timestamp`). The `MSExchange Management` channel **does** ingest and normalize (`microsoft_windows_raw` → `xdr_data`, `action_evtlog_event_id=1`), so channel availability is not the blocker. |
 
 ### dNSHostName spoofing: the 4742 carries it, and the value must be a real DC (2026-11-18)
@@ -218,6 +219,36 @@ What was ruled out as a common cause:
   only referenced Windows events were 5136, 4781, 4720, 4728 and 4768 — never
   4624). That points at 4624 handling, not at the relay discriminator, as the
   hard blocker.
+
+### New machine delegation: `4741` does not make a machine "new" (2026-11-18)
+
+`new_machine_delegation` had never alerted in 90 days, although the shipped
+generator had been emitting a `4741` + `4742(AllowedToDelegateTo)` shape on a
+background weight of 3. Three isolated batches were delivered; every event was
+verified in `xdr_data` and none produced an alert.
+
+| Attempt | Shape | Alert |
+|---|---|---|
+| 05:17Z | config-only: `4741` + clean `4742` (`AllowedToDelegateTo`, other attributes `-`) + `5136` pair; a bare S4U2Self + S4U2Proxy (`TransmittedServices` = the new machine); a new-machine TGT + TGS to `FS01` | none |
+| 05:41Z | full RBCD chain on `FS01` (`5136` + `4662` with the `3f78c3e5-…` GUID); constrained delegation enabled at creation (`4741` UAC `0x1001000`); unconstrained at creation (`4741` UAC `0x81000`) | none |
+| 06:14Z | the same three chains, each preceded by a DC-side machine `4624` (type 3, Kerberos, `TargetUserName` = `<machine>$`) and the machine's own TGT, so the identity graph has a machine node | none |
+
+The third attempt targeted the obvious remaining gap: the new machine never
+authenticated, so the graph had no machine node to attach a delegation to.
+That did not change the outcome.
+
+A separate diagnostic explains why. "Rare machine account creation" is a
+single-event Identity Analytics detection ("a user was observed creating a
+machine account for the first time") and has never fired in 90 days, although
+the tenant holds 19 `4741`s created by ~15 distinct users — each one that
+user's first. A fresh `4741` by `a.tucker`, who had never created a machine,
+was ingested and still raised nothing. `4741` is therefore not what feeds
+machine-creation analytics in this tenant, so this detector cannot establish
+that the machine is "new" regardless of how the delegation half is shaped.
+
+The vendor page also declares a **Test Period of 12 Hours**, so a delayed alert
+cannot be ruled out completely. Re-probe only if a real `4741` ever drives a
+machine-creation alert here.
 
 ### Container targets are evaluated; the AdminSDHolder ACL is analytic-specific (2026-11-16)
 
