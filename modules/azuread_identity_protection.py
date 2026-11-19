@@ -155,8 +155,81 @@ def generate_benign(config=None, context=None):
     return random.choice(_BENIGN_FNS)(config, context)
 
 
-SCENARIOS = {}
-ANALYTIC_ALERTS = {}
+# ── threat scenarios: genuine Identity Protection risk detections ─────────────────────
+# High/medium-risk UserRiskEvents left in the atRisk state (not auto-dismissed) — the needle the
+# risk analytics look for. Record shape is identical to the benign risk event above; only
+# riskEventType / riskLevel / riskState / riskDetail and the source IP differ. UNCONFIRMED: these
+# target the Entra Identity Protection risk detectors; the alert names below are provisional until a
+# fire -> alert is observed in the tenant (same promote workflow used for the other Microsoft feeds).
+_ANON_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]  # TOR / anonymizer exits
+
+
+def _risk_threat(config, etype, level, *, loc=None, activity="signin", detail="none"):
+    u = ac.pick_user(config)
+    loc = loc or ac.egress(u)
+    props = {"id": uuid.uuid4().hex, "correlationId": str(uuid.uuid4()),
+             "requestId": str(uuid.uuid4()), "activity": activity,
+             "activityDateTime": _ts(-random.randint(30, 300)),
+             "detectedDateTime": _ts(-random.randint(5, 60)),
+             "ipAddress": loc.get("ip", ""), "riskEventType": etype,
+             "riskState": "atRisk", "riskLevel": level, "riskDetail": detail,
+             "source": "IdentityProtection", "detectionTimingType": "realtime",
+             "userId": ac.user_oid(u["username"]), "userPrincipalName": u["upn"],
+             "userDisplayName": u.get("display_name"), "userType": "member",
+             "location": {"city": loc.get("city", ""), "state": loc.get("state", ""),
+                          "countryOrRegion": loc.get("countryOrRegion", ""),
+                          "geoCoordinates": loc.get("geoCoordinates", {})},
+             "additionalInfo": "[{\"Key\":\"userAgent\",\"Value\":\"" + ac.user_agent(u) + "\"}]"}
+    return [_envelope("UserRiskEvents", "UserRiskDetection", props, caller_ip=loc.get("ip", ""))]
+
+
+def _anon_loc():
+    return {"ip": random.choice(_ANON_IPS), "city": "", "state": "",
+            "countryOrRegion": "US", "geoCoordinates": {}}
+
+
+def scenario_leaked_credentials(config=None):
+    """Identity Protection flagged the user's credentials as leaked (found in a breach/paste dump) ->
+    high-risk leakedCredentials detection left unremediated."""
+    return _risk_threat(config, "leakedCredentials", "high", detail="none")
+
+
+def scenario_malicious_ip_signin(config=None):
+    """Sign-in from an IP Microsoft threat intelligence flags as malicious -> maliciousIPAddress."""
+    return _risk_threat(config, "maliciousIPAddress", "high", loc=ac.rare_asn_loc())
+
+
+def scenario_anonymous_ip_signin(config=None):
+    """Sign-in from an anonymizer / TOR exit -> anonymizedIPAddress risk detection."""
+    return _risk_threat(config, "anonymizedIPAddress", "medium", loc=_anon_loc())
+
+
+def scenario_impossible_travel_risk(config=None):
+    """Identity Protection unlikely-travel (impossible travel) risk detection from a foreign network."""
+    return _risk_threat(config, "unlikelyTravel", "medium", loc=ac.rare_asn_loc())
+
+
+def scenario_password_spray_risk(config=None):
+    """Identity Protection password-spray risk detection on the account."""
+    return _risk_threat(config, "passwordSpray", "medium", loc=ac.rare_asn_loc())
+
+
+SCENARIOS = {
+    "leaked_credentials": scenario_leaked_credentials,
+    "malicious_ip_signin": scenario_malicious_ip_signin,
+    "anonymous_ip_signin": scenario_anonymous_ip_signin,
+    "impossible_travel_risk": scenario_impossible_travel_risk,
+    "password_spray_risk": scenario_password_spray_risk,
+}
+
+# Provisional target alerts (UNCONFIRMED — pending a fire -> alert observation in the tenant).
+ANALYTIC_ALERTS = {
+    "leaked_credentials": "Azure AD leaked credentials risk detection",
+    "malicious_ip_signin": "Azure AD sign-in from a malicious IP address",
+    "anonymous_ip_signin": "Azure AD sign-in from an anonymized IP address",
+    "impossible_travel_risk": "Azure AD impossible travel risk detection",
+    "password_spray_risk": "Azure AD password spray risk detection",
+}
 
 
 def get_threat_names():
