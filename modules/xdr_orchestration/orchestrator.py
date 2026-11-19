@@ -23,6 +23,7 @@ from .stories import (
     Story, get_reference_story, get_intrusion_story, get_quick_story,
     get_lateral_story, get_persistence_story, get_fullchain_story,
     get_story, override_domain, _annotate, story_domains, freshen_domains,
+    DEFAULT_NETWORK_VENDORS,
 )
 from . import ledger as _ledger
 from . import policy as _policy
@@ -153,6 +154,7 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
               only_steps=None, skip_steps=None, pace: Optional[float] = None,
               domain_override: Optional[str] = None,
               fresh_domains: bool = True,
+              network_vendors=None,
               anchor_dhcp: Optional[bool] = None,
               anchor_logon: Optional[bool] = None,
               timing_profile: Optional[str] = None, jitter: Optional[float] = None,
@@ -184,6 +186,13 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
                                 rules' 1-hour IP+domain suppression can't silence a
                                 repeat run. The {old: new} map is in
                                 summary["run_domains"].
+      network_vendors         : module NAMEs whose synthetic network events are sent.
+                                Default: Palo Alto Networks NGFW only
+                                (stories.DEFAULT_NETWORK_VENDORS). Others (Infoblox,
+                                Zscaler, Cisco Firepower, Check Point, Fortinet) are
+                                opt-in; their events are skipped and listed in
+                                summary["vendors_skipped"]. The Infoblox DHCP identity
+                                anchor follows the Infoblox selection.
       anchor_dhcp/anchor_logon: override the story's identity-anchor emission.
       prevention_probe        : (Tier-2 #6) fire a benign canary first; if the agent
                                 is PREVENTING, `on_prevention` decides: "abort"
@@ -197,14 +206,16 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
     """
     story = story or get_reference_story()
     _annotate(story)
+    # One short random tag per run: suffixes fresh domains and names builtin
+    # payload artifacts (e.g. wildfire-test-pe-file-<tag>.exe) so runs never collide.
+    run_tag = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(4))
+    vendors = list(network_vendors) if network_vendors is not None else list(DEFAULT_NETWORK_VENDORS)
     run_domains = {}
     if domain_override:
         run_domains = {d: domain_override for d in story_domains(story)}
         override_domain(story, domain_override)
     elif fresh_domains:
-        run_domains = freshen_domains(
-            story, "".join(random.choice(string.ascii_lowercase + string.digits)
-                           for _ in range(4)))
+        run_domains = freshen_domains(story, run_tag)
     if anchor_dhcp is not None:
         story.anchor_dhcp = anchor_dhcp
     if anchor_logon is not None:
@@ -220,6 +231,8 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
                # from its definition (original domains), so the scorecard reads the
                # run's real domains from here.
                "run_domains": run_domains,
+               # Network vendors sent this run; the scorecard only expects their alerts.
+               "network_vendors": vendors, "vendors_skipped": {},
                "timing": timing.to_dict(), "prevention": None, "scorecard": None,
                # Epoch seconds; the scorecard sizes its alert window from this so a
                # long run (or a late Re-score) still covers the run's first alerts.
@@ -227,7 +240,7 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
     _run_options = {"dry_run": dry_run, "only_steps": only_steps,
                     "skip_steps": skip_steps, "domain_override": domain_override or None,
                     "fresh_domains": bool(fresh_domains and not domain_override),
-                    "run_domains": run_domains,
+                    "run_domains": run_domains, "network_vendors": vendors,
                     "timing": timing.to_dict(), "prevention_probe": prevention_probe,
                     "scorecard": scorecard, "cleanup_prior_incidents": cleanup_prior_incidents}
 
@@ -329,8 +342,10 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
 
     # 5) Identity anchors — bind the synthetic network IP to the real host/user so
     #    IP-keyed network alerts resolve to the same identity the endpoint case uses.
-    if story.anchor_dhcp:
-        # IP <-> host (DHCP lease).
+    if story.anchor_dhcp and "Infoblox NIOS" not in vendors:
+        summary["vendors_skipped"]["Infoblox NIOS/DHCP_ACK"] = 1
+    elif story.anchor_dhcp:
+        # IP <-> host (DHCP lease). An Infoblox log, so it follows the Infoblox opt-in.
         summary["emitted"] += _emit(
             all_modules, "Infoblox NIOS", "DHCP_ACK",
             {"src_ip": host_ip, "client_mac": host_mac, "hostname": host_name},
@@ -351,31 +366,55 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
         if step.pre_delay:
             time.sleep(timing.delay(step.pre_delay))
 
-        # 6a) Fire the real technique.
+        # 6a) Fire the real technique: an Atomic test, or a builtin payload
+        #     (payloads.py, e.g. the WildFire test PE) run over the same channel.
         tech = step.technique
         input_args = tech.get("input_args") or step.params.get("input_args")
+        builtin = tech.get("executor") == "builtin"
+        builtin_params = {"tag": run_tag}
         # Some tests need a target file/tool staged first (e.g. file deletion).
-        if step.prereqs:
+        if step.prereqs and not builtin:
             pr = executor.get_prereqs(tech["id"], tech.get("test_numbers"))
             print(f"    - prereqs {tech['id']}: {'OK' if pr.ok else 'FAIL'} — {pr.detail}")
             summary["results"].append(pr.to_dict())
-        r = executor.execute(tech["id"], tech.get("test_numbers"), input_args=input_args)
-        print(f"    - technique {tech['id']} test {tech.get('test_numbers')}: "
-              f"{'OK' if r.ok else 'FAIL'} — {r.detail}")
+        if builtin:
+            r = executor.run_builtin(tech.get("payload"), tech["id"], builtin_params)
+            print(f"    - payload {tech.get('payload')} ({tech['id']}): "
+                  f"{'OK' if r.ok else 'FAIL'} — {r.detail}")
+        else:
+            r = executor.execute(tech["id"], tech.get("test_numbers"), input_args=input_args)
+            print(f"    - technique {tech['id']} test {tech.get('test_numbers')}: "
+                  f"{'OK' if r.ok else 'FAIL'} — {r.detail}")
         summary["results"].append(r.to_dict())
 
         # 6b) Emit the aligned synthetic network events, pinned to identity
         #     (src_ip + hostname + the real user; egress IP for external modules).
         #     `ip` mirrors `src_ip` for modules that read `ip` (e.g. Okta client IP).
+        #     A builtin payload's real artifact (file name, SHA-256, URL) is passed
+        #     along so the network log names the very file the box received.
+        outs = getattr(r, "outputs", None) or {}
+        artifact = {k: v for k, v in {"filename": outs.get("file_name"),
+                                      "sha256": outs.get("sha256"),
+                                      "url": outs.get("url")}.items() if v}
         for ne in step.network:
+            if ne.module not in vendors:
+                k = f"{ne.module}/{ne.event}"
+                summary["vendors_skipped"][k] = summary["vendors_skipped"].get(k, 0) + 1
+                continue
             _ip = egress_ip if ne.external else host_ip
-            base = {"src_ip": _ip, "ip": _ip, "hostname": host_name, "user": user}
-            ctx = {**base, **ne.context}
+            base = {"src_ip": _ip, "ip": _ip, "internal_ip": host_ip,
+                    "hostname": host_name, "user": user}
+            ctx = {**base, **artifact, **ne.context}
             summary["emitted"] += _emit(all_modules, ne.module, ne.event, ctx, config, verbose)
 
         # 6c) Cleanup the technique's artifacts (persistence etc.) so nothing is left
         #     behind — the creation telemetry already fired during execute().
-        if step.cleanup:
+        if step.cleanup and builtin:
+            cr = executor.run_builtin(tech.get("payload"), tech["id"], builtin_params,
+                                      action="cleanup")
+            print(f"    - cleanup {tech.get('payload')}: {'OK' if cr.ok else 'FAIL'} — {cr.detail}")
+            summary["results"].append(cr.to_dict())
+        elif step.cleanup:
             cr = executor.cleanup(tech["id"], tech.get("test_numbers"), input_args=input_args)
             print(f"    - cleanup {tech['id']}: {'OK' if cr.ok else 'FAIL'} — {cr.detail}")
             summary["results"].append(cr.to_dict())
@@ -449,7 +488,8 @@ def run_story_id(all_modules, config, story_id, *, dry_run=None,
                  pace=None, domain_override=None, anchor_dhcp=None, anchor_logon=None,
                  timing_profile=None, jitter=None, prevention_probe=False,
                  on_prevention="warn", scorecard=False, scorecard_wait=0,
-                 scorecard_minutes=None, ledger=True, fresh_domains=True):
+                 scorecard_minutes=None, ledger=True, fresh_domains=True,
+                 network_vendors=None):
     """Run a story by id (used by the console /api/attack/run route). Falls back to
     the reference story when the id is unknown. Threads the per-run options through
     to run_story (see its docstring)."""
@@ -458,6 +498,7 @@ def run_story_id(all_modules, config, story_id, *, dry_run=None,
                      cleanup_prior_incidents=cleanup_prior_incidents,
                      only_steps=only_steps, skip_steps=skip_steps, pace=pace,
                      domain_override=domain_override, fresh_domains=fresh_domains,
+                     network_vendors=network_vendors,
                      anchor_dhcp=anchor_dhcp,
                      anchor_logon=anchor_logon, timing_profile=timing_profile,
                      jitter=jitter, prevention_probe=prevention_probe,

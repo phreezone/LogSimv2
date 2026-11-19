@@ -54,7 +54,16 @@ def _selected(story, selected_steps):
     return [(i, s) for i, s in enumerate(story.steps, 1) if keep is None or i in keep]
 
 
-def collect_expectations(story, selected_steps: Optional[List[int]] = None) -> list:
+def _sent(network, vendors):
+    """The step's network events whose vendor was sent (vendors None = all, for
+    summaries from before vendor selection existed)."""
+    if vendors is None:
+        return network
+    return [ne for ne in (network or []) if ne.module in vendors]
+
+
+def collect_expectations(story, selected_steps: Optional[List[int]] = None,
+                         vendors=None) -> list:
     """The DETECTIONS this run should produce -- one row per distinct alert, not per
     alert-name guess, so the score counts detections rather than needles.
 
@@ -80,19 +89,20 @@ def collect_expectations(story, selected_steps: Optional[List[int]] = None) -> l
             out.append({**base, "source": "endpoint",
                         "label": mitre.get("technique") or tech or endpoint[0],
                         "needles": endpoint, "emitted": []})
-        detections, _ = network_detections(getattr(step, "network", None))
+        detections, _ = network_detections(_sent(getattr(step, "network", None), vendors))
         for d in detections:
             out.append({**base, "source": "network", **d})
     return out
 
 
-def untracked_emissions(story, selected_steps: Optional[List[int]] = None) -> list:
+def untracked_emissions(story, selected_steps: Optional[List[int]] = None,
+                        vendors=None) -> list:
     """Network events the run emits that no known analytic or rule is built to detect
     (e.g. Zscaler large_download). Shown for transparency; never scored."""
     from .expectations import network_detections
     out = []
     for idx, step in _selected(story, selected_steps):
-        for tag in network_detections(getattr(step, "network", None))[1]:
+        for tag in network_detections(_sent(getattr(step, "network", None), vendors))[1]:
             out.append({"step": idx, "emitted": tag})
     return out
 
@@ -139,7 +149,7 @@ def technique_hit(tid: Optional[str], a: dict) -> bool:
     return False
 
 
-def find_detection(exp: dict, alerts: list, attrs: dict) -> dict:
+def find_detection(exp: dict, alerts: list, attrs: dict, used=None) -> dict:
     """Find the alert that satisfies one expectation. Only alerts tied to the run
     (attrs[id(alert)] is a marker name) count -- a same-named alert from background
     traffic or another host is NOT this run's detection.
@@ -150,9 +160,16 @@ def find_detection(exp: dict, alerts: list, attrs: dict) -> dict:
 
     Returns {"alert", "needle", "matched_by": "mitre"|"name", "via"} on a hit, else
     {"unattributed": alert-or-None} -- the first same-named alert that fired but
-    carries none of the run's markers, so a miss can say "it fired, not for us"."""
+    carries none of the run's markers, so a miss can say "it fired, not for us".
+
+    `used` holds ids of alerts already credited to another row: one alert is one
+    detection, so it cannot satisfy two rows (e.g. "Suspicious port scan" contains
+    both PAN's needle and Zscaler's "Port Scan")."""
+    used = used if used is not None else set()
     if exp.get("source") == "endpoint" and exp.get("technique_id"):
         for a in alerts:
+            if id(a) in used:
+                continue
             if attrs.get(id(a)) and technique_hit(exp["technique_id"], a):
                 return {"alert": a, "needle": exp["technique_id"],
                         "matched_by": "mitre", "via": attrs[id(a)]}
@@ -162,7 +179,7 @@ def find_detection(exp: dict, alerts: list, attrs: dict) -> dict:
         for a in alerts:
             if n not in _lower(a.get("name")):
                 continue
-            if attrs.get(id(a)):
+            if attrs.get(id(a)) and id(a) not in used:
                 return {"alert": a, "needle": needle, "matched_by": "name",
                         "via": attrs[id(a)]}
             stray = stray or a
@@ -286,7 +303,8 @@ def build_scorecard(story, summary: dict, identity: dict, *, client=None,
     """
     user = (identity or {}).get("username")
     host = (identity or {}).get("hostname")
-    expectations = collect_expectations(story, summary.get("selected_steps"))
+    vendors = summary.get("network_vendors")      # None: older run, all vendors sent
+    expectations = collect_expectations(story, summary.get("selected_steps"), vendors)
 
     # Build/resolve the client — any failure is reported, never raised.
     if client is None:
@@ -329,8 +347,16 @@ def build_scorecard(story, summary: dict, identity: dict, *, client=None,
     matched, missing = [], []
     by_source = {"network": {"matched": 0, "total": 0},
                  "endpoint": {"matched": 0, "total": 0}}
-    for exp in expectations:
-        hit = find_detection(exp, alerts, attrs)
+    # Credit each alert to at most one row, most specific row first (longest needle),
+    # then report rows in story order.
+    used, hits = set(), {}
+    for k in sorted(range(len(expectations)),
+                    key=lambda k: -max((len(x) for x in expectations[k]["needles"]), default=0)):
+        hits[k] = find_detection(expectations[k], alerts, attrs, used)
+        if hits[k].get("alert"):
+            used.add(id(hits[k]["alert"]))
+    for k, exp in enumerate(expectations):
+        hit = hits[k]
         row = {k: exp[k] for k in ("step", "source", "label", "needles", "emitted",
                                    "technique_id", "mitre")}
         bucket = by_source.setdefault(exp["source"], {"matched": 0, "total": 0})
@@ -401,7 +427,8 @@ def build_scorecard(story, summary: dict, identity: dict, *, client=None,
         "by_source": by_source,
         "matched": matched,
         "missing": missing,
-        "untracked": untracked_emissions(story, summary.get("selected_steps")),
+        "untracked": untracked_emissions(story, summary.get("selected_steps"), vendors),
+        "network_vendors": vendors,
         "unexpected": unexpected,
         "alert_cases": alert_cases,
         "observed_alert_count": len(alerts),

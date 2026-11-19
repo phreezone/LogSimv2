@@ -64,6 +64,8 @@ The orchestrator refuses to fire any technique unless `WorkstationConnection.pre
 
 | Check | What it verifies |
 |---|---|
+| **.env target settings** | `XDR_TARGET_HOST`, `XDR_TARGET_WINRM_USER` and `XDR_TARGET_WINRM_PASSWORD` are set, are not the `.env.example` placeholders, and the host looks like an IP or hostname. Shows the host and user it found; the password is only reported as set. Blocking. |
+| **.env XSIAM read-back** | `XSIAM_API_BASE`, `XSIAM_API_KEY_ID` and `XSIAM_API_KEY` are all set (the scorecard needs them). Never blocks: SKIP when absent or incomplete. |
 | **WinRM reachable + auth** | TCP to the port is open, then a `whoami` round-trips under the configured credentials |
 | **Identity discovery** | The live box reports a logged-in user + hostname + primary IPv4 (the triad the synthetic logs will carry) |
 | **Atomic present** | `Invoke-AtomicTest` is importable on the target |
@@ -128,7 +130,7 @@ Cortex XDR's malware/WildFire and Behavioral Threat Protection will flag or quar
 
 The dashboard has its own top-level **⚔ XDR Attack** tab (styled distinctly so purple-team runs are easy to spot and isolate). It surfaces:
 
-- **Preflight** — live per-check pass/fail and the discovered `user`/`host`/`ip` the run will carry (fail-closed gate). Backed by `GET /api/v1/attack/health`.
+- **Preflight** — live per-check pass/fail and the discovered `user`/`host`/`ip` the run will carry (fail-closed gate). Backed by `GET /api/v1/attack/health`. Each check re-reads the `XDR_*` and `XSIAM_API_*` values from `.env`, so a fix there shows up on the next **Re-check preflight** without restarting the dashboard.
 - **Run a story** — pick a story, optional **dry-run** (no techniques fired; synthetic logs only), and fire a small isolated run. Backed by `POST /api/v1/attack/run` → poll `GET /api/v1/attack/runs/<id>` for technique results + emitted manifest.
 - **Generate workstation installer** — downloads the Kickstarter `.ps1` (`GET /api/v1/attack/kickstarter`).
 
@@ -141,6 +143,29 @@ Stories (also registered as CLI scenarios 24/25/26):
 | `xdr_intrusion` | 26 | credential-theft "smash-and-grab" — deliberately AVOIDS discovery to broaden XDR's detection view: LOLBin ingress (T1105-13 MpCmdRun) → OS credential dumping (T1003.001-2 comsvcs LSASS MiniDump) → credentials-in-files (T1552.001-4 findstr) → indicator removal (T1070.004-6 file deletion) → local data staging (T1074.001-3 Compress-Archive) → HTTP exfil (T1048.003-4), with aligned web download / web-exfil / DNS-tunnel / perimeter-firewall egress |
 
 Every technique is non-destructive and cleanup-capable (test numbers validated live via `-ShowDetails`). The `xdr_intrusion` story uses the `Step.prereqs` hook to stage a technique's target (e.g. the file T1070.004 deletes) with `-GetPrereqs` before firing.
+
+### WildFire stage (`xdr_wildfire`)
+
+The Atomic tests exercise behaviour. This story exercises the agent's **malware module** with a real WildFire verdict. It uses a **builtin payload** (`payloads.py`): a fixed, reviewed PowerShell script run over the same WinRM channel as the Atomic tests. It is selected with:
+
+```yaml
+technique: {id: T1204.002, executor: builtin, payload: wildfire_pe}
+```
+
+The `wildfire_pe` payload:
+
+1. Downloads Palo Alto's WildFire test PE from `http://wildfire.paloaltonetworks.com/publicapi/test/pe`. This is the non-SSL URL; the WildFire API's `/test` resource needs no API key.
+2. Saves it as `C:\Users\Public\Downloads\wildfire-test-pe-file-<run tag>.exe`. That folder is deliberately **outside** the Atomic allow-list paths (`C:\AtomicRedTeam\`, `AppData\Local\Temp\`); a file inside them would never be scanned.
+3. Hashes the file and runs it. It then reports whether the agent blocked execution or quarantined the file. Either counts as success: that is the detection.
+4. **Leaves the file on disk.** Each run instead deletes earlier runs' test files before downloading, so at most one test file is ever on the box. An unknown hash is allowed to run while the agent uploads it to WildFire in the background. On 2026-11-18, a cleanup that deleted the file 15 seconds after it ran left the agent with FILE_WRITE and PROCESS_START events but no verdict, and no alert.
+
+Every download has a different SHA-256 and the verdict is always malware. Each run is therefore a never-seen sample: the agent finds no cached verdict, WildFire analyses it, and the malware verdict raises the agent's WildFire alert. Allow about 5 minutes. Cortex lists "Cortex XDR agent generates WildFire malware issues" among its onboarding health checks, using this test file.
+
+The step's matching Zscaler `sandbox_threat` record is built from the payload's real result: the same file name, SHA-256 and URL. It is recorded as **Allowed** with a malicious sandbox verdict, because the file did reach the box.
+
+**Confirmed on 2026-11-18:** about 10 minutes after the run, the agent raised **`WildFire Malware`**: source `XDR Agent`, severity high, action `Detected (Post Detected)`. It landed in the run's single case, and the scorecard scored the T1204.002 row 1/1. The agent allowed the never-seen hash to run and alerted once WildFire returned the malware verdict.
+
+The box needs outbound HTTP to `wildfire.paloaltonetworks.com`. Builtin steps install no Atomic prereqs; the Kickstarter skips them.
 
 ### Story check (offline)
 
@@ -158,6 +183,27 @@ Every technique is non-destructive and cleanup-capable (test numbers validated l
   - a correlation rule name that is missing from `XSIAM imports/rule_ids.json`
 
   The story still runs. The console's story picker shows the warnings.
+
+### Network vendors: Palo Alto NGFW by default
+
+Every story step's network signal has a **Palo Alto Networks NGFW** rendering, and PAN is the only network vendor sent by default. Infoblox, Zscaler, Cisco Firepower, Check Point and Fortinet are opt-in per run. Tick them under **Network logs** in the console, or send `network_vendors: [...]` with the module names. Unselected vendors' events are skipped, counted in `summary.vendors_skipped`, and left out of the scorecard. The Infoblox DHCP identity anchor is an Infoblox log, so it follows the Infoblox box. The Windows logon anchor is always sent.
+
+The PAN events are derived from each step's other-vendor events (`stories.PANW_EQUIVALENT`, applied in `_annotate`, so YAML stories get them too). A step that already lists PAN events keeps its own.
+
+| Other-vendor event | PAN NGFW event | Detector it is built for |
+|---|---|---|
+| `C2_BEACON`, `web_c2_beacon`, `C2_EGRESS` | `xdr_c2_beacon`: 10–16 HTTPS callbacks with URL records to the run's C2 domain | none in one run (not scored) |
+| `DNS_TUNNEL` | `dns_tunnel_pattern` | none (qname entropy isn't in CEF traffic) |
+| `port_scan` | `port_scan` | Suspicious port scan |
+| `smb_share_enumeration`, `smb_new_host_lateral`, `smb_rare_file_transfer` | `rare_smb` | Rare SMB session to a remote host |
+| `rdp_lateral` | `rare_rdp` | Rare RDP session to a remote host |
+| `data_exfil` | `large_upload_https` | Large Upload (HTTPS) |
+| `large_download`, `sandbox_threat` | `xdr_web_download`: the exact URL a builtin payload fetched (e.g. the WildFire test PE over HTTP/80), else a large binary | none (not scored) |
+| `reverse_ssh_tunnel` | `unusual_ssh_external` | Unusual SSH activity with tunnel characteristics to external destination |
+
+In `panw_ngfw.py`, an orchestrated call pins the actor (`session_context["_xdr_actor"]`), so every PAN generator emits from the box's internal IP, user and host. The firewall logs the pre-NAT client. `xdr_c2_beacon` and `xdr_web_download` are orchestration-only and never drawn in ambient generation.
+
+Scoring: one alert counts for at most one detection row. The most specific row (longest name) claims it first, so a single "Suspicious port scan" alert can't satisfy both PAN's row and Zscaler's "Port Scan".
 
 ### Fresh C2 domain per run (default on)
 

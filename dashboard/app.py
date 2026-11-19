@@ -1787,15 +1787,41 @@ def _console_lan_ip():
 def api_attack_health():
     """Run the orchestrator preflight and return the per-check report + the
     discovered identity the run will carry (fail-closed gate for the tab)."""
+    from modules.xdr_orchestration import WorkstationConnection
+    env_file = _refresh_xdr_env()
     try:
-        from modules.xdr_orchestration import WorkstationConnection, ConnectionError as _CE
         conn = WorkstationConnection.from_config(CONFIG)
+        conn.env_file = env_file
         report = conn.preflight(force=True)
         return jsonify(report.to_dict())
     except Exception as e:
-        # A config error (no block / no host) is a clear RED, not a 500.
-        return jsonify({"ok": False, "checks": [
+        # A config error (no block / no host) is a clear RED, not a 500 -- and the
+        # .env rows still say which variable is missing.
+        rows = [{"name": c.name, "status": c.status, "detail": c.detail}
+                for c in WorkstationConnection.env_checks(env_file)]
+        return jsonify({"ok": False, "checks": rows + [
             {"name": "connection", "status": "FAIL", "detail": str(e)}], "identity": None}), 200
+
+
+def _refresh_xdr_env():
+    """Re-read the XDR target + XSIAM read-back values from .env so a fix made in
+    the file shows up on the next health check (and the next run) without
+    restarting the dashboard. Only XDR_* / XSIAM_API_* keys are refreshed. Returns
+    the .env path, or None when no file is found."""
+    try:
+        from dotenv import find_dotenv, dotenv_values
+        path = find_dotenv(usecwd=False) or find_dotenv(usecwd=True)
+        if not path:
+            return None
+        for k, v in dotenv_values(path).items():
+            if k.startswith(("XDR_", "XSIAM_API_")):
+                if v is None or not v.strip():
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        return path
+    except Exception:
+        return None
 
 
 @app.get("/api/attack/stories")
@@ -1847,6 +1873,10 @@ def api_attack_run():
     # Default ON: a run-unique tag on each story domain, so the C2 rules' 1-hour
     # IP+domain suppression can't silence a repeat run. Ignored with domain_override.
     fresh_domains = bool(body.get("fresh_domains", True))
+    # Network vendors whose synthetic logs are sent. Omitted -> Palo Alto NGFW only
+    # (stories.DEFAULT_NETWORK_VENDORS); the console sends its checkbox selection.
+    nv = body.get("network_vendors")
+    network_vendors = [str(v) for v in nv] if isinstance(nv, list) else None
     anchor_dhcp = body.get("anchor_dhcp")
     anchor_logon = body.get("anchor_logon")
     anchor_dhcp = bool(anchor_dhcp) if anchor_dhcp is not None else None
@@ -1876,6 +1906,7 @@ def api_attack_run():
             mods, c, story_id, dry_run=dry_run, cleanup_prior_incidents=cleanup,
             only_steps=only_steps, skip_steps=skip_steps, pace=pace,
             domain_override=domain_override, fresh_domains=fresh_domains,
+            network_vendors=network_vendors,
             anchor_dhcp=anchor_dhcp,
             anchor_logon=anchor_logon, timing_profile=timing_profile, jitter=jitter,
             prevention_probe=prevention_probe, on_prevention=on_prevention,
@@ -1888,6 +1919,7 @@ def api_attack_run():
                     "dry_run": dry_run, "cleanup_prior_incidents": cleanup,
                     "only_steps": only_steps, "skip_steps": skip_steps, "pace": pace,
                     "domain_override": domain_override, "fresh_domains": fresh_domains,
+                    "network_vendors": network_vendors,
                     "timing_profile": timing_profile,
                     "jitter": jitter, "prevention_probe": prevention_probe,
                     "scorecard": scorecard,

@@ -83,6 +83,17 @@ def validate_story(story) -> List[dict]:
             out.append(_p("warning", i, f"{tid} is outside the validated technique palette "
                                         "(no ATT&CK mapping or endpoint expectation; the "
                                         "box may lack its prereqs)"))
+        if tech.get("executor") == "builtin":
+            from .payloads import PAYLOADS
+            if tech.get("payload") not in PAYLOADS:
+                out.append(_p("error", i, f"builtin step needs a known payload "
+                                          f"(got '{tech.get('payload')}'; known: "
+                                          + ", ".join(sorted(PAYLOADS)) + ")"))
+            if step.prereqs:
+                out.append(_p("warning", i, "prereqs is ignored for builtin payload steps"))
+        elif tech.get("executor") not in (None, "winrm_atomic"):
+            out.append(_p("error", i, f"unknown executor '{tech.get('executor')}' "
+                                      "(winrm_atomic or builtin)"))
         tn = tech.get("test_numbers")
         if tn is not None and not _TESTS_RE.match(str(tn)):
             out.append(_p("error", i, f"test_numbers '{tn}' must be digits, comma-separated"))

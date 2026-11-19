@@ -129,13 +129,21 @@ TECHNIQUE_CATALOG = {
     "T1087.001": {"tactic": "Discovery", "technique": "Account Discovery: Local Account", "expected_alerts": []},
     "T1518.001": {"tactic": "Discovery", "technique": "Security Software Discovery", "expected_alerts": ["Security Software"]},
     "T1105":     {"tactic": "Command and Control", "technique": "Ingress Tool Transfer", "expected_alerts": ["Ingress Tool", "LOLBin", "Download"]},
-    "T1003.001": {"tactic": "Credential Access", "technique": "OS Credential Dumping: LSASS Memory", "expected_alerts": ["LSASS", "Credential Dump", "comsvcs", "MiniDump"]},
+    # Names the agent actually raised on 2026-11-18 (XDR Agent, box-tied):
+    # "Credential Gathering Protection - <id>" (many ids, one per rule hit) and
+    # "Memory dumping with comsvcs.dll". Matching is case-insensitive substring.
+    "T1003.001": {"tactic": "Credential Access", "technique": "OS Credential Dumping: LSASS Memory", "expected_alerts": ["Credential Gathering Protection", "Memory dumping", "LSASS", "Credential Dump", "comsvcs", "MiniDump"]},
     "T1552.001": {"tactic": "Credential Access", "technique": "Unsecured Credentials: Credentials In Files", "expected_alerts": ["Unsecured Credential", "Credentials In Files", "password"]},
     "T1070.004": {"tactic": "Defense Evasion", "technique": "Indicator Removal: File Deletion", "expected_alerts": ["Indicator Removal", "File Deletion"]},
     "T1074.001": {"tactic": "Collection", "technique": "Data Staged: Local Data Staging", "expected_alerts": ["Data Staged", "Staging", "Archive"]},
     "T1048.003": {"tactic": "Exfiltration", "technique": "Exfiltration Over Unencrypted Non-C2 Protocol", "expected_alerts": ["Exfiltration", "Exfil"]},
     "T1547.001": {"tactic": "Persistence", "technique": "Boot/Logon Autostart: Registry Run Keys", "expected_alerts": ["Run Key", "Registry Run", "Autostart"]},
+    # Matches the analytics alert "Uncommon local scheduled task created" (2026-11-18).
     "T1053.005": {"tactic": "Persistence", "technique": "Scheduled Task/Job: Scheduled Task", "expected_alerts": ["Scheduled Task"]},
+    # Builtin wildfire_pe payload. Confirmed 2026-11-18: "WildFire Malware", source
+    # XDR Agent, high, action "Detected (Post Detected)", ~10 min after the run (the
+    # file stays on disk so the agent can upload it for the verdict).
+    "T1204.002": {"tactic": "Execution", "technique": "User Execution: Malicious File", "expected_alerts": ["WildFire Malware"]},
 }
 
 
@@ -145,12 +153,55 @@ TECHNIQUE_CATALOG = {
 # emit, and a network miss always means "sent, the detector didn't fire".
 
 
+# ── Palo Alto NGFW as the default network vendor ──────────────────────────────
+# Every step's network signal also gets a PAN NGFW rendering, derived from the vendor
+# events it already declares (so YAML stories get it too). PAN is the one network
+# vendor sent by default; the others are opt-in per run (orchestrator network_vendors).
+PANW_MODULE = "Palo Alto Networks NGFW"
+DEFAULT_NETWORK_VENDORS = (PANW_MODULE,)
+
+# other-vendor event -> PAN NGFW event (panw_ngfw._THREAT_DISPATCH / _XDR_EVENTS)
+PANW_EQUIVALENT = {
+    "C2_BEACON": "xdr_c2_beacon", "web_c2_beacon": "xdr_c2_beacon", "C2_EGRESS": "xdr_c2_beacon",
+    "DNS_TUNNEL": "dns_tunnel_pattern",
+    "port_scan": "port_scan",
+    "smb_share_enumeration": "rare_smb", "smb_new_host_lateral": "rare_smb",
+    "smb_rare_file_transfer": "rare_smb",
+    "rdp_lateral": "rare_rdp",
+    "data_exfil": "large_upload_https",
+    "large_download": "xdr_web_download", "sandbox_threat": "xdr_web_download",
+    "reverse_ssh_tunnel": "unusual_ssh_external",
+}
+
+
+def panw_equivalents(network) -> List["NetworkEvent"]:
+    """The PAN NGFW events matching a step's other-vendor events, one per distinct
+    (event, domain). Internal source (the box's LAN IP): the firewall logs the
+    pre-NAT client, as PAN does."""
+    out, seen = [], set()
+    for ne in network or []:
+        if ne.module == PANW_MODULE:
+            continue
+        ev = PANW_EQUIVALENT.get(ne.event)
+        if not ev:
+            continue
+        dom = ne.context.get("domain") if ev == "xdr_c2_beacon" else None
+        if (ev, dom) in seen:
+            continue
+        seen.add((ev, dom))
+        out.append(NetworkEvent(PANW_MODULE, ev, context={"domain": dom} if dom else {}))
+    return out
+
+
 def _annotate(story: "Story") -> "Story":
     """Fill each step's mitre + expected_alerts from TECHNIQUE_CATALOG where the step
-    didn't set them explicitly. Idempotent; returns the same story. Every consumer
+    didn't set them explicitly, and add the step's PAN NGFW network events (unless it
+    already lists some). Idempotent; returns the same story. Every consumer
     (run_story, list_stories, mitre_coverage) annotates, so steps always carry their
     ATT&CK mapping without the builders having to repeat it."""
     for step in story.steps:
+        if step.network and not any(ne.module == PANW_MODULE for ne in step.network):
+            step.network = list(step.network) + panw_equivalents(step.network)
         tid = (step.technique or {}).get("id")
         cat = TECHNIQUE_CATALOG.get(tid, {})
         if not step.mitre:
@@ -238,6 +289,47 @@ def get_quick_story() -> Story:
                                  context={"domain": c2_domain}, external=True),
                     *_fw_egress(c2_domain),
                 ],
+            ),
+        ],
+    )
+
+
+# ── WildFire malware-delivery story ───────────────────────────────────────────
+
+def _wildfire_pe() -> dict:
+    """Builtin payload step spec: download + run Palo Alto's WildFire test PE
+    (payloads.py). T1204.002 = User Execution: Malicious File."""
+    return {"id": "T1204.002", "executor": "builtin", "payload": "wildfire_pe"}
+
+
+def get_wildfire_story() -> Story:
+    """Malware delivery that the Cortex agent judges with a REAL WildFire verdict.
+
+    The Atomic techniques exercise behaviour; this exercises the agent's malware
+    module. Palo Alto's WildFire test PE (fresh SHA-256 on every download, verdict
+    always malware) is fetched over plain HTTP to C:\\Users\\Public\\Downloads -- outside
+    the Atomic allow-list paths -- and executed, so the agent queries WildFire on a
+    never-seen hash and raises its WildFire malware alert (allow ~5 min for the
+    verdict). The paired Zscaler sandbox record names the same file, hash and URL.
+    The file stays until the next WildFire run removes it: deleting it right away
+    stopped the agent's WildFire upload (no verdict, no alert)."""
+    return Story(
+        id="xdr_wildfire",
+        name="XDR WildFire: malware test file delivered and run (real WildFire verdict)",
+        tactics=["Discovery", "Execution"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery — System Owner/User (whoami), the operator orienting first.",
+                 _wa("T1033")),
+            Step(
+                "Execution — download Palo Alto's WildFire test PE over HTTP and run it; "
+                "Zscaler records the same file with a malicious sandbox verdict.",
+                _wildfire_pe(),
+                network=[NetworkEvent("Zscaler Web Gateway", "sandbox_threat")],
+                # No cleanup: the agent needs the file on disk to upload it for the
+                # WildFire verdict. The next run removes it (payloads.py).
+                cleanup=False,
+                post_delay=5.0,
             ),
         ],
     )
@@ -564,6 +656,7 @@ _STORY_BUILDERS = {
     "xdr_lateral":     get_lateral_story,
     "xdr_persistence": get_persistence_story,
     "xdr_fullchain":   get_fullchain_story,
+    "xdr_wildfire":    get_wildfire_story,
 }
 # YAML stories add to / override the built-ins (user-authored canon lives in files).
 _STORY_BUILDERS.update(load_yaml_stories())
@@ -585,7 +678,9 @@ def list_stories() -> list:
             "steps": len(s.steps),
             "techniques": [st.technique["id"] for st in s.steps],
             "tactics": list(s.tactics),
-            "expectations": len(collect_expectations(s)),
+            # with the default vendor set (PAN NGFW only)
+            "expectations": len(collect_expectations(s, vendors=list(DEFAULT_NETWORK_VENDORS))),
+            "network_vendors": sorted({ne.module for st in s.steps for ne in st.network}),
         })
     return out
 
@@ -685,11 +780,15 @@ def freshen_domains(story: Story, token: str) -> dict:
 
 
 def all_technique_ids() -> list:
-    """Every distinct technique id across all stories — used by the Kickstarter to
-    install exactly the prereqs any story might need."""
+    """Every distinct ATOMIC technique id across all stories — used by the Kickstarter
+    to install exactly the prereqs any story might need. Builtin payload steps
+    (payloads.py) are skipped: they need no Atomic prereqs, and asking Atomic for
+    their technique's prereqs would stage unrelated test files."""
     ids = []
     for build in _STORY_BUILDERS.values():
         for st in build().steps:
+            if (st.technique or {}).get("executor") == "builtin":
+                continue
             if st.technique["id"] not in ids:
                 ids.append(st.technique["id"])
     return ids

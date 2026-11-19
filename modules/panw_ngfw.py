@@ -938,7 +938,14 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
 # Benign generators
 # ---------------------------------------------------------------------------
 def _user_src(config, session_context, prefer_active=True):
-    """(src_ip, username, hostname) for a benign actor, preferring a bus-correlated user."""
+    """(src_ip, username, hostname) for a benign actor, preferring a bus-correlated user.
+
+    An XDR-orchestrated call pins the actor: generate_log() puts the real box identity in
+    session_context["_xdr_actor"], so every threat generator that picks its source here
+    (port scan, SMB/RDP, uploads, SSH, DNS tunnel) emits from the box the endpoint
+    technique ran on."""
+    if isinstance(session_context, dict) and session_context.get("_xdr_actor"):
+        return tuple(session_context["_xdr_actor"])
     if session_context:
         info = (correlated_or_random_user(session_context, preferred_device_type="workstation")
                 if prefer_active else get_random_user(session_context, preferred_device_type="workstation"))
@@ -1883,6 +1890,8 @@ _last_daily_emit = {}
 
 def _beacon_host(config, session_context, key):
     """The one fixed host (same on every run) that owns the beacon for `key`."""
+    if isinstance(session_context, dict) and session_context.get("_xdr_actor"):
+        return tuple(session_context["_xdr_actor"])          # orchestrated: the box
     hit = recurring_host(key, n=1) if recurring_host else None
     return hit if hit else _threat_actor(config, session_context)
 
@@ -2524,11 +2533,81 @@ def _generate_threat_log(config, session_context=None, forced_event=None, threat
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+# --- XDR-orchestrated events ----------------------------------------------------------
+# Emitted only when the XDR orchestrator asks (never drawn in ambient generation). The
+# box identity comes from the context; the C2 domain / downloaded URL are the run's own,
+# so the PAN logs name the same host, user and destination as the endpoint technique.
+
+def _xdr_c2_beacon(config, actor, ctx):
+    """10-16 short HTTPS callbacks to the run's C2 domain over the last ~15 minutes,
+    each a traffic:end + URL record (SNI host), the PAN view of a web C2 beacon."""
+    src, user, shost = actor
+    domain = ctx.get("domain") or rare_domain(f"xdr|{src}")
+    ip = ctx.get("dst_ip") or _rare_answer(domain)
+    n = random.randint(10, 16)
+    step = random.randint(45, 75)
+    t0 = time.time() - n * step
+    print(f"    - PAN NGFW simulating: XDR C2 beacon {src} -> {domain} ({n} callbacks)")
+    out = []
+    for i in range(n):
+        out += _web(config, src, ip, 443, "ssl", domain,
+                    path=random.choice(["/api/v1/checkin", "/gate.php", "/beacon", "/j/collect"]),
+                    url_cat="unknown", suser=user, shost=shost,
+                    bytes_sent=random.randint(300, 900), bytes_received=random.randint(150, 600),
+                    duration_s=random.randint(1, 5),
+                    ts=min(t0 + i * step + random.randint(-5, 5), time.time()))
+    return out
+
+
+def _xdr_web_download(config, actor, ctx):
+    """One download session: the exact URL a builtin payload fetched (e.g. the WildFire
+    test PE over plain HTTP), else a large binary from a rare host (Atomic T1105)."""
+    src, user, shost = actor
+    url = ctx.get("url")
+    if url:
+        scheme, rest = url.split("://", 1) if "://" in url else ("http", url)
+        domain, _, path = rest.partition("/")
+        path = "/" + path
+        port, app = (80, "web-browsing") if scheme == "http" else (443, "ssl")
+        size = int(ctx.get("size") or random.randint(40_000, 120_000))
+        ip = resolver.answer_for(domain) if hasattr(resolver, "answer_for") else _rare_answer(domain)
+        cat = ctx.get("url_category") or "computer-and-internet-info"
+    else:
+        domain, ip = _rare_ext(config, f"xdr-dl|{src}")
+        path, port, app = "/files/update.bin", 443, "ssl"
+        size = random.randint(20, 200) * 1024 * 1024
+        cat = "unknown"
+    print(f"    - PAN NGFW simulating: XDR download {src} <- {domain}{path} ({size} bytes)")
+    return _web(config, src, ip, port, app, domain, path=path, url_cat=cat, method="get",
+                suser=user, shost=shost, bytes_sent=random.randint(400, 1500),
+                bytes_received=size, duration_s=random.randint(1, 20))
+
+
+_XDR_EVENTS = {"xdr_c2_beacon": _xdr_c2_beacon, "xdr_web_download": _xdr_web_download}
+
+
+def _xdr_actor(config, ctx):
+    """(internal src_ip, user, hostname) of the box from an orchestrated context, or None.
+    `internal_ip` wins over `src_ip`, which external-facing events set to the egress."""
+    if not ctx or not ctx.get("user"):
+        return None
+    ip = ctx.get("internal_ip") or ctx.get("src_ip") or ctx.get("ip")
+    return (ip, ctx["user"], ctx.get("hostname")) if ip else None
+
+
 def generate_log(config, scenario=None, threat_level="Realistic", benign_only=False,
                  context=None, scenario_event=None):
     """Main log generation entry point.  Returns a CEF string or a list of CEF strings."""
     global last_threat_event_time
     session_context = (context or {}).get("session_context")
+
+    # XDR-orchestrated: pin the box as the actor for every generator, and serve the
+    # orchestration-only events.
+    actor = _xdr_actor(config, context) if scenario_event else None
+    if actor:
+        if scenario_event in _XDR_EVENTS:
+            return _XDR_EVENTS[scenario_event](config, actor, context), scenario_event
+        session_context = {"_xdr_actor": actor}
 
     # Orchestrated / dashboard-forced named threat. Return the (logs, display_name) tuple
     # so the caller records WHICH threat fired; returning the bare logs (the old `[0]`) made

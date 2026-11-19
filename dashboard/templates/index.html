@@ -561,6 +561,18 @@
           <input type="checkbox" id="xdr-scorecard" checked> Scorecard (pull alerts after)
         </label>
       </div>
+      <!-- Network vendors whose synthetic logs are sent alongside the endpoint
+           techniques. Palo Alto NGFW is the default; the rest are opt-in per demo. -->
+      <div id="xdr-vendors" style="display:flex;gap:14px;align-items:center;margin-top:8px;flex-wrap:wrap;font-size:13px;color:var(--text-muted);"
+           title="Which network vendors' synthetic logs this run sends. Unticked vendors' events are skipped (and not scored). The Infoblox DHCP identity anchor follows the Infoblox box.">
+        <span>Network logs:</span>
+        <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" class="xdr-vendor" value="Palo Alto Networks NGFW" checked> Palo Alto NGFW</label>
+        <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" class="xdr-vendor" value="Infoblox NIOS"> Infoblox DNS</label>
+        <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" class="xdr-vendor" value="Zscaler Web Gateway"> Zscaler</label>
+        <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" class="xdr-vendor" value="Cisco Firepower"> Cisco Firepower</label>
+        <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" class="xdr-vendor" value="Check Point Firewall"> Check Point</label>
+        <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" class="xdr-vendor" value="Fortinet FortiGate"> Fortinet</label>
+      </div>
       <div id="xdr-story-techs" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>
     </div>
 
@@ -1549,6 +1561,7 @@
     const timing_profile = document.getElementById('xdr-timing').value;
     const domain_override = document.getElementById('xdr-domain').value.trim();
     const fresh_domains = document.getElementById('xdr-fresh-domains').checked;
+    const network_vendors = Array.from(document.querySelectorAll('.xdr-vendor:checked')).map(c => c.value);
     const prevention_probe = document.getElementById('xdr-prevention').checked;
     const scorecard = document.getElementById('xdr-scorecard').checked;
     const skip_steps = document.getElementById('xdr-skip').value
@@ -1567,6 +1580,7 @@
         prevention_probe, scorecard,
         domain_override: domain_override || null,
         fresh_domains,
+        network_vendors,
         skip_steps: skip_steps.length ? skip_steps : null,
       });
       statusEl.textContent = 'running…';
@@ -1637,6 +1651,13 @@
     statusEl.style.color = a.aborted || v.status === 'error' ? 'var(--red)' : (ok ? 'var(--green)' : 'var(--yellow)');
     let html = '';
     if (a.aborted) html += `<div style="color:var(--red);">${escHtml(a.aborted)}</div>`;
+    if (a.network_vendors) {
+      const sk = a.vendors_skipped || {};
+      const nsk = Object.values(sk).reduce((x, y) => x + y, 0);
+      html += `<div style="color:var(--text-muted);">Network logs sent: ${a.network_vendors.length ? a.network_vendors.map(escHtml).join(', ') : 'none'}`
+           + (nsk ? ` <span title="${escHtml(Object.keys(sk).join(', '))}">(${nsk} event(s) from unselected vendors skipped)</span>` : '')
+           + `</div>`;
+    }
     const rd = a.run_domains || {};
     if (Object.keys(rd).length) {
       html += `<div style="color:var(--text-muted);">C2 domains this run: `
