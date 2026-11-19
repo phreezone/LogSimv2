@@ -220,6 +220,47 @@ What was ruled out as a common cause:
   4624). That points at 4624 handling, not at the relay discriminator, as the
   hard blocker.
 
+### Suspicious account lockouts: the locked users must be "commonly targeted" (2026-11-19)
+
+`suspicious_account_lockout` had never alerted in 90 days. Its target,
+"Excessive account lockouts on suspicious users", is a **Medium variation** of
+"Excessive user account lockouts" (Low); both share rule id
+`ed56d140-47ce-11ec-a9b1-faffc26aac4a`. The Low base had fired 14 times in 90
+days, always on ordinary users from an internal workstation.
+
+The shipped generator locked out invented service-account names
+(`svc_sql_prod`, `svc_backup`, `admin.network`, `da_admin`, `tier0_admin`, ...).
+Those names are extremely well known to the identity graph (10k–65k events
+each), but they are not what the variation selects on: every delivery produced
+the Low base at most. The discriminator is the alert's own wording — "The users
+locked out are **commonly targeted users**".
+
+The tenant's posture and privileged-group alerts name the accounts it actually
+treats that way: `Administrator` (Administrators, Domain Admins, Enterprise
+Admins, Group Policy Creator Owners, Schema Admins), `adm-a.cox2` (DnsAdmins),
+and users added to Domain/Enterprise Admins such as `a.ortega` and `c.ford`.
+
+| Attempt | Shape | Alert |
+|---|---|---|
+| 00:43Z | hand-built batch: seven graph-known privileged accounts from `SALES-LT-001`, 3–8 s between attempts | **MEDIUM 811261** — 4 users: `Administrator`, `a.ortega`, `adm-a.cox2`, `c.ford` |
+| 01:06Z | shipped generator, original pacing (~50 s per victim) from `SALES-LT-005` | LOW 811426 — only 3 users, `Administrator` absent |
+| 01:20Z | shipped generator, compressed spray (sub-second gaps) from `SALES-LT-006` | **MEDIUM 811431** — 3 users: `Administrator`, `a.ortega`, `c.ford` |
+
+Two things fell out of the middle attempt. First, the variation is not simply a
+headcount: three users **including** `Administrator` raise Medium (attempt 3),
+while three without it stay Low (attempt 2). Second, the tenant stops indexing
+`4740` events from a source host once a lockout alert has fired for it — the
+later victims' `4771`/`4776`/`4625` still arrive, but their `4740` never reaches
+`xdr_data`. With the original pacing the fourth victim (`Administrator`) landed
+after the analytic had already evaluated the third, so the Medium was lost to
+the 1-day dedup. The generator now sprays all victims within a few seconds,
+which is also the realistic shape for a password spray.
+
+The victim list is `windows_events_config.targeted_lockout_accounts`
+(default: `Administrator`, `adm-a.cox2`, `a.ortega`, `c.ford`). Replace it with
+the tenant's own privileged accounts; merely service-account-shaped names will
+only ever raise the Low base alert.
+
 ### New machine delegation: `4741` does not make a machine "new" (2026-11-18)
 
 `new_machine_delegation` had never alerted in 90 days, although the shipped

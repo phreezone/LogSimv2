@@ -21641,6 +21641,12 @@
     "dns_domain": "examplecorp.local",
     "domain_controller_hostname": "DC01.examplecorp.local",
     "spoof_dc_fqdn": "ExampleCorp-DC1.corp.examplecorp.com",
+    "targeted_lockout_accounts": [
+      "Administrator",
+      "adm-a.cox2",
+      "a.ortega",
+      "c.ford"
+    ],
     "use_fqdn_hostnames": false,
     "dc_interval_multiplier": 0.5,
     "wks_interval_multiplier": 1.0,

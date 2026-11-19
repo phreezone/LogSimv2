@@ -111,7 +111,7 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `priv_group_addition` | User added to a privileged group | Medium | T1098.002 |
 | `priv_group_add_remove` | User added to a privileged group and removed | Low-Medium | T1098.002 |
 | `account_lockout` | Excessive user lockouts | Low | T1110 |
-| `suspicious_account_lockout` | Suspicious account lockout pattern | Low | T1110 |
+| `suspicious_account_lockout` | Excessive account lockouts on suspicious users | Medium | T1110 |
 | `default_account_enabled` | User enabled a default local account | Low | T1078.001 |
 | `sms_admins_addition` | User added to SMS Admins group | Medium | T1098 |
 | `suspicious_account_creation` | Suspicious hidden user account created | Low | T1136 |
@@ -131,6 +131,13 @@ The old names still work.
 which must name a domain controller the tenant's identity graph actually knows
 (default `ExampleCorp-DC1.corp.examplecorp.com`); a synthetic DC-looking name
 such as `DC01.examplecorp.local` never matches.
+
+`suspicious_account_lockout` was verified on 2026-11-19 (MEDIUM alert 811431,
+plus 811261 from a hand-built batch). The Medium variation only selects when the
+locked accounts are ones the graph treats as "commonly targeted users", so the
+generator locks `windows_events_config.targeted_lockout_accounts` (default
+`Administrator`, `adm-a.cox2`, `a.ortega`, `c.ford`). Merely service-account
+names such as `svc_backup` only ever raise the Low base alert.
 
 **WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 

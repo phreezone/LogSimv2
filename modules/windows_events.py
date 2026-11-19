@@ -5386,13 +5386,28 @@ def _threat_account_lockout(config, session_context):
     return events
 
 
-_SUSPICIOUS_LOCKOUT_ACCOUNTS = [
-    "svc_sql_prod", "svc_sql_dev", "svc_iis", "svc_sharepoint",
-    "svc_backup", "svc_monitoring", "svc_jenkins", "svc_reporting",
-    "svc_crm", "svc_etl",
-    "admin.backup", "admin.helpdesk", "admin.network",
-    "Administrator", "da_admin", "tier0_admin",
+# Accounts the identity graph treats as "commonly targeted" — privileged users and
+# users that have been the target of identity alerts. This is the discriminator for
+# the Medium variation "Excessive account lockouts on suspicious users": locking out
+# ordinary users, or merely service-looking names such as svc_sql_prod, only raises
+# the Low base alert. Verified 2026-11-19 (alert 811261): a batch that locked these
+# four accounts from one workstation raised the Medium variation with the description
+# "The users locked out are commonly targeted users".
+_TARGETED_LOCKOUT_ACCOUNTS = [
+    "Administrator",   # Administrators, Domain Admins, Enterprise Admins, ...
+    "adm-a.cox2",      # DnsAdmins
+    "a.ortega",        # added to Domain Admins
+    "c.ford",          # added to Enterprise Admins
 ]
+
+
+def _get_targeted_lockout_accounts(config):
+    """Lockout victims, overridable per tenant via
+    windows_events_config.targeted_lockout_accounts."""
+    configured = _cf(config).get("targeted_lockout_accounts")
+    if configured:
+        return [a for a in configured if a]
+    return list(_TARGETED_LOCKOUT_ACCOUNTS)
 
 
 def _threat_suspicious_account_lockout(config, session_context):
@@ -5400,9 +5415,12 @@ def _threat_suspicious_account_lockout(config, session_context):
     host — significantly more suspicious than regular user lockouts.
 
     XSIAM detection: "Excessive account lockouts on suspicious users" —
-    same trigger as regular lockout (multiple 4740 from one source) but
-    elevated to Medium severity because the locked accounts are service
-    accounts, admin accounts, or users with existing UEBA risk scores.
+    a Medium variation of "Excessive user account lockouts". The base alert
+    fires on any high number of 4740s from one source host; the variation is
+    selected when the locked accounts are ones the identity graph considers
+    "commonly targeted" (privileged users and users with attack history).
+    Merely using service-account names is not enough — those raise the Low
+    base alert only.
 
     All DC-side events (4771, 4776, 4625, 4740) use:
       - computer_name = DC hostname (DC logs them)
@@ -5415,10 +5433,11 @@ def _threat_suspicious_account_lockout(config, session_context):
 
     dc_host = _get_dc_hostname(config)
 
-    num_victims = random.randint(4, 7)
-    svc_accounts = random.sample(
-        _SUSPICIOUS_LOCKOUT_ACCOUNTS,
-        k=min(len(_SUSPICIOUS_LOCKOUT_ACCOUNTS), num_victims))
+    accounts = _get_targeted_lockout_accounts(config)
+    if not accounts:
+        return None
+    num_victims = random.randint(4, min(7, len(accounts)))
+    victims = random.sample(accounts, k=num_victims)
 
     attacker = random.choice(all_users)
     attacker_ip = attacker.get("ip") or "10.0.1.200"
@@ -5427,32 +5446,32 @@ def _threat_suspicious_account_lockout(config, session_context):
     events = []
     t = time.time() - num_victims * 60
 
-    for acct_name in svc_accounts:
-        svc_user = {
+    for acct_name in victims:
+        victim = {
             "username": acct_name,
             "hostname": dc_host,
             "ip": attacker_ip,
         }
         attempts = random.randint(6, 10)
         for _ in range(attempts):
-            events.append(json.dumps(_build_4771(svc_user, config, status="0x18",
+            events.append(json.dumps(_build_4771(victim, config, status="0x18",
                                                  ip_override=attacker_ip, ts=t)))
-            events.append(json.dumps(_build_4776(svc_user, config, status="0xC000006A",
-                                                 workstation=attacker_hostname, ts=t + 0.8)))
-            events.append(json.dumps(_build_4625(svc_user, config, logon_type=3,
+            events.append(json.dumps(_build_4776(victim, config, status="0xC000006A",
+                                                 workstation=attacker_hostname, ts=t + 0.3)))
+            events.append(json.dumps(_build_4625(victim, config, logon_type=3,
                                                  sub_status="0xC000006A",
                                                  workstation_override=dc_host,
                                                  source_workstation=attacker_hostname,
-                                                 ip_override=attacker_ip, ts=t + 1.5)))
-            t += random.uniform(3, 8)
-        events.append(json.dumps(_build_4740(svc_user, config,
+                                                 ip_override=attacker_ip, ts=t + 0.6)))
+            t += random.uniform(0.4, 1.6)
+        events.append(json.dumps(_build_4740(victim, config,
                                              source_workstation=attacker_hostname, ts=t)))
-        events.append(json.dumps(_build_4625(svc_user, config, logon_type=3,
+        events.append(json.dumps(_build_4625(victim, config, logon_type=3,
                                              status="0xC0000234", sub_status="0x0",
                                              workstation_override=dc_host,
                                              source_workstation=attacker_hostname,
-                                             ip_override=attacker_ip, ts=t + 2.0)))
-        t += random.uniform(2, 5)
+                                             ip_override=attacker_ip, ts=t + 0.5)))
+        t += random.uniform(1.0, 2.5)
     return events
 
 
