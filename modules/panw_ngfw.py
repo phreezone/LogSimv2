@@ -163,7 +163,7 @@ _APP = {
     "dns-over-https":  ("general-internet", "internet-utility",  "browser-based",   "Medium",        [443]),
     "tftp":            ("general-internet", "file-sharing",      "client-server",   "High",          [69]),
     "telnet":          ("networking",       "remote-access",     "client-server",   "High",          [23]),
-    # Seen in the pa440 scanner-run threat rows (2026-11-19); category/sub-category/risk are assumed, not
+    # Seen in the pa440's threat rows; category/sub-category/risk are assumed, not
     # read from Applipedia (its API is reCAPTCHA-gated).
     "lpd":             ("general-internet", "internet-utility",  "client-server",   "Medium",        [515]),
     "smtp-base":       ("collaboration",    "email",             "client-server",   "Medium",        [25]),
@@ -807,7 +807,7 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
 # Threat logs (log_type THREAT, subtype vulnerability) -> panw_ngfw_threat_raw
 # ---------------------------------------------------------------------------
 # The signatures below are the ones the tenant's real pa440 threat feed carries (read-only
-# query, 2026-11-15): same Threat ID, name, severity and category as recorded there. IDs are
+# query): same Threat ID, name, severity and category as recorded there. IDs are
 # never invented, so the catalog is limited to signatures whose ID is confirmed; add more in
 # panw_ngfw_config.threat_signatures ({key: [id, name, severity, category, subtype]}) once
 # their IDs are known (spyware / virus / wildfire-virus signatures need that).
@@ -843,8 +843,7 @@ _THREAT_SIGS = {
     "trendnet_tew432brp": (97650, "TRENDnet TEW-432BRP Firmware Command Injection Vulnerability", "critical", "code-execution", "vulnerability"),
     "php_memcorrupt": (543004, "PHP Memory Corruption Vulnerability",         "critical", "code-execution", "vulnerability"),
 }
-# Signatures read from the tenant's pa440 feed (read-only query 2026-11-16, last ~1000 min; 195
-# Threat IDs, of which 186 were not in the catalog yet): (id, name, severity, category, subtype,
+# Signatures read from the tenant's pa440 feed (read-only query): (id, name, severity, category, subtype,
 # action, app, file_name/$misc). Every field is as the tenant row carries it; the action/app/$misc
 # are each signature's own dominant values. Host names and IPs seen inside $misc were dropped.
 _TENANT_SIGS = [
@@ -1046,8 +1045,8 @@ _TENANT_SIGS = [
     (56480, 'Flexible Poll 1.2 SQL Injection Vulnerability', 'critical', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'index.php'),
     (97356, 'Adobe ColdFusion Path Traversal Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'ide.cfm'),
     (97710, 'Atlassian Web Resource Download Path Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'download/resources/jira.webresources:color-picker-popup/images/..::..::..::..::..::WEB-INF::web.xml'),
-    # 2026-11-19/20 vulnerability-scanner runs against the pa440 (cases 73849-73864): signatures the tenant
-    # raised native PAN NGFW alerts for. misc keeps only the request path, never the scanned host.
+    # Signatures the pa440's threat feed carried during vulnerability-scanner runs. misc keeps only the
+    # request path, never the scanned host.
     (56335, 'ABB PB610 Panel Builder 600 IDAL HTTP Host Stack Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
     (30147, 'Novell GroupWise Messenger Accept Language Header Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'alert', 'web-browsing', None),
     (55363, 'Nginx Unit Router Process Heap-based Buffer Overflow Vulnerability', 'critical', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
@@ -2781,7 +2780,7 @@ def _sim_rare_external_rdp(config, session_context):
 
 # --- File Data logs (log_type THREAT, subtype file -> __firewall_type firewall.filedata) ----------
 # The file-type identification entries the live pa440 writes when a profile alerts on a file type
-# (read-only pull of its native CSV feed, 2026-11-16: ~12k rows, all severity low, action alert,
+# (read-only pull of its native CSV feed: all severity low, action alert,
 # threat category N/A, direction server-to-client). Name and Threat ID are as the device records
 # them; the `filetype` token is each signature's file extension / type word (assumed: the native CSV
 # has no such column) and `file_url` / `filedigest` are not in the CSV either (digest stays empty:

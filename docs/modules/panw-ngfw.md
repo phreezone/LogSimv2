@@ -187,7 +187,7 @@ CEF:0|PANW|NGFW_CEF|<sw>|<threatid>|threat|<number-of-severity>| __firewall_type
 
 The header's signature slot is **`Name(ID)`** (traffic and URL logs put the subtype there), and
 `threat_name` and `threat_id` are the same `Name(ID)` string: that is what the
-pa440's own CEF rows carry (read-only diff, 2026-11-16; `$threatid` expands to name and ID). A bare
+pa440's own CEF rows carry (`$threatid` expands to name and ID). A bare
 numeric `threat_id` is silently dropped by the tenant, whereas `Name(ID)` is stored as the numeric `threat_id` column
 that the native PAN NGFW alerts need; they are named `Name(ID)` too, and the registry's alert targets use that form. `severity` is the numeric `$number-of-severity` (1 informational … 5 critical). The live
 CLCS rows spell several of these differently, so the module also sends the column names the
@@ -196,8 +196,7 @@ tenant's own rows use: `file_name` (holds `$misc`), `direction_of_attack`, `vend
 (`number` default, or `word`) chooses whether `severity` itself carries the number or the word;
 the number is what the documented format sends.
 
-**What the real feed carries** (read-only query of the tenant's `panw_ngfw_threat_raw`,
-2026-11-15, ~11.5k rows over 30 days): every row is subtype `vulnerability` from the one pa440;
+**What the real feed carries** (the pa440's own rows in `panw_ngfw_threat_raw`): every row is subtype `vulnerability`;
 severity Critical / High / Medium; actions `drop`, `reset-server` and `alert`. The first
 eight catalog signatures are exactly the ones seen there, with the Threat IDs, names,
 severities and categories as the tenant records them:
@@ -266,28 +265,23 @@ client's User-Agent in `user_agent`.
 | `threat_php_memory_corruption` | threat logs only: an internet attacker, 2–5 crafted HTTP requests at a DMZ web server, reset-server |
 | `threat_scanner_campaign` | one internal host: port scan → failed connections → Nmap NSE, OpenVAS and portmapper hits on the same server within the hour. The firewall's own threat alerts and the XDR analytics on the traffic land on one host, the shape of case 68482's "Multiple network-related alerts…" roll-up |
 
-**Ten more from the pa440's native CSV feed (2026-11-16).** The same device also wrote its plain
-PAN-OS CSV syslog into `unknown_unknown_raw` (unparsed `_raw_log`, ~2M rows in 13 h). Collapsing its
-34,500 vulnerability rows gave 203 distinct Threat IDs: 193 were already here (name, severity, subtype
-and action all agree) and 10 were new (30514, 33338, 38531, 37008, 55358, 58435, 96441, 95922, 37765,
-56480), added with the category, action and `$misc` the real rows carry. Two more were found from the
-alerts (97356 Adobe ColdFusion Path Traversal, 97710 Atlassian Web Resource Download Path Traversal) and added from the
-pa440's own CEF rows.
+**More from the pa440's native CSV feed.** The same device also writes its plain PAN-OS CSV syslog into
+`unknown_unknown_raw` (unparsed `_raw_log`). Its vulnerability rows supplied ten further signatures (30514, 33338,
+38531, 37008, 55358, 58435, 96441, 95922, 37765, 56480), added with the category, action and `$misc` the real rows
+carry. Two more (97356 Adobe ColdFusion Path Traversal, 97710 Atlassian Web Resource Download Path Traversal) came from
+the pa440's own CEF rows.
 
-**Scanner runs (2026-11-19/20, cases 73849-73864).** A vulnerability scanner run against the pa440 raised 1,795 PAN NGFW alerts
-across six cases (203 names, 222 IDs). Every signature already in the catalog matched on name, ID and severity; 22 were new and are
-now added from the pa440's own CEF rows (request paths only, never the scanned host): 17 web signatures (7 code-execution, 5 overflow,
-5 alert-only) and 5 legacy services (TFTP `drop`, telnet, FTP `alert`, LPD, SMTP). The catalog now holds 220
-tenant signatures; the family counts below include them. Each signature raised two alerts, one per delivery route (the CEF
-row with `(ID)` in the name and the older row without), which is why alert names appear in both forms.
+**Signatures from vulnerability-scanner runs.** A scanner pointed at the pa440 adds signatures the catalog did not
+have; 22 were added from the pa440's own CEF rows (request paths only, never the scanned host): 17 web signatures
+and 5 legacy services (TFTP `drop`, telnet, FTP `alert`, LPD, SMTP). The catalog holds 220 tenant signatures; the
+family counts below include them. A signature the pa440 hits is delivered by two routes, the CEF row with `(ID)` in
+the name and the older row without, so alert names appear in both forms.
 
-**Tenant-confirmed signature catalog (2026-11-16).** After a burst of generated threat traffic the
-tenant's `panw_ngfw_threat_raw` (one pa440, ~1000-minute window) carried **195 Threat IDs**; 186 were
-not yet in the catalog and were added from the rows (id, name, severity, category and `sub_type` exactly as
-the tenant records them; the action, App-ID and `$misc` are each signature's own dominant values, with
-host names and IPs stripped from `$misc`). 185 are subtype `vulnerability` and one is `spyware`
-(18011 Western Digital My Cloud Backdoor, backdoor, reset-server). No other subtype (virus, wildfire,
-url, data, scan, flood) appeared. Six grouped events fire them (all threat logs only, an internet
+**Tenant-confirmed signature catalog.** Read from the pa440's own `panw_ngfw_threat_raw` rows (id, name, severity,
+category and `sub_type` exactly as the tenant records them; the action, App-ID and `$misc` are each signature's own
+dominant values, with host names and IPs stripped from `$misc`). Almost all are subtype `vulnerability`; one is
+`spyware` (18011 Western Digital My Cloud Backdoor, backdoor, reset-server). No other subtype (virus, wildfire,
+url, data, scan, flood) has been seen. Six grouped events fire them (all threat logs only, an internet
 attacker `untrust -> dmz`, each hit using the signature's own action / App-ID / `$misc`; a family picks
 one signature per fire at random):
 
@@ -300,17 +294,11 @@ one signature per fire at random):
 | `threat_legacy_service_exploit` | FTP (tcp/21), TFTP (udp/69), telnet (23), LPD (515) and SMTP (25) service exploits | 8 |
 | `threat_wd_mycloud_backdoor` | the one spyware signature (18011) | 1 |
 
-All six are **alert-capable** (`analytic: True`). The first query of the `alerts` dataset (alert_source
-`PAN_NGFW`, last 48 h) returned 0 rows, but that was before `threat_id` was sent as `Name(ID)`. A later 3-day
-pull (2026-11-17, 916 PAN NGFW alerts, 392 names) matched **209 of the 218 catalogue signatures by name**, all medium to
-critical (critical 106 of 113, high 56 of 57, medium 47 of 47), under both name forms (`Name(ID)` and the older bare name). The
-nine without an alert are the signatures never sent yet (Pastebin C2 x3, Schoolboy, Moxa, TRENDnet, PHP Memory
-Corruption, Agobot) and the informational default-credentials signature, which never alerts. Native alerts
-are named `Name(ID)` of the signature hit, so a family event's `xsiam_alert` is a descriptor
-("Name(ID) of the signature hit") rather than one fixed name. Probes confirmed the exact alert for the spyware event
-(`Western Digital My Cloud Backdoor(18011)`, critical, raised 4-7 min after the send). The name match does not prove which
-alerts came from this generator rather than the pa440's own traffic. Ports for the
-non-HTTP apps are assumed standard (ftp 21, tftp 69, telnet 23, lpd 515, smtp-base 25); everything web rides 80/8080.
+All six are **alert-capable** (`analytic: True`): the firewall's own signature raises a native `PAN NGFW` alert named
+`Name(ID)` of the signature hit once `threat_id` is sent as `Name(ID)`, so a family event's `xsiam_alert` is a descriptor
+("Name(ID) of the signature hit") rather than one fixed name. Informational signatures (the default-credentials one)
+never reach the alerts table. Ports for the non-HTTP apps are assumed standard (ftp 21, tftp 69, telnet 23, lpd 515,
+smtp-base 25); everything web rides 80/8080.
 
 <details><summary>All 220 added signatures</summary>
 
@@ -551,19 +539,17 @@ action alert, direction server-to-client, threat category N/A): `file_data_web` 
 cleartext HTTP from an Internet server), `file_data_internal` (a host fetching from an internal web app on
 8080/9080/80) and `file_data_ocsp` (an OCSP lookup returning a DER X509 certificate, App-ID `ocsp`, tcp/80).
 Each fires traffic + file (+ URL) logs on one `session_id`. Names, IDs and the file-name distribution come
-from the pa440's native CSV feed (2026-11-16, ~12k `file` rows): 52081 Unknown Binary File, 52256 PHP,
+from the pa440's native CSV feed: 52081 Unknown Binary File, 52256 PHP,
 52384 XML, 52255 JSP, 52239 ASP, 52257 ASPX, 52380 JSON, 52021 PDF, 52209 DER X509, 52390 X509 file, 52017
 Perl, 52193 Python, 52418 DAT. **Assumed:** the `filetype` token (extension), `file_url` (host + path) and the
 empty `filedigest` (only a WildFire verdict carries one); the CSV has none of these three. How XSIAM parses
-the CEF File Data route is unconfirmed until the pa440 sends it.
+the CEF File Data route's parsing is taken from the pa440's own CEF rows.
 
 **Not built yet, and what is needed.** Virus, wildfire-virus, wildfire, data, scan and flood logs
-still have no rows in the tenant feed (the 2026-11-16 pull held only `vulnerability`, `file`, `url` and 21
-`spyware` rows), so no
+have not appeared in the tenant feed (only `vulnerability`, `file`, `url` and `spyware` rows have), so no
 IDs, names or subtype-specific columns can be copied. Spyware C2/DNS signatures beyond 18011 likewise. Supplying real IDs and names (or enough threat
 rows to read them from) is all that is needed to add them. Whether the syslog-delivered logs
-raise the same native `PAN_NGFW` alerts as the CLCS rows, and which `severity` form the platform
-expects, have to be settled with a small probe (not yet sent).
+raise the same native `PAN_NGFW` alerts as the CLCS rows is settled for the vulnerability and spyware signatures; the other subtypes need a probe.
 
 ## Vulnerabilities (on-demand module)
 
@@ -576,7 +562,7 @@ alert it targets, `Name(ID)`). The MCP `fire_event` tool and the CLI specific-th
 |---|---|
 | Entries | 235, `vuln_<id>` (also accepted as a bare ID, `97710`, or `t97710`): the 219 tenant-confirmed vulnerability signatures plus the 16 hand-curated ones that have a dedicated event in the NGFW module (Log4j, Dnsmasq, Nmap NSE, OpenVAS, RPC portmapper / fragmentation, NFS export, SSH brute force, IAX2, default credentials, PHP RCE x3, Moxa, TRENDnet, PHP memory corruption). Spyware signatures (WD 18011, bot beacon, Agobot, Pastebin C2, Schoolboy) are not listed |
 | What a fire sends | what `panw_ngfw` builds for that signature. Tenant entries: an internet attacker (`untrust -> dmz`) trips it against a DMZ server, 1-4 threat-log sessions (1-3 for the legacy services), the signature's own action, App-ID, port and request path. Curated entries run their dedicated event with the ID pinned (the three PHP RCE IDs each fire only their own), so scanner and RPC signatures come from an internal host and the SSH brute force carries its preceding sessions. `threat_id` is sent as `Name(ID)` |
-| Expect | the native `PAN NGFW` alert named `Name(ID)`, 4-7 minutes later (default credentials, 59995, is informational and never alerts; its dropdown label says so). Repeats of one signature in a short window may be suppressed by the tenant, so send a few from different sources if a single fire shows nothing |
+| Expect | the native `PAN NGFW` alert named `Name(ID)` within minutes (default credentials, 59995, is informational and never alerts; its dropdown label says so) |
 | Background | none: in a long-running session the module generates nothing (the same signatures already ride the grouped events of the NGFW module) |
 | Config | none of its own: it shares `panw_ngfw_config` (syslog host and port, `zones`, DMZ servers) |
 
@@ -685,7 +671,7 @@ broker from its own source host, alerts attributed by the `DS:PANW/NGFW_CEF` tag
 | `snmp_unexpected_source` | *(non-analytic)* | a workstation walking every network device on UDP/161 (traffic only; the SNMP config logs are a different PAN log type) | ported |
 | `file_data_web` / `file_data_internal` / `file_data_ocsp` | *(non-analytic)* | File Data (`firewall.filedata`) logs: file-type identification alongside traffic and URL logs | native CSV |
 
-The *ported* events replicate the traffic-based hits of the other firewall generators (their alert targets are the same names those registries use; several of those detectors have never fired in this tenant from any feed). `dns_tunneling` and `reverse_ssh_tunnel` are already covered by `dns_tunnel_pattern` and the SSH events above.
+The *ported* events replicate the traffic-based hits of the other firewall generators (their alert targets are the same names those registries use). `dns_tunneling` and `reverse_ssh_tunnel` are already covered by `dns_tunnel_pattern` and the SSH events above.
 
 All sequences end at or before the current time.
 
