@@ -639,6 +639,51 @@ def override_domain(story: Story, new_domain: str) -> Story:
     return story
 
 
+def story_domains(story: Story) -> list:
+    """Every distinct C2/exfil domain the story uses (step params + network contexts)."""
+    out = []
+    for step in story.steps:
+        for d in [step.params.get("domain")] + [ne.context.get("domain") for ne in step.network]:
+            if d and d not in out:
+                out.append(d)
+    return out
+
+
+def fresh_domain(domain: str, token: str) -> str:
+    """'update-check-svc.net' + 'k3f9' -> 'update-check-svc-k3f9.net'."""
+    name, dot, tld = domain.rpartition(".")
+    return f"{name}-{token}.{tld}" if dot else f"{domain}-{token}"
+
+
+def freshen_domains(story: Story, token: str) -> dict:
+    """Per-run option (default ON): give every story domain a run-unique tag, in place.
+
+    Why: the shipped C2 correlation rules suppress repeats for 1 hour keyed on
+    source IP + domain, and every run fires from the same box IP. Two runs of a
+    story within the hour (2026-11-18: persistence at 18:42 and 19:15) left Check
+    Point, Fortinet and Infoblox silent on the second -- suppressed, not missed. A
+    fresh domain per run keeps each run independently detectable. Distinct domains
+    stay distinct (each gets the same tag). Rewrites step params, input_args
+    strings (so the real technique hits the same host) and network contexts.
+    Returns {old: new}."""
+    mapping = {d: fresh_domain(d, token) for d in story_domains(story)}
+    for step in story.steps:
+        d = step.params.get("domain")
+        if d in mapping:
+            step.params["domain"] = mapping[d]
+        for holder in (step.params.get("input_args"), (step.technique or {}).get("input_args")):
+            if isinstance(holder, dict):
+                for k, v in list(holder.items()):
+                    if isinstance(v, str):
+                        for old, new in mapping.items():
+                            v = v.replace(old, new)
+                        holder[k] = v
+        for ne in step.network:
+            if ne.context.get("domain") in mapping:
+                ne.context = {**ne.context, "domain": mapping[ne.context["domain"]]}
+    return mapping
+
+
 def all_technique_ids() -> list:
     """Every distinct technique id across all stories — used by the Kickstarter to
     install exactly the prereqs any story might need."""

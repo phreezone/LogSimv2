@@ -11,6 +11,8 @@
 # Registered as a scenario in log_simulator.get_scenarios() via run_reference_story
 # so it flows through the existing driver, run-tracking, and transports unchanged.
 
+import random
+import string
 import sys
 import time
 from typing import Optional
@@ -20,7 +22,7 @@ from .executor import build_executor
 from .stories import (
     Story, get_reference_story, get_intrusion_story, get_quick_story,
     get_lateral_story, get_persistence_story, get_fullchain_story,
-    get_story, override_domain, _annotate,
+    get_story, override_domain, _annotate, story_domains, freshen_domains,
 )
 from . import ledger as _ledger
 from . import policy as _policy
@@ -150,6 +152,7 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
               cleanup_prior_incidents: bool = False,
               only_steps=None, skip_steps=None, pace: Optional[float] = None,
               domain_override: Optional[str] = None,
+              fresh_domains: bool = True,
               anchor_dhcp: Optional[bool] = None,
               anchor_logon: Optional[bool] = None,
               timing_profile: Optional[str] = None, jitter: Optional[float] = None,
@@ -176,6 +179,11 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
                                 is one of timing.PACE_PROFILES; `pace` multiplies the
                                 scale; `jitter` (0..1) randomizes each delay.
       domain_override         : replace the story's C2/exfil domain for this run.
+      fresh_domains           : (default ON; ignored with domain_override) tag every
+                                story domain with a run-unique suffix so the C2
+                                rules' 1-hour IP+domain suppression can't silence a
+                                repeat run. The {old: new} map is in
+                                summary["run_domains"].
       anchor_dhcp/anchor_logon: override the story's identity-anchor emission.
       prevention_probe        : (Tier-2 #6) fire a benign canary first; if the agent
                                 is PREVENTING, `on_prevention` decides: "abort"
@@ -189,8 +197,14 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
     """
     story = story or get_reference_story()
     _annotate(story)
+    run_domains = {}
     if domain_override:
+        run_domains = {d: domain_override for d in story_domains(story)}
         override_domain(story, domain_override)
+    elif fresh_domains:
+        run_domains = freshen_domains(
+            story, "".join(random.choice(string.ascii_lowercase + string.digits)
+                           for _ in range(4)))
     if anchor_dhcp is not None:
         story.anchor_dhcp = anchor_dhcp
     if anchor_logon is not None:
@@ -202,12 +216,18 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
                "results": [], "emitted": 0, "aborted": None,
                "selected_steps": [i for (i, _s) in selected],
                "domain_override": domain_override or None,
+               # {story domain: domain actually used}. A Re-score rebuilds the story
+               # from its definition (original domains), so the scorecard reads the
+               # run's real domains from here.
+               "run_domains": run_domains,
                "timing": timing.to_dict(), "prevention": None, "scorecard": None,
                # Epoch seconds; the scorecard sizes its alert window from this so a
                # long run (or a late Re-score) still covers the run's first alerts.
                "started_at": time.time()}
     _run_options = {"dry_run": dry_run, "only_steps": only_steps,
                     "skip_steps": skip_steps, "domain_override": domain_override or None,
+                    "fresh_domains": bool(fresh_domains and not domain_override),
+                    "run_domains": run_domains,
                     "timing": timing.to_dict(), "prevention_probe": prevention_probe,
                     "scorecard": scorecard, "cleanup_prior_incidents": cleanup_prior_incidents}
 
@@ -429,7 +449,7 @@ def run_story_id(all_modules, config, story_id, *, dry_run=None,
                  pace=None, domain_override=None, anchor_dhcp=None, anchor_logon=None,
                  timing_profile=None, jitter=None, prevention_probe=False,
                  on_prevention="warn", scorecard=False, scorecard_wait=0,
-                 scorecard_minutes=None, ledger=True):
+                 scorecard_minutes=None, ledger=True, fresh_domains=True):
     """Run a story by id (used by the console /api/attack/run route). Falls back to
     the reference story when the id is unknown. Threads the per-run options through
     to run_story (see its docstring)."""
@@ -437,7 +457,8 @@ def run_story_id(all_modules, config, story_id, *, dry_run=None,
     return run_story(all_modules, config, story, dry_run=dry_run,
                      cleanup_prior_incidents=cleanup_prior_incidents,
                      only_steps=only_steps, skip_steps=skip_steps, pace=pace,
-                     domain_override=domain_override, anchor_dhcp=anchor_dhcp,
+                     domain_override=domain_override, fresh_domains=fresh_domains,
+                     anchor_dhcp=anchor_dhcp,
                      anchor_logon=anchor_logon, timing_profile=timing_profile,
                      jitter=jitter, prevention_probe=prevention_probe,
                      on_prevention=on_prevention, scorecard=scorecard,

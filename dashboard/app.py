@@ -1844,6 +1844,9 @@ def api_attack_run():
     except (TypeError, ValueError):
         pace = None
     domain_override = (body.get("domain_override") or "").strip() or None
+    # Default ON: a run-unique tag on each story domain, so the C2 rules' 1-hour
+    # IP+domain suppression can't silence a repeat run. Ignored with domain_override.
+    fresh_domains = bool(body.get("fresh_domains", True))
     anchor_dhcp = body.get("anchor_dhcp")
     anchor_logon = body.get("anchor_logon")
     anchor_dhcp = bool(anchor_dhcp) if anchor_dhcp is not None else None
@@ -1872,7 +1875,8 @@ def api_attack_run():
         _ATTACK_SUMMARIES[run_id] = run_story_id(
             mods, c, story_id, dry_run=dry_run, cleanup_prior_incidents=cleanup,
             only_steps=only_steps, skip_steps=skip_steps, pace=pace,
-            domain_override=domain_override, anchor_dhcp=anchor_dhcp,
+            domain_override=domain_override, fresh_domains=fresh_domains,
+            anchor_dhcp=anchor_dhcp,
             anchor_logon=anchor_logon, timing_profile=timing_profile, jitter=jitter,
             prevention_probe=prevention_probe, on_prevention=on_prevention,
             scorecard=scorecard, scorecard_wait=scorecard_wait)
@@ -1883,7 +1887,8 @@ def api_attack_run():
     return jsonify({"started": True, "story": story.name, "story_id": story_id,
                     "dry_run": dry_run, "cleanup_prior_incidents": cleanup,
                     "only_steps": only_steps, "skip_steps": skip_steps, "pace": pace,
-                    "domain_override": domain_override, "timing_profile": timing_profile,
+                    "domain_override": domain_override, "fresh_domains": fresh_domains,
+                    "timing_profile": timing_profile,
                     "jitter": jitter, "prevention_probe": prevention_probe,
                     "scorecard": scorecard,
                     "run_id": run_id}), 202

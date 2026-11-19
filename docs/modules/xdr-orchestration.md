@@ -159,6 +159,14 @@ Every technique is non-destructive and cleanup-capable (test numbers validated l
 
   The story still runs. The console's story picker shows the warnings.
 
+### Fresh C2 domain per run (default on)
+
+The shipped C2 correlation rules suppress repeats for 1 hour, keyed on source IP plus domain. Every run fires from the same box IP, so rerunning a story within the hour silences those rules: the logs arrive, but no alert fires. On 2026-11-18, Check Point, Fortinet and Infoblox stayed silent on a rerun 33 minutes later.
+
+By default each run therefore adds a 4-character random tag to every story domain, for example `update-check-svc.net` → `update-check-svc-k3f9.net`. The tag goes into step params, technique input args and network contexts. Distinct domains stay distinct. The mapping is saved as `summary.run_domains`, and the scorecard uses it to recognise the run's alerts, including on a later Re-score.
+
+To turn it off, untick **Fresh C2 domain each run** in the console, or send `fresh_domains: false`. Setting a domain override also turns it off.
+
 ### Scorecard read-back
 
 - **Sources:** the analytics and correlation sources (`XDR Analytics`, `XDR Analytics BIOC`, `Correlation`) plus the agent sources (`XDR Agent`, `XDR BIOC`, `XDR IOC`). The box's own Cortex detections arrive as `XDR Agent`.

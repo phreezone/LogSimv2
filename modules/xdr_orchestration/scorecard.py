@@ -212,6 +212,11 @@ def run_markers(story, summary: dict, identity: dict) -> dict:
     domains = set()
     if summary.get("domain_override"):
         domains.add(_lower(summary["domain_override"]))
+    # The domains the run actually used (fresh per-run tags). A Re-score rebuilds
+    # the story with its original domains, so these come from the summary.
+    for d in (summary.get("run_domains") or {}).values():
+        if d:
+            domains.add(_lower(d))
     for _idx, step in _selected(story, summary.get("selected_steps")):
         for ne in getattr(step, "network", None) or []:
             d = (getattr(ne, "context", None) or {}).get("domain")

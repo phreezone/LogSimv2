@@ -548,6 +548,9 @@
         <label style="display:flex;align-items:center;gap:6px;">Domain override
           <input type="text" id="xdr-domain" placeholder="e.g. my-c2.example.net" style="width:200px;padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
         </label>
+        <label style="display:flex;align-items:center;gap:6px;" title="Tags each story domain with a run-unique suffix so the C2 rules' 1-hour IP+domain suppression can't silence a repeat run. Ignored when a domain override is set.">
+          <input type="checkbox" id="xdr-fresh-domains" checked> Fresh C2 domain each run
+        </label>
         <label style="display:flex;align-items:center;gap:6px;">Skip steps
           <input type="text" id="xdr-skip" placeholder="e.g. 1,2" style="width:80px;padding:4px 8px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
         </label>
@@ -1545,6 +1548,7 @@
     const cleanup_prior_incidents = document.getElementById('xdr-cleanup').checked;
     const timing_profile = document.getElementById('xdr-timing').value;
     const domain_override = document.getElementById('xdr-domain').value.trim();
+    const fresh_domains = document.getElementById('xdr-fresh-domains').checked;
     const prevention_probe = document.getElementById('xdr-prevention').checked;
     const scorecard = document.getElementById('xdr-scorecard').checked;
     const skip_steps = document.getElementById('xdr-skip').value
@@ -1562,6 +1566,7 @@
         story_id, dry_run, cleanup_prior_incidents, timing_profile,
         prevention_probe, scorecard,
         domain_override: domain_override || null,
+        fresh_domains,
         skip_steps: skip_steps.length ? skip_steps : null,
       });
       statusEl.textContent = 'running…';
@@ -1616,6 +1621,12 @@
     statusEl.style.color = a.aborted || v.status === 'error' ? 'var(--red)' : (ok ? 'var(--green)' : 'var(--yellow)');
     let html = '';
     if (a.aborted) html += `<div style="color:var(--red);">${escHtml(a.aborted)}</div>`;
+    const rd = a.run_domains || {};
+    if (Object.keys(rd).length) {
+      html += `<div style="color:var(--text-muted);">C2 domains this run: `
+           + Object.entries(rd).map(([o, n]) => o === n ? escHtml(n) : `${escHtml(o)} → <span style="color:var(--text);">${escHtml(n)}</span>`).join(', ')
+           + `</div>`;
+    }
     (a.validation || []).forEach(p => {
       const col = p.level === 'error' ? 'var(--red)' : 'var(--yellow)';
       html += `<div style="color:${col};">${p.level === 'error' ? '✗' : '⚠'} `
