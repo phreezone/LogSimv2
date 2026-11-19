@@ -139,6 +139,13 @@ generator locks `windows_events_config.targeted_lockout_accounts` (default
 `Administrator`, `adm-a.cox2`, `a.ortega`, `c.ford`). Merely service-account
 names such as `svc_backup` only ever raise the Low base alert.
 
+The rule's *other* Medium variation, "Excessive user account lockouts from a
+suspicious source", could not be selected: four source hosts — including a real
+tenant asset with 59 alerts — each produced only the Low base on identical
+ordinary victims, so the variation is not name- or history-based. The generator
+targets the "commonly targeted users" variation and does not attempt this one
+(see `docs/modules/windows.md`).
+
 **WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 
 | Generator | Reason |

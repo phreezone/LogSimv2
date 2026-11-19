@@ -261,6 +261,33 @@ The victim list is `windows_events_config.targeted_lockout_accounts`
 the tenant's own privileged accounts; merely service-account-shaped names will
 only ever raise the Low base alert.
 
+#### The other Medium variation is not selected by the source host
+
+The rule has a second Medium variation, "Excessive user account lockouts from a
+**suspicious source**". The same ordinary victims were sprayed from four source
+hosts, one per batch, changing nothing else:
+
+| Source host | What it is | Alert |
+|---|---|---|
+| `IP-10-0-0-12` | a real tenant asset with **59 alerts** in its history | LOW 811432 |
+| `WKS-UNKNOWN-88` | a name absent from the asset inventory | LOW 811435 |
+| `DESKTOP-7Q4M2X` | a workgroup-style name, not a domain-joined host | LOW 811436 |
+| `ATTACKER-PC` | an obviously hostile host name | LOW 811434 |
+
+Every batch delivered four ordinary users, all four `4740`s were verified in
+`xdr_data` for every source, and every alert reads "this source host has
+generated an average of 0 lockouts per day". None raised the Medium variation.
+
+So "suspicious source" is not "a host with a long alert history", not "a host
+unknown to the inventory", and not a name heuristic — the first test is the
+decisive one, because a 59-alert real asset produced only the Low base. What the
+variation actually keys on is unverified and the generator makes no attempt to
+select it; this remains a known gap, not a working detection.
+
+Process note: the first run of this probe put all three hosts into a single
+240-event message and was silently truncated to its first 71 events, so only the
+first source was fairly tested. See "Probe deliveries must be chunked".
+
 ### New machine delegation: `4741` does not make a machine "new" (2026-11-18)
 
 `new_machine_delegation` had never alerted in 90 days, although the shipped
