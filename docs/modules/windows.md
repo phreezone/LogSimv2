@@ -143,7 +143,7 @@ after three or more isolated probe batches each, so they are **WIP**.
 | `pkinit_auth` | **WIP** | 4 batches, 0 alerts. Tried the Microsoft-documented smart-card shape (4768 `PreAuthType=15`, `PreAuthEncryptionType=0x12`, cert issuer/serial/thumbprint), `PreAuthType` 14/16/17, rogue and enterprise issuers, short/full issuer DN, machine and user targets, missing cert, `4771` failure, `TicketOptions=0x60810010`, loopback `::1`, realm-qualified `ServiceName`, and a 4768 correlated with a preceding `msDS-KeyCredentialLink` write. All shapes ingested with the fields intact in both `microsoft_windows_raw` and `xdr_data`. |
 | `spn_cleared` | **WIP** | 5 batches, 0 alerts. Tried 4742 `ServicePrincipalNames` empty / `-` / absent, 5136 `%%14675` delete pairs, 5136 `%%14674` add-with-empty-value, 4662 write-property, and a same-account state transition (4742 with real SPNs, then 4742 with `-`). Batches 4–5 added the missing realism: `UserAccountControl` `%%2080` / `0x1000` (instead of `-`), the "only SPN changed" 4742 shape (`SamAccountName`/`DnsHostName` left as `-`), a real tenant asset (`FS01$`) as well as a new machine, and deleted-value renderings `-` / empty / absent. All shapes ingested; none alerted. Batch 6 re-ran the module's full sequence after the CRLF fix (9 events, real CRLF) — still 0 alerts. |
 | `kerberos_relay` | **WIP** | 7 batches, 0 alerts. Tried the published KrbRelayUp endpoint signature alone (4624 type 3, Kerberos, local Administrator RID 500, loopback) with `127.0.0.1` / `::1` / `::ffff:127.0.0.1` and `WorkstationName` `FS01` / `-`, then the full sequence 4768 → DC 4624 → 4769 → endpoint 4624 → 4672 → 4688 → 4689 against the real `FS01` asset. Batch 4 varied the target SID (machine-local vs synthetic-domain vs the tenant's real domain `S-1-5-21-2795392456-4107320412-3908095700` Administrator), the subject (machine account + `0x3e7` + `lsass.exe` vs anonymous `S-1-0-0`), and the target host (`FS01` vs `DC01`); all six events ingested with the fields intact and produced no alert. **Batches 5–7 ran after the CRLF fix below.** The stored `action_evtlog_message` now carries real CRLF (58–59 per 4624, 0 bare LF) and the published XQL hunt for this analytic returns the synthetic rows verbatim (`auth_package=Kerberos`, `logon_type=3`, `network=127.0.0.1`, `sid` ending `-500`). Batch 6 covered machine-local and real-domain Administrator SIDs; batch 7 fired the module's own full 7-event sequence against `SQL01`. Neither the Cribl receiver path nor attributing the WEC event to a real agent hostname (`Windows10-Workstation1`) changed anything — both still land as `EVENT_LOG_DOMAIN_CONTROLLER` with null `agent_ip_addresses`/`identity_enrichment`. That collector class is now the standing blocker: real agent 4624s are stamped `EVENT_LOG_AGENT_EVENT_LOG`, and no WEC/Cribl record can be. See "event_sub_type: WEC vs agent" below. |
-| `wip_adminsdholder_acl_modification` | **WIP** | 3 batches, 0 alerts. Batch 1 delivered the canonical shape — 5136 `nTSecurityDescriptor` pair on `CN=AdminSDHolder,CN=System,DC=examplecorp,DC=local` with `ObjectClass=container`, `OperationType` `%%14675`/`%%14674` under one `OpCorrelationID`, and a new ACE `(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;<user SID>)` (Full control for a non-machine principal), plus the 4662 read `0x10`, WRITE_DAC `0x40000` and write-property `0x20` legs. This matches the published logic for the same detection (Splunk ESCU `00d877c3-7b7b-443d-9562-6b231e2abab9`: `EventCode=5136 ObjectClass=container ObjectDN="CN=AdminSDHolder,CN=System*"`, new ACE with Full control). Every field verified in `xdr_data`. Batch 2 was a differential probe: the same `msDS-KeyCredentialLink` change fired on the container (alert 799066, "The account type: container"), so the target type is not the blocker. Batch 3 added a second ACE for `WD` and named the `nTSecurityDescriptor` GUID in the WRITE_DAC `Properties`; still 0. See "Container targets are evaluated" below. |
+| `wip_adminsdholder_acl_modification` | **WIP** | 4 batches, 0 alerts. Batch 1 delivered the canonical shape — 5136 `nTSecurityDescriptor` pair on `CN=AdminSDHolder,CN=System,DC=examplecorp,DC=local` with `ObjectClass=container`, `OperationType` `%%14675`/`%%14674` under one `OpCorrelationID`, and a new ACE `(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;<user SID>)` (Full control for a non-machine principal), plus the 4662 read `0x10`, WRITE_DAC `0x40000` and write-property `0x20` legs. This matches the published logic for the same detection (Splunk ESCU `00d877c3-7b7b-443d-9562-6b231e2abab9`: `EventCode=5136 ObjectClass=container ObjectDN="CN=AdminSDHolder,CN=System*"`, new ACE with Full control). Every field verified in `xdr_data`. Batch 2 was a differential probe: the same `msDS-KeyCredentialLink` change fired on the container (alert 799066, "The account type: container"), so the target type is not the blocker. Batch 3 added a second ACE for `WD` and named the `nTSecurityDescriptor` GUID in the WRITE_DAC `Properties`; still 0. Batch 4 retargeted everything at the **real** naming context (`DC=corp,DC=examplecorp,DC=com`, real domain SID, real DC) and included a positive control — a 5136 `msDS-KeyCredentialLink` on the real `CN=Administrator,CN=Users,...` with the 828-hex blob. The control also produced 0 alerts, so the real naming context is not resolvable for 5136 analytics; that hypothesis is disproven, not pending. See "Attempt 4: the real naming context does not resolve" below. |
 | `wip_esc4_template_modification` | **WIP** | 3 batches, 0 alerts. Attempt 1 was `5136` only (`nTSecurityDescriptor` delete+add on the template granting Authenticated Users the write rights DA/SY hold, plus `msPKI-Certificate-Name-Flag=1`). Attempt 2 added the `4662` legs (`0x10` read, `0x40000` WRITE_DAC `%%1539`, `0x20` property write `%%7685`) with the documented schema GUIDs. Attempt 3 added `4899`/`4900` from the CA with old/new template content and old/new security descriptor. All events verified ingested. The detector's own event-collection reference names **4899, 4900 and 4662** (not 5136); the `4899`/`4900` EventData names remain unverifiable because Microsoft publishes no per-event page. See "AD CS detectors: what is reachable and what is not" below. |
 | `wip_new_machine_delegation` | **WIP** | 3 batches, 0 alerts. Attempt 1: config-only `4741` + clean `4742(AllowedToDelegateTo)` + `5136`, a bare S4U2Self/S4U2Proxy pair, and a new machine TGT + TGS. Attempt 2: full RBCD chain on `FS01` (`5136` + `4662` with `3f78c3e5-…`), constrained delegation at creation (`4741` UAC `0x1001000`), unconstrained at creation (`4741` UAC `0x81000`). Attempt 3: the same three chains, each preceded by a DC-side machine `4624` and the machine's own TGT. All events verified ingested. A `4741` diagnostic showed a fresh machine creation by a first-time creator does **not** raise "Rare machine account creation", so `4741` is not what feeds machine-creation analytics here. See "New machine delegation: `4741` does not make a machine 'new'" below. |
 | `mailbox_export`, `mailbox_export_log_removal`, `mailbox_cas_change` | **WIP** | 3 batches, 0 alerts. Tried 4104 `ScriptBlockText` carrying `New-MailboxExportRequest` / `Remove-MailboxExportRequest` / `Set-CASMailbox`, 4688 process creation, and native `MSExchange Management` EventID 1 `CmdletName`/`CmdletParameters` (simple and full field sets: `ObjectModified`, `User`, `Organization`, `OriginatingServer`, `Succeeded`, `RunspaceId`, `Timestamp`). The `MSExchange Management` channel **does** ingest and normalize (`microsoft_windows_raw` → `xdr_data`, `action_evtlog_event_id=1`), so channel availability is not the blocker. |
@@ -242,7 +242,7 @@ and users added to Domain/Enterprise Admins such as `a.ortega` and `c.ford`.
 
 | Attempt | Shape | Alert |
 |---|---|---|
-| 00:43Z | hand-built batch: seven graph-known privileged accounts from `SALES-LT-001`, 3–8 s between attempts | **MEDIUM 811261** — 4 users: `Administrator`, `a.ortega`, `adm-a.cox2`, `c.ford` |
+| 00:43Z | hand-built batch: seven graph-known privileged accounts from `SALES-LT-001`, 3–8 s between attempts (only the first four accounts were actually delivered — see "Probe deliveries must be chunked") | **MEDIUM 811261** — 4 users: `Administrator`, `a.ortega`, `adm-a.cox2`, `c.ford` |
 | 01:06Z | shipped generator, original pacing (~50 s per victim) from `SALES-LT-005` | LOW 811426 — only 3 users, `Administrator` absent |
 | 01:20Z | shipped generator, compressed spray (sub-second gaps) from `SALES-LT-006` | **MEDIUM 811431** — 3 users: `Administrator`, `a.ortega`, `c.ford` |
 
@@ -332,6 +332,48 @@ So this is three batches, zero alerts, and the item stays `WIP_`. Remaining
 candidates, none verified: an ACE/SDDL parse this tenant does not perform, or the
 analytic simply not being active for WEC-only data. Do not assume the container
 target is the blocker; that hypothesis is disproven.
+
+#### Attempt 4: the real naming context does not resolve (2026-11-19)
+
+A fourth hypothesis was that every batch so far had used the **synthetic**
+naming context. Sampling 800 `5136` rows over 90 days showed the split is total:
+
+| Naming context | 5136 rows |
+|---|---|
+| `DC=corp,DC=examplecorp,DC=com` (the real DC) | **0** |
+| `DC=examplecorp,DC=local` (LogSim synthetic) | **800** |
+
+so no event had ever named the real `AdminSDHolder` object, even though the real
+directory is `DC=corp,DC=examplecorp,DC=com` (proven by 185,646 real `1644`s and
+the real `4769`s: realm `CORP.EXAMPLECORP.COM`, DC account `EXAMPLECORP-DC1$`).
+
+The batch re-pointed the module at the real namespace and the real domain SID
+`S-1-5-21-2795392456-4107320412-3908095700`, and carried a **positive control**:
+
+| Probe (all verified in `xdr_data`) | Alerts |
+|---|---|
+| **Control:** 5136 `msDS-KeyCredentialLink` on `CN=Administrator,CN=Users,DC=corp,DC=examplecorp,DC=com`, 828-hex blob — the exact shape that selects the Medium variation in the synthetic namespace | **0** |
+| ACL change by the real `Administrator` (RID 500) granting FullControl to `MSOL_37f6388798ea` (RID 2368) | 0 |
+| The same ACL change performed by `MSOL_37f6388798ea` granting itself FullControl | 0 |
+
+All five `5136` rows landed with the real DN, the real domain SID and the real DC
+`ExampleCorp-DC1.corp.examplecorp.com`. The control is what settles it: an
+attribute write that fires in the synthetic namespace did **not** fire in the
+real one, so the namespace is not resolvable for 5136 analytics at all — this is
+not an AdminSDHolder-specific result.
+
+The graph does know the real domain: three posture alerts name it
+(`CN=Backup Operators,CN=Builtin,DC=corp,DC=examplecorp,DC=com` and siblings).
+The likely reason is **object identity, not the DN**: these analytics attach an
+event to an object by `objectGUID`, the real objects already carry authoritative
+GUIDs from agent inventory, and the generator's fabricated `uuid5` GUID cannot
+match them. Synthetic objects have no competing GUID, so the generator's stable
+`uuid5` values *became* the graph's identity for those objects — which is why
+synthetic-namespace detections work.
+
+Retargeting to the real naming context is therefore **disproven, not pending**.
+The ACL analytic's silence remains analytic-specific: an ACE/SDDL parse this
+tenant does not perform, or the analytic not being active for WEC-only data.
 
 Process note: attempt 2 was initially read as 0 alerts because the poll filtered
 on alert *names* containing "key credential". The tenant name is "Possible shadow
@@ -787,6 +829,25 @@ no longer read.
   undeliverable is counted under "WEC delivery" in the health check.
 - **Insane** fires a threat on every threats-worker tick (base interval x
   `threat_interval_multiplier`, 2 s by default). It previously fired none in parallel mode.
+
+### Probe deliveries must be chunked
+
+`WecClient.deliver_events()` posts the whole list it is given as **one** SOAP
+message; it does not split. The production sender does the splitting for it
+(`log_simulator.py`, `wec_batch_size`, default 100). A probe that calls
+`deliver_events()` directly therefore bypasses the chunking, and a large batch is
+silently truncated by the broker while still returning success:
+
+| Batch | Payload | Indexed |
+|---|---|---|
+| 182 events (lockout probe attempt 1) | ~443 KB | first **104** events |
+| 240 events (lockout source probe) | ~586 KB | first **71** events |
+
+Both were clean prefixes, and neither raised an error. This is why attempt 1 of
+the suspicious-lockout probe reported four locked users out of seven: the other
+three accounts' events were never delivered. Chunk probe deliveries the way the
+sender does (or smaller) and verify ingestion before concluding anything from a
+silent batch.
 
 ## Record Numbers
 
