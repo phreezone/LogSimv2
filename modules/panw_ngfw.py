@@ -151,11 +151,19 @@ _APP = {
     # Applipedia detail API is reCAPTCHA-gated and the live feed has no AD traffic).
     "active-directory-base": ("business-systems", "auth-service", "client-server",   "Medium",        [135, 389]),
     "ms-dc-replication":     ("business-systems", "auth-service", "client-server",   "Medium",        []),
+    # Seen in the live pa440 threat/traffic rows (category / sub-category / technology / risk
+    # exactly as the tenant records them).
+    "portmapper":      ("networking",       "infrastructure",    "network-protocol","Medium",        [111]),
+    "rpc":             ("networking",       "infrastructure",    "network-protocol","Low",           [111]),
+    "nfs":             ("business-systems", "storage-backup",    "client-server",   "Medium",        [2049]),
     "smtp":            ("collaboration",    "email",             "client-server",   "Medium",        [25, 587]),
     "ftp":             ("general-internet", "file-sharing",      "client-server",   "Critical",      [21]),
     "icmp":            ("networking",       "ip-protocol",       "network-protocol","High",          [0]),
     "ping":            ("general-internet", "internet-utility",  "network-protocol","Low",           [0]),
     "snmp-base":       ("networking",       "infrastructure",    "client-server",   "Low",           [161]),
+    # IAX2 (Asterisk) is identified as voip-video (user-confirmed App-ID); the category,
+    # technology and risk are assumed, not read from Applipedia (its API is gated).
+    "voip-video":      ("collaboration",    "voip-video",        "client-server",   "Medium",        []),
     "incomplete":      ("unknown",          "unknown",           "unknown",         "Informational", []),
     "insufficient-data":("unknown",         "unknown",           "unknown",         "Informational", []),
     "unknown-tcp":     ("unknown",          "unknown",           "unknown",         "Informational", []),
@@ -179,6 +187,10 @@ _APP = {
     "spotify-base":    ("media",            "streaming",         "browser-based",   "Low",           [443]),
     "linkedin-base":   ("business-systems", "social-business",   "browser-based",   "Low",           [443]),
     "facebook-base":   ("general-internet", "social-business",   "browser-based",   "Medium",        [443]),
+    # Seen in the pa440's threat rows; category/sub-category/risk are assumed, not
+    # read from Applipedia (its API is reCAPTCHA-gated).
+    "lpd":             ("general-internet", "internet-utility",  "client-server",   "Medium",        [515]),
+    "smtp-base":       ("collaboration",    "email",             "client-server",   "Medium",        [25]),
 }
 
 # Benign external destination-domain -> the App-ID that destination's traffic is
@@ -249,12 +261,15 @@ _PROTO_BY_PORT = {53: "udp", 123: "udp", 161: "udp", 0: "icmp", 67: "udp", 68: "
 
 # PAN-OS URL categories (lowercase, as in the live feed).
 _URL_CAT_BENIGN  = ["business-and-economy", "computer-and-internet-info", "search-engines",
-                    "web-advertisements", "content-delivery-networks", "internet-communications",
+                    "web-advertisements", "content-delivery-networks", "internet-communications-and-telephony",
                     "financial-services", "government", "health-and-medicine", "games",
-                    "streaming-media", "social-networking", "web-based-email", "online-storage-and-backup"]
+                    "streaming-media", "social-networking", "web-based-email", "online-storage-and-backup",
+                    "shopping", "news", "reference-and-research", "ai-conversational-assistant",
+                    "internet-portals", "travel"]
 _URL_CAT_RISKY   = ["malware", "command-and-control", "phishing", "proxy-avoidance-and-anonymizers",
                     "dynamic-dns", "newly-registered-domain", "hacking", "unknown",
-                    "peer-to-peer", "questionable", "grayware"]
+                    "peer-to-peer", "questionable", "grayware", "ransomware", "compromised-website",
+                    "scanning-activity", "parked"]
 
 # The URL category the firewall's URL-filtering verdict assigns to a benign destination by
 # domain, so a streaming visit is not labelled "health-and-medicine": _traffic_fields picks
@@ -269,7 +284,7 @@ _DOMAIN_URLCAT = [
     ("drive", "online-storage-and-backup"),
 ]
 
-_SW_VERSION = "12.1.12"      # PAN-OS release stamped in the CEF device-version slot
+_SW_VERSION = "12.2.4-h1"    # PAN-OS release stamped in the CEF device-version slot (the lab pa440's)
 # Apps and Threats content version stamped in the THREAT (url) log's `contentver` field
 # ("Content Version (contentver) — Applications and Threats version on your firewall when
 # the log was generated", threat-log-fields).  Not a live CLCS column; a stable pair the
@@ -351,8 +366,20 @@ def _session_id():
     return str(random.randint(100000, 2147483647))
 
 
+_SEQ = [random.randint(7000000000000000000, 7999999999999999000)]
+
+
 def _seqno():
-    return str(random.randint(7000000000000000000, 7999999999999999999))
+    """sequence_no is a per-device counter shared by every log type (the live pa440 rows rise
+    monotonically: ...642205570 -> ...642224005 over 35 min), not a random number per log."""
+    _SEQ[0] += random.randint(1, 3)
+    return str(_SEQ[0])
+
+
+def _pan_time(t):
+    """log_time/time_generated as PAN-OS writes them in the CEF custom format: the live pa440
+    Syslog rows show 'Nov 16 2026 18:46:43 GMT'."""
+    return time.strftime("%b %d %Y %H:%M:%S GMT", time.gmtime(t))
 
 
 def _random_mac(host=None):
@@ -519,17 +546,98 @@ def _is_internal(ip):
 
 _UNTRUST_ZONES = ("untrust", "internet", "external", "wan")
 _DMZ_ZONES = ("dmz",)
+# Interfaces of the zones beyond WAN / DMZ / LAN (the LAN interface faces the user zone). Every
+# one is overridable per zone in panw_ngfw_config.zones.<name>.interface.
+_ZONE_IF_DEFAULT = {"servers": "ethernet1/4", "database": "ethernet1/5", "identity": "ethernet1/6"}
 
 
 def _zone_if(forti, zone):
     """The firewall interface that faces `zone`: WAN for untrust, the DMZ interface for the
-    DMZ, the LAN interface for trust/internal zones."""
+    DMZ, a per-zone interface for the server / database / identity zones, the LAN interface for
+    the user zone and anything else internal."""
     z = str(zone or "").lower()
+    spec = (forti.get("zones") or {}).get(z) or {}
+    if spec.get("interface"):
+        return spec["interface"]
     if z in _UNTRUST_ZONES:
         return forti.get("interface_wan", "ethernet1/1")
     if z in _DMZ_ZONES:
         return forti.get("interface_dmz", "ethernet1/3")
+    if z in _ZONE_IF_DEFAULT:
+        return _ZONE_IF_DEFAULT[z]
     return forti.get("interface_lan", "ethernet1/2")
+
+
+# Zone model. An internal address belongs to the zone of the role it plays: the published DMZ
+# servers, the domain controllers (identity), the database servers, the other internal servers,
+# then anything covered by panw_ngfw_config.zones.<name>.{hosts,cidrs}, and otherwise the user
+# zone. Exact hosts beat CIDRs; a longer CIDR beats a shorter one; the configured hosts beat
+# the role lists. Everything that is not RFC1918 is untrust.
+_zone_cache = {"key": None, "hosts": {}, "nets": []}
+
+
+def _zone_tables(config):
+    forti = _get_config(config)
+    zc = forti.get("zones") or {}
+    ap = config.get("apache_config") or {}
+    key = (tuple(config.get("internal_servers") or ()), tuple(forti.get("domain_controllers") or ()),
+           tuple(config.get("domain_controllers") or ()), tuple(config.get("database_servers") or ()),
+           tuple(ap.get("server_ips") or ()), ap.get("server_ip"), repr(sorted(zc.items(), key=lambda kv: kv[0])))
+    if _zone_cache["key"] == key:
+        return _zone_cache["hosts"], _zone_cache["nets"]
+    hosts, nets = {}, []
+    for h in config.get("internal_servers") or ():
+        hosts[h] = "servers"
+    for h in config.get("database_servers") or ():
+        hosts[h] = "database"
+    for h in _dcs(config):
+        hosts[h] = "identity"
+    for h in _dmz_servers(config):
+        hosts[h] = "dmz"
+    for name, spec in zc.items():
+        for h in (spec or {}).get("hosts") or ():
+            hosts[h] = name
+        for c in (spec or {}).get("cidrs") or ():
+            try:
+                nets.append((ip_network(c, strict=False), name))
+            except ValueError:
+                pass
+    nets.sort(key=lambda t: -t[0].prefixlen)
+    _zone_cache.update(key=key, hosts=hosts, nets=nets)
+    return hosts, nets
+
+
+def _zone_of(config, ip):
+    """The security zone an address sits in (see the zone model above)."""
+    if not _is_internal(ip):
+        return "untrust"
+    hosts, nets = _zone_tables(config)
+    if ip in hosts:
+        return hosts[ip]
+    a = ip_address(ip)
+    for net, name in nets:
+        if a in net:
+            return name
+    return "users"
+
+
+def _resolve_zone(config, ip, hint):
+    """Callers pass the legacy generic internal zone ("trust") for any internal side; that is
+    replaced by the address's real zone. An explicit untrust / dmz / custom zone is kept."""
+    return _zone_of(config, ip) if str(hint or "trust").lower() == "trust" else hint
+
+
+def _zone_rule(forti, from_zone, to_zone, denied=False):
+    """The security rule a flow between two zones would hit when the caller names none."""
+    if to_zone in _UNTRUST_ZONES and from_zone not in ("dmz", "servers", "database", "identity")             and from_zone not in _UNTRUST_ZONES:
+        return forti.get("default_rule", "Allow-Users-Outbound")
+    lab = lambda z: "DMZ" if z == "dmz" else str(z).capitalize()
+    pre = "Deny" if denied else "Allow"
+    if from_zone in _UNTRUST_ZONES:
+        return f"{pre}-Inbound-{lab(to_zone)}"
+    if from_zone == to_zone:
+        return f"{pre}-{lab(from_zone)}-Internal"
+    return f"{pre}-{lab(from_zone)}-to-{lab(to_zone)}"
 
 
 # ---------------------------------------------------------------------------
@@ -598,21 +706,23 @@ _PAN_ALIASES = {
 }
 
 
-def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None, fw_type=None):
+def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None, fw_type=None,
+                sig=None):
     """Build one PAN-OS NGFW_CEF syslog line.
 
-    Header:  CEF:0|PANW|NGFW_CEF|<sw>|<subtype>|<type>|<sev>|
+    Header:  CEF:0|PANW|NGFW_CEF|<sw>|<sig>|<type>|<sev>|
     Body:    literal key=value pairs (PAN custom log format), space separated.
     `ts` is the event epoch seconds (defaults to now); it drives log_time/time_generated/
     receive_time.  `rt` is NOT a PAN field: it is emitted only when
     panw_ngfw_config.emit_rt is true, and it does not drive XSIAM _time on this route.
     `fw_type` overrides the __firewall_type routing key: a URL log is log_type THREAT but
     routes as firewall.url (into panw_ngfw_url_raw).
+    `sig` is the CEF signature slot: the documented format puts $subtype there for traffic and
+    URL logs but $threatid for threat (and file-data) logs; it defaults to the subtype.
     """
     t = ts if ts is not None else time.time()
     serial, name = _serial(config), _fw_name(config)
-    sw = _get_config(config).get("sw_version", _SW_VERSION)
-    iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t))
+    pan_ts = _pan_time(t)
     # The documented __timestamp is $start (session START) and __tz is $high_res_timestamp;
     # time_generated is when the log was written, i.e. the session end.
     try:
@@ -628,17 +738,14 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
         # The Syslog Collector routes on __firewall_type but does NOT rename the body: each
         # key lands as a column of that name. So the documented `subtype` is sent alongside
         # `sub_type`, the column the dataset (and its modeling rule's FAILED-on-deny/drop
-        # outcome) actually reads, and log_type is lowercase as in the live CLCS rows.
-        "log_type":        log_type.lower(),
-        "type":            log_type.upper(),
+        # outcome) actually reads, and log_type is uppercase as in the live pa440 Syslog rows.
+        "log_type":        log_type.upper(),
         "subtype":         subtype,
         "sub_type":        subtype,
-        "log_time":        iso,
-        "time_generated":  iso,
-        # Documented as "receive_time or cef-formatted-receive_time": they are alternatives
-        # for the same value (plain vs CEF-escaped form), so only receive_time is emitted.
-        "receive_time":    iso,
-        "high_res_timestamp": hires,
+        "log_time":        pan_ts,
+        "time_generated":  pan_ts,
+        "rt":              str(int(t * 1000)),   # event time; _time is still the ingest time
+        "time_generated_high_res": hires,
         "session_start_time": start_iso,
         "serial":          serial,
         "log_source_id":   serial,
@@ -682,18 +789,22 @@ def _format_cef(config, subtype, fields, log_type="TRAFFIC", severity=1, ts=None
         if value is not None and value != "":
             merged[pan_key] = value
     ext = " ".join(f"{k}={_cef_escape(v)}" for k, v in merged.items() if v is not None and v != "")
-    header = f"CEF:0|PANW|NGFW_CEF|{sw}|{subtype}|{log_type.lower()}|{_cef_severity_slot(severity)}|"
+    sw = _get_config(config).get("sw_version", _SW_VERSION)
+    header = f"CEF:0|PANW|NGFW_CEF|{sw}|{sig or subtype}|{log_type.upper()}|{_cef_severity_slot(severity)}|"
     syslog_ts = time.strftime("%b %d %H:%M:%S", time.gmtime(t))
     return f"<{_SYSLOG_PRI}>{syslog_ts} {_syslog_host(config)} {header} {ext}"
 
 
 def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
                     shost=None, suser=None, dhost=None, duser=None, proto=None,
-                    from_zone="trust", to_zone="untrust", bytes_sent=None, bytes_received=None,
+                    from_zone=None, to_zone=None, bytes_sent=None, bytes_received=None,
                     duration_s=None, end_reason=None, url_cat=None, nat_src=None, nat_dpt=None,
                     spt=None, src_category="workstation", rule=None):
-    """Common extension dict for a traffic:end session (or deny/drop)."""
+    """Common extension dict for a traffic:end session (or deny/drop). A zone left unset (or the
+    generic "trust") is taken from the address; an explicit untrust / dmz / custom zone stays."""
     forti = _get_config(config)
+    from_zone = _resolve_zone(config, src_ip, from_zone)
+    to_zone = _resolve_zone(config, dst_ip, to_zone)
     meta = _APP.get(app, _APP["incomplete"])
     proto = proto or _proto_for(app, dpt)
     end_reason = end_reason or _end_reason(proto)
@@ -740,7 +851,7 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
         "inbound_if":       in_if,
         "outbound_if":      out_if,
         "session_id":       _session_id(),
-        "rule_matched":     rule or forti.get("default_rule", "Allow-Users-Outbound"),
+        "rule_matched":     rule or _zone_rule(forti, from_zone, to_zone, denied),
         "rule_matched_uuid":str(uuid.uuid4()),
         "bytes_sent":       bytes_sent,
         "bytes_received":   bytes_received,
@@ -794,6 +905,10 @@ def _traffic_fields(config, src_ip, dst_ip, dpt, app, action="allow", *,
     if outbound:
         f["nat_source"]      = nat_src or _nat_for(src_ip, config)
         f["nat_source_port"] = random.randint(20000, 65000)
+    else:
+        # The live pa440 rows send the NAT columns on every log, zeroed when no NAT applied.
+        f["nat_source"], f["nat_source_port"] = "0.0.0.0", 0
+    f["nat_dest"], f["nat_dest_port"] = "0.0.0.0", 0
     return f
 
 
@@ -880,11 +995,15 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
         "url_domain":        domain,      # no parser derives it from uri on this path
         "url_category":      cat,
         "url_category_list": f"{cat},{risk}",
-        "threat_id":         "9999",
-        "threat_name":       "",
+        # Live CEF URL rows: threat_id and threat_name are both "9999(9999)", threat_category
+        # N/A, severity the number 1 and pcap_id 0.
+        "threat_id":         "9999(9999)",
+        "threat_name":       "9999(9999)",
+        "threat_category":   "N/A",
         "direction":         "client-to-server",
         "direction_of_attack": "client to server",   # the live column (doc key: direction)
-        "severity":          "Informational",          # the live column's value
+        "severity":          "1",
+        "pcap_id":           0,
         "http2_connection":  0,
         # Documented threat-log fields the URL filtering log carries (URL Filtering Log
         # Fields / Threat Log Fields).  thr_category and contentver are doc-only values
@@ -910,6 +1029,350 @@ def _url_record(config, traffic_fields, domain, path="/", category=None, action=
             f["user_agent"] = user_agent
     return _format_cef(config, "url", f, log_type="THREAT", severity="Informational",
                        ts=ts, fw_type="firewall.url")
+
+
+# ---------------------------------------------------------------------------
+# Threat logs (log_type THREAT, subtype vulnerability) -> panw_ngfw_threat_raw
+# ---------------------------------------------------------------------------
+# The signatures below are the ones the tenant's real pa440 threat feed carries (read-only
+# query): same Threat ID, name, severity and category as recorded there. IDs are
+# never invented, so the catalog is limited to signatures whose ID is confirmed; add more in
+# panw_ngfw_config.threat_signatures ({key: [id, name, severity, category, subtype]}) once
+# their IDs are known (spyware / virus / wildfire-virus signatures need that).
+_SEVERITY_NUM = {"informational": 1, "low": 2, "medium": 3, "high": 4, "critical": 5}
+_THREAT_SIGS = {
+    "log4j":      (92046, "Apache Log4j Remote Code Execution Vulnerability", "critical", "code-execution", "vulnerability"),
+    "dnsmasq":    (30109, "Dnsmasq Integer Underflow Vulnerability",          "high",     "code-execution", "vulnerability"),
+    "nmap_nse":   (58433, "Nmap Scripting Engine Detection",                  "medium",   "hacktool",       "vulnerability"),
+    "openvas":    (55283, "OpenVAS Vulnerability Scanner Detection",          "medium",   "info-leak",      "vulnerability"),
+    "rpc_dump":   (32796, "RPC Portmapper DUMP Request Detected",             "medium",   "info-leak",      "vulnerability"),
+    "nfs_export": (32788, "UNIX NFS Export Directory Attempt",                "medium",   "info-leak",      "vulnerability"),
+    "rpc_frag":   (54578, "Sun ONC RPC Small Piece fragmentation Evasion Detection", "medium", "code-execution", "vulnerability"),
+    "ssh_brute":  (40015, "SSH User Authentication Brute Force Attempt",      "high",     "brute-force",    "vulnerability"),
+    # From Threat Vault signature details (current content, PAN-OS 8.1+), not from the tenant feed:
+    # ID, name, severity and category are as shown there; the subtype follows the documented
+    # Threat ID ranges (30000-44999 vulnerability, 10000-19999 spyware). The App-ID each session
+    # carries: voip-video for IAX2 (user-confirmed); web-browsing for the bot beacon is assumed.
+    "iax2_dos":   (40020, "Digium Asterisk IAX2 Call Number Denial Of Service Vulnerability", "medium", "brute-force", "vulnerability"),
+    "bot_qxx":    (19900, "Bot: Backdoor_Win32_Agent_qxx",                      "high",     "backdoor",       "spyware"),
+    "bot_agobot": (19999, "Bot: Backdoor_Win32_Agobot_pnd_pnj",                 "high",     "backdoor",       "spyware"),
+    "default_creds": (59995, "Manufacturer default username and password found in HTTP Basic Authentication",
+                      "informational", "insecure-credentials", "vulnerability"),
+    # One name, three IDs: each is a separate signature that logs under its own Threat ID.
+    "pastebin_c2_a": (21975, "Pastebin Command and Control Traffic Detection", "critical", "spyware", "spyware"),
+    "pastebin_c2_b": (21976, "Pastebin Command and Control Traffic Detection", "critical", "spyware", "spyware"),
+    "pastebin_c2_c": (21980, "Pastebin Command and Control Traffic Detection", "critical", "spyware", "spyware"),
+    "schoolboy":  (21985, "Schoolboy Downloader Traffic Detection",             "critical", "downloader",     "spyware"),
+    # One name, three IDs (PHP RCE, CVE pair); the IDs are separate signatures.
+    "php_rce_a":  (97622, "PHP Remote Code Execution Vulnerability",            "critical", "code-execution", "vulnerability"),
+    "php_rce_b":  (97623, "PHP Remote Code Execution Vulnerability",            "critical", "code-execution", "vulnerability"),
+    "php_rce_c":  (97625, "PHP Remote Code Execution Vulnerability",            "critical", "code-execution", "vulnerability"),
+    "moxa_tn5900": (97630, "Moxa TN-5900 Firmware Command Injection Vulnerability", "critical", "code-execution", "vulnerability"),
+    "trendnet_tew432brp": (97650, "TRENDnet TEW-432BRP Firmware Command Injection Vulnerability", "critical", "code-execution", "vulnerability"),
+    "php_memcorrupt": (543004, "PHP Memory Corruption Vulnerability",         "critical", "code-execution", "vulnerability"),
+}
+# Signatures read from the tenant's pa440 feed (read-only query): (id, name, severity, category, subtype,
+# action, app, file_name/$misc). Every field is as the tenant row carries it; the action/app/$misc
+# are each signature's own dominant values. Host names and IPs seen inside $misc were dropped.
+_TENANT_SIGS = [
+    (18011, 'Western Digital My Cloud Backdoor', 'critical', 'backdoor', 'spyware', 'reset-server', 'web-browsing', 'nas_sharing.cgi'),
+    (30101, 'Webhints Improper URI Sanitization Remote Command Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', '/hints.pl?|id|'),
+    (30554, 'Netgear Routers Arbitrary Command Injection Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '/cgi-bin/;cat$IFS/etc/passwd'),
+    (30844, 'HTTP Directory Traversal Request Attempt', 'medium', 'info-leak', 'vulnerability', 'alert', 'jaspersoft', 'win.ini'),
+    (30847, 'Generic HTTP Cross Site Scripting Attempt', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/<script>foo</script>'),
+    (30851, 'Microsoft Windows win.ini Access Attempt Detected', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'win.ini'),
+    (30852, 'HTTP /etc/passwd Access Attempt', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/../../etc/passwd'),
+    (31002, 'Multiple Products Arbitrary File Location Upload Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '/ap_spec_rec/upload/'),
+    (31003, 'Squid Proxy TRACE Request Denial of Service', 'medium', 'dos', 'vulnerability', 'reset-server', 'webdav', '/'),
+    (31475, 'Generic HTTP Cross Site Scripting Attempt', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/profil.php?id=1%20<script>foo</script>'),
+    (31476, 'Generic HTTP Cross Site Scripting Attempt', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', "/search=<script>alert('XSS')</script>"),
+    (31477, 'Generic HTTP Cross Site Scripting Attempt', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', "/index.php?gadget=Glossary&action=ViewTerm&term=<script>alert('crtx397162412');</script>"),
+    (31699, 'Trihedral VTScada WAP Filter Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/file://etc/passwd'),
+    (32658, 'HTTP Cross Site Scripting Attempt', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', "/index.php?gadget=Glossary&action=ViewTerm&term=<script>alert('crtx397162412');</script>"),
+    (32721, 'Alcatel OmniPCX Office MasterCGI Remote Command Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/cgi-bin/masterCGI?ping=nomip&user=;id;'),
+    (32775, 'Microsoft IIS 5.0 Form_JScript.asp XSS Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'Form_JScript.asp_889426325'),
+    (33073, 'Microsoft IIS ServerVariables_JScript. asp Information Disclosure', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/iissamples/sdk/asp/interaction/ServerVariables_Jscript.asp_471833835'),
+    (33452, 'Adobe ColdFusion Multiple Directory Traversal Vulnerabilities', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'enter.cfm'),
+    (33678, 'OPIE and Konica FTP Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'ftp', None),
+    (33756, 'Oracle 9i Application Server Dynamic Monitoring Services Anonymous Access', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/fcgi-bin/echo?foo=<SCRIPT>alert(document.domain)</SCRIPT>'),
+    (34181, 'IBM Rational Quality Manager and Test Lab Manager Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/manager/html'),
+    (34804, 'PHP CGI Query String Parameter Handling Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/php-cgi/php?-d%20allow_url_include=on%20-d%20safe_mode=off%20-d%20suhosin.simulation=on%2'),
+    (35107, 'HTTP /etc/passwd Access Attempt', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'weblogin.cgi'),
+    (35283, 'Dahua HDCVI and IPC Backdoor Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'Account1'),
+    (36102, 'PCCS Mysql Database Admin Tool Username and Password Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/pccsmysqladm/incs/dbconnect.inc_1167841198'),
+    (36124, 'Oracle 9I Application Server PL/SQL Apache Module Buffer Overflow Vulnerability', 'critical', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (36274, 'Spring Data Commons Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', '/account'),
+    (36729, 'Bash Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', 'test'),
+    (36736, 'Bash Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'ftp', None),
+    (37040, 'Rejetto HTTP File Server Remote Command Execution Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '/?search=='),
+    (37610, 'Microsoft Windows HTTP.sys Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/'),
+    (38768, 'D-Link Routers Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'passwd'),
+    (38926, 'Dahua Security DVR Appliances Authentication Bypass Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'passwd'),
+    (39268, 'ElasticSearch Groovy Script Engine Remote Command Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '_search'),
+    (39766, 'Novell ZENworks Mobile Management Cross-Site Scripting Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', "/index.php?gadget=Glossary&action=ViewTerm&term=<script>alert('crtx397162412');</script>"),
+    (40031, 'HTTP Unauthorized Brute Force Attack', 'high', 'brute-force', 'vulnerability', 'alert', 'web-browsing', 'run'),
+    (40483, 'PAN-OS Authentication Bypass Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-client', 'web-browsing', '/esp/cms_changeDeviceContext.esp?device=aaaaa:a\'";user|s."1337";'),
+    (40627, 'Drupal Core Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'register'),
+    (40740, 'Linksys Devices Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', '/error.php?err=404'),
+    (40797, 'Cisco Adaptive Security Appliance Web Services Denial of Service Vulnerability', 'high', 'dos', 'vulnerability', 'reset-both', 'web-browsing', 'file_list.json'),
+    (40992, 'Pivotal Spring Data Commons Remote File Read XXE Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'autodiscover'),
+    (54119, 'Novell File Reporter FSFUI Arbitrary File Retrieval Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/FSF/CMD'),
+    (54426, 'Squid HTTP Header Remote Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', 'openid-configuration'),
+    (54505, 'DLink DSL Remote OS Command Injection Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/login.cgi?username=&command=simple&do=edit&password=&file=|id|'),
+    (54519, 'IBM Lotus Domino HTTP Redirect Buffer Overflow Vulnerability', 'medium', 'overflow', 'vulnerability', 'alert', 'web-browsing', 'openid-configuration'),
+    (54701, 'HTTP Directory Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'webspirs.cgi'),
+    (54817, 'Multiple Products Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'upgrade_handle.php'),
+    (54825, 'ThinkPHP Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'index.php'),
+    (55025, 'Cisco RV320/RV325 Router Unauthenticated Configuration Export Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'config.exp'),
+    (55155, 'Sonatype Nexus Repository Manager Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'extdirect'),
+    (55385, 'Drupal core Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/node/1?_format=hal_json'),
+    (55462, 'Atlassian Confluence Directory Traversal Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'preview'),
+    (55505, 'Zimbra Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'ms-exchange', 'Autodiscover.xml'),
+    (55558, 'Spring Cloud Config Server Directory Traversal Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/etc/passwd'),
+    (55570, 'Oracle WebLogic wls9-async Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/wls-wsat/CoordinatorPortType'),
+    (55852, 'phpunit Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php'),
+    (56365, 'Fortinet FortiOS SSL VPN Path Traversal Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'fgt_lang'),
+    (56609, 'Ysoserial Java Object Deserialization Payloads Detection', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'amf'),
+    (56613, 'D-Link DNS-320 ShareCenter Remote Command Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'login_mgr.cgi'),
+    (56635, 'Ysoserial Java Object Deserialization Payloads Detection', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'amf'),
+    (56815, 'Ysoserial Java Object Deserialization Payloads Detection', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'amf'),
+    (56868, 'Jenkins Script Security Plugin Sandbox Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'checkScriptCompile'),
+    (56954, 'Webmin Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'password_change.cgi'),
+    (57497, 'Citrix Application Delivery Controller And Gateway Directory Traversal Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'smb.conf'),
+    (57557, 'Siemens Solid Edge ST4 Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/cgi-bin/chklogin.cgi?file=config.ini'),
+    (57806, 'Zyxel Multiple Products Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'weblogin.cgi'),
+    (57887, 'Liferay Portal Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'invoke'),
+    (57897, 'Draytek Vigor Remote Command Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'mainfunction.cgi'),
+    (57993, 'Unraid Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/webGui/images/green-on.png/?path=x&site[x][text]=<?php%20echo%20md5("CVE-2020-5847");%20?'),
+    (58062, 'Liferay Portal JSON Web Service Insecure Deserialization Vulnerability', 'critical', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'invoke'),
+    (58132, 'Apache Shiro Improper Authentication Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'test'),
+    (58460, 'Possible HTTP Malicious Payload Detection', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'index.php'),
+    (58465, 'Amcrest IPM-721S Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'Sha1Account1'),
+    (58618, 'YAWS Unauthenticated Remote File Disclosure Vulnerability', 'high', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/../../../../../../etc/passwd'),
+    (58623, 'F5 Traffic Management User Interface Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'fileRead.jsp'),
+    (58628, 'DataLife Engine Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '/datalife/engine/preview.php'),
+    (58671, 'Citrix Multiple Products Authorization Bypass Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'report'),
+    (58688, 'F5 Traffic Management User Interface Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'hsqldb'),
+    (58986, 'SAP NetWeaver AS JAVA Authentication Vulnerability', 'critical', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'ConfigServlet'),
+    (59021, 'Cisco ASA and FTD Arbitrary File Read Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'translation-table'),
+    (59133, 'vBulletin Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'widget_tabbedcontainer_tab_panel'),
+    (59315, 'phpMyadmin Scripts Deserialization Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'setup.php'),
+    (59335, 'MobileIron Core and Connector Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'LogService'),
+    (59505, 'Nette Code Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/index.php/nette.micro/?callback=shell_exec&cmd=id&what=-1'),
+    (59623, 'Oracle WebLogic Server Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'console.portal'),
+    (59940, 'Oracle WebLogic Server Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'console.portal'),
+    (90136, 'Car Rental Management System File Inclusion Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/index.php?page=../../../../../../../../../../../etc/passwd'),
+    (90152, 'WordPress Duplicator Plugin Directory Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/wp-admin/admin-ajax.php?action=duplicator_download&file=../../../../../etc/passwd'),
+    (90183, 'Zyxel USG Backdoor Account Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/?username=zyfwp&password=PrOw!aN_fXp'),
+    (90196, 'Apache Flink Directory Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '3MAYwwxfqaTJDraP0BYB3zrm9wY.txt'),
+    (90244, 'Elasticsearch Groovy Script Engine Remote Command Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '_search'),
+    (90776, 'Yealink DM Pre Auth Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'getPingData'),
+    (90879, 'F5 BIG-IP Authentication Bypass Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'login'),
+    (91201, 'VMware vCenter Server Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'getClusterCapabilityData'),
+    (91314, 'Cisco Adaptive Security Appliance Cross-Site Scripting Vulnerability', 'medium', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/+CSCOE+/saml/sp/acs?tgname=a'),
+    (91368, 'Microsoft Exchange Server SSRF Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'autodiscover.json'),
+    (91443, 'Microsoft Outlook Web Access Login Form Remote URI Redirection Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'outlook-web', '/exchweb/bin/auth/owalogon.asp?url=http://12345678910'),
+    (91471, 'Buffalo WSR-2533DHPL2 Path Traversal Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'info.html'),
+    (91594, 'Confluence Server OGNL Injection Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'doenterpagevariables.action'),
+    (91676, 'ZOHOcorp ManageEngine Improper Authentication Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'LogonCustomization'),
+    (91752, 'Apache HTTP Server Path Traversal Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/../../../../../../../etc/passwd'),
+    (91805, 'Draytek VigoConnect Local File Inclusion Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'WebServlet'),
+    (91832, 'Atlassian Confluence Server Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'web.xml'),
+    (91940, 'Metabase Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/api/geojson?url=file:///c://windows/win.ini'),
+    (91970, 'SonicWall SMA SQL Injection Vulnerability', 'high', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'supportInstaller'),
+    (91991, 'Apache Log4j Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'utils.js'),
+    (92271, 'D-LINK DIR Information Disclosure Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'getcfg.php'),
+    (92295, 'Primetek Primefaces Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'dynamiccontent.properties.xhtml'),
+    (92329, 'Grafana Labs Grafana Snapshot Authentication Bypass Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/api/snapshots/:key'),
+    (92386, 'Ivanti Endpoint Manager Cloud Services Appliance Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'index.php'),
+    (92389, 'Spring Cloud SPEL Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/functionRouter'),
+    (92397, 'Eclipse Jetty Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'concat'),
+    (92483, 'VMware Server-Side Template Injection Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'verify'),
+    (92526, 'Sophos Firewall Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'Controller'),
+    (92570, 'F5 BIG-IP Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'bash'),
+    (92626, 'SolarView Compact Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'conf_mail.php'),
+    (92712, 'Eclipse Jetty Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'web.xml'),
+    (92934, 'Atlassian Confluence Authentication Bypass Vulnerability', 'critical', 'insecure-credentials', 'vulnerability', 'reset-server', 'web-browsing', 'dologin.action'),
+    (93079, 'GLPI htmlawed Module Code Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'htmLawedTest.php'),
+    (93114, 'Adobe ColdFusion Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'ChannelListener.cfc'),
+    (93295, 'Dahua Improper Authentication Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'RPC2_Login'),
+    (93512, 'Joomla Improper Access Control Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', '/api/index.php/v1/config/application?public=true'),
+    (93588, 'JAI-EXT Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'wms'),
+    (93713, 'Adobe ColdFusion Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'iedit.cfc'),
+    (94087, 'Adobe ColdFusion Improper Access Control Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'utils.cfc'),
+    (94246, 'TOTOlink A7100RU Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'cstecgi.cgi'),
+    (94248, 'Chamilo Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'additional_webservices.php'),
+    (94261, 'vBulletin Deserialization Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'save'),
+    (94275, 'Adobe ColdFusion IPFilterUtils Improper Access Control Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'utils.cfc'),
+    (94299, 'PaperCut NG and MF Path Traversal Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/../../deployment/sharp/icons/home-app.png'),
+    (94328, 'Generic Cross-Site Scripting Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '/calendar_scheduler.php?start="><script>alert(document.cookie)</script>'),
+    (94344, 'Stakater Forecastle Directory Traversal Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'test'),
+    (94409, 'JetBrains TeamCity Authentication Bypass Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/app/rest/users/id:1/tokens/RPC2'),
+    (94413, 'Cacti Group Cacti SQL Injection Vulnerability', 'critical', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'graph_view.php'),
+    (94475, 'IBM Aspera Faspex Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'relay_package'),
+    (94666, 'Qlik Sense Enterprise HTTP Request Smuggling Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', 'CVE-2023-41265.ttf'),
+    (94701, 'ownCloud Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/apps/graphapi/vendor/microsoft/microsoft-graph/tests/GetPhpInfo.php/YARg.css'),
+    (94842, 'Qlik Sense Enterprise Path Traversal Vulnerability', 'medium', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'localhost:8080/qrs/ReloadTask?xrfkey=1333333333333337&filter=.ttf'),
+    (94845, 'cPanel ErrorPage Cross-Site Scripting Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', '<img src=x onerror="prompt(document.domain)">9264863'),
+    (94885, 'Ivanti Multiple Products Authentication Bypass Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'system-information'),
+    (94975, 'D-Link D-View TftpSendFileThread Directory Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'drop', 'tftp', None),
+    (95095, 'JetBrains TeamCity Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'hax'),
+    (95102, 'JetBrains TeamCity Path Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'diagnostic.jsp'),
+    (95132, 'aiohttp Directory Traversal Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/../../../../../../../../etc/passwd.'),
+    (95258, 'Check Point Security Gateway Directory Traversal Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'MyCRL'),
+    (95295, 'PHP CGI Argument Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'status.php'),
+    (95308, 'Microsoft Exchange Server Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'autodiscover.json'),
+    (95311, 'Zoho ManageEngine Desktop Central Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'agentLogUploader'),
+    (95373, 'SAP Solution Manager Privilege Escalation Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'soap', 'EemAdmin'),
+    (95382, 'Progress Kemp LoadMaster REST API Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'set'),
+    (95393, 'Splunk Enterprise Path Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'passwd'),
+    (95408, 'TerraMaster TOS Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'api.php'),
+    (95410, 'Minio Information Disclosure Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'verify'),
+    (95415, 'ServiceNow Platform Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'login.do'),
+    (95423, 'Openfire Directory Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'log.jsp'),
+    (95433, 'Apache Airflow Experimental API Authentication Bypass Vulnerability', 'critical', 'code-obfuscation', 'vulnerability', 'reset-server', 'web-browsing', '/api/experimental/latest_runs'),
+    (95567, 'SolarWinds Web Help Desk Hardcoded Credential Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '/helpdesk/WebObjects/Helpdesk.woa/ra/OrionTickets/'),
+    (95568, 'Apache HTTP Server on Windows Server-Side Request Forgery Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/etc/passwd#vt/test'),
+    (95792, 'Ivanti Cloud Services Appliance Broker Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'users.php'),
+    (96109, 'Ingress Nginx Admission Controller Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/'),
+    (96143, 'Langflow Unauthenticated Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'code'),
+    (96194, 'Apache HTTP Server Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'temp.db?.1.1.1.1a-1.css'),
+    (96267, 'Ivanti Endpoint Manager Mobile Remote Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/mifs/rs/api/v2/featureusage?format=${4427*4428}'),
+    (96314, 'Oracle Business Intelligence Local File Inclusion Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'saw.dll'),
+    (96343, 'Cisco IOS XE WLC Arbitrary File Upload Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/ap_spec_rec/upload/'),
+    (96481, 'Microsoft Sharepoint Authentication Bypass Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'ToolPane.aspx'),
+    (96497, 'Fortinet FortiWeb SQL Injection Vulnerability', 'critical', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'status'),
+    (96509, 'Microsoft Sharepoint Authentication Bypass Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'ToolPane.aspx'),
+    (96606, 'PTZOptics PT30X-SDINDI Cameras param.cgi Information Disclosure Vulnerability', 'critical', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'param.cgi'),
+    (96611, 'SimpleHelp SimpleHelp WebDownloadServer Directory Traversal Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'serverconfig.xml'),
+    (96643, 'Cisco Secure Firewall ASA and Cisco Secure FTD Authentication Bypass Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'file_action.html'),
+    (96671, 'Fortra GoAnywhere MFT Insecure Deserialization Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/goanywhere/license/Unlicensed.xhtml/xjprn?javax.faces.ViewState=xjprn&GARequestAction=act'),
+    (96700, 'Kentico Xperience Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'soap', 'SyncServer.asmx'),
+    (96738, 'Apache Tomcat Rewrite Rules Relative Path Traversal Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'confluence-base', 'web.xml'),
+    (96742, 'Fortinet FortiWeb Path Traversal Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'fwbcgi'),
+    (96755, 'Oracle Identity Manager REST WebServices Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'groovyscriptstatus;.wadl'),
+    (96787, 'React Server Components Remote Code Execution Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', '/'),
+    (96795, 'Apache Tika XML External Entity Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-both', 'web-browsing', 'tika'),
+    (97003, 'Zimbra Collaboration Server RestFilter Local File Inclusion Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'rest'),
+    (97012, 'Ivanti Endpoint Manager Remote Control logintype Authentication Bypass Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'Auth'),
+    (97127, 'GeoServer GetMap XML External Entity Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'wfs'),
+    (97135, 'XWiki SolrSearchMacros Code Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'SolrSearch'),
+    (97291, 'Ivanti Sentry Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'handleMessage'),
+    (97413, 'SolarView Compact Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'downloader.php'),
+    (97417, 'HTTP Bash History Access Attempt', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', '.bash_history'),
+    (510004, 'Palo Alto Networks GlobalProtect Cross-Site Scripting Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'getconfig.esp'),
+    (30514, 'HTTP SQL Injection Attempt', 'medium', 'sql-injection', 'vulnerability', 'alert', 'web-browsing', 'view.php'),
+    (33338, 'HTTP SQL Injection Attempt', 'medium', 'sql-injection', 'vulnerability', 'alert', 'web-browsing', 'printdetail.asp'),
+    (38531, 'HTTP SQL Injection Attempt', 'medium', 'sql-injection', 'vulnerability', 'alert', 'web-browsing', 'forum_answer.php'),
+    (37008, 'PHP-Charts PHP Code Execution Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'url.php'),
+    (55358, 'Ruby on Rails File Content Disclosure Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'profiles'),
+    (58435, 'Brother MFC-J6520DW Authentication Bypass Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'status.html'),
+    (96441, 'TBK DVR-4104 and DVR-4216 Command Injection Vulnerability', 'medium', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'device.rsp'),
+    (95922, 'jQuery File Upload Plugin Unrestricted File Upload Vulnerability', 'medium', 'code-execution', 'vulnerability', 'alert', 'web-browsing', 'index.php'),
+    (37765, 'PHPMoAdmin Object Parameter Handling Code Execution Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'moadmin.php'),
+    (56480, 'Flexible Poll 1.2 SQL Injection Vulnerability', 'critical', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'index.php'),
+    (97356, 'Adobe ColdFusion Path Traversal Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'ide.cfm'),
+    (97710, 'Atlassian Web Resource Download Path Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'download/resources/jira.webresources:color-picker-popup/images/..::..::..::..::..::WEB-INF::web.xml'),
+    # Signatures the pa440's threat feed carried during vulnerability-scanner runs. misc keeps only the
+    # request path, never the scanned host.
+    (56335, 'ABB PB610 Panel Builder 600 IDAL HTTP Host Stack Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (30147, 'Novell GroupWise Messenger Accept Language Header Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'alert', 'web-browsing', None),
+    (55363, 'Nginx Unit Router Process Heap-based Buffer Overflow Vulnerability', 'critical', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (95187, 'Palo Alto Networks GlobalProtect OS Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'global-protect/login.esp'),
+    (95191, 'Palo Alto Networks GlobalProtect OS Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (90135, 'Siemens SIMATIC S7-300 CPU Denial-of-Service Vulnerability', 'high', 'dos', 'vulnerability', 'alert', 'web-browsing', None),
+    (54679, 'Smart Software Solutions CoDeSys ControlService Stack Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (97000, 'DNN Platform Unauthenticated File Upload Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'Providers/HtmlEditorProviders/DNNConnect.CKE/Browser/FileUploader.ashx'),
+    (59523, 'Cogent DataHub Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'index.asp'),
+    (31769, 'HTTP Long If-Modified-Since Header Anomaly', 'high', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (38761, 'Apache Tomcat Remote Code Execution Via JSP Upload Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (96989, 'SmarterTools SmarterMail guid Directory Traversal Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'api/upload'),
+    (97182, 'WordPress Breeze Cache Arbitrary File Upload Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'blog-posting', 'wp-comments-post.php'),
+    (97173, 'Fortinet FortiSandbox Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'fortisandbox/job-detail/tracer-behavior'),
+    (35614, 'Lighttpd Connection Type Denial-of-Service Vulnerability', 'high', 'dos', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (35823, 'HTTP SQL Injection Attempt', 'medium', 'sql-injection', 'vulnerability', 'alert', 'web-browsing', 'index.php'),
+    (91579, 'HTTP SQL Injection Attempt', 'medium', 'sql-injection', 'vulnerability', 'alert', 'web-browsing', 'index.php'),
+    # Non-web services seen in the same scans (legacy-service family): TFTP drop, telnet, LPD, SMTP, FTP alert.
+    (30173, 'TFTP Server FileName Buffer Overflow Vulnerability', 'high', 'code-execution', 'vulnerability', 'drop', 'tftp', None),
+    (37249, 'Microsoft Windows Telnet Service Buffer Overflow Vulnerability', 'critical', 'overflow', 'vulnerability', 'reset-server', 'telnet', None),
+    (54430, 'HylaFAXplus LDAP Authentication User Name Buffer Overflow Vulnerability', 'medium', 'overflow', 'vulnerability', 'alert', 'ftp', None),
+    (54692, 'Hummingbird InetD LPD Component Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'lpd', None),
+    (30384, 'Mail Server SMTP EHLO/HELO Buffer Overflow Vulnerability', 'critical', 'overflow', 'vulnerability', 'reset-server', 'smtp-base', None),
+]
+for _r in _TENANT_SIGS:
+    _THREAT_SIGS["t%d" % _r[0]] = _r[:5]
+_TENANT_PROFILE = {"t%d" % _r[0]: (_r[5], _r[6], _r[7]) for _r in _TENANT_SIGS}
+# Actions that end the session: the matching traffic log ends with session_end_reason=threat.
+_SESSION_ENDING_ACTIONS = ("drop", "reset-server", "reset-client", "reset-both", "block-ip")
+
+
+def _sig(config, key):
+    extra = (_get_config(config).get("threat_signatures") or {}).get(key)
+    return tuple(extra) if extra else _THREAT_SIGS[key]
+
+
+def _threat_record(config, tf, sig, action, ts, misc=None, user_agent=None, repeats=1):
+    """One PAN-OS THREAT log (firewall.threat) for the session described by `tf`.
+
+    `tf` is the traffic-field dict of the session it fired in, so the threat log shares that
+    session's addresses, ports, zones, interfaces, users, App-ID, rule and session_id.
+    Documented extras over the traffic format: misc, threat_id, threat_name, threat_category,
+    direction, user_agent, xff / xff_ip. Header signature slot is the Threat ID.
+    """
+    tid, tname, sev, cat, subtype = sig
+    f = {k: tf[k] for k in _URL_SHARED_KEYS if tf.get(k) not in (None, "")}
+    fmt = str(_get_config(config).get("threat_severity_format", "number")).lower()
+    f.update({
+        "action":              action,
+        "misc":                misc,
+        "file_name":           misc,                 # the live column that holds $misc
+        # Live CEF rows: the documented `threat_id=$threatid` expands to "Name(ID)" and the tenant
+        # turns it into the numeric ID column; a bare number sent from here is dropped instead
+        # (all 56 of our rows lacked threat_id while all 613 of the pa440's had it).
+        "threat_id":           f"{tname}({tid})",
+        "threat_name":         f"{tname}({tid})",
+        "threat_name_firewall": tname,
+        "threat_category":     cat,
+        "direction":           "client-to-server",
+        "direction_of_attack": "client to server",   # the live column (doc key: direction)
+        # The documented format sends the NUMERIC severity ($number-of-severity); the live
+        # columns carry the word. Send the number as `severity` and the word as
+        # `vendor_severity`; threat_severity_format=word swaps them (the probe decides).
+        "severity":            (sev.capitalize() if fmt == "word" else str(_SEVERITY_NUM[sev])),
+        "vendor_severity":     sev.capitalize(),
+        "count_of_repeats":    repeats,
+        "user_agent":          user_agent,
+    })
+    # Live CEF rows put "Name(ID)" in the header signature slot ($threatid expands to it).
+    return _format_cef(config, subtype, f, log_type="THREAT", severity=_SEVERITY_NUM[sev], ts=ts,
+                       fw_type="firewall.threat", sig=f"{tname}({tid})")
+
+
+def _threat_session(config, key, src, dst, dpt, app, *, action, end, suser=None, shost=None,
+                    dhost=None, from_zone="trust", to_zone="trust", proto=None, rule=None,
+                    misc=None, user_agent=None, repeats=1, src_category="workstation",
+                    threat_only=False):
+    """[threat log, traffic log] for one session that tripped signature `key`
+    ([threat log] alone with threat_only=True: the session's traffic log is not generated).
+
+    The firewall logs the threat part-way through the session. If the action ends the session
+    (drop / reset-*), the traffic log for it ends with session_end_reason=threat and, as in the
+    live feed, still records action=allow (the session was permitted by policy). An 'alert'
+    action leaves the session to end normally. Both logs share one session_id and finish at or
+    before `end`."""
+    sig = _sig(config, key)
+    ends = action in _SESSION_ENDING_ACTIONS
+    dur = random.randint(1, 6) if ends else random.randint(2, 40)
+    tf = _traffic_fields(config, src, dst, dpt, app, action="allow", shost=shost, suser=suser,
+                         dhost=dhost, proto=proto, from_zone=from_zone, to_zone=to_zone,
+                         bytes_sent=random.randint(300, 6000),
+                         bytes_received=(random.randint(0, 600) if ends else random.randint(400, 40000)),
+                         duration_s=dur, end_reason=("threat" if ends else None),
+                         src_category=src_category, rule=rule)
+    start = end - dur
+    threat = _threat_record(config, tf, sig, action, ts=start + random.uniform(0.3, max(0.4, dur * 0.6)),
+                            misc=misc, user_agent=user_agent, repeats=repeats)
+    return [threat] if threat_only else [threat, _format_cef(config, "end", tf, ts=end)]
 
 
 # ---------------------------------------------------------------------------
@@ -1171,12 +1634,57 @@ _DEFAULT_THREAT_EVENTS = [
     {"event": "ssh_proxy_suspicious", "weight": 1,  "analytic": True,  "xsiam_alert": "Suspicious SSH activity that resembles SSH proxy"},
     {"event": "ssh_proxy_detected",   "weight": 1,  "analytic": True,  "xsiam_alert": "Unusual SSH activity that resembles SSH proxy detected"},
     {"event": "host_attack_chain",    "weight": 2,  "analytic": True,  "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
+    # THREAT logs (panw_ngfw_threat_raw). The firewall's own signature raises a native PAN_NGFW
+    # alert named after the signature, so each target is the Threat name the tenant shows.
+    {"event": "threat_log4j_exploit", "weight": 3, "analytic": True, "xsiam_alert": "Apache Log4j Remote Code Execution Vulnerability(92046)"},
+    {"event": "threat_dnsmasq_exploit", "weight": 2, "analytic": True, "xsiam_alert": "Dnsmasq Integer Underflow Vulnerability(30109)"},
+    {"event": "threat_nmap_nse_scan", "weight": 2, "analytic": True, "xsiam_alert": "Nmap Scripting Engine Detection(58433)"},
+    {"event": "threat_openvas_scan",  "weight": 2, "analytic": True, "xsiam_alert": "OpenVAS Vulnerability Scanner Detection(55283)"},
+    {"event": "threat_rpc_portmapper_dump", "weight": 1, "analytic": True, "xsiam_alert": "RPC Portmapper DUMP Request Detected(32796)"},
+    {"event": "threat_nfs_export_probe", "weight": 1, "analytic": True, "xsiam_alert": "UNIX NFS Export Directory Attempt(32788)"},
+    {"event": "threat_rpc_fragmentation_evasion", "weight": 1, "analytic": True, "xsiam_alert": "Sun ONC RPC Small Piece fragmentation Evasion Detection(54578)"},
+    {"event": "threat_ssh_bruteforce", "weight": 2, "analytic": True, "xsiam_alert": "SSH User Authentication Brute Force Attempt(40015)"},
+    {"event": "threat_iax2_dos",       "weight": 1, "analytic": True, "xsiam_alert": "Digium Asterisk IAX2 Call Number Denial Of Service Vulnerability(40020)"},
+    {"event": "threat_bot_backdoor_beacon", "weight": 2, "analytic": True, "xsiam_alert": "Bot: Backdoor_Win32_Agent_qxx(19900)"},
+    {"event": "threat_bot_agobot_backdoor", "weight": 2, "analytic": True, "xsiam_alert": "Bot: Backdoor_Win32_Agobot_pnd_pnj(19999)"},
+    {"event": "threat_pastebin_c2",    "weight": 2, "analytic": True, "xsiam_alert": "Pastebin Command and Control Traffic Detection(21975) / Pastebin Command and Control Traffic Detection(21976) / Pastebin Command and Control Traffic Detection(21980)"},
+    {"event": "threat_schoolboy_downloader", "weight": 2, "analytic": True, "xsiam_alert": "Schoolboy Downloader Traffic Detection(21985)"},
+    {"event": "threat_php_rce",        "weight": 3, "analytic": True, "xsiam_alert": "PHP Remote Code Execution Vulnerability(97622) / PHP Remote Code Execution Vulnerability(97623) / PHP Remote Code Execution Vulnerability(97625)"},
+    {"event": "threat_moxa_tn5900_injection", "weight": 1, "analytic": True, "xsiam_alert": "Moxa TN-5900 Firmware Command Injection Vulnerability(97630)"},
+    {"event": "threat_trendnet_tew432brp_injection", "weight": 1, "analytic": True, "xsiam_alert": "TRENDnet TEW-432BRP Firmware Command Injection Vulnerability(97650)"},
+    {"event": "threat_php_memory_corruption", "weight": 2, "analytic": True, "xsiam_alert": "PHP Memory Corruption Vulnerability(543004)"},
+    # Informational: never surfaces in the alerts table; background only.
+    {"event": "threat_default_credentials_http", "weight": 2, "analytic": False, "xsiam_alert": None},
+    {"event": "threat_web_rce",          "weight": 4, "analytic": True, "xsiam_alert": "Name(ID) of the signature hit: code-execution signature, any of the web-RCE family"},
+    {"event": "threat_web_infoleak",     "weight": 3, "analytic": True, "xsiam_alert": "Name(ID) of the signature hit: info-leak signature, any of the web info-leak family"},
+    {"event": "threat_web_detect_only",  "weight": 3, "analytic": True, "xsiam_alert": "Name(ID) of the signature hit: alert-only signature, any of the detect-only family"},
+    {"event": "threat_web_sqli_overflow_dos", "weight": 1, "analytic": True, "xsiam_alert": "Name(ID) of the signature hit: sqli/overflow/dos signature, any of that family"},
+    {"event": "threat_legacy_service_exploit", "weight": 1, "analytic": True, "xsiam_alert": "Name(ID) of the signature hit: FTP/TFTP exploit signature, any of the legacy family"},
+    {"event": "threat_wd_mycloud_backdoor", "weight": 1, "analytic": True, "xsiam_alert": "Western Digital My Cloud Backdoor(18011)"},
+    {"event": "threat_scanner_campaign", "weight": 1, "analytic": True, "xsiam_alert": "Multiple network-related alerts produced by different detectors on the same host"},
     # Realistic network patterns whose dedicated analytic needs EAL-decoded fields the CEF
     # traffic log cannot carry — kept for hunts / correlation, NOT offered on demand.
     {"event": "kerberos_preauth_pattern", "weight": 2, "analytic": False, "xsiam_alert": None},
     {"event": "ntlm_relay_pattern",   "weight": 2,  "analytic": False, "xsiam_alert": None},
     {"event": "dns_tunnel_pattern",   "weight": 2,  "analytic": False, "xsiam_alert": None},
     {"event": "ldap_recon",           "weight": 2,  "analytic": False, "xsiam_alert": None},
+    # Traffic-based hits ported from the other firewall generators (names and alert targets
+    # match the FortiGate / Check Point / ASA / Firepower registries).
+    {"event": "tor_connection",       "weight": 3,  "analytic": True,  "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "server_outbound_http", "weight": 2,  "analytic": True,  "xsiam_alert": "Recurring access to rare IP"},
+    {"event": "dns_c2_beacon",        "weight": 3,  "analytic": True,  "xsiam_alert": "Abnormal Recurring Communications to a Rare Domain"},
+    {"event": "smb_new_host_lateral", "weight": 4,  "analytic": True,  "xsiam_alert": "Rare SMB session to a remote host"},
+    {"event": "smb_rare_file_transfer","weight": 3, "analytic": True,  "xsiam_alert": "Rare SMB session to a remote host"},
+    {"event": "smb_share_enumeration","weight": 5,  "analytic": True,  "xsiam_alert": "Rare SMB session to a remote host"},
+    {"event": "rare_external_rdp",    "weight": 2,  "analytic": True,  "xsiam_alert": "Rare RDP session to a remote host"},
+    {"event": "large_download",       "weight": 3,  "analytic": False, "xsiam_alert": None},
+    {"event": "dos_anomaly",          "weight": 3,  "analytic": False, "xsiam_alert": None},
+    {"event": "external_port_scan",   "weight": 3,  "analytic": False, "xsiam_alert": None},
+    {"event": "snmp_unexpected_source","weight": 1, "analytic": False, "xsiam_alert": None},
+    # File Data logs (firewall.filedata): file-type identification, severity low, never an alert.
+    {"event": "file_data_web",        "weight": 3,  "analytic": False, "xsiam_alert": None},
+    {"event": "file_data_internal",   "weight": 3,  "analytic": False, "xsiam_alert": None},
+    {"event": "file_data_ocsp",       "weight": 2,  "analytic": False, "xsiam_alert": None},
 ]
 
 _EVENT_DISPLAY_NAMES = {e["event"]: e["event"] for e in _DEFAULT_THREAT_EVENTS}
@@ -1213,7 +1721,7 @@ def _dcs(config):
 
 def _conn(config, src, dst, dpt, app, action="allow", *, suser=None, shost=None, duser=None,
           dhost=None, bytes_sent=None, bytes_received=None, duration_s=None, ts=None,
-          from_zone="trust", to_zone="untrust", url_cat=None, end_reason=None, proto=None,
+          from_zone=None, to_zone=None, url_cat=None, end_reason=None, proto=None,
           src_category="workstation", no_qualify=False, rule=None):
     """One PAN-OS traffic:end (or deny/drop) CEF line."""
     subtype = action if action in ("deny", "drop") else "end"
@@ -2313,6 +2821,675 @@ def _sim_ldap_recon(config, session_context):
     return out
 
 
+# --- Traffic-based hits ported from the other firewall generators -----------------------------
+# Same behaviours the ASA / FortiGate / Check Point / Firepower modules fire (Tor, SMB lateral
+# movement, server egress, DNS C2, DoS, SNMP walk ...), expressed as PAN-OS traffic logs.
+def _tor_exit(config):
+    nodes = config.get("tor_exit_nodes") or []
+    if nodes:
+        n = random.choice(nodes)
+        return n.get("ip") if isinstance(n, dict) else n
+    return rare_external_ip()
+
+
+def _sim_tor_connection(config, session_context):
+    """DNS lookup of the Tor project, then one long Tor session to an exit/relay address."""
+    src, user, shost = _threat_actor(config, session_context)
+    gname, gip = resolver.dns_server_for(config, src)
+    port = random.choices([443, 9001, 9030], weights=[60, 30, 10])[0]
+    tor_ip = _tor_exit(config)
+    print(f"    - PAN NGFW simulating: Tor connection {src} -> {tor_ip}:{port}")
+    now = time.time()
+    return [
+        _conn(config, src, gip, 53, "dns-base", suser=user, shost=shost, proto="udp",
+              dhost=f"{gname}.{resolver.internal_domain(config)}", from_zone="trust", to_zone="trust",
+              bytes_sent=random.randint(70, 120), bytes_received=random.randint(100, 300),
+              duration_s=0, ts=now - 3),
+        _conn(config, src, tor_ip, port, "tor" if port != 443 else "ssl", suser=user, shost=shost,
+              bytes_sent=random.randint(10000, 100000), bytes_received=random.randint(50000, 500000),
+              duration_s=random.randint(60, 3600), url_cat="proxy-avoidance-and-anonymizers"),
+    ]
+
+
+def _sim_server_outbound_http(config, session_context):
+    """An internal server (never a browsing host) making plain HTTP to a rare external host."""
+    servers = config.get("internal_servers") or ["10.0.10.50"]
+    src = random.choice(stable_subset(servers, "panw_ngfw:server_outbound_http") or servers)
+    ip, dom = _beacon_dst(config, "srv_http", src)
+    dom = dom or rare_domain(f"srvhttp|{src}")
+    print(f"    - PAN NGFW simulating: server outbound HTTP {src} -> {dom}")
+    return _web(config, src, ip, 80, "web-browsing", dom, url_cat="unknown", suser=None,
+                shost=None, from_zone="dmz", to_zone="untrust", src_category="server",
+                user_agent=random.choice(_CLIENT_UAS[:3]),
+                bytes_sent=random.randint(300, 4000), bytes_received=random.randint(500, 60000),
+                duration_s=random.randint(5, 120))
+
+
+def _smb_conns(config, src, user, shost, dests, step=20):
+    out, t0 = [], time.time() - len(dests) * step
+    for i, d in enumerate(dests):
+        out.append(_conn(config, src, d, 445, "ms-ds-smbv3", suser=user, shost=shost,
+                         dhost=resolver.internal_fqdn(config, d), from_zone="trust", to_zone="trust",
+                         bytes_sent=random.randint(2000, 60000), bytes_received=random.randint(2000, 200000),
+                         duration_s=random.randint(5, 120), ts=t0 + i * step))
+    return out
+
+
+def _sim_smb_new_host_lateral(config, session_context):
+    """SMB from one workstation to 5-10 internal hosts it has never talked to."""
+    src, user, shost = _threat_actor(config, session_context)
+    n, dests = random.randint(5, 10), []
+    for _ in range(30):
+        peer = get_random_user(session_context, preferred_device_type="workstation") if session_context else None
+        if peer and peer.get("ip") and peer["ip"] != src and peer["ip"] not in dests:
+            dests.append(peer["ip"])
+        if len(dests) >= n:
+            break
+    while len(dests) < n:
+        dests.append(rare_internal_host(config, exclude=(src,)))
+    print(f"    - PAN NGFW simulating: SMB new-host lateral movement {src} -> {len(dests)} hosts")
+    return _smb_conns(config, src, user, shost, dests)
+
+
+def _sim_smb_rare_file_transfer(config, session_context):
+    """One 100 MB - 1 GB SMB session to a rarely-contacted workstation (data staging)."""
+    src, user, shost = _threat_actor(config, session_context)
+    dst = rare_known_host(config, exclude=(src,), avoid_subnet_of=src)
+    size = random.randint(100 * 1024 * 1024, 1024 * 1024 * 1024)
+    print(f"    - PAN NGFW simulating: SMB rare file transfer {src} -> {dst} {size // (1024 * 1024)}MB")
+    return [_conn(config, src, dst, 445, "ms-ds-smbv3", suser=user, shost=shost,
+                  dhost=resolver.internal_fqdn(config, dst), from_zone="trust", to_zone="trust",
+                  bytes_sent=size, bytes_received=random.randint(1000, 50000),
+                  duration_s=random.randint(120, 900))]
+
+
+def _sim_smb_share_enumeration(config, session_context):
+    """Rapid, tiny TCP/445 sessions to 15-40 distinct internal hosts: share hunting."""
+    src, user, shost = _threat_actor(config, session_context)
+    n = random.randint(15, 40)
+    pool = list(sweep_targets(config, exclude=(src,)))
+    random.shuffle(pool)
+    dests = pool[:n]
+    while len(dests) < n:
+        dests.append(rare_internal_host(config, exclude=(src,)))
+    print(f"    - PAN NGFW simulating: SMB share enumeration {src} -> {len(dests)} hosts")
+    out, t0 = [], time.time() - n * 3
+    for i, d in enumerate(dests):
+        out.append(_conn(config, src, d, 445, "ms-ds-smbv3", suser=user, shost=shost,
+                         from_zone="trust", to_zone="trust", bytes_sent=random.randint(40, 200),
+                         bytes_received=random.randint(40, 200), duration_s=0, ts=t0 + i * 3))
+    return out
+
+
+def _sim_large_download(config, session_context):
+    """One multi-GB INBOUND HTTPS session (huge received, tiny sent): the mirror of an upload."""
+    src, user, shost = _threat_actor(config, session_context)
+    dom, dst, url, is_tail = exfil_destination(config, "download")
+    tail = url.split("://", 1)[-1]
+    path = "/" + tail.split("/", 1)[1] if "/" in tail else "/"
+    recv_mb = random.randint(500, 4000)
+    print(f"    - PAN NGFW simulating: large download {dom} -> {src} {recv_mb}MB")
+    return _web(config, src, dst, 443, "ssl", dom, path=path,
+                url_cat="unknown" if is_tail else "online-storage-and-backup", suser=user, shost=shost,
+                bytes_sent=random.randint(20000, 200000), bytes_received=recv_mb * 1024 * 1024,
+                duration_s=random.randint(300, 2400))
+
+
+def _sim_dns_c2_beacon(config, session_context):
+    """One fixed host querying a rare external DNS server on a steady cadence (DNS C2)."""
+    src, user, shost = _beacon_host(config, session_context, "panw_dns_c2")
+    ip, dom = _beacon_dst(config, "dns_c2", src)
+    n = random.randint(8, 15)
+    step = random.randint(60, 240)
+    print(f"    - PAN NGFW simulating: DNS C2 beacon {src} -> {ip} ({n} queries)")
+    t = time.time() - n * step
+    out = []
+    for _ in range(n):
+        t += step + random.randint(-10, 10)
+        out.append(_conn(config, src, ip, 53, "dns-base", suser=user, shost=shost, proto="udp", dhost=dom,
+                         bytes_sent=random.randint(80, 200), bytes_received=random.randint(100, 500),
+                         duration_s=0, ts=min(t, time.time())))
+    return out
+
+
+def _sim_dos_anomaly(config, session_context):
+    """80-150 tiny sessions from distinct external sources to one published server: a flood."""
+    target = random.choice(config.get("internal_servers") or ["10.0.10.50"])
+    port, app = random.choice([(80, "web-browsing"), (443, "ssl")])
+    n = random.randint(80, 150)
+    print(f"    - PAN NGFW simulating: DoS flood -> {target}:{port} ({n} sources)")
+    out, t0 = [], time.time() - n * 0.5
+    for i in range(n):
+        out.append(_conn(config, random_external_ip(), target, port, app,
+                         action=random.choice(["allow", "allow", "drop"]), from_zone="untrust",
+                         to_zone="dmz", bytes_sent=random.randint(60, 200),
+                         bytes_received=random.randint(0, 200), duration_s=0, ts=t0 + i * 0.5,
+                         rule="Allow-Inbound-Web"))
+    return out
+
+
+def _sim_snmp_unexpected_source(config, session_context):
+    """A workstation walking every network device on UDP/161 (the SNMP-harvest shape; the
+    failed-community config logs are a different PAN log type and are not modelled)."""
+    src, user, shost = _threat_actor(config, session_context)
+    devs = mgmt_plane.network_devices(config)
+    print(f"    - PAN NGFW simulating: SNMP walk {src} -> {len(devs)} devices")
+    out, t = [], time.time() - 60
+    for dev in devs:
+        out.append(_conn(config, src, dev, 161, "snmp-base", suser=user, shost=shost, proto="udp",
+                         from_zone="trust", to_zone="trust", bytes_sent=random.randint(60, 200),
+                         bytes_received=random.randint(800, 40000), duration_s=random.randint(0, 3), ts=t))
+        t += random.randint(1, 4)
+    return out
+
+
+def _sim_external_port_scan(config, session_context):
+    """An Internet host probing 20-24 privileged ports on a published server; mostly blocked."""
+    src = random_external_ip()
+    target = random.choice(config.get("internal_servers") or ["10.0.10.50"])
+    ports = random.sample(_PRIV_PORTS, min(len(_PRIV_PORTS), random.randint(20, 24)))
+    print(f"    - PAN NGFW simulating: external port scan {src} -> {target} ({len(ports)} ports)")
+    out, t0 = [], time.time() - len(ports) * 2
+    for i, p in enumerate(ports):
+        act = random.choices(["deny", "drop", "allow"], weights=[5, 3, 1])[0]
+        out.append(_conn(config, src, target, p, "incomplete" if act != "allow" else _APP_for_port(p),
+                         action=act, from_zone="untrust", to_zone="dmz", ts=t0 + i * 2,
+                         rule="Deny-Inbound-Default" if act != "allow" else "Allow-Inbound-Web"))
+    return out
+
+
+def _sim_rare_external_rdp(config, session_context):
+    """RDP from a workstation straight to a rare Internet host."""
+    src, user, shost = _threat_actor(config, session_context)
+    dom, dst = _rare_ext(config, f"extrdp|{user}")
+    print(f"    - PAN NGFW simulating: rare external RDP {src} -> {dst}")
+    return [_conn(config, src, dst, 3389, "ms-rdp", suser=user, shost=shost, dhost=dom,
+                  bytes_sent=random.randint(40000, 400000), bytes_received=random.randint(200000, 4000000),
+                  duration_s=random.randint(120, 3000), url_cat="unknown")]
+
+
+# --- File Data logs (log_type THREAT, subtype file -> __firewall_type firewall.filedata) ----------
+# The file-type identification entries the live pa440 writes when a profile alerts on a file type
+# (read-only pull of its native CSV feed: all severity low, action alert,
+# threat category N/A, direction server-to-client). Name and Threat ID are as the device records
+# them; the `filetype` token is each signature's file extension / type word (assumed: the native CSV
+# has no such column) and `file_url` / `filedigest` are not in the CSV either (digest stays empty:
+# only a WildFire verdict carries one).
+_FILE_SIGS = {
+    "bin":  (52081, "Unknown Binary File",                      "bin"),
+    "php":  (52256, "Hypertext Preprocessor PHP File",          "php"),
+    "xml":  (52384, "XML File",                                 "xml"),
+    "jsp":  (52255, "JavaServer Pages JSP File",                "jsp"),
+    "asp":  (52239, "Active Server Page ASP File",              "asp"),
+    "aspx": (52257, "Active Server Page Extended ASPX File",    "aspx"),
+    "json": (52380, "JSON File",                                "json"),
+    "pdf":  (52021, "Adobe Portable Document Format (PDF)",     "pdf"),
+    "der":  (52209, "DER Encoded X509 Certificate",             "der"),
+    "crt":  (52390, "X509 Certificate File",                    "crt"),
+    "perl": (52017, "Perl Script",                              "pl"),
+    "py":   (52193, "Python File",                              "py"),
+    "dat":  (52418, "DAT file",                                 "dat"),
+}
+# (signature key, file name pool, weight) as the live feed's name distribution
+_FILE_WEB_NAMES = [
+    ("php",  ["index.php", "login.php", "main.php", "calendar.php", "setup.php"], 8),
+    ("xml",  ["sitemap.xml", "device-desc.xml", "dd.xml", "web.xml"], 5),
+    ("jsp",  ["login.jsp", "index.jsp", "welcome.jsp"], 3),
+    ("asp",  ["index.asp", "default.asp", "login.asp", "home.asp"], 3),
+    ("aspx", ["Login.aspx", "Default.aspx", "index.aspx"], 3),
+    ("json", ["composer.json", "manifest.json"], 2),
+    ("pdf",  ["report.pdf", "brochure.pdf"], 2),
+    ("crt",  ["gd_tls_issuing_dv-r1v1.crt"], 1),
+    ("perl", ["index.pl"], 1),
+    ("py",   ["index.py"], 1),
+    ("dat",  ["users.dat"], 1),
+    ("bin",  ["inform", "update", "firmware"], 6),
+]
+_OCSP_HOSTS = ["ocsp.digicert.com", "ocsp.pki.goog", "ocsp.sectigo.com", "ocsp.godaddy.com",
+               "ocsp.entrust.net", "r3.o.lencr.org"]
+
+
+def _file_record(config, tf, sigkey, misc, ts, file_url=None, action="alert"):
+    """One PAN-OS file-type THREAT log (documented File Data format: firewall.filedata).
+
+    Header signature slot is the Threat ID. `tf` is the traffic-field dict of the session it
+    fired in, so the file log shares its addresses, ports, zones, users, App-ID and session_id.
+    """
+    tid, tname, ftype = _FILE_SIGS[sigkey]
+    f = {k: tf[k] for k in _URL_SHARED_KEYS if tf.get(k) not in (None, "")}
+    fmt = str(_get_config(config).get("threat_severity_format", "number")).lower()
+    f.update({
+        "action":              action,
+        "misc":                misc,
+        "file_name":           misc,
+        # Live CEF File Data rows: threat_id, threat_name and the header signature are all "Name(ID)".
+        "threat_id":           f"{tname}({tid})",
+        "threat_name":         f"{tname}({tid})",
+        "threat_name_firewall": tname,
+        "threat_category":     "N/A",
+        "direction":           "server-to-client",
+        "direction_of_attack": "server to client",
+        "severity":            ("Low" if fmt == "word" else str(_SEVERITY_NUM["low"])),
+        "vendor_severity":     "Low",
+        "count_of_repeats":    1,
+        "file_url":            file_url,
+        "filetype":            ftype,
+        "pcap_id":             0,
+    })
+    return _format_cef(config, "file", f, log_type="THREAT", severity=_SEVERITY_NUM["low"], ts=ts,
+                       fw_type="firewall.filedata", sig=f"{tname}({tid})")
+
+
+def _file_session(config, src, dst, dpt, app, domain, sigkey, name, *, suser=None, shost=None,
+                  from_zone=None, to_zone=None, url_cat=None, path=None, with_url=True,
+                  dhost=None, url_host=None):
+    """[traffic:end, (url), file] for one cleartext download: all three share one session_id."""
+    dur = random.randint(1, 12)
+    f = _traffic_fields(config, src, dst, dpt, app, shost=shost, suser=suser, dhost=dhost or domain,
+                        from_zone=from_zone, to_zone=to_zone, url_cat=url_cat, duration_s=dur,
+                        bytes_sent=random.randint(300, 1500), bytes_received=random.randint(800, 90000))
+    end = time.time() - random.uniform(0, 3)
+    out = [_format_cef(config, "end", dict(f), ts=end)]
+    host = url_host or domain
+    path = path or f"/{name}"
+    if with_url:
+        out.append(_url_record(config, f, host, path=path, category=url_cat, ts=end - dur / 2))
+    out.append(_file_record(config, f, sigkey, name, ts=end - dur / 2,
+                            file_url=f"{host}{path}"))
+    return out
+
+
+def _sim_file_data_web(config, session_context):
+    """A user fetching a file over cleartext HTTP from an Internet web server: the device
+    identifies the file type and logs it (alert) next to the URL and traffic logs."""
+    src, user, shost = _user_src(config, session_context)
+    dests = config.get("benign_egress_destinations") or [{}]
+    domain, dst = resolver.benign_target(config, weighted_destination(user, dests))
+    sigkey, names, _w = random.choices(_FILE_WEB_NAMES, weights=[w[2] for w in _FILE_WEB_NAMES])[0]
+    name = random.choice(names)
+    print(f"    - PAN NGFW simulating: file data {_FILE_SIGS[sigkey][1]} {domain} -> {src}")
+    return _file_session(config, src, dst, 80, "web-browsing", domain, sigkey, name, suser=user,
+                         shost=shost, url_cat=random.choice(_URL_CAT_BENIGN))
+
+
+def _sim_file_data_internal(config, session_context):
+    """A host fetching a file from an internal web application on 8080 / 9080 (intranet
+    portals, device description XML, admin pages): the bulk of the live file-type rows."""
+    src, user, shost = _user_src(config, session_context)
+    servers = [s for s in (config.get("internal_servers") or ["10.0.10.50"]) if s != src] or ["10.0.10.50"]
+    dst = random.choice(stable_subset(servers, "panw_ngfw:file_data_internal") or servers)
+    sigkey, names, _w = random.choices(_FILE_WEB_NAMES, weights=[w[2] for w in _FILE_WEB_NAMES])[0]
+    name = random.choice(names)
+    port = random.choices([8080, 9080, 80], weights=[5, 3, 2])[0]
+    host = resolver.internal_fqdn(config, dst)
+    print(f"    - PAN NGFW simulating: file data (internal) {_FILE_SIGS[sigkey][1]} {dst}:{port} -> {src}")
+    return _file_session(config, src, dst, port, "web-browsing", host, sigkey, name, suser=user,
+                         shost=shost, from_zone="trust", to_zone="trust", url_cat="private-ip-addresses",
+                         url_host=f"{host}:{port}" if port != 80 else host)
+
+
+def _sim_file_data_ocsp(config, session_context):
+    """Certificate validation: the client's OCSP lookup returns a DER X509 certificate blob
+    (App-ID ocsp, tcp/80), logged as a file-type identification."""
+    src, user, shost = _user_src(config, session_context)
+    host = random.choice(_OCSP_HOSTS)
+    dst = rare_external_ip()
+    print(f"    - PAN NGFW simulating: file data OCSP {host} -> {src}")
+    return _file_session(config, src, dst, 80, "ocsp", host, "der", random.choice(["ocsp", "responder", "ocsp"]),
+                         suser=user, shost=shost, url_cat="computer-and-internet-info", path="/",
+                         with_url=random.random() < 0.5)
+
+
+# --- Threat-log scenarios (THREAT + the matching traffic log of each session) ---------------
+_SCANNER_UA = {
+    "nmap_nse": "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)",
+    "openvas":  "Mozilla/5.0 [en] (X11, U; OpenVAS-VT)",
+}
+_CLIENT_UAS = ["python-requests/2.31.0", "curl/8.4.0", "Go-http-client/1.1",
+               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/129.0.0.0 Safari/537.36"]
+_PROBE_PATHS = ["/", "/login", "/api/v1/auth", "/index.jsp", "/admin", "/manager/html", "/actuator/health"]
+
+
+def _inbound_threat(config, key, app, ports, actions, *, proto="tcp", n=(3, 8), rule="Allow-Inbound-Web",
+                    cleartext_web=False, threat_only=False, misc=None):
+    """An internet attacker repeatedly tripping signature `key` against a published DMZ server
+    (untrust -> dmz). Web exploits ride cleartext HTTP so PAN can see the request (it cannot
+    inspect undecrypted TLS), and carry the request path in `misc` and the client User-Agent."""
+    attacker = rare_external_ip()
+    dst = random.choice(_dmz_servers(config))
+    dname = resolver.internal_fqdn(config, dst)
+    now = time.time()
+    count = random.randint(*n)
+    gap = random.randint(8, 25)
+    t = now - count * gap
+    ua = random.choice(_CLIENT_UAS)
+    print(f"    - PAN NGFW simulating: {key} threat {attacker} -> {dst} x{count}")
+    out = []
+    for _ in range(count):
+        t = min(t + gap + random.randint(-3, 3), now)
+        out += _threat_session(config, key, attacker, dst, random.choice(ports), app,
+                               action=random.choice(actions), end=t, dhost=dname, from_zone="untrust",
+                               to_zone="dmz", proto=proto, rule=rule, src_category="unknown",
+                               misc=(misc or (random.choice(_PROBE_PATHS) if cleartext_web else None)),
+                               user_agent=(ua if cleartext_web else None), threat_only=threat_only)
+    return out
+
+
+def _scanner_threat(config, session_context, key, app, ports, action, *, proto="tcp", end=None,
+                    actor=None, target_n=(5, 12), http=False, target=None):
+    """An internal host running a vulnerability scanner against internal servers: one session
+    per target, each tripping signature `key` (scanner detections alert rather than block)."""
+    src, user, shost = actor or _threat_actor(config, session_context)
+    servers = [h for h in (config.get("internal_servers") or ["10.0.10.50"]) if h != src]
+    targets = [target] if target else random.sample(servers, min(len(servers), random.randint(*target_n)))
+    end = end or time.time()
+    gap = random.randint(6, 18)
+    t = end - len(targets) * gap
+    print(f"    - PAN NGFW simulating: {key} scanner {src} -> {len(targets)} servers")
+    out = []
+    for dst in targets:
+        t = min(t + gap, end)
+        out += _threat_session(config, key, src, dst, random.choice(ports), app, action=action, end=t,
+                               suser=user, shost=shost, dhost=resolver.internal_fqdn(config, dst),
+                               proto=proto, misc=(random.choice(_PROBE_PATHS) if http else None),
+                               user_agent=(_SCANNER_UA.get(key) if http else None))
+    return out
+
+
+def _sim_threat_log4j_exploit(config, session_context):
+    """Critical code-execution signature, blocked: Log4j exploitation attempts on cleartext web."""
+    return _inbound_threat(config, "log4j", "web-browsing", [80, 8080], ["drop"] * 4 + ["reset-server"],
+                           cleartext_web=True)
+
+
+def _sim_threat_dnsmasq_exploit(config, session_context):
+    """High code-execution signature, dropped: malformed DNS to a published resolver (UDP)."""
+    return _inbound_threat(config, "dnsmasq", "dns-base", [53], ["drop"], proto="udp", n=(2, 5),
+                           rule="Allow-Inbound-DNS")
+
+
+def _sim_threat_nmap_nse_scan(config, session_context):
+    return _scanner_threat(config, session_context, "nmap_nse", "web-browsing", [80, 8080], "alert", http=True)
+
+
+def _sim_threat_openvas_scan(config, session_context):
+    return _scanner_threat(config, session_context, "openvas", "web-browsing", [80, 8080], "alert", http=True)
+
+
+def _sim_threat_rpc_portmapper_dump(config, session_context):
+    """Portmapper DUMP is reset by the firewall (as in the live feed): session ends 'threat'."""
+    return _scanner_threat(config, session_context, "rpc_dump", "portmapper", [111], "reset-server")
+
+
+def _sim_threat_nfs_export_probe(config, session_context):
+    return _scanner_threat(config, session_context, "nfs_export", "nfs", [2049], "alert")
+
+
+def _sim_threat_rpc_fragmentation_evasion(config, session_context):
+    return _scanner_threat(config, session_context, "rpc_frag", "rpc", [111], "alert", target_n=(3, 6))
+
+
+def _sim_threat_ssh_bruteforce(config, session_context):
+    """An internet host guessing SSH credentials against a published server. The first few
+    attempts are ordinary short SSH sessions; once the guess count crosses the signature's
+    threshold each further session also logs the threat, with the running attempt count in
+    count_of_repeats."""
+    attacker = rare_external_ip()
+    dst = random.choice(_dmz_servers(config))
+    dname = resolver.internal_fqdn(config, dst)
+    count = random.randint(10, 14)
+    now = time.time()
+    t = now - count * 12
+    print(f"    - PAN NGFW simulating: SSH brute force {attacker} -> {dst} ({count} attempts)")
+    out = []
+    for i in range(count):
+        t = min(t + 12 + random.randint(-3, 3), now)
+        if i < 4:
+            out.append(_conn(config, attacker, dst, 22, "ssh", action="allow", ts=t, dhost=dname,
+                             from_zone="untrust", to_zone="dmz", rule="Allow-Inbound-SSH",
+                             bytes_sent=random.randint(1500, 3500), bytes_received=random.randint(1500, 4000),
+                             duration_s=random.randint(1, 4), src_category="unknown"))
+        else:
+            out += _threat_session(config, "ssh_brute", attacker, dst, 22, "ssh", action="alert", end=t,
+                                   dhost=dname, from_zone="untrust", to_zone="dmz", rule="Allow-Inbound-SSH",
+                                   repeats=i - 3, src_category="unknown")
+    return out
+
+
+def _sim_threat_iax2_dos(config, session_context):
+    """Medium IAX2 call-number exhaustion against a published Asterisk-style server: an
+    internet host floods UDP/4569 (alert only, the signature's default action) as
+    App-ID voip-video, which is what PAN assigns IAX2."""
+    return _inbound_threat(config, "iax2_dos", "voip-video", [4569], ["alert"], proto="udp",
+                           n=(6, 14), rule="Allow-Inbound-IAX2")
+
+
+def _sim_threat_bot_backdoor_beacon(config, session_context):
+    """High spyware signature, reset-client: an infected internal host's backdoor beacons to a
+    rare external host. The first beacon is reset; the malware retries on a timer, so the same
+    host/C2 pair repeats a handful of times. App-ID assumed web-browsing (cleartext HTTP)."""
+    src, user, shost = _threat_actor(config, session_context)
+    dom, dst = _rare_ext(config, f"bot|{user}")
+    count = random.randint(3, 6)
+    gap = random.randint(45, 90)
+    now = time.time()
+    t = now - count * gap
+    print(f"    - PAN NGFW simulating: Bot backdoor beacon {src} -> {dom} x{count}")
+    out = []
+    for _ in range(count):
+        t = min(t + gap + random.randint(-8, 8), now)
+        out += _threat_session(config, "bot_qxx", src, dst, 80, "web-browsing", action="reset-client", end=t,
+                               suser=user, shost=shost, dhost=dom, from_zone="trust", to_zone="untrust")
+    return out
+
+
+def _threat_only_outbound(config, session_context, key, dst, dom, dpt, app, action, *, count, gap):
+    """Threat logs only (no traffic log): an infected internal host trips signature `key` `count`
+    times against one external server, `gap` seconds apart, the last no later than now."""
+    src, user, shost = _threat_actor(config, session_context)
+    now = time.time()
+    t = now - count * gap
+    print(f"    - PAN NGFW simulating: {key} threat {src} -> {dom or dst} x{count}")
+    out = []
+    for _ in range(count):
+        t = min(t + gap + random.randint(-5, 5), now)
+        out += _threat_session(config, key, src, dst, dpt, app, action=action, end=t, suser=user,
+                               shost=shost, dhost=dom, from_zone="trust", to_zone="untrust",
+                               threat_only=True)
+    return out
+
+
+def _sim_threat_bot_agobot_backdoor(config, session_context):
+    """High spyware signature (Agobot backdoor), reset-both: threat log only. App-ID assumed."""
+    dom, dst = _rare_ext(config, f"agobot|{random.random()}")
+    return _threat_only_outbound(config, session_context, "bot_agobot", dst, dom, 80, "web-browsing",
+                                 "reset-both", count=random.randint(2, 5), gap=random.randint(45, 90))
+
+
+def _sim_threat_pastebin_c2(config, session_context):
+    """Critical spyware signature: C2 that hides in Pastebin traffic, reset-both. Threat log only.
+    One of the three signature IDs per event. The destination is the real pastebin.com (a
+    well-known site, so the resolver answer is the same everywhere); the App-ID is assumed ssl."""
+    key = random.choice(["pastebin_c2_a", "pastebin_c2_b", "pastebin_c2_c"])
+    return _threat_only_outbound(config, session_context, key, resolver.answer_for("pastebin.com", config),
+                                 "pastebin.com", 443, "ssl", "reset-both", count=random.randint(1, 3),
+                                 gap=random.randint(60, 180))
+
+
+def _sim_threat_default_credentials_http(config, session_context):
+    """Informational, alert: an HTTP Basic login with a manufacturer default username/password
+    to an internal web admin page. Threat log only; informational severity never reaches the
+    alerts table, so this is background-only."""
+    src, user, shost = _threat_actor(config, session_context)
+    servers = [h for h in (config.get("internal_servers") or ["10.0.10.50"]) if h != src]
+    dst = random.choice(servers)
+    print(f"    - PAN NGFW simulating: default-credentials HTTP Basic {src} -> {dst}")
+    return _threat_session(config, "default_creds", src, dst, random.choice([80, 8080]), "web-browsing",
+                           action="alert", end=time.time(), suser=user, shost=shost,
+                           dhost=resolver.internal_fqdn(config, dst), threat_only=True)
+
+
+def _sim_threat_schoolboy_downloader(config, session_context):
+    """Critical downloader signature, reset-both: threat logs only. App-ID assumed web-browsing."""
+    dom, dst = _rare_ext(config, f"schoolboy|{random.random()}")
+    return _threat_only_outbound(config, session_context, "schoolboy", dst, dom, 80, "web-browsing",
+                                 "reset-both", count=random.randint(1, 3), gap=random.randint(60, 150))
+
+
+def _sim_threat_php_rce(config, session_context):
+    """Critical PHP RCE (one of three signature IDs), reset-server: an internet attacker's crafted
+    HTTP requests to a DMZ web server. Threat logs only."""
+    return _php_rce_event(config, random.choice(["php_rce_a", "php_rce_b", "php_rce_c"]))
+
+
+def _php_rce_event(config, key):
+    return _inbound_threat(config, key, "web-browsing", [80, 8080], ["reset-server"], n=(2, 6),
+                           cleartext_web=True, threat_only=True)
+
+
+def _sim_threat_moxa_tn5900_injection(config, session_context):
+    """Critical Moxa TN-5900 firmware command injection, reset-server, over cleartext HTTP.
+    Threat logs only."""
+    return _inbound_threat(config, "moxa_tn5900", "web-browsing", [80, 8080], ["reset-server"], n=(1, 4),
+                           cleartext_web=True, threat_only=True)
+
+
+def _sim_threat_trendnet_tew432brp_injection(config, session_context):
+    """Critical TRENDnet TEW-432BRP firmware command injection, reset-server, cleartext HTTP.
+    Threat logs only."""
+    return _inbound_threat(config, "trendnet_tew432brp", "web-browsing", [80, 8080], ["reset-server"],
+                           n=(1, 4), cleartext_web=True, threat_only=True)
+
+
+def _sim_threat_php_memory_corruption(config, session_context):
+    """Critical PHP memory corruption (remote code execution), reset-server, cleartext HTTP.
+    Threat logs only."""
+    return _inbound_threat(config, "php_memcorrupt", "web-browsing", [80, 8080], ["reset-server"],
+                           n=(2, 5), cleartext_web=True, threat_only=True)
+
+
+# The hand-curated vulnerability signatures (not in the tenant catalogue) each have a dedicated event above.
+# This maps a signature key to the generator that fires exactly that signature, for the per-signature
+# Vulnerabilities module (modules/panw_ngfw_vulns.py).
+_CURATED_SIG_EVENTS = {
+    "log4j": _sim_threat_log4j_exploit, "dnsmasq": _sim_threat_dnsmasq_exploit,
+    "nmap_nse": _sim_threat_nmap_nse_scan, "openvas": _sim_threat_openvas_scan,
+    "rpc_dump": _sim_threat_rpc_portmapper_dump, "nfs_export": _sim_threat_nfs_export_probe,
+    "rpc_frag": _sim_threat_rpc_fragmentation_evasion, "ssh_brute": _sim_threat_ssh_bruteforce,
+    "iax2_dos": _sim_threat_iax2_dos, "default_creds": _sim_threat_default_credentials_http,
+    "php_rce_a": lambda c, s: _php_rce_event(c, "php_rce_a"),
+    "php_rce_b": lambda c, s: _php_rce_event(c, "php_rce_b"),
+    "php_rce_c": lambda c, s: _php_rce_event(c, "php_rce_c"),
+    "moxa_tn5900": _sim_threat_moxa_tn5900_injection,
+    "trendnet_tew432brp": _sim_threat_trendnet_tew432brp_injection,
+    "php_memcorrupt": _sim_threat_php_memory_corruption,
+}
+
+
+def curated_sig_event(config, session_context, key):
+    """Fire the one hand-curated signature `key` (a _THREAT_SIGS key that has a dedicated event)."""
+    return _CURATED_SIG_EVENTS[key](config, session_context)
+
+
+def _tenant_keys(pred):
+    return sorted(k for k, (act, app, _m) in _TENANT_PROFILE.items() if pred(_THREAT_SIGS[k], act, app))
+
+
+_WEB_APPS_EXCLUDED = ("ftp", "tftp", "telnet", "lpd", "smtp-base")
+_LEGACY_PORT = {"telnet": 23, "lpd": 515, "smtp-base": 25}
+_LEGACY_RULE = {"telnet": "Allow-Inbound-Legacy", "lpd": "Allow-Inbound-Legacy", "smtp-base": "Allow-Inbound-SMTP"}
+_TENANT_FAMILIES = {
+    "web_rce":    lambda g, a, p: g[3] == "code-execution" and a != "alert" and p not in _WEB_APPS_EXCLUDED and g[4] == "vulnerability",
+    "web_leak":   lambda g, a, p: g[3] == "info-leak" and a != "alert" and p not in _WEB_APPS_EXCLUDED,
+    "web_detect": lambda g, a, p: a == "alert" and p not in _WEB_APPS_EXCLUDED,
+    "web_other":  lambda g, a, p: (g[3] in ("sql-injection", "overflow", "dos", "code-obfuscation", "brute-force",
+                                            "insecure-credentials") and a != "alert" and p not in _WEB_APPS_EXCLUDED),
+    "legacy":     lambda g, a, p: p in _WEB_APPS_EXCLUDED,
+    "spyware":    lambda g, a, p: g[4] == "spyware",
+}
+
+
+def _tenant_family_event(config, family):
+    """One internet attacker tripping a tenant-confirmed signature of `family` against a DMZ
+    server: the signature's own action, App-ID and $misc as the tenant feed carries them.
+    Threat logs only, like the other catalog-driven exploit events."""
+    return tenant_sig_event(config, random.choice(_tenant_keys(_TENANT_FAMILIES[family])))
+
+
+def tenant_sig_event(config, key):
+    """One internet attacker tripping the single tenant-confirmed signature `key` ("t<id>") against a
+    DMZ server, with the signature's own action, App-ID and $misc. Used by the family events (a random
+    key) and by the per-signature Vulnerabilities module (a chosen key). Threat logs only."""
+    act, app, misc = _TENANT_PROFILE[key]
+    if app == "tftp":
+        return _inbound_threat(config, key, app, [69], [act], proto="udp", n=(1, 3),
+                               rule="Allow-Inbound-FTP-Legacy", threat_only=True)
+    if app == "ftp":
+        return _inbound_threat(config, key, app, [21], [act], n=(1, 3),
+                               rule="Allow-Inbound-FTP-Legacy", threat_only=True)
+    if app in _LEGACY_PORT:
+        return _inbound_threat(config, key, app, [_LEGACY_PORT[app]], [act], n=(1, 3),
+                               rule=_LEGACY_RULE[app], threat_only=True)
+    return _inbound_threat(config, key, app, [80, 8080], [act], n=(1, 4), cleartext_web=True,
+                           threat_only=True, misc=misc)
+
+
+def _sim_threat_web_rce(config, session_context):
+    """Code-execution web exploits (115+ signatures, blocked with reset-*): cleartext HTTP."""
+    return _tenant_family_event(config, "web_rce")
+
+
+def _sim_threat_web_infoleak(config, session_context):
+    """Information-disclosure / traversal / auth-bypass signatures, blocked (reset-server)."""
+    return _tenant_family_event(config, "web_leak")
+
+
+def _sim_threat_web_detect_only(config, session_context):
+    """Signatures the policy only alerts on (XSS, /etc/passwd, directory traversal requests, ...)."""
+    return _tenant_family_event(config, "web_detect")
+
+
+def _sim_threat_web_sqli_overflow_dos(config, session_context):
+    """SQL injection, buffer overflow, DoS and other categories, blocked."""
+    return _tenant_family_event(config, "web_other")
+
+
+def _sim_threat_legacy_service_exploit(config, session_context):
+    """FTP / TFTP / telnet / LPD / SMTP service exploits (buffer overflow, directory traversal)."""
+    return _tenant_family_event(config, "legacy")
+
+
+def _sim_threat_wd_mycloud_backdoor(config, session_context):
+    """Spyware-subtype signature (Western Digital My Cloud Backdoor), reset-server, cleartext HTTP."""
+    return _tenant_family_event(config, "spyware")
+
+
+def _sim_threat_scanner_campaign(config, session_context):
+    """One internal host works through a whole recon sequence within the hour: a port scan,
+    failed connections, then scanner-signature hits (Nmap NSE, OpenVAS, portmapper) on the
+    same server. The firewall's own threat alerts plus the XDR analytics on the traffic land on
+    one host, the shape XSIAM rolls up into "Multiple network-related alerts produced by
+    different detectors on the same host" (case 68482's insight)."""
+    actor = _threat_actor(config, session_context)
+    src, user, shost = actor
+    servers = [h for h in (config.get("internal_servers") or ["10.0.10.50"]) if h != src]
+    target = random.choice(servers)
+    now = time.time()
+    print(f"    - PAN NGFW simulating: scanner campaign on {src}")
+    out = _scan_burst(config, src, user, shost,
+                      random.sample(_PRIV_PORTS, min(len(_PRIV_PORTS), random.randint(20, 24))),
+                      end=now - 45 * 60, target=target)
+    out += _failed_burst(config, src, user, shost, end=now - 25 * 60)
+    out += _scanner_threat(config, session_context, "nmap_nse", "web-browsing", [80, 8080], "alert",
+                           actor=actor, end=now - 12 * 60, http=True, target=target)
+    out += _scanner_threat(config, session_context, "openvas", "web-browsing", [80, 8080], "alert",
+                           actor=actor, end=now - 6 * 60, http=True, target=target)
+    out += _scanner_threat(config, session_context, "rpc_dump", "portmapper", [111], "reset-server",
+                           actor=actor, end=now - 60, target=target)
+    return out
+
+
 _THREAT_DISPATCH = {
     "port_scan": _sim_port_scan, "port_sweep": _sim_port_sweep,
     "failed_connections": _sim_failed_connections,
@@ -2336,6 +3513,14 @@ _THREAT_DISPATCH = {
     "new_admin_behavior": _sim_new_admin_behavior, "dormant_host_conn": _sim_dormant_host_conn,
     "kerberos_preauth_pattern": _sim_kerberos_preauth_pattern, "ntlm_relay_pattern": _sim_ntlm_relay_pattern,
     "dns_tunnel_pattern": _sim_dns_tunnel_pattern, "ldap_recon": _sim_ldap_recon,
+    "tor_connection": _sim_tor_connection, "server_outbound_http": _sim_server_outbound_http,
+    "dns_c2_beacon": _sim_dns_c2_beacon, "smb_new_host_lateral": _sim_smb_new_host_lateral,
+    "smb_rare_file_transfer": _sim_smb_rare_file_transfer, "smb_share_enumeration": _sim_smb_share_enumeration,
+    "rare_external_rdp": _sim_rare_external_rdp, "large_download": _sim_large_download,
+    "dos_anomaly": _sim_dos_anomaly, "external_port_scan": _sim_external_port_scan,
+    "snmp_unexpected_source": _sim_snmp_unexpected_source,
+    "file_data_web": _sim_file_data_web, "file_data_internal": _sim_file_data_internal,
+    "file_data_ocsp": _sim_file_data_ocsp,
     "port_scan_aggressive": _sim_port_scan_aggressive, "ipfs_peering": _sim_ipfs_peering,
     "rare_domain_attack_port": _sim_rare_domain_attack_port,
     "recurring_rare_domain_attack_port": _sim_recurring_rare_domain_attack_port,
@@ -2357,6 +3542,24 @@ _THREAT_DISPATCH = {
     "dcsync_non_dc_appid": _sim_dcsync_non_dc_appid, "dcsync_large_appid": _sim_dcsync_large_appid,
     "recurring_rare_domain_suspicious_as": _sim_recurring_rare_domain_suspicious_as,
     "recurring_rare_domain_abnormal_suffix": _sim_recurring_rare_domain_abnormal_suffix,
+    "threat_log4j_exploit": _sim_threat_log4j_exploit, "threat_dnsmasq_exploit": _sim_threat_dnsmasq_exploit,
+    "threat_nmap_nse_scan": _sim_threat_nmap_nse_scan, "threat_openvas_scan": _sim_threat_openvas_scan,
+    "threat_rpc_portmapper_dump": _sim_threat_rpc_portmapper_dump,
+    "threat_nfs_export_probe": _sim_threat_nfs_export_probe,
+    "threat_rpc_fragmentation_evasion": _sim_threat_rpc_fragmentation_evasion,
+    "threat_ssh_bruteforce": _sim_threat_ssh_bruteforce,
+    "threat_bot_agobot_backdoor": _sim_threat_bot_agobot_backdoor, "threat_pastebin_c2": _sim_threat_pastebin_c2,
+    "threat_default_credentials_http": _sim_threat_default_credentials_http,
+    "threat_schoolboy_downloader": _sim_threat_schoolboy_downloader, "threat_php_rce": _sim_threat_php_rce,
+    "threat_moxa_tn5900_injection": _sim_threat_moxa_tn5900_injection,
+    "threat_trendnet_tew432brp_injection": _sim_threat_trendnet_tew432brp_injection,
+    "threat_php_memory_corruption": _sim_threat_php_memory_corruption,
+    "threat_web_rce": _sim_threat_web_rce, "threat_web_infoleak": _sim_threat_web_infoleak,
+    "threat_web_detect_only": _sim_threat_web_detect_only,
+    "threat_web_sqli_overflow_dos": _sim_threat_web_sqli_overflow_dos,
+    "threat_legacy_service_exploit": _sim_threat_legacy_service_exploit,
+    "threat_wd_mycloud_backdoor": _sim_threat_wd_mycloud_backdoor,
+    "threat_iax2_dos": _sim_threat_iax2_dos, "threat_bot_backdoor_beacon": _sim_threat_bot_backdoor_beacon, "threat_scanner_campaign": _sim_threat_scanner_campaign,
 }
 
 
