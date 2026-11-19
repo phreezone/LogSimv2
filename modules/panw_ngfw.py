@@ -3159,7 +3159,13 @@ def _tenant_family_event(config, family):
     """One internet attacker tripping a tenant-confirmed signature of `family` against a DMZ
     server: the signature's own action, App-ID and $misc as the tenant feed carries them.
     Threat logs only, like the other catalog-driven exploit events."""
-    key = random.choice(_tenant_keys(_TENANT_FAMILIES[family]))
+    return tenant_sig_event(config, random.choice(_tenant_keys(_TENANT_FAMILIES[family])))
+
+
+def tenant_sig_event(config, key):
+    """One internet attacker tripping the single tenant-confirmed signature `key` ("t<id>") against a
+    DMZ server, with the signature's own action, App-ID and $misc. Used by the family events (a random
+    key) and by the per-signature Vulnerabilities module (a chosen key). Threat logs only."""
     act, app, misc = _TENANT_PROFILE[key]
     if app == "tftp":
         return _inbound_threat(config, key, app, [69], [act], proto="udp", n=(1, 3),

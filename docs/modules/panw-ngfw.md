@@ -565,6 +565,21 @@ rows to read them from) is all that is needed to add them. Whether the syslog-de
 raise the same native `PAN_NGFW` alerts as the CLCS rows, and which `severity` form the platform
 expects, have to be settled with a small probe (not yet sent).
 
+## Vulnerabilities (on-demand module)
+
+A separate module, **Palo Alto Networks NGFW Vulnerabilities** (`modules/panw_ngfw_vulns.py`), lists every
+tenant-confirmed vulnerability signature as its own entry so one exact signature can be fired ad hoc: **Threats &
+Scenarios → Fire Individual Threat**, pick the module, then the signature (the dropdown groups each entry under the
+alert it targets, `Name(ID)`). The MCP `fire_event` tool and the CLI specific-threat menu list the same entries.
+
+| | |
+|---|---|
+| Entries | 219, `vuln_<id>` (also accepted as a bare ID, `97710`, or `t97710`). The spyware signature (WD 18011) and the hand-curated vulnerability events that already have their own entry in the NGFW module (Log4j, Dnsmasq, IAX2, PHP / Moxa / TRENDnet, scanner and RPC detections) are not repeated |
+| What a fire sends | what `panw_ngfw` builds for that signature: an internet attacker (`untrust -> dmz`) trips it against a DMZ server, 1-4 threat-log sessions (1-3 for the legacy services), the signature's own action, App-ID, port and request path, `threat_id` sent as `Name(ID)` |
+| Expect | the native `PAN NGFW` alert named `Name(ID)`, 4-7 minutes later. Repeats of one signature in a short window may be suppressed by the tenant, so send a few from different sources if a single fire shows nothing |
+| Background | none: in a long-running session the module generates nothing (the same signatures already ride the grouped events of the NGFW module) |
+| Config | none of its own: it shares `panw_ngfw_config` (syslog host and port, `zones`, DMZ servers) |
+
 ## Threat scenarios
 
 Dispatched from `_generate_threat_log` (weighted) or forced by name via `scenario_event`.
