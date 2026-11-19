@@ -148,9 +148,12 @@ names such as `svc_backup` only ever raise the Low base alert.
 | `wip_sccm_container_recon` | Full real shape (4662 reads + the DC's 1644 LDAP search naming the container) still silent; every real 1644 in the tenant is agent-collected, WEC lands as `EVENT_LOG_DOMAIN_CONTROLLER` (see `docs/modules/windows.md`) |
 | `wip_esc4_template_modification` | 3 batches (5136 only → +4662 legs → +CA 4899/4900) still silent. The detector's own collection reference names 4899/4900/4662; those EventData names are unverifiable because Microsoft publishes no per-event page (see `docs/modules/windows.md`) |
 | `wip_new_machine_delegation` | 3 batches (config-only → RBCD/constrained/unconstrained chains → same chains with a DC-side machine 4624 + TGT) still silent. A fresh `4741` by a first-time creator does not raise "Rare machine account creation", so `4741` does not drive machine-creation analytics here and the detector cannot see a "new" machine (see `docs/modules/windows.md`) |
-| `wip_shadow_credentials` | Added 2026-10-21 — *Key credential attribute modification* (5136 `msDS-KeyCredentialLink` + PKINIT 4768) |
-| `wip_default_account_masquerade` | Added 2026-10-21 — *Masquerading as a default local account* (local 4720 `DefaultAccount` / `Guest` on a member server) |
-| `wip_samaccountname_change` | Added 2026-10-21 — *Suspicious sAMAccountName change* (4781 machine account renamed without `$`) |
+
+Two former rows here were stale and have been removed: the key-credential and
+sAMAccountName generators are `shadow_credentials` and `suspicious_sam_change`,
+and both are **confirmed**. "Masquerading as a default local account" is a
+variation of the confirmed `default_account_enabled` analytic with no generator
+yet, so it does not belong in a table of `wip_`-prefixed generators.
 
 **Endpoint execution telemetry** (for the advanced linked kill chains): the module also generates **4688 process trees** (Office → PowerShell → cmd → LOLBin, with real parent/child linkage and command lines), **4697** (a service was installed — malware persistence), and **1102** (the audit log was cleared — anti-forensics). Emitted via the `PROCESS_TREE`, `SERVICE_INSTALL`, and `CLEAR_LOGS` scenario events. Verified to ingest and parse in `microsoft_windows_raw`. *Note:* the Broker VM's WEC subscription must forward these Event IDs for them to reach XSIAM — see the Subscription Filter note below.
 
