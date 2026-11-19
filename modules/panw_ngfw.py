@@ -163,6 +163,10 @@ _APP = {
     "dns-over-https":  ("general-internet", "internet-utility",  "browser-based",   "Medium",        [443]),
     "tftp":            ("general-internet", "file-sharing",      "client-server",   "High",          [69]),
     "telnet":          ("networking",       "remote-access",     "client-server",   "High",          [23]),
+    # Seen in the pa440 scanner-run threat rows (2026-11-19); category/sub-category/risk are assumed, not
+    # read from Applipedia (its API is reCAPTCHA-gated).
+    "lpd":             ("general-internet", "internet-utility",  "client-server",   "Medium",        [515]),
+    "smtp-base":       ("collaboration",    "email",             "client-server",   "Medium",        [25]),
 }
 
 # Benign external destination-domain -> the App-ID that destination's traffic is
@@ -1042,6 +1046,31 @@ _TENANT_SIGS = [
     (56480, 'Flexible Poll 1.2 SQL Injection Vulnerability', 'critical', 'sql-injection', 'vulnerability', 'reset-server', 'web-browsing', 'index.php'),
     (97356, 'Adobe ColdFusion Path Traversal Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'ide.cfm'),
     (97710, 'Atlassian Web Resource Download Path Traversal Vulnerability', 'high', 'info-leak', 'vulnerability', 'reset-server', 'web-browsing', 'download/resources/jira.webresources:color-picker-popup/images/..::..::..::..::..::WEB-INF::web.xml'),
+    # 2026-11-19/20 vulnerability-scanner runs against the pa440 (cases 73849-73864): signatures the tenant
+    # raised native PAN NGFW alerts for. misc keeps only the request path, never the scanned host.
+    (56335, 'ABB PB610 Panel Builder 600 IDAL HTTP Host Stack Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (30147, 'Novell GroupWise Messenger Accept Language Header Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'alert', 'web-browsing', None),
+    (55363, 'Nginx Unit Router Process Heap-based Buffer Overflow Vulnerability', 'critical', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (95187, 'Palo Alto Networks GlobalProtect OS Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'global-protect/login.esp'),
+    (95191, 'Palo Alto Networks GlobalProtect OS Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (90135, 'Siemens SIMATIC S7-300 CPU Denial-of-Service Vulnerability', 'high', 'dos', 'vulnerability', 'alert', 'web-browsing', None),
+    (54679, 'Smart Software Solutions CoDeSys ControlService Stack Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (97000, 'DNN Platform Unauthenticated File Upload Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'Providers/HtmlEditorProviders/DNNConnect.CKE/Browser/FileUploader.ashx'),
+    (59523, 'Cogent DataHub Information Disclosure Vulnerability', 'medium', 'info-leak', 'vulnerability', 'alert', 'web-browsing', 'index.asp'),
+    (31769, 'HTTP Long If-Modified-Since Header Anomaly', 'high', 'overflow', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (38761, 'Apache Tomcat Remote Code Execution Via JSP Upload Vulnerability', 'high', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (96989, 'SmarterTools SmarterMail guid Directory Traversal Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'api/upload'),
+    (97182, 'WordPress Breeze Cache Arbitrary File Upload Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'blog-posting', 'wp-comments-post.php'),
+    (97173, 'Fortinet FortiSandbox Command Injection Vulnerability', 'critical', 'code-execution', 'vulnerability', 'reset-server', 'web-browsing', 'fortisandbox/job-detail/tracer-behavior'),
+    (35614, 'Lighttpd Connection Type Denial-of-Service Vulnerability', 'high', 'dos', 'vulnerability', 'reset-server', 'web-browsing', None),
+    (35823, 'HTTP SQL Injection Attempt', 'medium', 'sql-injection', 'vulnerability', 'alert', 'web-browsing', 'index.php'),
+    (91579, 'HTTP SQL Injection Attempt', 'medium', 'sql-injection', 'vulnerability', 'alert', 'web-browsing', 'index.php'),
+    # Non-web services seen in the same scans (legacy-service family): TFTP drop, telnet, LPD, SMTP, FTP alert.
+    (30173, 'TFTP Server FileName Buffer Overflow Vulnerability', 'high', 'code-execution', 'vulnerability', 'drop', 'tftp', None),
+    (37249, 'Microsoft Windows Telnet Service Buffer Overflow Vulnerability', 'critical', 'overflow', 'vulnerability', 'reset-server', 'telnet', None),
+    (54430, 'HylaFAXplus LDAP Authentication User Name Buffer Overflow Vulnerability', 'medium', 'overflow', 'vulnerability', 'alert', 'ftp', None),
+    (54692, 'Hummingbird InetD LPD Component Buffer Overflow Vulnerability', 'high', 'overflow', 'vulnerability', 'reset-server', 'lpd', None),
+    (30384, 'Mail Server SMTP EHLO/HELO Buffer Overflow Vulnerability', 'critical', 'overflow', 'vulnerability', 'reset-server', 'smtp-base', None),
 ]
 for _r in _TENANT_SIGS:
     _THREAT_SIGS["t%d" % _r[0]] = _r[:5]
@@ -3112,7 +3141,9 @@ def _tenant_keys(pred):
     return sorted(k for k, (act, app, _m) in _TENANT_PROFILE.items() if pred(_THREAT_SIGS[k], act, app))
 
 
-_WEB_APPS_EXCLUDED = ("ftp", "tftp")
+_WEB_APPS_EXCLUDED = ("ftp", "tftp", "telnet", "lpd", "smtp-base")
+_LEGACY_PORT = {"telnet": 23, "lpd": 515, "smtp-base": 25}
+_LEGACY_RULE = {"telnet": "Allow-Inbound-Legacy", "lpd": "Allow-Inbound-Legacy", "smtp-base": "Allow-Inbound-SMTP"}
 _TENANT_FAMILIES = {
     "web_rce":    lambda g, a, p: g[3] == "code-execution" and a != "alert" and p not in _WEB_APPS_EXCLUDED and g[4] == "vulnerability",
     "web_leak":   lambda g, a, p: g[3] == "info-leak" and a != "alert" and p not in _WEB_APPS_EXCLUDED,
@@ -3136,6 +3167,9 @@ def _tenant_family_event(config, family):
     if app == "ftp":
         return _inbound_threat(config, key, app, [21], [act], n=(1, 3),
                                rule="Allow-Inbound-FTP-Legacy", threat_only=True)
+    if app in _LEGACY_PORT:
+        return _inbound_threat(config, key, app, [_LEGACY_PORT[app]], [act], n=(1, 3),
+                               rule=_LEGACY_RULE[app], threat_only=True)
     return _inbound_threat(config, key, app, [80, 8080], [act], n=(1, 4), cleartext_web=True,
                            threat_only=True, misc=misc)
 
@@ -3161,7 +3195,7 @@ def _sim_threat_web_sqli_overflow_dos(config, session_context):
 
 
 def _sim_threat_legacy_service_exploit(config, session_context):
-    """FTP / TFTP service exploits (buffer overflow, directory traversal)."""
+    """FTP / TFTP / telnet / LPD / SMTP service exploits (buffer overflow, directory traversal)."""
     return _tenant_family_event(config, "legacy")
 
 

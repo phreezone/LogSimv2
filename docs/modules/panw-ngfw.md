@@ -272,8 +272,14 @@ PAN-OS CSV syslog into `unknown_unknown_raw` (unparsed `_raw_log`, ~2M rows in 1
 and action all agree) and 10 were new (30514, 33338, 38531, 37008, 55358, 58435, 96441, 95922, 37765,
 56480), added with the category, action and `$misc` the real rows carry. Two more were found from the
 alerts (97356 Adobe ColdFusion Path Traversal, 97710 Atlassian Web Resource Download Path Traversal) and added from the
-pa440's own CEF rows. The catalog now holds 198
-tenant signatures; the family counts below include them.
+pa440's own CEF rows.
+
+**Scanner runs (2026-11-19/20, cases 73849-73864).** A vulnerability scanner run against the pa440 raised 1,795 PAN NGFW alerts
+across six cases (203 names, 222 IDs). Every signature already in the catalog matched on name, ID and severity; 22 were new and are
+now added from the pa440's own CEF rows (request paths only, never the scanned host): 17 web signatures (7 code-execution, 5 overflow,
+5 alert-only) and 5 legacy services (TFTP `drop`, telnet, FTP `alert`, LPD, SMTP). The catalog now holds 220
+tenant signatures; the family counts below include them. Each signature raised two alerts, one per delivery route (the CEF
+row with `(ID)` in the name and the older row without), which is why alert names appear in both forms.
 
 **Tenant-confirmed signature catalog (2026-11-16).** After a burst of generated threat traffic the
 tenant's `panw_ngfw_threat_raw` (one pa440, ~1000-minute window) carried **195 Threat IDs**; 186 were
@@ -287,11 +293,11 @@ one signature per fire at random):
 
 | Event | Family | Signatures |
 |---|---|---|
-| `threat_web_rce` | code-execution vulnerability, blocked (reset-server / reset-both / reset-client / drop) | 96 |
+| `threat_web_rce` | code-execution vulnerability, blocked (reset-server / reset-both / reset-client / drop) | 103 |
 | `threat_web_infoleak` | info-leak (traversal, disclosure, auth bypass), blocked | 43 |
-| `threat_web_detect_only` | signatures the policy only alerts on (XSS, /etc/passwd, directory traversal, scanner probes) | 45 |
-| `threat_web_sqli_overflow_dos` | sql-injection, overflow, dos, code-obfuscation, brute-force, insecure-credentials, blocked | 10 |
-| `threat_legacy_service_exploit` | FTP (tcp/21) and TFTP (udp/69) exploits | 3 |
+| `threat_web_detect_only` | signatures the policy only alerts on (XSS, /etc/passwd, directory traversal, scanner probes) | 50 |
+| `threat_web_sqli_overflow_dos` | sql-injection, overflow, dos, code-obfuscation, brute-force, insecure-credentials, blocked | 15 |
+| `threat_legacy_service_exploit` | FTP (tcp/21), TFTP (udp/69), telnet (23), LPD (515) and SMTP (25) service exploits | 8 |
 | `threat_wd_mycloud_backdoor` | the one spyware signature (18011) | 1 |
 
 All six are **alert-capable** (`analytic: True`). The first query of the `alerts` dataset (alert_source
@@ -304,9 +310,9 @@ are named `Name(ID)` of the signature hit, so a family event's `xsiam_alert` is 
 ("Name(ID) of the signature hit") rather than one fixed name. Probes confirmed the exact alert for the spyware event
 (`Western Digital My Cloud Backdoor(18011)`, critical, raised 4-7 min after the send). The name match does not prove which
 alerts came from this generator rather than the pa440's own traffic. Ports for the
-non-HTTP apps are assumed standard (ftp 21, tftp 69); everything web rides 80/8080.
+non-HTTP apps are assumed standard (ftp 21, tftp 69, telnet 23, lpd 515, smtp-base 25); everything web rides 80/8080.
 
-<details><summary>All 198 added signatures</summary>
+<details><summary>All 220 added signatures</summary>
 
 | Threat ID | Name | Severity | Category | Subtype | Action | App-ID |
 |---|---|---|---|---|---|---|
@@ -508,6 +514,28 @@ non-HTTP apps are assumed standard (ftp 21, tftp 69); everything web rides 80/80
 | 56480 | Flexible Poll 1.2 SQL Injection Vulnerability | critical | sql-injection | vulnerability | reset-server | `web-browsing` |
 | 97356 | Adobe ColdFusion Path Traversal Vulnerability | critical | code-execution | vulnerability | reset-server | `web-browsing` |
 | 97710 | Atlassian Web Resource Download Path Traversal Vulnerability | high | info-leak | vulnerability | reset-server | `web-browsing` |
+| 56335 | ABB PB610 Panel Builder 600 IDAL HTTP Host Stack Buffer Overflow Vulnerability | high | overflow | vulnerability | reset-server | `web-browsing` |
+| 30147 | Novell GroupWise Messenger Accept Language Header Overflow Vulnerability | high | overflow | vulnerability | alert | `web-browsing` |
+| 55363 | Nginx Unit Router Process Heap-based Buffer Overflow Vulnerability | critical | overflow | vulnerability | reset-server | `web-browsing` |
+| 95187 | Palo Alto Networks GlobalProtect OS Command Injection Vulnerability | critical | code-execution | vulnerability | reset-server | `web-browsing` |
+| 95191 | Palo Alto Networks GlobalProtect OS Command Injection Vulnerability | critical | code-execution | vulnerability | reset-server | `web-browsing` |
+| 90135 | Siemens SIMATIC S7-300 CPU Denial-of-Service Vulnerability | high | dos | vulnerability | alert | `web-browsing` |
+| 54679 | Smart Software Solutions CoDeSys ControlService Stack Buffer Overflow Vulnerability | high | overflow | vulnerability | reset-server | `web-browsing` |
+| 97000 | DNN Platform Unauthenticated File Upload Vulnerability | critical | code-execution | vulnerability | reset-server | `web-browsing` |
+| 59523 | Cogent DataHub Information Disclosure Vulnerability | medium | info-leak | vulnerability | alert | `web-browsing` |
+| 31769 | HTTP Long If-Modified-Since Header Anomaly | high | overflow | vulnerability | reset-server | `web-browsing` |
+| 38761 | Apache Tomcat Remote Code Execution Via JSP Upload Vulnerability | high | code-execution | vulnerability | reset-server | `web-browsing` |
+| 96989 | SmarterTools SmarterMail guid Directory Traversal Vulnerability | critical | code-execution | vulnerability | reset-server | `web-browsing` |
+| 97182 | WordPress Breeze Cache Arbitrary File Upload Vulnerability | critical | code-execution | vulnerability | reset-server | `blog-posting` |
+| 97173 | Fortinet FortiSandbox Command Injection Vulnerability | critical | code-execution | vulnerability | reset-server | `web-browsing` |
+| 35614 | Lighttpd Connection Type Denial-of-Service Vulnerability | high | dos | vulnerability | reset-server | `web-browsing` |
+| 35823 | HTTP SQL Injection Attempt | medium | sql-injection | vulnerability | alert | `web-browsing` |
+| 91579 | HTTP SQL Injection Attempt | medium | sql-injection | vulnerability | alert | `web-browsing` |
+| 30173 | TFTP Server FileName Buffer Overflow Vulnerability | high | code-execution | vulnerability | drop | `tftp` |
+| 37249 | Microsoft Windows Telnet Service Buffer Overflow Vulnerability | critical | overflow | vulnerability | reset-server | `telnet` |
+| 54430 | HylaFAXplus LDAP Authentication User Name Buffer Overflow Vulnerability | medium | overflow | vulnerability | alert | `ftp` |
+| 54692 | Hummingbird InetD LPD Component Buffer Overflow Vulnerability | high | overflow | vulnerability | reset-server | `lpd` |
+| 30384 | Mail Server SMTP EHLO/HELO Buffer Overflow Vulnerability | critical | overflow | vulnerability | reset-server | `smtp-base` |
 
 </details>
 
