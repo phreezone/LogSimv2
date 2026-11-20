@@ -197,9 +197,14 @@ _APP = {
 # identified as, so `app` stays coherent with the destination name and port (the real
 # feed's App-ID always matches the actual service).  Substring match on the domain.
 _DOMAIN_APP = [
+    # Specific hosts first. A bare "microsoft" substring used to label Teams, Entra
+    # sign-in, Graph, Copilot and telemetry traffic ms-update; "google" swallowed Gmail.
+    ("teams.microsoft", "ms-teams"), ("mail.google", "gmail-base"),
+    ("microsoftonline", "ssl"), ("graph.microsoft", "ssl"), ("copilot.microsoft", "ssl"),
+    ("data.microsoft", "ssl"), ("delivery.mp.microsoft", "ms-update"),
     ("office365", "ms-office365-base"), ("outlook", "outlook-web-online"),
     ("sharepoint", "sharepoint-online"), ("onedrive", "ms-onedrive-base"),
-    ("windowsupdate", "ms-update"), ("microsoft", "ms-update"),
+    ("windowsupdate", "ms-update"), ("update.microsoft", "ms-update"),
     ("googleapis", "google-base"), ("google", "google-base"),
     ("zoom", "zoom-base"), ("slack", "slack-base"), ("salesforce", "salesforce-base"),
     ("github", "ssl"), ("gmail", "gmail-base"),
@@ -209,7 +214,7 @@ _DOMAIN_APP = [
     ("paloaltonetworks", "paloalto-updates"), ("apple", "apple-update"),
     ("okta", "ssl"), ("service-now", "ssl"), ("zendesk", "ssl"), ("atlassian", "ssl"),
     ("docusign", "ssl"), ("workday", "ssl"), ("twilio", "ssl"), ("stripe", "ssl"),
-    ("fedex", "ssl"), ("ups", "ssl"), ("ubuntu", "web-browsing"), ("redhat", "web-browsing"),
+    ("fedex", "ssl"), (".ups.com", "ssl"), ("ubuntu", "web-browsing"), ("redhat", "web-browsing"),
 ]
 
 
@@ -281,7 +286,24 @@ _URL_CAT_RISKY   = ["malware", "command-and-control", "phishing", "proxy-avoidan
 _DOMAIN_URLCAT = [
     ("youtube", "streaming-media"), ("netflix", "streaming-media"), ("spotify", "streaming-media"),
     ("facebook", "social-networking"), ("linkedin", "social-networking"),
-    ("drive", "online-storage-and-backup"),
+    ("drive", "online-storage-and-backup"), ("dropbox", "online-storage-and-backup"),
+    ("box.com", "online-storage-and-backup"), ("sharepoint", "business-and-economy"),
+    ("onedrive", "online-storage-and-backup"), ("instagram", "social-networking"),
+    ("reddit", "social-networking"),
+    ("whatsapp", "internet-communications-and-telephony"),
+    ("zoom", "internet-communications-and-telephony"), ("webex", "internet-communications-and-telephony"),
+    ("vimeo", "streaming-media"), ("mail.google", "web-based-email"), ("outlook", "web-based-email"),
+    ("bing.com", "search-engines"), ("www.google.com", "search-engines"),
+    ("www.amazon.com", "shopping"), ("ebay", "shopping"),
+    ("cnn.com", "news"), ("bbc.co", "news"), ("nytimes", "news"), ("weather.com", "news"),
+    ("wikipedia", "reference-and-research"),
+    ("github", "computer-and-internet-info"), ("gitlab", "computer-and-internet-info"),
+    ("bitbucket", "computer-and-internet-info"), ("stackoverflow", "computer-and-internet-info"),
+    ("npmjs", "computer-and-internet-info"), ("pypi", "computer-and-internet-info"),
+    ("docker", "computer-and-internet-info"), ("jetbrains", "computer-and-internet-info"),
+    ("paypal", "financial-services"), ("stripe", "financial-services"),
+    ("salesforce", "business-and-economy"), ("workday", "business-and-economy"),
+    ("service-now", "business-and-economy"), ("zendesk", "business-and-economy"),
 ]
 
 _SW_VERSION = "12.2.4-h1"    # PAN-OS release stamped in the CEF device-version slot (the lab pa440's)
@@ -351,7 +373,7 @@ def _fw_ip(config):
     """The firewall's own management/source IP — user-customisable via
     panw_ngfw_config.mgmt_ip (PAN stamps this in the syslog header when the device's
     'Syslog HOSTNAME Format' is set to ipv4-address)."""
-    return _get_config(config).get("mgmt_ip", "10.0.0.1")
+    return _get_config(config).get("mgmt_ip", "10.0.30.13")
 
 
 def _syslog_host(config):
@@ -1379,7 +1401,14 @@ def _threat_session(config, key, src, dst, dpt, app, *, action, end, suser=None,
 # Benign generators
 # ---------------------------------------------------------------------------
 def _user_src(config, session_context, prefer_active=True):
-    """(src_ip, username, hostname) for a benign actor, preferring a bus-correlated user."""
+    """(src_ip, username, hostname) for a benign actor, preferring a bus-correlated user.
+
+    An XDR-orchestrated call pins the actor: generate_log() puts the real box identity in
+    session_context["_xdr_actor"], so every threat generator that picks its source here
+    (port scan, SMB/RDP, uploads, SSH, DNS tunnel) emits from the box the endpoint
+    technique ran on."""
+    if isinstance(session_context, dict) and session_context.get("_xdr_actor"):
+        return tuple(session_context["_xdr_actor"])
     if session_context:
         info = (correlated_or_random_user(session_context, preferred_device_type="workstation")
                 if prefer_active else get_random_user(session_context, preferred_device_type="workstation"))
@@ -1486,7 +1515,10 @@ def _benign_internal(config, session_context):
         # AD authentication, directory lookups, RPC and SYSVOL/NETLOGON SMB go to the domain
         # controllers. XSIAM classifies a host as a DC from exactly this traffic, which the
         # SMB-from-DC and DCSync-from-non-DC detectors depend on.
-        dst_ip = random.choice(_dcs(config))
+        dst_ip = random.choice(resolver.domain_controllers_for(config, src_ip, _dcs(config)))
+    elif app.startswith("ms-ds-smb"):
+        # Workstation SMB to a file server (the other 70% of SMB; 30% went to a DC above).
+        dst_ip = random.choice(resolver.file_servers(config, src_ip) or ["10.0.10.50"])
     else:
         dst_ip = random.choice(config.get("internal_servers") or ["10.0.10.50"])
     dpt = (_APP.get(app, (None,)*5)[4] or [445])[0]
@@ -2366,6 +2398,8 @@ _last_daily_emit = {}
 
 def _beacon_host(config, session_context, key):
     """The one fixed host (same on every run) that owns the beacon for `key`."""
+    if isinstance(session_context, dict) and session_context.get("_xdr_actor"):
+        return tuple(session_context["_xdr_actor"])          # orchestrated: the box
     hit = recurring_host(key, n=1) if recurring_host else None
     return hit if hit else _threat_actor(config, session_context)
 
@@ -3702,11 +3736,81 @@ def _generate_threat_log(config, session_context=None, forced_event=None, threat
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+# --- XDR-orchestrated events ----------------------------------------------------------
+# Emitted only when the XDR orchestrator asks (never drawn in ambient generation). The
+# box identity comes from the context; the C2 domain / downloaded URL are the run's own,
+# so the PAN logs name the same host, user and destination as the endpoint technique.
+
+def _xdr_c2_beacon(config, actor, ctx):
+    """10-16 short HTTPS callbacks to the run's C2 domain over the last ~15 minutes,
+    each a traffic:end + URL record (SNI host), the PAN view of a web C2 beacon."""
+    src, user, shost = actor
+    domain = ctx.get("domain") or rare_domain(f"xdr|{src}")
+    ip = ctx.get("dst_ip") or _rare_answer(domain)
+    n = random.randint(10, 16)
+    step = random.randint(45, 75)
+    t0 = time.time() - n * step
+    print(f"    - PAN NGFW simulating: XDR C2 beacon {src} -> {domain} ({n} callbacks)")
+    out = []
+    for i in range(n):
+        out += _web(config, src, ip, 443, "ssl", domain,
+                    path=random.choice(["/api/v1/checkin", "/gate.php", "/beacon", "/j/collect"]),
+                    url_cat="unknown", suser=user, shost=shost,
+                    bytes_sent=random.randint(300, 900), bytes_received=random.randint(150, 600),
+                    duration_s=random.randint(1, 5),
+                    ts=min(t0 + i * step + random.randint(-5, 5), time.time()))
+    return out
+
+
+def _xdr_web_download(config, actor, ctx):
+    """One download session: the exact URL a builtin payload fetched (e.g. the WildFire
+    test PE over plain HTTP), else a large binary from a rare host (Atomic T1105)."""
+    src, user, shost = actor
+    url = ctx.get("url")
+    if url:
+        scheme, rest = url.split("://", 1) if "://" in url else ("http", url)
+        domain, _, path = rest.partition("/")
+        path = "/" + path
+        port, app = (80, "web-browsing") if scheme == "http" else (443, "ssl")
+        size = int(ctx.get("size") or random.randint(40_000, 120_000))
+        ip = resolver.answer_for(domain) if hasattr(resolver, "answer_for") else _rare_answer(domain)
+        cat = ctx.get("url_category") or "computer-and-internet-info"
+    else:
+        domain, ip = _rare_ext(config, f"xdr-dl|{src}")
+        path, port, app = "/files/update.bin", 443, "ssl"
+        size = random.randint(20, 200) * 1024 * 1024
+        cat = "unknown"
+    print(f"    - PAN NGFW simulating: XDR download {src} <- {domain}{path} ({size} bytes)")
+    return _web(config, src, ip, port, app, domain, path=path, url_cat=cat, method="get",
+                suser=user, shost=shost, bytes_sent=random.randint(400, 1500),
+                bytes_received=size, duration_s=random.randint(1, 20))
+
+
+_XDR_EVENTS = {"xdr_c2_beacon": _xdr_c2_beacon, "xdr_web_download": _xdr_web_download}
+
+
+def _xdr_actor(config, ctx):
+    """(internal src_ip, user, hostname) of the box from an orchestrated context, or None.
+    `internal_ip` wins over `src_ip`, which external-facing events set to the egress."""
+    if not ctx or not ctx.get("user"):
+        return None
+    ip = ctx.get("internal_ip") or ctx.get("src_ip") or ctx.get("ip")
+    return (ip, ctx["user"], ctx.get("hostname")) if ip else None
+
+
 def generate_log(config, scenario=None, threat_level="Realistic", benign_only=False,
                  context=None, scenario_event=None):
     """Main log generation entry point.  Returns a CEF string or a list of CEF strings."""
     global last_threat_event_time
     session_context = (context or {}).get("session_context")
+
+    # XDR-orchestrated: pin the box as the actor for every generator, and serve the
+    # orchestration-only events.
+    actor = _xdr_actor(config, context) if scenario_event else None
+    if actor:
+        if scenario_event in _XDR_EVENTS:
+            return _XDR_EVENTS[scenario_event](config, actor, context), scenario_event
+        session_context = {"_xdr_actor": actor}
 
     # Orchestrated / dashboard-forced named threat. Return the (logs, display_name) tuple
     # so the caller records WHICH threat fired; returning the bare logs (the old `[0]`) made

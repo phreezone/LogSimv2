@@ -11,6 +11,8 @@
 # Registered as a scenario in log_simulator.get_scenarios() via run_reference_story
 # so it flows through the existing driver, run-tracking, and transports unchanged.
 
+import random
+import string
 import sys
 import time
 from typing import Optional
@@ -20,8 +22,13 @@ from .executor import build_executor
 from .stories import (
     Story, get_reference_story, get_intrusion_story, get_quick_story,
     get_lateral_story, get_persistence_story, get_fullchain_story,
-    get_story, override_domain,
+    get_story, override_domain, _annotate, story_domains, freshen_domains,
+    DEFAULT_NETWORK_VENDORS,
 )
+from . import ledger as _ledger
+from . import policy as _policy
+from .timing import resolve_timing
+from .scorecard import build_scorecard
 
 
 def _select_steps(steps, only_steps, skip_steps):
@@ -65,6 +72,12 @@ def _emit(all_modules, module_key, event, context, config, verbose=True):
     return 0
 
 
+# Pre-run cleanup reaches open box-cases modified in the last 72 hours (~300 open
+# cases on this tenant, so ~4 pages). A stale box-case that still matters is one
+# still absorbing alerts, so it is always recently modified.
+CLEANUP_LOOKBACK_MIN = 72 * 60
+
+
 def _resolve_prior_incidents(identity, verbose=True):
     """Best-effort: resolve prior OPEN XSIAM incidents for the box identity so the
     upcoming run's fresh case is the only grouping target for its network alerts.
@@ -95,12 +108,20 @@ def _resolve_prior_incidents(identity, verbose=True):
         return 0
     try:
         # Match on user OR host: query each and union by incident_id so a case keyed
-        # on only one of the two entities is still caught.
+        # on only one of the two entities is still caught. Search by MODIFICATION
+        # time: an old box-case that is still open keeps absorbing each run's alerts,
+        # so it was modified recently even if it was opened days ago (a creation-time
+        # window missed case 70436, opened 11-07, and the run split across it).
+        # One sweep of recently-modified open cases, matched on user OR host locally
+        # (two filtered sweeps cost twice the paging for the same cases).
+        u, h = (user or "").lower(), (host or "").lower()
         found = {}
-        for kw in ({"user": user} if user else {}), ({"host": host} if host else {}):
-            if not kw:
-                continue
-            for inc in client.get_open_incidents(minutes_back=1440, **kw):
+        for inc in client.get_open_incidents(minutes_back=CLEANUP_LOOKBACK_MIN,
+                                             time_field="modification_time"):
+            users = [str(x).lower() for x in (inc.get("users") or [])]
+            hosts = [str(x).lower() for x in (inc.get("hosts") or [])]
+            if (u and any(x == u or x.endswith("\\" + u) for x in users)) or \
+               (h and any(h in x for x in hosts)):
                 found[inc.get("incident_id")] = inc
     except XsiamError as e:
         if verbose:
@@ -132,42 +153,108 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
               cleanup_prior_incidents: bool = False,
               only_steps=None, skip_steps=None, pace: Optional[float] = None,
               domain_override: Optional[str] = None,
+              fresh_domains: bool = True,
+              network_vendors=None,
               anchor_dhcp: Optional[bool] = None,
-              anchor_logon: Optional[bool] = None) -> dict:
-    """Run one story. Returns a summary dict {ok, identity, steps:[...], emitted, results}.
+              anchor_logon: Optional[bool] = None,
+              timing_profile: Optional[str] = None, jitter: Optional[float] = None,
+              timing_seed: Optional[int] = None,
+              prevention_probe: bool = False, on_prevention: str = "warn",
+              policy_controller=None,
+              scorecard: bool = False, scorecard_wait: float = 0,
+              scorecard_minutes: Optional[int] = None, scorecard_client=None,
+              ledger: bool = True, ledger_path: Optional[str] = None,
+              story_id: Optional[str] = None) -> dict:
+    """Run one story. Returns a summary dict {ok, identity, steps, emitted, results,
+    scorecard, timing, prevention}.
 
     Fail-closed on preflight. `dry_run` forces the DryRun executor (no technique
     fires); by default a stub-transport connection implies dry-run.
 
-    `cleanup_prior_incidents` (default OFF): when True, resolve prior OPEN XSIAM
-    incidents for the box identity before firing, so this run's network alerts and
-    endpoint alerts reliably coalesce into a single fresh incident (see
-    _resolve_prior_incidents). Best-effort — never aborts the run. Opt-in because it
-    closes incidents on the tenant.
+    `cleanup_prior_incidents` (default OFF): resolve prior OPEN XSIAM incidents for
+    the box identity before firing so this run's alerts coalesce into one fresh
+    incident. Best-effort — never aborts the run. Opt-in (closes tenant incidents).
 
     Per-run options (all optional, backward-compatible):
       only_steps / skip_steps : 1-based step numbers to run exclusively / to drop.
-      pace                    : multiplier on every pre/post delay (and the anchor
-                                sleeps). 0 = fire as fast as possible; 2 = slower.
+      pace / timing_profile / jitter : campaign timing (Tier-2 #5). `timing_profile`
+                                is one of timing.PACE_PROFILES; `pace` multiplies the
+                                scale; `jitter` (0..1) randomizes each delay.
       domain_override         : replace the story's C2/exfil domain for this run.
+      fresh_domains           : (default ON; ignored with domain_override) tag every
+                                story domain with a run-unique suffix so the C2
+                                rules' 1-hour IP+domain suppression can't silence a
+                                repeat run. The {old: new} map is in
+                                summary["run_domains"].
+      network_vendors         : module NAMEs whose synthetic network events are sent.
+                                Default: Palo Alto Networks NGFW only
+                                (stories.DEFAULT_NETWORK_VENDORS). Others (Infoblox,
+                                Zscaler, Cisco Firepower, Check Point, Fortinet) are
+                                opt-in; their events are skipped and listed in
+                                summary["vendors_skipped"]. The Infoblox DHCP identity
+                                anchor follows the Infoblox selection.
       anchor_dhcp/anchor_logon: override the story's identity-anchor emission.
+      prevention_probe        : (Tier-2 #6) fire a benign canary first; if the agent
+                                is PREVENTING, `on_prevention` decides: "abort"
+                                (fail-closed) or "warn" (continue). A PolicyController
+                                may be injected to attempt a real flip first.
+      scorecard               : (Tier-1 #1) after the run, pull XSIAM alerts/incidents
+                                and score them against each step's expected_alerts.
+                                `scorecard_wait` gives detectors time to fire first.
+      ledger                  : (Tier-1 #3) append a compact run record to the ledger
+                                (default ON, best-effort, non-fatal).
     """
     story = story or get_reference_story()
+    _annotate(story)
+    # One short random tag per run: suffixes fresh domains and names builtin
+    # payload artifacts (e.g. wildfire-test-pe-file-<tag>.exe) so runs never collide.
+    run_tag = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(4))
+    vendors = list(network_vendors) if network_vendors is not None else list(DEFAULT_NETWORK_VENDORS)
+    run_domains = {}
     if domain_override:
+        run_domains = {d: domain_override for d in story_domains(story)}
         override_domain(story, domain_override)
+    elif fresh_domains:
+        run_domains = freshen_domains(story, run_tag)
     if anchor_dhcp is not None:
         story.anchor_dhcp = anchor_dhcp
     if anchor_logon is not None:
         story.anchor_logon = anchor_logon
-    try:
-        pace = max(0.0, float(pace)) if pace is not None else 1.0
-    except (TypeError, ValueError):
-        pace = 1.0
+    timing = resolve_timing(pace=pace, profile=timing_profile, jitter=jitter,
+                            seed=timing_seed)
     selected = _select_steps(story.steps, only_steps, skip_steps)
-    summary = {"story": story.name, "ok": False, "identity": None,
+    summary = {"story": story.name, "story_id": story_id, "ok": False, "identity": None,
                "results": [], "emitted": 0, "aborted": None,
                "selected_steps": [i for (i, _s) in selected],
-               "domain_override": domain_override or None, "pace": pace}
+               "domain_override": domain_override or None,
+               # {story domain: domain actually used}. A Re-score rebuilds the story
+               # from its definition (original domains), so the scorecard reads the
+               # run's real domains from here.
+               "run_domains": run_domains,
+               # Network vendors sent this run; the scorecard only expects their alerts.
+               "network_vendors": vendors, "vendors_skipped": {},
+               "timing": timing.to_dict(), "prevention": None, "scorecard": None,
+               # Epoch seconds; the scorecard sizes its alert window from this so a
+               # long run (or a late Re-score) still covers the run's first alerts.
+               "started_at": time.time()}
+    _run_options = {"dry_run": dry_run, "only_steps": only_steps,
+                    "skip_steps": skip_steps, "domain_override": domain_override or None,
+                    "fresh_domains": bool(fresh_domains and not domain_override),
+                    "run_domains": run_domains, "network_vendors": vendors,
+                    "timing": timing.to_dict(), "prevention_probe": prevention_probe,
+                    "scorecard": scorecard, "cleanup_prior_incidents": cleanup_prior_incidents}
+
+    def _finalize(summ):
+        """Record the run to the ledger (best-effort) and return the summary."""
+        if ledger:
+            try:
+                _ledger.record_run(
+                    _ledger.summarize_run(summ, story_id=story_id, options=_run_options),
+                    path=ledger_path, verbose=verbose)
+            except Exception as e:
+                if verbose:
+                    print(f"[XDR] ledger skipped (non-fatal): {e}")
+        return summ
 
     # The preflight banner uses ✓/✗ glyphs; a cp1252-encoded stream (piped output,
     # some Windows consoles) would raise UnicodeEncodeError. Make output UTF-8 safe.
@@ -177,6 +264,19 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
         except (AttributeError, ValueError):
             pass
 
+    # 0) Story validation — offline, before touching the box. An unknown module or
+    #    event would emit nothing and score as a phantom miss, so refuse to fire.
+    from .validate import validate_story, errors as _errors, format_problems
+    problems = validate_story(story)
+    summary["validation"] = problems
+    if problems:
+        print(f"[XDR] story check:\n{format_problems(problems)}")
+    if _errors(problems):
+        summary["aborted"] = (f"story '{story.id}' failed validation "
+                              f"({len(_errors(problems))} error(s)) — orchestrator refuses to fire")
+        print(f"[XDR] ABORT — {summary['aborted']}")
+        return _finalize(summary)
+
     # 1) Connection.
     if connection is None:
         try:
@@ -184,7 +284,7 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
         except ConnectionError as e:
             summary["aborted"] = f"connection config error: {e}"
             print(f"[XDR] ABORT — {summary['aborted']}")
-            return summary
+            return _finalize(summary)
 
     # 2) Preflight — fail-closed.
     print(f"\n=== XDR Orchestration: {story.name} ===")
@@ -193,7 +293,7 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
     if not report.ok:
         summary["aborted"] = "preflight failed — orchestrator refuses to fire"
         print(f"[XDR] ABORT — {summary['aborted']}")
-        return summary
+        return _finalize(summary)
 
     # 3) Identity seed (from the preflight report, else discover).
     identity = report.identity or connection.discover_identity()
@@ -211,6 +311,30 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
     print(f"[XDR] executor={executor.name}  identity: user={user} host={host_name} "
           f"ip={host_ip} egress={egress_ip}")
 
+    # 4.4) Optional prevention-mode gate (opt-in) — fire ONE benign canary; if the
+    #      Cortex agent is PREVENTING it will terminate the host, and a whole story
+    #      fired into that wall is a wasted run. Try an injected PolicyController flip
+    #      first (if any), then abort or warn per `on_prevention`.
+    if prevention_probe:
+        pres = _policy.probe_prevention(executor, verbose=verbose)
+        summary["prevention"] = pres.to_dict()
+        if pres.prevention_active:
+            flipped = False
+            ctrl = policy_controller
+            if ctrl is not None and getattr(ctrl, "available", False):
+                try:
+                    flipped = bool(ctrl.flip_to_alert(identity))
+                    print(f"[XDR] prevention — policy flip {'succeeded' if flipped else 'failed'}")
+                except Exception as e:
+                    print(f"[XDR] prevention — policy flip error: {e}")
+            if not flipped and (on_prevention or "warn").lower() == "abort":
+                summary["aborted"] = "prevention active — " + pres.detail
+                print(f"[XDR] ABORT — {summary['aborted']}")
+                return _finalize(summary)
+            if not flipped:
+                print("[XDR] prevention — continuing despite PREVENT mode (on_prevention="
+                      "'warn'); expect terminated techniques.")
+
     # 4.5) Optional pre-run incident cleanup (opt-in) — resolve prior open box-cases
     #      so this run's network + endpoint alerts stitch into ONE fresh incident.
     if cleanup_prior_incidents:
@@ -218,65 +342,106 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
 
     # 5) Identity anchors — bind the synthetic network IP to the real host/user so
     #    IP-keyed network alerts resolve to the same identity the endpoint case uses.
-    if story.anchor_dhcp:
-        # IP <-> host (DHCP lease).
+    if story.anchor_dhcp and "Infoblox NIOS" not in vendors:
+        summary["vendors_skipped"]["Infoblox NIOS/DHCP_ACK"] = 1
+    elif story.anchor_dhcp:
+        # IP <-> host (DHCP lease). An Infoblox log, so it follows the Infoblox opt-in.
         summary["emitted"] += _emit(
             all_modules, "Infoblox NIOS", "DHCP_ACK",
             {"src_ip": host_ip, "client_mac": host_mac, "hostname": host_name},
             config, verbose)
-        time.sleep(1 * pace)
+        time.sleep(timing.delay(1.0))
     if story.anchor_logon:
         # IP <-> user (4624 type-3 network logon): "user logged on from host_ip".
         summary["emitted"] += _emit(
             all_modules, "Windows Event Log", "NETWORK_LOGON",
             {"user": user, "hostname": host_name, "src_ip": host_ip},
             config, verbose)
-        time.sleep(1 * pace)
+        time.sleep(timing.delay(1.0))
 
-    # 6) Steps (filtered by only/skip; delays scaled by `pace`).
+    # 6) Steps (filtered by only/skip; delays scaled + jittered by `timing`).
     total = len(story.steps)
     for i, step in selected:
         print(f"\n[XDR] STEP {i}/{total}: {step.narrative}")
         if step.pre_delay:
-            time.sleep(step.pre_delay * pace)
+            time.sleep(timing.delay(step.pre_delay))
 
-        # 6a) Fire the real technique.
+        # 6a) Fire the real technique: an Atomic test, or a builtin payload
+        #     (payloads.py, e.g. the WildFire test PE) run over the same channel.
         tech = step.technique
         input_args = tech.get("input_args") or step.params.get("input_args")
+        builtin = tech.get("executor") == "builtin"
+        builtin_params = {"tag": run_tag}
         # Some tests need a target file/tool staged first (e.g. file deletion).
-        if step.prereqs:
+        if step.prereqs and not builtin:
             pr = executor.get_prereqs(tech["id"], tech.get("test_numbers"))
             print(f"    - prereqs {tech['id']}: {'OK' if pr.ok else 'FAIL'} — {pr.detail}")
             summary["results"].append(pr.to_dict())
-        r = executor.execute(tech["id"], tech.get("test_numbers"), input_args=input_args)
-        print(f"    - technique {tech['id']} test {tech.get('test_numbers')}: "
-              f"{'OK' if r.ok else 'FAIL'} — {r.detail}")
+        if builtin:
+            r = executor.run_builtin(tech.get("payload"), tech["id"], builtin_params)
+            print(f"    - payload {tech.get('payload')} ({tech['id']}): "
+                  f"{'OK' if r.ok else 'FAIL'} — {r.detail}")
+        else:
+            r = executor.execute(tech["id"], tech.get("test_numbers"), input_args=input_args)
+            print(f"    - technique {tech['id']} test {tech.get('test_numbers')}: "
+                  f"{'OK' if r.ok else 'FAIL'} — {r.detail}")
         summary["results"].append(r.to_dict())
 
         # 6b) Emit the aligned synthetic network events, pinned to identity
         #     (src_ip + hostname + the real user; egress IP for external modules).
         #     `ip` mirrors `src_ip` for modules that read `ip` (e.g. Okta client IP).
+        #     A builtin payload's real artifact (file name, SHA-256, URL) is passed
+        #     along so the network log names the very file the box received.
+        outs = getattr(r, "outputs", None) or {}
+        artifact = {k: v for k, v in {"filename": outs.get("file_name"),
+                                      "sha256": outs.get("sha256"),
+                                      "url": outs.get("url")}.items() if v}
         for ne in step.network:
+            if ne.module not in vendors:
+                k = f"{ne.module}/{ne.event}"
+                summary["vendors_skipped"][k] = summary["vendors_skipped"].get(k, 0) + 1
+                continue
             _ip = egress_ip if ne.external else host_ip
-            base = {"src_ip": _ip, "ip": _ip, "hostname": host_name, "user": user}
-            ctx = {**base, **ne.context}
+            base = {"src_ip": _ip, "ip": _ip, "internal_ip": host_ip,
+                    "hostname": host_name, "user": user}
+            ctx = {**base, **artifact, **ne.context}
             summary["emitted"] += _emit(all_modules, ne.module, ne.event, ctx, config, verbose)
 
         # 6c) Cleanup the technique's artifacts (persistence etc.) so nothing is left
         #     behind — the creation telemetry already fired during execute().
-        if step.cleanup:
+        if step.cleanup and builtin:
+            cr = executor.run_builtin(tech.get("payload"), tech["id"], builtin_params,
+                                      action="cleanup")
+            print(f"    - cleanup {tech.get('payload')}: {'OK' if cr.ok else 'FAIL'} — {cr.detail}")
+            summary["results"].append(cr.to_dict())
+        elif step.cleanup:
             cr = executor.cleanup(tech["id"], tech.get("test_numbers"), input_args=input_args)
             print(f"    - cleanup {tech['id']}: {'OK' if cr.ok else 'FAIL'} — {cr.detail}")
             summary["results"].append(cr.to_dict())
 
         if step.post_delay:
-            time.sleep(step.post_delay * pace)
+            time.sleep(timing.delay(step.post_delay))
 
     _execs = [res for res in summary["results"] if res["action"] == "execute"]
     summary["ok"] = all(res["ok"] for res in _execs) if _execs else True
     print(f"\n[XDR] done — technique_ok={summary['ok']} "
           f"techniques={len(_execs)} synthetic_events_emitted={summary['emitted']}")
-    return summary
+
+    # 7) Optional closed-loop scorecard (opt-in) — pull the run's alerts/incidents
+    #    from XSIAM and score them against each step's expected_alerts. Best-effort;
+    #    never changes summary["ok"] (a detection miss is data, not a run failure).
+    if scorecard:
+        try:
+            summary["scorecard"] = build_scorecard(
+                story, summary, identity, client=scorecard_client,
+                minutes_back=scorecard_minutes, wait_seconds=scorecard_wait,
+                verbose=verbose)
+        except Exception as e:
+            summary["scorecard"] = {"available": False, "reason": f"scorecard error: {e}"}
+            if verbose:
+                print(f"[XDR] scorecard skipped (non-fatal): {e}")
+
+    return _finalize(summary)
 
 
 # ── Scenario entry (registered in get_scenarios) ──────────────────────────────
@@ -285,42 +450,46 @@ def run_reference_story(all_modules, config):
     """Scenario-registry entry point: run the full reference story against the
     configured target. Signature matches every other scenario func(all_modules,
     config). Dry-run is auto-selected when transport='stub'."""
-    return run_story(all_modules, config, get_reference_story())
+    return run_story(all_modules, config, get_reference_story(), story_id="xdr_reference")
 
 
 def run_quick_story(all_modules, config):
     """Scenario-registry entry point: run the short 'quick' story (small run)."""
-    return run_story(all_modules, config, get_story("xdr_quick"))
+    return run_story(all_modules, config, get_story("xdr_quick"), story_id="xdr_quick")
 
 
 def run_intrusion_story(all_modules, config):
     """Scenario-registry entry point: run the credential-theft 'smash-and-grab'
     story — a different tactic spread (credential access / evasion / staging /
     exfil) so XDR sees more than discovery noise."""
-    return run_story(all_modules, config, get_intrusion_story())
+    return run_story(all_modules, config, get_intrusion_story(), story_id="xdr_intrusion")
 
 
 def run_lateral_story(all_modules, config):
     """Scenario-registry entry point: credential-access → lateral-movement story
     (LSASS dump + creds-in-files + synthetic SMB/RDP pivot)."""
-    return run_story(all_modules, config, get_lateral_story())
+    return run_story(all_modules, config, get_lateral_story(), story_id="xdr_lateral")
 
 
 def run_persistence_story(all_modules, config):
     """Scenario-registry entry point: persistence + defense-evasion story (Run key +
     scheduled task + indicator removal + callback beacon)."""
-    return run_story(all_modules, config, get_persistence_story())
+    return run_story(all_modules, config, get_persistence_story(), story_id="xdr_persistence")
 
 
 def run_fullchain_story(all_modules, config):
     """Scenario-registry entry point: the extended end-to-end kill-chain (recon → C2
     → ingress → cred theft → evasion → staging → exfil → persistence x2)."""
-    return run_story(all_modules, config, get_fullchain_story())
+    return run_story(all_modules, config, get_fullchain_story(), story_id="xdr_fullchain")
 
 
 def run_story_id(all_modules, config, story_id, *, dry_run=None,
                  cleanup_prior_incidents=False, only_steps=None, skip_steps=None,
-                 pace=None, domain_override=None, anchor_dhcp=None, anchor_logon=None):
+                 pace=None, domain_override=None, anchor_dhcp=None, anchor_logon=None,
+                 timing_profile=None, jitter=None, prevention_probe=False,
+                 on_prevention="warn", scorecard=False, scorecard_wait=0,
+                 scorecard_minutes=None, ledger=True, fresh_domains=True,
+                 network_vendors=None):
     """Run a story by id (used by the console /api/attack/run route). Falls back to
     the reference story when the id is unknown. Threads the per-run options through
     to run_story (see its docstring)."""
@@ -328,5 +497,11 @@ def run_story_id(all_modules, config, story_id, *, dry_run=None,
     return run_story(all_modules, config, story, dry_run=dry_run,
                      cleanup_prior_incidents=cleanup_prior_incidents,
                      only_steps=only_steps, skip_steps=skip_steps, pace=pace,
-                     domain_override=domain_override, anchor_dhcp=anchor_dhcp,
-                     anchor_logon=anchor_logon)
+                     domain_override=domain_override, fresh_domains=fresh_domains,
+                     network_vendors=network_vendors,
+                     anchor_dhcp=anchor_dhcp,
+                     anchor_logon=anchor_logon, timing_profile=timing_profile,
+                     jitter=jitter, prevention_probe=prevention_probe,
+                     on_prevention=on_prevention, scorecard=scorecard,
+                     scorecard_wait=scorecard_wait, scorecard_minutes=scorecard_minutes,
+                     ledger=ledger, story_id=story_id)

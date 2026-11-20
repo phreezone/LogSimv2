@@ -46,6 +46,7 @@ class ExecResult:
     started_at: float = field(default_factory=time.time)
     duration_s: float = 0.0
     detail: str = ""                   # human-readable one-liner for banners/UI
+    outputs: dict = field(default_factory=dict)   # builtin payloads' parsed JSON result
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +54,7 @@ class ExecResult:
             "action": self.action,
             "technique_id": self.technique_id,
             "test_numbers": self.test_numbers,
+            "outputs": self.outputs,
             "ok": self.ok,
             "rc": self.rc,
             "command": self.command,
@@ -233,6 +235,41 @@ class WinRMAtomicExecutor:
         return self._invoke("cleanup", technique_id, args, test_numbers,
                             ok_predicate=lambda rc, out, err: rc == 0)
 
+    # -- builtin payloads (payloads.py) ----------------------------------------
+
+    def run_builtin(self, payload: str, technique_id: str, params: dict,
+                    action: str = "execute") -> ExecResult:
+        """Run a built-in (non-Atomic) payload: a fixed script from payloads.py,
+        delivered like the Atomic tests (file, falling back to encoded)."""
+        from .payloads import PAYLOADS, parse_json_line, validate_params
+        err_msg = validate_params(payload, params)
+        if err_msg:
+            return ExecResult(executor=self.name, action=action, technique_id=technique_id,
+                              ok=False, detail=err_msg, command=f"builtin:{payload}")
+        spec = PAYLOADS[payload]
+        script = spec["cleanup" if action == "cleanup" else "execute"](params)
+        started = time.time()
+        try:
+            if self.delivery == "file" and hasattr(self.connection, "run_ps_file"):
+                try:
+                    rc, out, err = self.connection.run_ps_file(script, timeout=self.default_timeout)
+                except Exception:
+                    rc, out, err = self.connection.run_ps(script, timeout=self.default_timeout)
+            else:
+                rc, out, err = self.connection.run_ps(script, timeout=self.default_timeout)
+        except Exception as e:
+            raise ExecutorError(f"{action} builtin:{payload}: WinRM channel error: {e}") from e
+        parsed = parse_json_line(out) or {}
+        if action == "cleanup":
+            ok = bool(parsed.get("removed", rc == 0))
+            detail = f"cleanup {'succeeded' if ok else 'left the file behind'} (rc={rc})"
+        else:
+            ok, detail = spec["judge"](rc, parsed)
+        return ExecResult(executor=self.name, action=action, technique_id=technique_id,
+                          ok=ok, rc=rc, stdout=out, stderr=err, command=f"builtin:{payload}",
+                          started_at=started, duration_s=time.time() - started,
+                          detail=detail, outputs=parsed)
+
 
 class DryRunExecutor:
     """No-box backend: logs the intended technique and returns a synthetic OK
@@ -270,6 +307,23 @@ class DryRunExecutor:
 
     def cleanup(self, technique_id, test_numbers=None, input_args=None):
         return self._record("cleanup", technique_id, test_numbers, input_args)
+
+    def run_builtin(self, payload, technique_id, params, action="execute"):
+        """Record the payload; for wildfire_pe return plausible outputs (file name,
+        a placeholder hash) so the paired network events still align in a dry run."""
+        from .payloads import validate_params, wildfire_file_path, WILDFIRE_TEST_URL
+        err_msg = validate_params(payload, params)
+        if err_msg:
+            return ExecResult(executor=self.name, action=action, technique_id=technique_id,
+                              ok=False, detail=err_msg, command=f"builtin:{payload}")
+        res = self._record(action, technique_id, None, {"payload": payload, **params})
+        if payload == "wildfire_pe" and action == "execute":
+            path = wildfire_file_path(params["tag"])
+            res.outputs = {"url": WILDFIRE_TEST_URL, "path": path,
+                           "file_name": path.rsplit("\\", 1)[-1], "sha256": None,
+                           "downloaded": True, "dry_run": True}
+        res.command = f"builtin:{payload}"
+        return res
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────

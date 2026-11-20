@@ -156,14 +156,28 @@ def _internal_zone(config):
     for i, ip in enumerate(dcs, start=1):
         zone[f"dc{i:02d}.{ad_domain}"] = [ip]
     zone[f"ad.{ad_domain}"] = list(dcs[:2])
+    # Every DC the estate names (domain_controller_hosts: DC01-DC16 with their sites).
+    for name, h in sorted((config.get("domain_controller_hosts") or {}).items()):
+        if isinstance(h, dict) and h.get("ip"):
+            zone[f"{name.lower()}.{ad_domain}"] = [h["ip"]]
 
     # Member servers, pinned deterministically to real internal_servers entries so
     # a name always resolves to the same host the firewalls target.
     roles = ["fileserver", "exchange", "sharepoint", "vcenter", "sql01",
              "print01", "app01", "backup01", "radius"]
+    # config["server_roles"] pins a name to the address the estate really gives it
+    # (and lists names the defaults do not carry: fs01, fs02, file01). Listed first,
+    # in config order, so the reverse record for an address is its first-listed name.
+    # Only the roles it does NOT pin fall back to the positional pick below, which
+    # is what made vcenter/print01/fileserver land on unrelated hosts.
+    pinned = {str(k).lower(): v for k, v in (config.get("server_roles") or {}).items()
+              if not str(k).startswith("_") and v}
+    for role, ip in pinned.items():
+        zone[f"{role}.{ad_domain}"] = [ip]
     if servers:
         for i, role in enumerate(roles):
-            zone[f"{role}.{ad_domain}"] = [servers[i % len(servers)]]
+            if role not in pinned:
+                zone[f"{role}.{ad_domain}"] = [servers[i % len(servers)]]
 
     # The Infoblox grid members themselves, so every module that names the DNS
     # server a client talks to uses the name the grid answers for.
@@ -177,6 +191,42 @@ def _internal_zone(config):
         if ip not in named:
             zone[_srv_name(ip, ad_domain)] = [ip]
     return ad_domain, zone
+
+
+def _site_hosts(config, src_ip, key):
+    """Addresses of the `key` hosts (file_server_sites / domain_controller_hosts) at the
+    office of the NEW HIRE whose device is src_ip; None for base-estate users and for
+    addresses no user holds, so their traffic keeps its existing destinations."""
+    if not src_ip:
+        return None
+    try:
+        from modules import session_utils as su
+    except ImportError:  # pragma: no cover
+        import session_utils as su
+    user = su.ip_owner(src_ip)
+    if not user or not su.is_new_hire(user):
+        return None
+    city = su.user_office(user)
+    ips = [h["ip"] for _, h in sorted(((config or {}).get(key) or {}).items())
+           if isinstance(h, dict) and h.get("site") == city and h.get("ip")]
+    return ips or None
+
+
+def domain_controllers_for(config, src_ip, default):
+    """The DCs a workstation talks to: its own site's for a new hire, else `default`."""
+    return _site_hosts(config, src_ip, "domain_controller_hosts") or default
+
+
+def file_servers(config, src_ip=None):
+    """Addresses of the file servers (FS01, FS02, FILE01): the destinations for
+    workstation SMB/FTP. config["file_servers"], else the whole internal_servers
+    list so an unconfigured estate behaves as before. With src_ip, a new hire's device
+    gets its own site's file servers (config["file_server_sites"])."""
+    site = _site_hosts(config, src_ip, "file_server_sites")
+    if site:
+        return site
+    fs = [ip for ip in ((config or {}).get("file_servers") or []) if ip]
+    return fs or list((config or {}).get("internal_servers") or [])
 
 
 def _srv_name(ip, ad_domain):

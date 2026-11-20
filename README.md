@@ -111,7 +111,7 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `priv_group_addition` | User added to a privileged group | Medium | T1098.002 |
 | `priv_group_add_remove` | User added to a privileged group and removed | Low-Medium | T1098.002 |
 | `account_lockout` | Excessive user lockouts | Low | T1110 |
-| `suspicious_account_lockout` | Suspicious account lockout pattern | Low | T1110 |
+| `suspicious_account_lockout` | Excessive account lockouts on suspicious users | Medium | T1110 |
 | `default_account_enabled` | User enabled a default local account | Low | T1078.001 |
 | `sms_admins_addition` | User added to SMS Admins group | Medium | T1098 |
 | `suspicious_account_creation` | Suspicious hidden user account created | Low | T1136 |
@@ -119,22 +119,48 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `as_rep_roasting` | Excessive TGT requests for users that do not require Kerberos pre-authentication | Medium | T1558.004 |
 | `dmsa_privesc` | Possible Privilege Escalation using Delegated MSA account attempt | High | T1098 |
 | `sensitive_password_reset` | Sensitive account password reset attempt for the first time | Medium | T1098 |
+| `password_never_expires` | Sensitive account modified to password never expires | Low | T1098 |
+| `priv_cert_request` | Suspicious privileged certificate request via certificate template | Low | T1078.002 |
 
-`as_rep_roasting`, `dmsa_privesc` and `sensitive_password_reset` were previously
-`wip_`-prefixed. The old names still work.
+`as_rep_roasting`, `dmsa_privesc`, `sensitive_password_reset`,
+`password_never_expires` and `priv_cert_request` were previously `wip_`-prefixed.
+The old names still work.
+
+`dnshostname_spoofing` was verified on 2026-11-18 (alerts 803275/803276 and
+803488/803489). It takes its spoof target from `windows_events.spoof_dc_fqdn`,
+which must name a domain controller the tenant's identity graph actually knows
+(default `ExampleCorp-DC1.corp.examplecorp.com`); a synthetic DC-looking name
+such as `DC01.examplecorp.local` never matches.
+
+`suspicious_account_lockout` was verified on 2026-11-19 (MEDIUM alert 811431,
+plus 811261 from a hand-built batch). The Medium variation only selects when the
+locked accounts are ones the graph treats as "commonly targeted users", so the
+generator locks `windows_events_config.targeted_lockout_accounts` (default
+`Administrator`, `adm-a.cox2`, `a.ortega`, `c.ford`). Merely service-account
+names such as `svc_backup` only ever raise the Low base alert.
+
+The rule's *other* Medium variation, "Excessive user account lockouts from a
+suspicious source", could not be selected: four source hosts — including a real
+tenant asset with 59 alerts — each produced only the Low base on identical
+ordinary victims, so the variation is not name- or history-based. The generator
+targets the "commonly targeted users" variation and does not attempt this one
+(see `docs/modules/windows.md`).
 
 **WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 
 | Generator | Reason |
 |---|---|
-| `wip_adminsdholder_acl_modification` | Identity graph dependent — needs real AD object GUIDs/SIDs |
-| `wip_password_never_expires` | Training period — needs identity graph baseline |
+| `wip_adminsdholder_acl_modification` | 4 batches, 0 alerts. The canonical 5136/4662 shape is silent, container targets *are* evaluated, and retargeting to the real naming context (`DC=corp,DC=examplecorp,DC=com`) is disproven — its positive control also stayed silent, so 5136 analytics do not resolve that namespace at all (see `docs/modules/windows.md`) |
 | `wip_irregular_service_tgs` | Only ever raises the weak-encryption ticket alert that `multiple_service_tickets` owns; `irregular_tgt_burst` covers its intended detection. Background only — not offered on demand |
-| `wip_priv_cert_request` | Not yet investigated |
-| `wip_sccm_container_recon` | Environment dependent — requires SCCM/ConfigMgr deployment |
-| `wip_shadow_credentials` | Added 2026-10-21 — *Key credential attribute modification* (5136 `msDS-KeyCredentialLink` + PKINIT 4768) |
-| `wip_default_account_masquerade` | Added 2026-10-21 — *Masquerading as a default local account* (local 4720 `DefaultAccount` / `Guest` on a member server) |
-| `wip_samaccountname_change` | Added 2026-10-21 — *Suspicious sAMAccountName change* (4781 machine account renamed without `$`) |
+| `wip_sccm_container_recon` | Full real shape (4662 reads + the DC's 1644 LDAP search naming the container) still silent; every real 1644 in the tenant is agent-collected, WEC lands as `EVENT_LOG_DOMAIN_CONTROLLER` (see `docs/modules/windows.md`) |
+| `wip_esc4_template_modification` | 3 batches (5136 only → +4662 legs → +CA 4899/4900) still silent. The detector's own collection reference names 4899/4900/4662; those EventData names are unverifiable because Microsoft publishes no per-event page (see `docs/modules/windows.md`) |
+| `wip_new_machine_delegation` | 3 batches (config-only → RBCD/constrained/unconstrained chains → same chains with a DC-side machine 4624 + TGT) still silent. A fresh `4741` by a first-time creator does not raise "Rare machine account creation", so `4741` does not drive machine-creation analytics here and the detector cannot see a "new" machine (see `docs/modules/windows.md`) |
+
+Two former rows here were stale and have been removed: the key-credential and
+sAMAccountName generators are `shadow_credentials` and `suspicious_sam_change`,
+and both are **confirmed**. "Masquerading as a default local account" is a
+variation of the confirmed `default_account_enabled` analytic with no generator
+yet, so it does not belong in a table of `wip_`-prefixed generators.
 
 **Endpoint execution telemetry** (for the advanced linked kill chains): the module also generates **4688 process trees** (Office → PowerShell → cmd → LOLBin, with real parent/child linkage and command lines), **4697** (a service was installed — malware persistence), and **1102** (the audit log was cleared — anti-forensics). Emitted via the `PROCESS_TREE`, `SERVICE_INSTALL`, and `CLEAR_LOGS` scenario events. Verified to ingest and parse in `microsoft_windows_raw`. *Note:* the Broker VM's WEC subscription must forward these Event IDs for them to reach XSIAM — see the Subscription Filter note below.
 
@@ -223,6 +249,7 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 |---|---|
 | Installation & `.env` setup | [docs/getting-started.md](docs/getting-started.md) |
 | `config.json` reference (all sections) | [docs/configuration.md](docs/configuration.md) |
+| The simulated company: 5,000 users, sites, servers, onboarding, app entitlements | [docs/estate.md](docs/estate.md) |
 | Transports — native pipes and the Cribl fallback | [docs/transports.md](docs/transports.md) |
 | Running modes & available modules | [docs/how-to-run.md](docs/how-to-run.md) |
 | Attack scenarios (23 kill chains) | [docs/attack-scenarios.md](docs/attack-scenarios.md) |

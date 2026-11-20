@@ -153,6 +153,71 @@ class WorkstationConnection:
     ENV_EGRESS_IP = "XDR_TARGET_EGRESS_IP"      # optional override (org NAT/public IP)
     ENV_EMAIL_DOM = "XDR_EMAIL_DOMAIN"          # optional override (email domain)
 
+    # ---- .env settings check -------------------------------------------------
+
+    _PLACEHOLDER = re.compile(r"<[^>]*>")
+    _HOST_RE = re.compile(r"^(?:\d{1,3}(?:\.\d{1,3}){3}|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?)$")
+
+    @classmethod
+    def env_checks(cls, env_file=None, transport=None):
+        """Preflight rows for the .env settings themselves, checked BEFORE anything
+        touches the box, so a missing or still-placeholder value says exactly which
+        variable to fix instead of surfacing as a WinRM/auth error.
+
+        Row 1 (blocking): target host + WinRM user + password. Values are shown,
+        except the password, which is only reported as set/unset.
+        Row 2 (never blocking, SKIP when absent): the XSIAM read-back key that the
+        scorecard needs. Sending works without it; scoring does not."""
+        def _env(name):
+            v = os.getenv(name)
+            return v.strip() if v and v.strip() else None
+
+        where = f" in {env_file}" if env_file else " in .env"
+        transport = (transport or _env(cls.ENV_TRANSPORT) or "winrm").lower()
+        rows = []
+        if transport == "stub":
+            rows.append(PreflightCheck(".env target settings", None,
+                                       "stub transport — no live box, host/user not needed"))
+        else:
+            missing, bad, shown = [], [], []
+            for name in (cls.ENV_HOST, cls.ENV_USER, cls.ENV_PASSWORD):
+                v = _env(name)
+                if not v:
+                    missing.append(name)
+                elif cls._PLACEHOLDER.search(v):
+                    bad.append(f"{name} still has the example placeholder")
+                elif name == cls.ENV_HOST and not cls._HOST_RE.match(v):
+                    bad.append(f"{name}='{v}' is not an IP or hostname")
+                elif name == cls.ENV_PASSWORD:
+                    shown.append("password set")
+                else:
+                    shown.append(f"{name}={v}")
+            if missing or bad:
+                parts = ([f"missing {', '.join(missing)}"] if missing else []) + bad
+                if not env_file:
+                    parts.append("no .env file was found next to the project")
+                rows.append(PreflightCheck(".env target settings", False,
+                                           "; ".join(parts) + f"{where} (see .env.example)"))
+            else:
+                port = _env(cls.ENV_PORT) or "5985"
+                rows.append(PreflightCheck(".env target settings", True,
+                                           ", ".join(shown) + f" (WinRM port {port})"))
+
+        api = {n: _env(n) for n in ("XSIAM_API_BASE", "XSIAM_API_KEY_ID", "XSIAM_API_KEY")}
+        api_missing = [n for n, v in api.items() if not v or cls._PLACEHOLDER.search(v)]
+        if not api_missing:
+            rows.append(PreflightCheck(".env XSIAM read-back", True,
+                                       f"{api['XSIAM_API_BASE']} key id {api['XSIAM_API_KEY_ID']}"))
+        elif len(api_missing) == 3:
+            rows.append(PreflightCheck(".env XSIAM read-back", None,
+                                       "not set — techniques still run, but the scorecard can't "
+                                       "read alerts back (XSIAM_API_BASE/_KEY_ID/_KEY)"))
+        else:
+            rows.append(PreflightCheck(".env XSIAM read-back", None,
+                                       f"incomplete — set {', '.join(api_missing)}{where}; "
+                                       "the scorecard needs all three"))
+        return rows
+
     @classmethod
     def from_config(cls, config):
         """Build the connection. All deployment-specific values come from .env via
@@ -505,7 +570,7 @@ class WorkstationConnection:
                 and now - self._preflight_cache_at < self.CACHE_TTL_SECONDS):
             return self._preflight_cache
 
-        checks = []
+        checks = list(self.env_checks(getattr(self, "env_file", None), self.transport))
         identity = None
 
         if self.transport == "stub":

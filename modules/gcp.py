@@ -278,14 +278,36 @@ def _get_project_id(config):
     return gcp_conf.get('gcp_project_id', 'PLACEHOLDER_GCP_PROJECT_ID')
 
 
+_GCP_USERS = {}     # id(session_context) -> (ctx, len, day, [usernames with GCP access])
+
+
+def _gcp_user(session_context):
+    """A random started user who has GCP access (user_profiles.*.gcp_iam_user), as a
+    get_user_by_name() dict. GCP audit logs used to name ANY roster user, so HR and Legal
+    staff ran GCP admin operations; access now follows the estate (mainly IT and DevOps).
+    A roster where nobody has gcp_iam_user keeps the old any-user behaviour."""
+    from modules import session_utils as su
+    day = su.onboarding_day()
+    hit = _GCP_USERS.get(id(session_context))
+    if not hit or hit[0] is not session_context or hit[1] != len(session_context) or hit[2] != day:
+        names = [u for u in su.pickable_users(session_context)
+                 if (session_context.get(u) or {}).get('gcp_iam_user')]
+        anyone = any((p or {}).get('gcp_iam_user') for p in session_context.values())
+        hit = (session_context, len(session_context), day, names if anyone else None)
+        _GCP_USERS[id(session_context)] = hit
+    if hit[3] is None:
+        return su.get_random_user(session_context)
+    if not hit[3]:
+        return None
+    return su.get_user_by_name(session_context, random.choice(hit[3]))
+
+
 def _get_random_principal(config, context=None, force_service_account=False):
     """
     Pick a principal (email) for the audit log.
     Prefers session_context users; falls back to gcp_config.service_accounts.
     Returns a dict with keys: email, display_name, caller_ip, is_service_account
     """
-    from modules.session_utils import get_random_user
-
     # A scenario pins ONE actor across its steps (run_gcp_cloud_pentest_scenario passes
     # principal_email + ip_address). Ignoring it gave every step a different user on a
     # different IP, so no per-principal or per-caller-IP chain could ever form.
@@ -302,7 +324,7 @@ def _get_random_principal(config, context=None, force_service_account=False):
 
     # Try session_context first (real users from user_profiles)
     if session_context and not force_service_account:
-        user = get_random_user(session_context)
+        user = _gcp_user(session_context)
         if user:
             # Prefer gcp_iam_user if set, otherwise use email
             email = user.get('gcp_iam_user') or user.get('email') or f"{user['username']}@examplecorp.com"
@@ -2142,8 +2164,7 @@ def _gen_tor_api_access(config, context=None):
     if (context or {}).get('principal_email'):
         email = context['principal_email']
     elif session_context:
-        from modules.session_utils import get_random_user
-        u = get_random_user(session_context)
+        u = _gcp_user(session_context)
         email = (u.get('gcp_iam_user') or u.get('email')) if u else f"admin@{project_id}.iam.gserviceaccount.com"
     else:
         gcp_conf = config.get(CONFIG_KEY, {})

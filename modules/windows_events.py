@@ -77,11 +77,15 @@ except ImportError:
 try:
     from modules.session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
                                         publish_activity, pick_active_session, CORRELATE_PROB,
-                                        carry_focus as _carry_focus, focus_user as _focus_user)
+                                        carry_focus as _carry_focus, focus_user as _focus_user,
+                                        is_onboarded as _is_onboarded, is_new_hire as _is_new_hire,
+                                        site_dc as _site_dc, user_rid as _user_rid)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
                                publish_activity, pick_active_session, CORRELATE_PROB,
-                               carry_focus as _carry_focus, focus_user as _focus_user)
+                               carry_focus as _carry_focus, focus_user as _focus_user,
+                               is_onboarded as _is_onboarded, is_new_hire as _is_new_hire,
+                               site_dc as _site_dc, user_rid as _user_rid)
 
 
 def _publish_logon(u):
@@ -211,6 +215,8 @@ _EVENT_META = {
     4887: {"task": 12290, "category": "Certification Services",    "version": 0, "outcome": "success"},
     4888: {"task": 12290, "category": "Certification Services",    "version": 0, "outcome": "failure"},
     4898: {"task": 12293, "category": "Certification Services",    "version": 0, "outcome": "success"},
+    4899: {"task": 12294, "category": "Certification Services",    "version": 0, "outcome": "success"},
+    4900: {"task": 12295, "category": "Certification Services",    "version": 0, "outcome": "success"},
     4720: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4722: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4724: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
@@ -235,6 +241,17 @@ _EVENT_META = {
     4699: {"task": 12804, "category": "Other Object Access Events", "version": 1, "outcome": "success"},
     5140: {"task": 12808, "category": "File Share",                 "version": 1, "outcome": "success"},
     5145: {"task": 12811, "category": "Detailed File Share",        "version": 0, "outcome": "success"},
+    # Directory Service (LDAP interface) diagnostics. Not a Security-channel audit
+    # event: the provider, channel and keyword differ, so they are carried here
+    # rather than at the _build_event call sites. Provider GUID and channel are the
+    # values the tenant's own agent-collected 1644 events report; the task value
+    # (LDAP Interface) is documented but is not stored by the tenant's parser and is
+    # not read by any detector.
+    1644: {"task": 1408, "category": "LDAP Interface", "version": 0, "outcome": "success",
+           "provider_name": "Microsoft-Windows-ActiveDirectory_DomainService",
+           "provider_guid": "{0E8478C5-3605-4E8C-8497-1E730C959516}",
+           "channel": "Directory Service",
+           "keywords": "0x8000000000000000"},
 }
 
 def _format_message(event_id: int, ed: dict) -> str:
@@ -661,6 +678,39 @@ def _msg_4662(d):
     )
 
 
+def _msg_1644(d):
+    """1644 — Directory Service LDAP search diagnostics.
+
+    Layout copied from the tenant's own agent-collected 1644 rows
+    (`ExampleCorp-DC1`, provider Microsoft-Windows-ActiveDirectory_DomainService),
+    including the blank line before each label and the trailing value space that
+    the real rendering carries. Parameter names follow what that parser stores:
+    param1 starting node, param2 filter, param3/param4 visited/returned entries,
+    param5 client, param6 scope, param7 attribute selection, param9 used indexes,
+    param17 user. Zero-valued counters are omitted, as the real rows do.
+    """
+    return (
+        "Internal event: A client issued a search operation with the following options. \r\n\r\n"
+        f" Client:\r\n{d.get('param5','')} \r\n"
+        f"Starting node:\r\n{d.get('param1','')} \r\n"
+        f"Filter:\r\n{d.get('param2','')} \r\n"
+        f"Search scope:\r\n{d.get('param6','')} \r\n"
+        f"Attribute selection:\r\n{d.get('param7','')} \r\n"
+        "Server controls:\r\n \r\n"
+        f"Visited entries:\r\n{d.get('param3','')} \r\n"
+        f"Returned entries:\r\n{d.get('param4','')} \r\n"
+        f"Used indexes:\r\n{d.get('param9','')} \r\n"
+        "Pages referenced:\r\n0 \r\n"
+        "Pages read from disk:\r\n0 \r\n"
+        "Pages preread from disk:\r\n0 \r\n"
+        "Clean pages modified:\r\n0 \r\n"
+        "Dirty pages modified:\r\n0 \r\n"
+        "Search time (ms):\r\n1 \r\n"
+        "Attributes returned:\r\n0 \r\n"
+        f"Additional Data\r\nUser:\r\n{d.get('param17','')} "
+    )
+
+
 def _msg_4656(d):
     return (
         "A handle to an object was requested.\r\n\r\n"
@@ -994,6 +1044,47 @@ def _msg_4898(d):
         f"\tSecurity Descriptor:\t{d.get('SecurityDescriptor','')}\r\n"
         f"\tOID:\t{d.get('TemplateOID','')}\r\n"
         f"\tTemplate DS Object FQDN:\t{d.get('TemplateDSObjectFQDN','')}"
+    )
+
+
+def _msg_4899(d):
+    # 4899 is the CA's "template updated" record. Message layout follows the published
+    # 4899 description: "%1 v%2 (Schema V%3)", the template DN, then an Old/New
+    # Template Content pair and the DC that performed the change.
+    return (
+        "A Certificate Services template was updated.\r\n\r\n"
+        f"\t{d.get('TemplateInternalName','')} "
+        f"v{d.get('TemplateVersion','')} "
+        f"(Schema V{d.get('TemplateSchemaVersion','')})\r\n"
+        f"\t{d.get('TemplateDSObjectFQDN','')}\r\n"
+        f"\t{d.get('TemplateOID','')}\r\n"
+        f"Template Change Information:\r\n"
+        f"\tOld Template Content:\t{d.get('OldTemplateContent','')}\r\n"
+        f"\tNew Template Content:\t{d.get('NewTemplateContent','')}\r\n"
+        f"Additional Information:\r\n"
+        f"\tDomain Controller:\t{d.get('DomainController','')}"
+    )
+
+
+def _msg_4900(d):
+    # 4900 is the CA's "template *security* updated" record — the ACL change on the
+    # template object. Published sample carries Old/New Template Content *and*
+    # Old/New Security Descriptor, which is exactly the before/after an ESC4
+    # analytic needs to see.
+    return (
+        "Certificate Services template security was updated.\r\n\r\n"
+        f"\t{d.get('TemplateInternalName','')} "
+        f"v{d.get('TemplateVersion','')} "
+        f"(Schema V{d.get('TemplateSchemaVersion','')})\r\n"
+        f"\t{d.get('TemplateDSObjectFQDN','')}\r\n"
+        f"\t{d.get('TemplateOID','')}\r\n"
+        f"Template Change Information:\r\n"
+        f"\tOld Template Content:\t{d.get('OldTemplateContent','')}\r\n"
+        f"\tNew Template Content:\t{d.get('NewTemplateContent','')}\r\n"
+        f"\tOld Security Descriptor:\t{d.get('OldSecurityDescriptor','')}\r\n"
+        f"\tNew Security Descriptor:\t{d.get('NewSecurityDescriptor','')}\r\n"
+        f"Additional Information:\r\n"
+        f"\tDomain Controller:\t{d.get('DomainController','')}"
     )
 
 
@@ -1398,6 +1489,8 @@ _MSG_BUILDERS = {
     4887: _msg_4887,
     4888: _msg_4888,
     4898: _msg_4898,
+    4899: _msg_4899,
+    4900: _msg_4900,
     4720: _msg_4720,
     4697: _msg_4697,
     1102: _msg_1102,
@@ -1418,6 +1511,7 @@ _MSG_BUILDERS = {
     4725: _msg_4725,
     4726: _msg_4726,
     4738: _msg_4738,
+    1644: _msg_1644,
 }
 
 # 4625 Status/SubStatus → FailureReason mapping.  Status is the primary
@@ -1887,11 +1981,32 @@ def _stable_user_sid(username: str) -> str:
         sid = _USER_SIDS.get(username)
         if sid:
             return sid
-        h = hashlib.sha1(username.encode()).digest()
-        rid = 1100 + (int.from_bytes(h[:4], "big") % 8_900)
+        # Roster users carry their RID in config (user_profiles.*.sid_rid, assigned
+        # collision-free by tools/estate_generator.py): 1100 + hash % 8,900 gave ~1,400
+        # of 5,000 users someone else's SID. Identities outside the roster keep the hash.
+        rid = _user_rid(username)
+        if rid is None:
+            h = hashlib.sha1(username.encode()).digest()
+            rid = 1100 + (int.from_bytes(h[:4], "big") % 8_900)
         sid = f"{_SYNTH_DOMAIN_SID}-{rid}"
         _USER_SIDS[username] = sid
         return sid
+
+
+def _win_ip(ip) -> str:
+    """Render an IP address the way Windows writes the Kerberos IpAddress field.
+
+    Windows shows IPv4 peers IPv4-mapped (``::ffff:a.b.c.d``), while genuine IPv6
+    addresses (``::1``, ``2001:db8::1``) and values that are already mapped are
+    written verbatim. Callers used to prepend ``::ffff:`` unconditionally, which
+    double-prefixed an already-mapped override to ``::ffff:::ffff:a.b.c.d``.
+    """
+    if not ip or ip == "-":
+        return "-"
+    s = str(ip)
+    if s.startswith("::ffff:") or ":" in s:
+        return s
+    return f"::ffff:{s}"
 
 
 def _local_admin_sid(hostname: str) -> str:
@@ -2178,13 +2293,35 @@ def _get_dns_domain(config):
     return _cf(config).get("dns_domain", "examplecorp.local")
 
 
+# Set by a workstation worker while it generates for a new hire: that user's site DC
+# (session_utils.site_dc). Base-estate hosts, the DC worker and threats leave it unset
+# and keep the configured DC, so the tenant's existing DC baselines stay where they are.
+_DC_TLS = threading.local()
+
+
 def _get_dc_hostname(config):
     """Synthetic DC hostname used for DC-originated events (4740/4768/4769/4771/4776)."""
+    site = getattr(_DC_TLS, "dc", None)
+    if site:
+        return _fqdn(site, config)
     return _cf(config).get("domain_controller_hostname", "DC01.examplecorp.local")
 
 
 def _get_dc_short(config):
     return _get_dc_hostname(config).split(".")[0].upper()
+
+
+def _get_spoof_dc_fqdn(config):
+    """FQDN of a domain controller the tenant's identity graph actually knows.
+
+    The dNSHostName analytics ("Suspicious dNSHostName attribute change to DC
+    name" and "Suspicious account attribute modification that matches that of a
+    sensitive machine account") match the new value against real DC assets. A
+    synthetic name that merely *looks* like a DC (DC01.examplecorp.local) never
+    matches, so the spoof has to name a DC that exists in the graph.
+    """
+    return (_cf(config).get("spoof_dc_fqdn")
+            or "ExampleCorp-DC1.corp.examplecorp.com")
 
 
 def _domain_dn(config):
@@ -2213,6 +2350,8 @@ def _get_windows_users(session_context):
         return []
     windows_users = []
     for uname, prof in session_context.items():
+        if not _is_onboarded(uname):
+            continue          # a new hire before their start date has no activity yet
         if (prof.get("primary_os_type") or "").lower() == "windows":
             info = get_user_by_name(session_context, uname)
             if info and info.get("hostname"):
@@ -2280,14 +2419,14 @@ def _build_event(event_id: int, computer: str, event_data: dict,
     record = {
         # --- Fields matching the microsoft_windows_raw dataset schema ---
         "event_id":          str(event_id),
-        "provider_name":     _PROVIDER_NAME,
-        "provider_guid":     _PROVIDER_GUID,
-        "channel":           _CHANNEL,
+        "provider_name":     meta.get("provider_name", _PROVIDER_NAME),
+        "provider_guid":     meta.get("provider_guid", _PROVIDER_GUID),
+        "channel":           meta.get("channel", _CHANNEL),
         "computer_name":     computer,
         "host_name":         computer,
         "time_created":      ts_str,
         "message":           message,
-        "keywords":          kw,
+        "keywords":          meta.get("keywords", kw),
         "log_level":         "Information",
         "event_result":      "success" if success else "failure",
         "event_action":      meta["category"],
@@ -2412,8 +2551,26 @@ def _render_event_xml(event: dict) -> str:
             data_el.text = str(value) if value is not None else ""
 
     # -- <RenderingInfo> --
-    msg = event.get("message", "").replace("\r\n", "\n")
+    # Keep the CRLF the message templates use. Real Windows events carry CRLF in
+    # RenderingInfo/Message, and several analytics parse that text with
+    # \r\n-anchored regexes -- e.g. "Possible Kerberos relay attack" extracts
+    # "Logon Type", "Source Network Address" and the New Logon "Security ID"
+    # from action_evtlog_message (verified: real XDR-agent 4624 messages hold
+    # 58 CRLF / 0 bare LF).
+    #
+    # XSIAM's Windows event parser then collapses every "\r\n" to "\n" in a
+    # single pass, on BOTH the WEC and the Cribl receiver paths (proven
+    # 2026-11-15: a marker event sent through each landed with 0 CRLF, and the
+    # raw XML still held &#13;). A literal CR in XML text is also normalised to
+    # LF, so lxml has to escape it as &#13;.
+    #
+    # Therefore the CR is doubled here: "\r\r\n" collapses to "\r\n" under that
+    # one-pass replacement and the stored message keeps real CRLF. Verified end
+    # to end -- a 4624 rendered with this encoding landed in the tenant with 59
+    # CRLF / 0 bare LF, and all four relay regexes matched.
+    msg = event.get("message", "")
     if msg:
+        msg = msg.replace("\r\n", "\r\r\n")
         ri = SE(root, "RenderingInfo")
         ri.set("Culture", "en-US")
         SE(ri, "Message").text = msg
@@ -3209,6 +3366,43 @@ def _build_4662(user_info, config, *, object_type, object_name,
     return _build_event(4662, dc_host, event_data, success=True, ts=ts)
 
 
+def _build_1644(user_info, config, *, search_base, ldap_filter="(objectClass=*)",
+                scope="subtree", attributes="*", visited=1, returned=1,
+                used_indexes="", ts=None) -> dict:
+    """1644 - Directory Service LDAP search diagnostics (DC, Directory Service log).
+
+    Windows writes this to the Directory Service log when a client issues a search
+    that exceeds the expensive-search threshold. It is the only record that names
+    the *search base*, so an analytic about "who queried this container" has to
+    read it: the matching 4662 says which object was touched but not that an LDAP
+    query enumerated it.
+
+    Field names and layout come from the tenant's own agent-collected 1644 rows
+    (provider Microsoft-Windows-ActiveDirectory_DomainService on ExampleCorp-DC1):
+    param1 search base, param2 filter, param3/param4 visited/returned entries,
+    param5 client "addr:port", param6 scope, param7 attribute selection,
+    param9 used indexes, param17 "DOMAIN\\user". Zero-valued counters are absent
+    in the real rows and are left out here too.
+    """
+    dc_host = _get_dc_hostname(config)
+    domain = _get_domain(config)
+    port = random.randint(49152, 65535)
+    ip = user_info.get("ip") or "10.20.30.40"
+    client = f"[::ffff:{ip}]:{port}"
+    event_data = {
+        "param1":  search_base,
+        "param2":  f" ( {ldap_filter} ) ",
+        "param3":  str(visited),
+        "param4":  str(returned),
+        "param5":  client,
+        "param6":  scope,
+        "param7":  attributes,
+        "param9":  used_indexes or "idx_objectClass:1:N;",
+        "param17": f"{domain}\\{user_info['username']}",
+    }
+    return _build_event(1644, dc_host, event_data, success=True, ts=ts)
+
+
 def _build_4656(user_info, config, *, object_type, object_name,
                 process_name, access_mask="0x1F0FFF",
                 handle_id=None, process_id=None,
@@ -3620,19 +3814,23 @@ def _build_4898(user_info, config, *, template_name, enrollee_supplies_subject=T
                 schema_version="2", template_version="100.2", ts=None) -> dict:
     """4898 - Certificate Services loaded a template (CA event).
 
-    Why this exists: 4898 is the only event that tells XSIAM a certificate template is
-    *abusable*. It is in XSIAM's published Object Access intake list and feeds
-    "Vulnerable certificate template loaded" and "Suspicious certificate template
-    modification" (ESC4). `msPKI-Certificate-Name-Flag = 0x1`
-    (CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT) inside Template Content is the literal ESC1
-    condition — a requester may name any subject, including a privileged one.
+    Why this exists: 4898 is the CA's "template loaded" record, and the only event
+    that hands a detector the template's *contents* rather than its DN.
+    `msPKI-Certificate-Name-Flag = 0x1` (CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT) inside
+    Template Content is the literal ESC1 condition: a requester may name any
+    subject, including a privileged one. It targets "Vulnerable certificate
+    template loaded" only; "Suspicious certificate template modification" (ESC4) is
+    a directory-service change to the template object, not a load.
 
-    CAVEAT: the exact EventData parameter names below could not be confirmed against a
-    captured 4898 from this environment; they follow the published field list
-    (TemplateInternalName / TemplateVersion / TemplateSchemaVersion / TemplateOID /
-    TemplateDSObjectFQDN / TemplateContent / SecurityDescriptor). If the detector stays
-    silent with a correct-looking event, verify these names against a real 4898 before
-    changing anything else — a wrong EventData key is invisible in the rendered XML.
+    CAVEAT - measured, not theoretical. Seven deliveries since 2026-10-29 (six of
+    them on 2026-11-16/17) under five template names, including one literally
+    called `ESC1-Vulnerable`, produced zero alerts - one of them in a batch that
+    did fire a sibling AD CS analytic. The EventData names and the TemplateContent
+    layout below cannot be checked against anything: the tenant's only 4898 events
+    are this generator's own output, Microsoft publishes no page for 4898, and the
+    Cortex detector page explicitly does not say which event or fields it reads.
+    Treat this builder as unverified; do not tune it further without a captured
+    real 4898 to compare against.
     """
     ca_host = _get_ca_hostname(config)
     dns_domain = _get_dns_domain(config)
@@ -3670,6 +3868,91 @@ def _build_4898(user_info, config, *, template_name, enrollee_supplies_subject=T
         "SecurityDescriptor":     sd,
     }
     return _build_event(4898, ca_host, event_data, success=True, ts=ts)
+
+
+def _build_4899(user_info, config, *, template_name, old_content, new_content,
+                schema_version="2", template_version="100.2",
+                template_oid=None, logon_id=None, ts=None) -> dict:
+    """4899 – A Certificate Services template was updated (CA event).
+
+    This is the CA's record of a template *content* change: the before/after
+    template flags, EKUs and enrollment settings. 4898 says what a template looks
+    like when it is loaded; 4899 says someone just changed it, which is the only
+    CA-side evidence that a template was armed (for example by flipping
+    msPKI-Certificate-Name-Flag to 0x1).
+
+    XSIAM's event-collection reference lists 4899 for "Suspicious certificate
+    template modification" (the ESC4 detector) alongside 4900 and 4662.
+
+    Field names follow 4898's (TemplateInternalName / TemplateVersion /
+    TemplateSchemaVersion / TemplateOID / TemplateDSObjectFQDN) plus the
+    Old/New pair the published 4899 message template shows. Microsoft publishes
+    no per-event page for 4899, so treat the EventData names as inferred.
+    """
+    ca_host = _get_ca_hostname(config)
+    dns_domain = _get_dns_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    event_data = {
+        "SubjectUserSid":         _stable_user_sid(user_info["username"]),
+        "SubjectUserName":        user_info["username"],
+        "SubjectDomainName":      _get_domain(config),
+        "SubjectLogonId":         logon_id or _new_logon_id(),
+        "TemplateInternalName":   template_name,
+        "TemplateVersion":        template_version,
+        "TemplateSchemaVersion":  schema_version,
+        "TemplateOID":            template_oid or (
+            f"1.3.6.1.4.1.311.21.8.{random.randint(1000000, 9999999)}."
+            f"{random.randint(1000000, 9999999)}"),
+        "TemplateDSObjectFQDN":   (f"CN={template_name},CN=Certificate Templates,"
+                                   f"CN=Public Key Services,CN=Services,"
+                                   f"CN=Configuration,{base_dn}"),
+        "OldTemplateContent":     old_content,
+        "NewTemplateContent":     new_content,
+        "DomainController":       _get_dc_hostname(config),
+    }
+    return _build_event(4899, ca_host, event_data, success=True, ts=ts)
+
+
+def _build_4900(user_info, config, *, template_name, old_content, new_content,
+                old_security_descriptor, new_security_descriptor,
+                schema_version="2", template_version="100.2",
+                template_oid=None, logon_id=None, ts=None) -> dict:
+    """4900 – Certificate Services template security was updated (CA event).
+
+    Windows writes this when the *ACL* on a certificate template changes. It is
+    the CA-side twin of the DC's 5136 nTSecurityDescriptor record, and it is the
+    one event that carries the old and new SDDL side by side — which is exactly
+    what an ESC4 analytic needs in order to say a template was made exploitable
+    rather than merely edited.
+
+    Field names as in _build_4899 plus OldSecurityDescriptor /
+    NewSecurityDescriptor; Microsoft publishes no per-event page for 4900, so
+    they are inferred from the published message template and 4898's names.
+    """
+    ca_host = _get_ca_hostname(config)
+    dns_domain = _get_dns_domain(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    event_data = {
+        "SubjectUserSid":         _stable_user_sid(user_info["username"]),
+        "SubjectUserName":        user_info["username"],
+        "SubjectDomainName":      _get_domain(config),
+        "SubjectLogonId":         logon_id or _new_logon_id(),
+        "TemplateInternalName":   template_name,
+        "TemplateVersion":        template_version,
+        "TemplateSchemaVersion":  schema_version,
+        "TemplateOID":            template_oid or (
+            f"1.3.6.1.4.1.311.21.8.{random.randint(1000000, 9999999)}."
+            f"{random.randint(1000000, 9999999)}"),
+        "TemplateDSObjectFQDN":   (f"CN={template_name},CN=Certificate Templates,"
+                                   f"CN=Public Key Services,CN=Services,"
+                                   f"CN=Configuration,{base_dn}"),
+        "OldTemplateContent":     old_content,
+        "NewTemplateContent":     new_content,
+        "OldSecurityDescriptor":  old_security_descriptor,
+        "NewSecurityDescriptor":  new_security_descriptor,
+        "DomainController":       _get_dc_hostname(config),
+    }
+    return _build_event(4900, ca_host, event_data, success=True, ts=ts)
 
 
 def _build_4886(user_info, config, *, template_name, request_id=None,
@@ -3714,7 +3997,7 @@ def _build_4887(user_info, config, *, template_name, request_id=None,
     attrs = "\r\n".join(attrs_parts)
     dc_parts = dns_domain.split(".")
     base_dn = ",".join(f"DC={p}" for p in dc_parts)
-    subj = subject_dn or f"CN={user_info['username']}, CN=Users, {base_dn}"
+    subj = subject_dn or f"CN={user_info['username']},CN=Users,{base_dn}"
     event_data = {
         "RequestId":              req_id,
         "Requester":              requester,
@@ -3744,7 +4027,7 @@ def _build_4888(user_info, config, *, template_name, request_id=None,
     attrs = "\r\n".join(attrs_parts)
     dc_parts = dns_domain.split(".")
     base_dn = ",".join(f"DC={p}" for p in dc_parts)
-    subj = subject_dn or f"CN={user_info['username']}, CN=Users, {base_dn}"
+    subj = subject_dn or f"CN={user_info['username']},CN=Users,{base_dn}"
     event_data = {
         "RequestId":              req_id,
         "Requester":              requester,
@@ -3803,13 +4086,15 @@ def _dc_logon_event(user_info, config, *, logon_type=3, auth_pkg=_KRB_PACKAGE,
 
 def _build_4768(user_info, config, *, ip_override=None, encryption=None,
                 status="0x0", cert_issuer="", cert_serial="", cert_thumbprint="",
-                preauth_type="2", ts=None) -> dict:
+                preauth_type="2", preauth_encryption="N/A", ts=None) -> dict:
     """4768 – Kerberos TGT request (DC event, success=Status 0x0).
 
     `preauth_type` is the Windows numeric pre-authentication type. The default
-    "2" is PA-ENC-TIMESTAMP (password). PKINIT is "16" (PA-PK-AS-REQ), which is
-    what the "PKINIT TGT authentication request" analytic keys on; callers using
-    it must also populate cert_issuer/cert_serial/cert_thumbprint.
+    "2" is PA-ENC-TIMESTAMP (password). Smart-card/PKINIT logons are recorded as
+    "15" (PA-PK-AS-REP_OLD) in the documented 4768 sample, with "16"
+    (PA-PK-AS-REQ) and "17" (PA-PK-AS-REP) as the other PKINIT codes; callers
+    using any of them must also populate cert_issuer/cert_serial/cert_thumbprint
+    and `preauth_encryption` (the pre-authentication flow's etype, e.g. "0x12").
     """
     domain = _get_domain(config)
     dc_host = _get_dc_hostname(config)
@@ -3833,7 +4118,7 @@ def _build_4768(user_info, config, *, ip_override=None, encryption=None,
         "Status":                           status,
         "TicketEncryptionType":             enc,
         "PreAuthType":                      preauth_type,
-        "IpAddress":                        f"::ffff:{ip}" if ip and "." in str(ip) else ip,
+        "IpAddress":                        _win_ip(ip),
         "IpPort":                           str(random.randint(49152, 65535)) if ip and ip != "-" else "0",
         "CertIssuerName":                   cert_issuer,
         "CertSerialNumber":                 cert_serial,
@@ -3847,7 +4132,7 @@ def _build_4768(user_info, config, *, ip_override=None, encryption=None,
         "DCAvailableKeys":                  "AES-SHA1, RC4",
         "ClientAdvertizedEncryptionTypes":  client_enc_types,
         "SessionKeyEncryptionType":         enc,
-        "PreAuthEncryptionType":            "N/A",
+        "PreAuthEncryptionType":            preauth_encryption,
     }
     return _build_event(4768, dc_host, event_data, success=success, ts=ts,
 )
@@ -3885,7 +4170,7 @@ def _build_4769(user_info, config, *, service_spn=None, encryption=None,
         "ServiceSid":            _stable_user_sid(spn) if success else _SID_ANON,
         "TicketOptions":         "0x40810000",
         "TicketEncryptionType":  enc if success else "0xFFFFFFFF",
-        "IpAddress":             f"::ffff:{ip}" if ip and "." in str(ip) else ip,
+        "IpAddress":             _win_ip(ip),
         "IpPort":                str(random.randint(49152, 65535)) if ip and ip != "-" else "0",
         "Status":                status,
         "LogonGuid":             _new_logon_guid(),
@@ -3918,7 +4203,7 @@ def _build_4771(user_info, config, *, status="0x18", ip_override=None, ts=None) 
         "TicketOptions":         "0x40810010",
         "Status":                status,
         "PreAuthType":           "2",
-        "IpAddress":             f"::ffff:{ip}" if ip and "." in str(ip) else ip,
+        "IpAddress":             _win_ip(ip),
         "IpPort":                str(random.randint(49152, 65535)),
         "CertIssuerName":        "",
         "CertSerialNumber":      "",
@@ -5121,13 +5406,28 @@ def _threat_account_lockout(config, session_context):
     return events
 
 
-_SUSPICIOUS_LOCKOUT_ACCOUNTS = [
-    "svc_sql_prod", "svc_sql_dev", "svc_iis", "svc_sharepoint",
-    "svc_backup", "svc_monitoring", "svc_jenkins", "svc_reporting",
-    "svc_crm", "svc_etl",
-    "admin.backup", "admin.helpdesk", "admin.network",
-    "Administrator", "da_admin", "tier0_admin",
+# Accounts the identity graph treats as "commonly targeted" — privileged users and
+# users that have been the target of identity alerts. This is the discriminator for
+# the Medium variation "Excessive account lockouts on suspicious users": locking out
+# ordinary users, or merely service-looking names such as svc_sql_prod, only raises
+# the Low base alert. Verified 2026-11-19 (alert 811261): a batch that locked these
+# four accounts from one workstation raised the Medium variation with the description
+# "The users locked out are commonly targeted users".
+_TARGETED_LOCKOUT_ACCOUNTS = [
+    "Administrator",   # Administrators, Domain Admins, Enterprise Admins, ...
+    "adm-a.cox2",      # DnsAdmins
+    "a.ortega",        # added to Domain Admins
+    "c.ford",          # added to Enterprise Admins
 ]
+
+
+def _get_targeted_lockout_accounts(config):
+    """Lockout victims, overridable per tenant via
+    windows_events_config.targeted_lockout_accounts."""
+    configured = _cf(config).get("targeted_lockout_accounts")
+    if configured:
+        return [a for a in configured if a]
+    return list(_TARGETED_LOCKOUT_ACCOUNTS)
 
 
 def _threat_suspicious_account_lockout(config, session_context):
@@ -5135,9 +5435,12 @@ def _threat_suspicious_account_lockout(config, session_context):
     host — significantly more suspicious than regular user lockouts.
 
     XSIAM detection: "Excessive account lockouts on suspicious users" —
-    same trigger as regular lockout (multiple 4740 from one source) but
-    elevated to Medium severity because the locked accounts are service
-    accounts, admin accounts, or users with existing UEBA risk scores.
+    a Medium variation of "Excessive user account lockouts". The base alert
+    fires on any high number of 4740s from one source host; the variation is
+    selected when the locked accounts are ones the identity graph considers
+    "commonly targeted" (privileged users and users with attack history).
+    Merely using service-account names is not enough — those raise the Low
+    base alert only.
 
     All DC-side events (4771, 4776, 4625, 4740) use:
       - computer_name = DC hostname (DC logs them)
@@ -5150,10 +5453,11 @@ def _threat_suspicious_account_lockout(config, session_context):
 
     dc_host = _get_dc_hostname(config)
 
-    num_victims = random.randint(4, 7)
-    svc_accounts = random.sample(
-        _SUSPICIOUS_LOCKOUT_ACCOUNTS,
-        k=min(len(_SUSPICIOUS_LOCKOUT_ACCOUNTS), num_victims))
+    accounts = _get_targeted_lockout_accounts(config)
+    if not accounts:
+        return None
+    num_victims = random.randint(4, min(7, len(accounts)))
+    victims = random.sample(accounts, k=num_victims)
 
     attacker = random.choice(all_users)
     attacker_ip = attacker.get("ip") or "10.0.1.200"
@@ -5162,32 +5466,32 @@ def _threat_suspicious_account_lockout(config, session_context):
     events = []
     t = time.time() - num_victims * 60
 
-    for acct_name in svc_accounts:
-        svc_user = {
+    for acct_name in victims:
+        victim = {
             "username": acct_name,
             "hostname": dc_host,
             "ip": attacker_ip,
         }
         attempts = random.randint(6, 10)
         for _ in range(attempts):
-            events.append(json.dumps(_build_4771(svc_user, config, status="0x18",
+            events.append(json.dumps(_build_4771(victim, config, status="0x18",
                                                  ip_override=attacker_ip, ts=t)))
-            events.append(json.dumps(_build_4776(svc_user, config, status="0xC000006A",
-                                                 workstation=attacker_hostname, ts=t + 0.8)))
-            events.append(json.dumps(_build_4625(svc_user, config, logon_type=3,
+            events.append(json.dumps(_build_4776(victim, config, status="0xC000006A",
+                                                 workstation=attacker_hostname, ts=t + 0.3)))
+            events.append(json.dumps(_build_4625(victim, config, logon_type=3,
                                                  sub_status="0xC000006A",
                                                  workstation_override=dc_host,
                                                  source_workstation=attacker_hostname,
-                                                 ip_override=attacker_ip, ts=t + 1.5)))
-            t += random.uniform(3, 8)
-        events.append(json.dumps(_build_4740(svc_user, config,
+                                                 ip_override=attacker_ip, ts=t + 0.6)))
+            t += random.uniform(0.4, 1.6)
+        events.append(json.dumps(_build_4740(victim, config,
                                              source_workstation=attacker_hostname, ts=t)))
-        events.append(json.dumps(_build_4625(svc_user, config, logon_type=3,
+        events.append(json.dumps(_build_4625(victim, config, logon_type=3,
                                              status="0xC0000234", sub_status="0x0",
                                              workstation_override=dc_host,
                                              source_workstation=attacker_hostname,
-                                             ip_override=attacker_ip, ts=t + 2.0)))
-        t += random.uniform(2, 5)
+                                             ip_override=attacker_ip, ts=t + 0.5)))
+        t += random.uniform(1.0, 2.5)
     return events
 
 
@@ -5833,8 +6137,13 @@ def _threat_priv_group_addition(config, session_context):
 # Authoritative AD schema GUIDs.
 #   container class -> MS-ADSC "Class container", schemaIdGuid
 #   nTSecurityDescriptor attribute -> MS-ADA3, schemaIdGuid
+#   pKICertificateTemplate class -> MS-ADSC, Schema-Id-Guid e5209ca2-...
+#   msPKI-Certificate-Name-Flag attribute -> MS-ADA3, System-Id-Guid ea1dddc4-...
+# All four come from Microsoft's AD schema reference pages, not from a capture.
 _GUID_CLASS_CONTAINER           = "{bf967a8b-0de6-11d0-a285-00aa003049e2}"
 _GUID_ATTR_NTSECURITYDESCRIPTOR = "{bf9679e3-0de6-11d0-a285-00aa003049e2}"
+_GUID_CLASS_PKI_TEMPLATE        = "{e5209ca2-3bba-11d2-90cc-00c04fd91ab1}"
+_GUID_ATTR_MS_PKI_NAME_FLAG     = "{ea1dddc4-60ff-416e-8cc0-17cee534bce7}"
 
 
 def _threat_adminsdholder_acl_modification(config, session_context):
@@ -5858,6 +6167,16 @@ def _threat_adminsdholder_acl_modification(config, session_context):
         AccessMask=0x40000 (WRITE_DACL) from a regular user
       - SubjectUserName is NOT a DC$ machine account or SYSTEM
       - XSIAM rule: "Suspicious modification of the AdminSDHolder's ACL"
+
+    STATUS (2026-11-16): WIP. Three batches delivered the events below with
+    every field verified in `xdr_data` and raised nothing. The blocker is NOT the
+    target object type: a differential probe fired "Possible shadow credentials
+    addition" on the same AdminSDHolder `container` DN (alert 799066, whose
+    description says "The account type: container"). Batch 3 also added an ACE
+    for WD/Everyone and named the nTSecurityDescriptor GUID in the WRITE_DAC
+    4662, with no change. What remains untested is this analytic's ACE/SDDL
+    handling or whether it is active for WEC-only data. See "Container targets
+    are evaluated" in docs/modules/windows.md.
     """
     u = _pick_windows_user(session_context)
     if not u:
@@ -6661,6 +6980,22 @@ def _threat_sccm_container_recon(config, session_context):
                                          logon_id=logon_id, ts=t)))
     t += random.uniform(0.5, 1.5)
 
+    # 1644 on the DC: the LDAP search itself. The 4662s below say which objects were
+    # touched, but only 1644 names the search base, and the published investigative
+    # action for this analytic is literally "look for the suspicious LDAP query".
+    # The tenant has 185k real 1644s (all agent-collected on ExampleCorp-DC1), and
+    # none of them has ever had CN=System Management as the starting node.
+    events.append(json.dumps(_build_1644(
+        u, config,
+        search_base=sysm_container_dn,
+        ldap_filter="(objectClass=*)",
+        scope="subtree",
+        attributes="*",
+        visited=len(sccm_site_objects) + 1,
+        returned=len(sccm_site_objects) + 1,
+        ts=t)))
+    t += random.uniform(0.2, 0.5)
+
     # %%7684 = Read Property, %%7682 = List Contents (msobjs.dll). The old values were
     # %%1537 (DELETE) and %%1541 (SYNCHRONIZE) — the wrong bitmask family entirely, the
     # same defect that kept the 4662-based generators silent while DCSync worked.
@@ -6682,6 +7017,22 @@ def _threat_sccm_container_recon(config, session_context):
         logon_id=logon_id, ts=t)))
     t += random.uniform(0.2, 0.5)
 
+    # A real LDAP search (`adfind -b <container>`, `Get-ADObject -SearchBase`) both
+    # lists the container's children and reads the container's own attributes, so it
+    # produces a List Contents 4662 on the container as well as the Read Property one
+    # above. The published analytic only says "a user accessed the System Management
+    # container"; which of the two ACEs it keys on is not documented, so emit both
+    # rather than betting on Read Property alone.
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=_SCCM_CONTAINER_OBJECT_TYPE,
+        object_name=sysm_container_dn,
+        access_mask=_SCCM_LIST_CHILDREN,
+        properties=list_props,
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.5)
+
     for site_obj in sccm_site_objects:
         events.append(json.dumps(_build_4662(
             u, config,
@@ -6694,6 +7045,220 @@ def _threat_sccm_container_recon(config, session_context):
         t += random.uniform(0.1, 0.3)
 
     t += random.uniform(0.5, 1.0)
+    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+                                         logon_id=logon_id, ts=t)))
+    return events
+
+
+def _threat_esc4_template_modification(config, session_context):
+    """Suspicious certificate template modification — AD CS ESC4.
+
+    ESC4 is the "own the template" step of the AD CS attack path: instead of
+    finding a template that already allows enrollee-supplied subjects (ESC1), the
+    attacker rewrites a template's ACL so a principal they control can edit it,
+    then arms ESC1 on it and enrolls. It is a *directory write* to
+    CN=<template>,CN=Certificate Templates,CN=Public Key Services,... which makes
+    it visible in two places at once:
+
+      - the DC records the directory-service access (4662) and the attribute
+        change (5136 nTSecurityDescriptor delete+add, then
+        msPKI-Certificate-Name-Flag);
+      - the CA records the template change itself (4899 content, 4900 security).
+
+    XSIAM's event-collection reference names **4899, 4900 and 4662** for
+    "Suspicious certificate template modification"; 5136 is not in that list.
+    The generator emits all four shapes so the analytic can key on whichever it
+    actually reads, and so the 5136 leg still tells the directory-service story.
+
+    Sequence:
+      1. Attacker authenticates → DC-side 4624 + endpoint 4624 + 4672
+      2. 4688 certipy template -write-default-configuration
+      3. 4899 the CA sees the template content change
+      4. 4900 the CA sees the template security descriptor change
+      5. 4662 read / WRITE_DAC / property writes on the template object
+      6. 5136 nTSecurityDescriptor delete+add, then msPKI-Certificate-Name-Flag
+      7. 4689 process exit
+
+    STATUS (2026-11-17): WIP. Three deliveries, zero alerts:
+
+      attempt 1 14:28Z  5136 only (SDDL delete+add granting Authenticated Users
+                        full control, plus name-flag = 1)
+      attempt 2 14:40Z  + the 4662 legs (0x10 read, 0x40000 WRITE_DAC %%1539,
+                        0x20 property write %%7685 for nTSecurityDescriptor and
+                        msPKI-Certificate-Name-Flag)
+      attempt 3 14:49Z  + 4899 and 4900 from the CA (old/new content and old/new
+                        security descriptor)
+
+    All three verified ingested with DN, class, attributes and SDDLs intact.
+    What remains unverified is the 4899/4900 EventData naming: Microsoft
+    publishes no per-event page for either, so they follow the published message
+    template plus 4898's field names. Do not tune this further without a captured
+    real 4899/4900 to compare against — the same wall as 4898.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    dns_domain = _get_dns_domain(config)
+    domain = _get_domain(config)
+    dc_host = _get_dc_hostname(config)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
+    template = random.choice(_CERT_TEMPLATES_VULNERABLE)
+    template_dn = (f"CN={template},CN=Certificate Templates,CN=Public Key Services,"
+                   f"CN=Services,CN=Configuration,{base_dn}")
+    template_guid = "{" + str(uuid.uuid4()) + "}"
+    template_oid = (f"1.3.6.1.4.1.311.21.8.{random.randint(1000000, 9999999)}."
+                    f"{random.randint(1000000, 9999999)}")
+
+    # Before: subject is built from AD (0x0). After: enrollee supplies subject
+    # (0x1) — the ESC1 condition the new ACL lets the attacker set.
+    def _content(name_flag):
+        return (f"msPKI-Certificate-Name-Flag: {name_flag}\r\n"
+                f"msPKI-Enrollment-Flag: 0x0\r\n"
+                f"msPKI-Private-Key-Flag: 0x10\r\n"
+                f"msPKI-RA-Signature: 0\r\n"
+                f"pKIExtendedKeyUsage: 1.3.6.1.5.5.7.3.2\r\n"
+                f"msPKI-Certificate-Application-Policy: 1.3.6.1.5.5.7.3.2")
+
+    old_content = _content("0x0")
+    new_content = _content("0x1")
+
+    # The class's documented default descriptor, then the ESC4 delta: Authenticated
+    # Users receive the same write rights DA and SY already hold.
+    old_sd = ("O:DAG:DAD:PAI(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)"
+              "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;SY)"
+              "(A;;RPLCLORC;;;AU)")
+    new_sd = ("O:DAG:DAD:PAI(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)"
+              "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;SY)"
+              "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;AU)")
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+    op_corr_id = _new_logon_guid()
+
+    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+                                             logon_id=logon_id, ts=t)))
+    t += 1.0
+    events.append(json.dumps(_build_4624(u, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += 0.05
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(3.0, 9.0)
+
+    tool = random.choice([
+        ("C:\\Users\\Public\\certipy.exe",
+         f'certipy template -u {u["username"]}@{dns_domain} -p <redacted> '
+         f'-dc-ip {dc_host} -template {template} -write-default-configuration '
+         f'-save-old'),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         f'powershell.exe -ep bypass -c "$acl = Get-Acl '
+         f"'AD:\\CN={template},CN=Certificate Templates,CN=Public Key Services,"
+         f"CN=Services,CN=Configuration,{base_dn}'; $acl.AddAccessRule("
+         f"(New-Object System.DirectoryServices.ActiveDirectoryAccessRule("
+         f"'\"Authenticated Users\",'GenericAll','Allow'))); Set-Acl -Path "
+         f"'AD:\\CN={template},CN=Certificate Templates,CN=Public Key Services,"
+         f"CN=Services,CN=Configuration,{base_dn}' -AclObject $acl\""),
+    ])
+    events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
+                                         command_line=tool[1],
+                                         logon_id=logon_id, ts=t)))
+    t += random.uniform(1.0, 2.0)
+
+    # The CA sees the change first: it holds the template definitions.
+    events.append(json.dumps(_build_4899(
+        u, config, template_name=template, old_content=old_content,
+        new_content=new_content, template_oid=template_oid,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 1.0)
+    events.append(json.dumps(_build_4900(
+        u, config, template_name=template, old_content=old_content,
+        new_content=new_content, old_security_descriptor=old_sd,
+        new_security_descriptor=new_sd, template_oid=template_oid,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 1.0)
+
+    # Directory-service access records: read the ACL, take WRITE_DAC, write the two
+    # attributes. ObjectType is the template class schemaIdGuid (e5209ca2-...), and
+    # the property GUIDs are the attributes' own schema IDs — the same construction
+    # that makes the DCSync and AdminSDHolder 4662 legs resolve.
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=f"%{_GUID_CLASS_PKI_TEMPLATE}",
+        object_name=template_dn,
+        access_mask="0x10",
+        properties=f"%%7684\n    {_GUID_CLASS_PKI_TEMPLATE}\n",
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.2, 0.5)
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=f"%{_GUID_CLASS_PKI_TEMPLATE}",
+        object_name=template_dn,
+        access_mask="0x40000",
+        properties=f"%%1539\n    {_GUID_CLASS_PKI_TEMPLATE}\n",
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.1, 0.3)
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=f"%{_GUID_CLASS_PKI_TEMPLATE}",
+        object_name=template_dn,
+        access_mask="0x20",
+        properties=(f"%%7685\n    {_GUID_CLASS_PKI_TEMPLATE}\n    "
+                    f"{_GUID_ATTR_NTSECURITYDESCRIPTOR}\n"),
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.1, 0.3)
+    events.append(json.dumps(_build_4662(
+        u, config,
+        object_type=f"%{_GUID_CLASS_PKI_TEMPLATE}",
+        object_name=template_dn,
+        access_mask="0x20",
+        properties=(f"%%7685\n    {_GUID_CLASS_PKI_TEMPLATE}\n    "
+                    f"{_GUID_ATTR_MS_PKI_NAME_FLAG}\n"),
+        operation_type="Object Access",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.3, 0.8)
+
+    # The DC's own record: value deleted then value added, then the flag write.
+    events.append(json.dumps(_build_5136(
+        u, config, object_dn=template_dn,
+        object_class="pKICertificateTemplate",
+        object_guid=template_guid,
+        attribute_name="nTSecurityDescriptor",
+        attribute_value=old_sd,
+        attribute_syntax_oid="2.5.5.15",
+        operation_type="%%14675",
+        op_correlation_id=op_corr_id,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.02, 0.1)
+    events.append(json.dumps(_build_5136(
+        u, config, object_dn=template_dn,
+        object_class="pKICertificateTemplate",
+        object_guid=template_guid,
+        attribute_name="nTSecurityDescriptor",
+        attribute_value=new_sd,
+        attribute_syntax_oid="2.5.5.15",
+        operation_type="%%14674",
+        op_correlation_id=op_corr_id,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.02, 0.1)
+    events.append(json.dumps(_build_5136(
+        u, config, object_dn=template_dn,
+        object_class="pKICertificateTemplate",
+        object_guid=template_guid,
+        attribute_name="msPKI-Certificate-Name-Flag",
+        attribute_value="1",
+        attribute_syntax_oid="2.5.5.9",
+        operation_type="%%14674",
+        op_correlation_id=op_corr_id,
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.5, 1.0)
+
     events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
                                          logon_id=logon_id, ts=t)))
     return events
@@ -6713,24 +7278,28 @@ def _threat_dnshostname_spoofing(config, session_context):
       1. Attacker authenticates → DC-side 4624 + endpoint 4624 + 4672
       2. 4741 or pre-existing machine account (attacker may create a new one)
       3. 4688 PowerShell / Certify process creation
-      4. 5136 dNSHostName modified to DC hostname (detection trigger)
+      4. 5136 dNSHostName modified to the DC's FQDN
       5. 5136 servicePrincipalName updated to match DC SPNs
-      6. 4769 TGS request using the spoofed identity
-      7. 4689 process exit
+      6. 4742 carrying the new DnsHostName — this is the event the detector reads
+      7. 4769 TGS request using the spoofed identity
+      8. 4689 process exit
 
-    Detection keys:
-      - 5136 with AttributeLDAPDisplayName=dNSHostName and AttributeValue
-        matching a DC hostname from a non-DC machine account
-      - Followed by certificate enrollment or TGS requests for DC services
+    Detection keys (verified against the tenant on 2026-11-18, alerts 803275 /
+    803276 / 803488):
+      - the **4742** state-carrying event, with `DnsHostName` set to the FQDN of
+        a domain controller the identity graph actually knows. A 5136 pair on
+        its own does not fire, and a synthetic DC-looking name
+        (`DC01.examplecorp.local`) never matches.
+      - the value has to name a real DC asset, which is why the spoof target
+        comes from `_get_spoof_dc_fqdn()` rather than `_get_dc_hostname()`.
     """
     u = _pick_windows_user(session_context)
     if not u:
         return None
 
+    spoof_dc = _get_spoof_dc_fqdn(config)
+
     dns_domain = _get_dns_domain(config)
-    domain = _get_domain(config)
-    dc_host = _get_dc_hostname(config)
-    dc_short = _get_dc_short(config)
     dc_parts = dns_domain.split(".")
     base_dn = ",".join(f"DC={p}" for p in dc_parts)
 
@@ -6775,13 +7344,13 @@ def _threat_dnshostname_spoofing(config, session_context):
     tool = random.choice([
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
          f'powershell.exe -ep bypass -c "Set-ADComputer {machine_name} '
-         f"-DnsHostName '{dc_host}'\""),
+         f"-DnsHostName '{spoof_dc}'\""),
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
          f'powershell.exe -ep bypass -c "Get-ADComputer {machine_name} | '
-         f"Set-ADComputer -DnsHostName '{dc_host}'\""),
+         f"Set-ADComputer -DnsHostName '{spoof_dc}'\""),
         ("C:\\Users\\Public\\Certipy.exe",
          f"Certipy.exe account update -u {u['username']}@{dns_domain} "
-         f"-p <password> -user {machine_name}$ -dns {dc_host}"),
+         f"-p <password> -user {machine_name}$ -dns {spoof_dc}"),
     ])
     events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
                                          command_line=tool[1],
@@ -6791,8 +7360,8 @@ def _threat_dnshostname_spoofing(config, session_context):
     old_dns = f"{machine_name.lower()}.{dns_domain}"
     old_spn_host = f"HOST/{old_dns}"
     old_spn_rkrb = f"RestrictedKrbHost/{old_dns}"
-    new_spn_host = f"HOST/{dc_host}"
-    new_spn_rkrb = f"RestrictedKrbHost/{dc_host}"
+    new_spn_host = f"HOST/{spoof_dc}"
+    new_spn_rkrb = f"RestrictedKrbHost/{spoof_dc}"
 
     # 5136 pair: dNSHostName Value Deleted (old) then Value Added (new)
     events.append(json.dumps(_build_5136(
@@ -6813,7 +7382,7 @@ def _threat_dnshostname_spoofing(config, session_context):
         object_class="computer",
         object_guid=machine_guid,
         attribute_name="dNSHostName",
-        attribute_value=dc_host,
+        attribute_value=spoof_dc,
         attribute_syntax_oid="2.5.5.12",
         operation_type="%%14674",
         op_correlation_id=op_corr_id,
@@ -6849,21 +7418,22 @@ def _threat_dnshostname_spoofing(config, session_context):
         t += 0.001
     t += 0.01
 
-    # 4742: computer account changed — final-state values
-    all_new_spns = f"{new_spn_host}\r\n\t{new_spn_rkrb}\r\n\tHOST/{dc_short}"
+    # 4742: computer account changed. Only DnsHostName is populated — that is
+    # exactly the shape the tenant's real 4742 uses for unchanged attributes
+    # ("-"), and it is the event the dNSHostName analytics read.
     events.append(json.dumps(_build_4742(
         u, config,
         target_computer_name=machine_sam,
         target_sid=machine_sid,
-        sam_account_name=machine_sam,
-        dns_host_name=dc_host,
-        spns=all_new_spns,
+        sam_account_name="-",
+        dns_host_name=spoof_dc,
+        spns="-",
         logon_id=logon_id, ts=t)))
     t += random.uniform(1.0, 3.0)
 
-    fake_machine_user = {**u, "username": machine_sam, "hostname": dc_host}
+    fake_machine_user = {**u, "username": machine_sam, "hostname": spoof_dc}
     events.append(json.dumps(_build_4769(fake_machine_user, config,
-                                         service_spn=f"ldap/{dc_host}",
+                                         service_spn=f"ldap/{spoof_dc}",
                                          encryption="0x12",
                                          ip_override=u.get("ip"),
                                          ts=t)))
@@ -7146,6 +7716,30 @@ def _threat_new_machine_delegation(config, session_context):
       5. 5136 userAccountControl -> TRUSTED_TO_AUTH_FOR_DELEGATION (corroboration)
       6. 4742 computer account CHANGED, AllowedToDelegateTo = DC SPN  (KEY TRIGGER)
       7. 4689 process exit
+
+    STATUS (2026-11-18): WIP. Three deliveries, zero alerts, all events verified
+    ingested in xdr_data:
+
+      attempt 1 05:17Z  config-only 4741 + clean 4742(AllowedToDelegateTo) + 5136;
+                        bare S4U2Self + S4U2Proxy (TransmittedServices = the new
+                        machine); and a new machine TGT + TGS to FS01
+      attempt 2 05:41Z  full RBCD chain on FS01 (5136 + 4662 with
+                        3f78c3e5-...); constrained delegation enabled at creation
+                        (4741 NewUacValue 0x1001000); unconstrained at creation
+                        (4741 NewUacValue 0x81000)
+      attempt 3 06:14Z  the same three chains, each preceded by a DC-side machine
+                        4624 (logon type 3, Kerberos, TargetUserName = <machine>$)
+                        and the machine's own TGT, so the identity graph has a
+                        machine node to attach the delegation to
+
+    A separate diagnostic explains why: a fresh 4741 by a user who had never
+    created a machine did NOT raise "Rare machine account creation" (a
+    single-event Identity Analytics detection), even though the 4741 was
+    ingested. 4741 is therefore not what feeds machine-creation analytics in
+    this tenant, so the detector cannot establish that the machine is "new".
+    The vendor page also declares a 12-hour Test Period, so a late alert cannot
+    be ruled out entirely. Re-probe only if a real 4741 ever drives a
+    machine-creation alert here.
     """
     u = _pick_windows_user(session_context)
     if not u:
@@ -7672,34 +8266,38 @@ def _threat_priv_group_add_remove(config, session_context):
     return events
 
 
-# Privileged accounts and templates used for ADCS attack simulation
-# krbtgt is disabled and never enrolls, so a krbtgt certificate subject will never
-# resolve against an identity XSIAM has ever seen authenticate.
-_PRIV_CERT_TARGETS = ["Administrator", "DC01$", "svc_sql_prod"]
+# The account that must *submit* the request. Verified 2026-11-16: the tenant's
+# analytic fires on a sensitive Requester regardless of the requested subject, and
+# only the built-in Administrator is *known* to be classified as sensitive here
+# (the same inventory rule that made password_never_expires target Administrator).
+# The requested subject is deliberately an ordinary user, chosen fresh each run,
+# because the Low variation also requires the (requester, subject) pair to be
+# novel over 30 days.
+_PRIV_CERT_REQUESTER = "Administrator"
+
 
 def _threat_priv_cert_request(config, session_context):
-    """Privileged certificate request via certificate template (ADCS ESC attacks).
+    r"""Privileged certificate request via certificate template (ADCS ESC attacks).
 
-    Three XSIAM detection variants:
-      - "Privileged certificate request via certificate template" (Low) —
-        4886 + 4887 with a vulnerable template and SAN for a privileged account
-      - "Suspicious privileged certificate request via certificate template" (Low) —
-        same pattern but using a template that is more obviously suspicious
-      - "Suspicious privileged certificate request denied via certificate template" (Medium) —
-        4886 + 4888 where the CA denied the request
+    Verified live 2026-11-16 (alert 799505, Low). The tenant's analytic fires when
+    the *Requester* is a sensitive account, whatever the certificate is issued to:
+    "A privileged certificate was requested by EXAMPLECORP\Administrator via
+    certificate template. ... This certificate was issued for CN=<ordinary user>.
+    ... This requester is a sensitive user."
+
+    The same shape with a normal requester and a privileged subject (attempt 1)
+    and the requester/subject permutations (attempt 2, burst B) raised nothing.
 
     Sequence:
-      1. Attacker authenticates → DC-side 4624 + endpoint 4624 + 4672
+      1. Administrator authenticates → DC-side 4624 + endpoint 4624 + 4672
       2. 4688 Certify.exe / certreq.exe / PowerShell process creation
-      3. 4886 certificate request received on CA (KEY TRIGGER)
-      4. 4887 certificate issued (success variants) OR 4888 request denied
-      5. Optional: 4768 PKINIT TGT request using the issued certificate
+      3. 4898 the CA loads an ESC1 template (enrollee supplies subject)
+      4. 4886 request received, 4887 issued to an ordinary user
+      5. 4768 PKINIT TGT request as the certificate subject
       6. 4689 process exit
 
-    Detection keys:
-      - 4886/4887/4888 with CertificateTemplate pointing to a vulnerable template
-      - SAN (san:upn=) in Attributes specifying a different identity than the Requester
-      - Certificate used for PKINIT auth shortly after issuance
+    Not emitted: the Medium "denied" variation (4886 + 4888). It was never probed,
+    and the issued path is the one verified to fire.
     """
     u = _pick_windows_user(session_context)
     if not u:
@@ -7707,29 +8305,13 @@ def _threat_priv_cert_request(config, session_context):
 
     dns_domain = _get_dns_domain(config)
 
-    # The issued path carries the detection: 4887 is the only event in the family that
-    # states both Requester and the issued certificate's Subject, and every AD CS analytic
-    # (privileged request / user-cert mismatch / machine-cert mismatch) compares those two.
-    # A denial gives XSIAM a requester and nothing to compare it against, so keep it a
-    # minority.
-    variant = random.choices(
-        ["suspicious_issued", "denied"],
-        weights=[80, 20], k=1)[0]
-
-    priv_target = random.choice(_PRIV_CERT_TARGETS)
-    is_machine_target = priv_target.endswith("$")
-    san_kind = "dns" if is_machine_target else "upn"
-    san_value = (f"{priv_target.rstrip('$').lower()}.{dns_domain}"
-                 if is_machine_target else f"{priv_target}@{dns_domain}")
-
-    # The certificate is issued to the *privileged target*, not to the attacker who
-    # submitted the request — that Requester/Subject divergence is the ESC1 signal.
-    # Without it Requester == Subject and nothing fires.
+    # Requester = the sensitive account; subject = an ordinary user. Reversing these
+    # (privileged subject, normal requester) is silent in this tenant.
+    requester = {**u, "username": _PRIV_CERT_REQUESTER}
+    subject = u["username"]
+    san_value = f"{subject}@{dns_domain}"
     cert_base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
-    priv_subject_dn = (
-        f"CN={priv_target.rstrip('$')}, CN=Computers, {cert_base_dn}"
-        if is_machine_target else
-        f"CN={priv_target}, CN=Users, {cert_base_dn}")
+    subject_dn = f"CN={subject},CN=Users,{cert_base_dn}"
 
     template = random.choice(_CERT_TEMPLATES_VULNERABLE)
 
@@ -7738,31 +8320,32 @@ def _threat_priv_cert_request(config, session_context):
 
     logon_id = _new_logon_id()
 
-    events.append(json.dumps(_dc_logon_event(u, config, ip_override=u.get("ip"),
+    events.append(json.dumps(_dc_logon_event(requester, config,
+                                             ip_override=requester.get("ip"),
                                              logon_id=logon_id, ts=t)))
     t += 1.0
-    events.append(json.dumps(_build_4624(u, config, logon_type=2,
+    events.append(json.dumps(_build_4624(requester, config, logon_type=2,
                                          auth_pkg=_NEG_PACKAGE,
                                          target_logon_id=logon_id,
                                          elevated=True, ts=t)))
     t += 0.05
-    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
+    events.append(json.dumps(_build_4672(requester, config, logon_id=logon_id,
                                          is_admin=True, ts=t)))
     t += random.uniform(2.0, 5.0)
 
     tool = random.choice([
         ("C:\\Users\\Public\\Certify.exe",
          f"Certify.exe request /ca:{_get_ca_hostname(config)} "
-         f"/template:{template} /altname:{priv_target}"),
+         f"/template:{template} /altname:{subject}"),
         ("C:\\Windows\\System32\\certreq.exe",
          f"certreq.exe -submit -attrib \"CertificateTemplate:{template}"
          f"\\nsan:upn={san_value}\" request.req"),
         ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
          f"powershell.exe -ep bypass -c \"Get-Certificate -Template {template} "
-         f"-DnsName {priv_target.rstrip('$').lower()}.{dns_domain} "
+         f"-DnsName {subject}.{dns_domain} "
          f"-CertStoreLocation Cert:\\CurrentUser\\My\""),
     ])
-    events.append(json.dumps(_build_4688(u, config, process_name=tool[0],
+    events.append(json.dumps(_build_4688(requester, config, process_name=tool[0],
                                          command_line=tool[1],
                                          logon_id=logon_id, ts=t)))
     t += random.uniform(0.5, 1.5)
@@ -7774,48 +8357,45 @@ def _threat_priv_cert_request(config, session_context):
     # Client Auth EKU + Authenticated Users enroll = ESC1), and it is in XSIAM's Object
     # Access intake list. Without it the request events describe an enrollment against a
     # template the tenant has no reason to consider vulnerable.
-    events.append(json.dumps(_build_4898(u, config, template_name=template,
+    events.append(json.dumps(_build_4898(requester, config, template_name=template,
                                          enrollee_supplies_subject=True, ts=t)))
     t += random.uniform(0.1, 0.4)
 
     # 4886 — CA received the request
-    events.append(json.dumps(_build_4886(u, config,
+    events.append(json.dumps(_build_4886(requester, config,
                                          template_name=template,
                                          request_id=request_id,
                                          san_override=san_value,
-                                         san_kind=san_kind,
+                                         san_kind="upn",
                                          ts=t)))
     t += random.uniform(0.1, 0.5)
 
-    if variant == "denied":
-        events.append(json.dumps(_build_4888(u, config,
-                                             template_name=template,
-                                             request_id=request_id,
-                                             san_override=san_value,
-                                             san_kind=san_kind,
-                                             subject_dn=priv_subject_dn,
-                                             ts=t)))
-    else:
-        events.append(json.dumps(_build_4887(u, config,
-                                             template_name=template,
-                                             request_id=request_id,
-                                             san_override=san_value,
-                                             san_kind=san_kind,
-                                             subject_dn=priv_subject_dn,
-                                             ts=t)))
-        t += random.uniform(2.0, 5.0)
+    # 4887 — issued. This is the record that states both Requester and the issued
+    # certificate's Subject, which is what the analytic reports.
+    events.append(json.dumps(_build_4887(requester, config,
+                                         template_name=template,
+                                         request_id=request_id,
+                                         san_override=san_value,
+                                         san_kind="upn",
+                                         subject_dn=subject_dn,
+                                         ts=t)))
+    t += random.uniform(2.0, 5.0)
 
-        # Attacker uses the cert for PKINIT TGT request
-        priv_user = {**u, "username": priv_target.rstrip("$")}
-        events.append(json.dumps(_build_4768(priv_user, config,
-                                             ip_override=u.get("ip"),
-                                             cert_issuer=f"{_get_domain(config)}-CA01-CA",
-                                             cert_serial="6100000005a4b31a47c8b1ae9f000000000005",
-                                             cert_thumbprint=_random_ski().replace(" ", ""),
-                                             ts=t)))
+    # Attacker uses the cert for a PKINIT TGT request as the certificate subject.
+    # preauth_type 15 (PA-PK-AS-REP_OLD) is the smart-card/PKINIT code; leaving the
+    # default 2 would render a password pre-auth record that also carries cert fields.
+    cert_user = {**u, "username": subject}
+    events.append(json.dumps(_build_4768(cert_user, config,
+                                         ip_override=u.get("ip"),
+                                         cert_issuer=f"{_get_domain(config)}-CA01-CA",
+                                         cert_serial="6100000005a4b31a47c8b1ae9f000000000005",
+                                         cert_thumbprint=_random_ski().replace(" ", ""),
+                                         preauth_type="15",
+                                         preauth_encryption="0x12",
+                                         ts=t)))
     t += random.uniform(0.5, 1.0)
 
-    events.append(json.dumps(_build_4689(u, config, process_name=tool[0],
+    events.append(json.dumps(_build_4689(requester, config, process_name=tool[0],
                                          logon_id=logon_id, ts=t)))
     return events
 
@@ -8070,10 +8650,16 @@ def _threat_sensitive_password_reset(config, session_context):
     return events
 
 
-_SENSITIVE_GROUP_ACCOUNTS = [
-    "Administrator", "krbtgt", "svc_sql_prod", "svc_backup",
-    "svc_exchange", "svc_sccm",
-]
+# The Low variation ("A sensitive account was modified to password never
+# expires") needs the target to be in a sensitive built-in group *according to the
+# tenant's identity inventory*, not according to an event we can send. A
+# 2026-11-16 probe showed only the built-in Administrator qualifies here: the
+# identical 4738 flag delta for krbtgt (RID 502) and for svc_sql_prod /
+# svc_exchange raised nothing, and no group-add event ever places those service
+# accounts in a privileged group. Choosing randomly from that set (the previous
+# behaviour) made most runs silent, so this generator always targets
+# Administrator.
+_PNE_TARGET_ACCOUNT = "Administrator"
 
 
 def _threat_password_never_expires(config, session_context):
@@ -8086,7 +8672,8 @@ def _threat_password_never_expires(config, session_context):
       - The "A sensitive account was modified to password never expires" variation (Low)
         additionally requires the target to be a member of a sensitive built-in AD group,
         which XSIAM resolves from its own identity inventory, not from a group-add event
-        emitted seconds earlier in the same burst.
+        emitted seconds earlier in the same burst. In this tenant only the built-in
+        Administrator satisfies that (see `_PNE_TARGET_ACCOUNT`), so that is the target.
 
     Sequence:
       1. Attacker authenticates → DC 4624 + endpoint 4624 + 4672
@@ -8099,13 +8686,8 @@ def _threat_password_never_expires(config, session_context):
     if not u:
         return None
 
-    target_acct = random.choice(_SENSITIVE_GROUP_ACCOUNTS)
-    if target_acct == "Administrator":
-        target_sid = f"{_SYNTH_DOMAIN_SID}-500"
-    elif target_acct == "krbtgt":
-        target_sid = f"{_SYNTH_DOMAIN_SID}-502"
-    else:
-        target_sid = _stable_user_sid(target_acct)
+    target_acct = _PNE_TARGET_ACCOUNT
+    target_sid = f"{_SYNTH_DOMAIN_SID}-500"
 
     events = []
     t = time.time()
@@ -8347,6 +8929,8 @@ _RENAMED_THREATS = {
     "WIP_AS_REP_ROASTING":          "AS_REP_ROASTING",
     "WIP_DMSA_PRIVESC":             "DMSA_PRIVESC",
     "WIP_SENSITIVE_PASSWORD_RESET": "SENSITIVE_PASSWORD_RESET",
+    "WIP_PASSWORD_NEVER_EXPIRES":   "PASSWORD_NEVER_EXPIRES",
+    "WIP_PRIV_CERT_REQUEST":        "PRIV_CERT_REQUEST",
 }
 
 # ── Exchange mailbox abuse via PowerShell (4104 ScriptBlock) ──────────────────
@@ -9024,9 +9608,11 @@ _GUID_ATTR_SERVICE_PRINCIPAL  = "{f3a64788-5306-11d1-a9c5-0000f80367c1}"
 _GUID_ATTR_SAM_ACCOUNT_NAME   = "{3e0abfd0-126a-11d0-a060-00aa006c33ed}"
 _GUID_ATTR_THUMBNAIL_PHOTO    = "{8d3bca50-1d7e-11d0-a081-00aa006c33ed}"
 
-# PA-PK-AS-REQ. Windows records this as PreAuthType=16 on a PKINIT 4768; 2 is
-# PA-ENC-TIMESTAMP (password), the value every non-PKINIT generator uses.
-_PREAUTH_PKINIT = "16"
+# 4768 PreAuthType for smart-card / PKINIT logons. Microsoft's documented 4768
+# sample with CertIssuerName/Serial/Thumbprint populated uses 15 (PA-PK-AS-REP_OLD,
+# "used for Smart Card logon authentication"); 16 is PA-PK-AS-REQ and 17 is
+# PA-PK-AS-REP. The generator emits 15; the probe harness exercised all three.
+_PREAUTH_PKINIT = "15"
 
 
 def _pkinit_cert_fields(config, *, rogue=False):
@@ -9185,7 +9771,8 @@ def _threat_shadow_credentials(config, session_context):
     pkinit_user = {**target, "ip": actor.get("ip")}
     events.append(json.dumps(_build_4768(
         pkinit_user, config, ip_override=actor.get("ip"), encryption="0x12",
-        preauth_type=_PREAUTH_PKINIT, cert_issuer=issuer, cert_serial=serial,
+        preauth_type=_PREAUTH_PKINIT, preauth_encryption="0x12",
+        cert_issuer=issuer, cert_serial=serial,
         cert_thumbprint=thumb, ts=t)))
     t += random.uniform(0.5, 1.5)
     events.append(json.dumps(_build_4769(
@@ -9206,11 +9793,13 @@ def _threat_pkinit_auth(config, session_context):
     PKINIT TGT authentication request" (Low) variations.
 
     Single-event detector: the only documented discriminator is that the TGT was
-    obtained with PKINIT. Windows records that on 4768 as PreAuthType=16
-    (PA-PK-AS-REQ) with CertIssuerName / CertSerialNumber / CertThumbprint
-    populated. Those field names are the published 4768 EventData names.
-    The shape is built from those names, not a captured PKINIT 4768; if this fires
-    nothing, diff a real event before changing anything else.
+    obtained with PKINIT. Windows records that on 4768 as PreAuthType=15
+    (PA-PK-AS-REP_OLD — the value in Microsoft's own smart-card 4768 sample)
+    with CertIssuerName / CertSerialNumber / CertThumbprint populated and
+    PreAuthEncryptionType set to the pre-auth flow etype (0x12). Those field
+    names are the published 4768 EventData names. The shape is built from those
+    names, not a captured PKINIT 4768; if this fires nothing, diff a real event
+    before changing anything else.
 
     A rogue (non-enterprise) issuer is used half the time to exercise the
     certificate-anomaly path that the "Suspicious" variation likely keys on;
@@ -9236,7 +9825,8 @@ def _threat_pkinit_auth(config, session_context):
 
     events.append(json.dumps(_build_4768(
         u, config, ip_override=src_ip, encryption="0x12",
-        preauth_type=_PREAUTH_PKINIT, cert_issuer=issuer, cert_serial=serial,
+        preauth_type=_PREAUTH_PKINIT, preauth_encryption="0x12",
+        cert_issuer=issuer, cert_serial=serial,
         cert_thumbprint=thumb, ts=t)))
     t += random.uniform(0.2, 0.8)
     events.append(json.dumps(_dc_logon_event(u, config, ip_override=src_ip,
@@ -9593,8 +10183,8 @@ def _threat_spn_cleared(config, session_context):
     t += 0.01
     events.append(json.dumps(_build_4742(
         actor, config, target_computer_name=machine_sam, target_sid=machine_sid,
-        sam_account_name=machine_sam, dns_host_name=machine_fqdn, spns="-",
-        logon_id=logon_id, ts=t)))
+        sam_account_name="-", dns_host_name="-", spns="-",
+        uac_control="%%2080", logon_id=logon_id, ts=t)))
     t += random.uniform(0.5, 1.0)
 
     events.append(json.dumps(_build_4689(actor, config, process_name=tool[0],
@@ -9736,17 +10326,18 @@ _THREAT_WEIGHTS = {
     "sms_admins_addition":         3,
     "sms_admins_add_remove":       3,
     "wip_sccm_container_recon":    3,
+    "wip_esc4_template_modification": 3,
     "dnshostname_spoofing":        3,
     "samaccountname_spoofing":     3,
     "delegation_change":           3,
-    "new_machine_delegation":      3,
+    "wip_new_machine_delegation":  3,
     "multiple_service_tickets":    5,
     "priv_group_add_remove":       4,
-    "wip_priv_cert_request":       3,
+    "priv_cert_request":           3,
     "suspicious_account_creation": 5,
     "mass_account_deletion":       4,
     "sensitive_password_reset": 4,
-    "wip_password_never_expires":  3,
+    "password_never_expires":  3,
     "default_account_enabled":     3,
     # LSASS handle access is a high-signal credential-dumping path, so it is
     # weighted with the other privilege-abuse threats rather than rarely.
@@ -9788,17 +10379,18 @@ _THREAT_GENERATORS = {
     "sms_admins_addition":              _threat_sms_admins_addition,
     "sms_admins_add_remove":            _threat_sms_admins_add_remove,
     "wip_sccm_container_recon":         _threat_sccm_container_recon,
+    "wip_esc4_template_modification":   _threat_esc4_template_modification,
     "dnshostname_spoofing":             _threat_dnshostname_spoofing,
     "samaccountname_spoofing":          _threat_samaccountname_spoofing,
     "delegation_change":                _threat_delegation_change,
-    "new_machine_delegation":           _threat_new_machine_delegation,
+    "wip_new_machine_delegation":       _threat_new_machine_delegation,
     "multiple_service_tickets":         _threat_multiple_service_tickets,
     "priv_group_add_remove":            _threat_priv_group_add_remove,
-    "wip_priv_cert_request":            _threat_priv_cert_request,
+    "priv_cert_request":                _threat_priv_cert_request,
     "suspicious_account_creation":      _threat_suspicious_account_creation,
     "mass_account_deletion":            _threat_mass_account_deletion,
     "sensitive_password_reset":     _threat_sensitive_password_reset,
-    "wip_password_never_expires":       _threat_password_never_expires,
+    "password_never_expires":       _threat_password_never_expires,
     "default_account_enabled":          _threat_default_account_enabled,
     "lsass_handle_access":              _threat_lsass_handle_access,
     "account_access_removal":           _threat_account_access_removal,
@@ -9843,30 +10435,34 @@ ANALYTIC_ALERTS = {
     "sms_admins_addition":         "User added to the SMS Admins local group",
     "sms_admins_add_remove":       "User added to the SMS Admins group and removed",
     "wip_sccm_container_recon":    "Suspicious access of the System Management Container",
+    "wip_esc4_template_modification": "Suspicious certificate template modification",
     "dnshostname_spoofing":        "Suspicious dNSHostName attribute change to DC name",
     "samaccountname_spoofing":     "Service ticket request with a spoofed sAMAccountName",
     "delegation_change":           "User account delegation to KRBTGT",
-    "new_machine_delegation":      "A new machine attempted Kerberos delegation",
+    "wip_new_machine_delegation":  "A new machine attempted Kerberos delegation",
     "multiple_service_tickets":    "Abnormal issuance of weakly encrypted service tickets to a user",
     "priv_group_add_remove":       "Rare privileged group addition and removal",
-    "wip_priv_cert_request":       "Privileged certificate request via certificate template",
+    "priv_cert_request":          "Suspicious privileged certificate request via certificate template",
     "suspicious_account_creation": "Suspicious hidden user created",
     "mass_account_deletion":       "A user deleted multiple users for the first time",
     "sensitive_password_reset":    "Sensitive account password reset attempt for the first time",
-    "wip_password_never_expires":  "A user account was modified to password never expires",
+    "password_never_expires":  "A sensitive account was modified to password never expires",
     "default_account_enabled":     "A user enabled the Windows DefaultAccount",
-    "mailbox_export":              "PowerShell used to export mailbox contents",
-    "mailbox_export_log_removal":  "PowerShell used to remove mailbox export request logs",
-    "mailbox_cas_change":          "Mailbox Client Access Setting (CAS) changed",
+    # WIP (2026-11-10): the three mailbox detectors ingest on 4104, 4688 and the
+    # native MSExchange Management channel but raised no alert after 3 probe
+    # batches each. See docs/modules/windows.md "Live verification".
+    "mailbox_export":              "PowerShell used to export mailbox contents",  # WIP
+    "mailbox_export_log_removal":  "PowerShell used to remove mailbox export request logs",  # WIP
+    "mailbox_cas_change":          "Mailbox Client Access Setting (CAS) changed",  # WIP
     # AD CS / Kerberos / directory-attribute abuse (added 2026-11-01).
     # The primary name is the Low+ variation the generator is built to raise;
     # the base Informational name and any sibling variation are in SECONDARY.
     "shadow_credentials":          "Possible shadow credentials addition",
-    "pkinit_auth":                 "Suspicious PKINIT TGT authentication request",
+    "pkinit_auth":                 "Suspicious PKINIT TGT authentication request",  # WIP
     "sid_history_injection":       "Suspicious SID History Addition",
     "adfs_dkm_access":             "ADFS DKM Key Access",
-    "kerberos_relay":              "Possible Kerberos relay attack",
-    "spn_cleared":                 "SPNs cleared from a machine account for the first time",
+    "kerberos_relay":              "Possible Kerberos relay attack",  # WIP
+    "spn_cleared":                 "SPNs cleared from a machine account for the first time",  # WIP
     "suspicious_sam_change":       "Suspicious sAMAccountName change to DC hostname",
 }
 
@@ -10061,17 +10657,19 @@ def _generate_scenario_event(scenario_event, config, context):
         "SMS_ADMINS_ADDITION":              _threat_sms_admins_addition,
         "SMS_ADMINS_ADD_REMOVE":            _threat_sms_admins_add_remove,
         "WIP_SCCM_CONTAINER_RECON":         _threat_sccm_container_recon,
+        "WIP_ESC4_TEMPLATE_MODIFICATION":   _threat_esc4_template_modification,
         "DNSHOSTNAME_SPOOFING":             _threat_dnshostname_spoofing,
         "SAMACCOUNTNAME_SPOOFING":          _threat_samaccountname_spoofing,
         "DELEGATION_CHANGE":                _threat_delegation_change,
         "NEW_MACHINE_DELEGATION":           _threat_new_machine_delegation,
+        "WIP_NEW_MACHINE_DELEGATION":       _threat_new_machine_delegation,
         "MULTIPLE_SERVICE_TICKETS":         _threat_multiple_service_tickets,
         "PRIV_GROUP_ADD_REMOVE":            _threat_priv_group_add_remove,
-        "WIP_PRIV_CERT_REQUEST":            _threat_priv_cert_request,
+        "PRIV_CERT_REQUEST":                _threat_priv_cert_request,
         "SUSPICIOUS_ACCOUNT_CREATION":      _threat_suspicious_account_creation,
         "MASS_ACCOUNT_DELETION":            _threat_mass_account_deletion,
         "SENSITIVE_PASSWORD_RESET":     _threat_sensitive_password_reset,
-        "WIP_PASSWORD_NEVER_EXPIRES":       _threat_password_never_expires,
+        "PASSWORD_NEVER_EXPIRES":       _threat_password_never_expires,
         "DEFAULT_ACCOUNT_ENABLED":          _threat_default_account_enabled,
         "LSASS_HANDLE_ACCESS":              _threat_lsass_handle_access,
         "ACCOUNT_ACCESS_REMOVAL":           _threat_account_access_removal,
@@ -10332,14 +10930,78 @@ def _dc_worker(config, session_context, interval, stop_event):
         stop_event.wait(timeout=_BENIGN_RATE.pace(interval, _N_BENIGN_WORKERS))
 
 
-def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
-    """Background thread generating workstation-specific benign events."""
+def _plan_endpoints(wcfg, hosts):
+    """Split the Windows workstations into always-on core hosts and daily rotation slots.
+
+    windows_events_config.endpoint_cap = {"active": N, "core": K}: at most N hosts generate
+    on a given UTC day -- the first K in estate order (base-estate hosts, then new hires
+    by start date) every day, and N-K slots filled each day by a deterministic draw from
+    the remaining hosts whose user has started. At 5,000 users there are ~2,700 Windows
+    workstations; one always-on thread each spread the module's events/s so thin that no
+    host built a baseline, and cost a thread per machine. Hosts outside today's draw are
+    simply switched off, as real machines are, and come back on later days.
+
+    Returns (core host list, rotation slot count, rotation() -> today's host list)."""
+    cap_cfg = wcfg.get("endpoint_cap") or {}
+    try:
+        cap = int(cap_cfg.get("active") or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap <= 0 or len(hosts) <= cap:
+        return list(hosts), 0, lambda: []
+
+    base = sorted(h for h in hosts if not all(_is_new_hire(u) for u in hosts[h]))
+    new = sorted((h for h in hosts if all(_is_new_hire(u) for u in hosts[h])),
+                 key=lambda h: (_hire_day(hosts[h]), h))
+    ordered = base + new
+    core_n = max(0, min(int(cap_cfg.get("core", cap // 2) or 0), cap))
+    core, pool = ordered[:core_n], ordered[core_n:]
+    rot_n = cap - len(core)
+    cache = {}
+    lock = threading.Lock()
+
+    def rotation():
+        day = int(time.time() // 86400)
+        with lock:
+            if cache.get("day") != day:
+                live = [h for h in pool if any(_is_onboarded(u) for u in hosts[h])]
+                rng = random.Random(f"win-endpoint-rotation|{day}")
+                cache["day"], cache["hosts"] = day, rng.sample(live, min(rot_n, len(live)))
+            return cache["hosts"]
+
+    return core, rot_n, rotation
+
+
+def _hire_day(users):
+    """Earliest start day among a host's users (0 for base-estate users)."""
+    try:
+        from modules import session_utils as _su_mod
+    except ImportError:  # pragma: no cover
+        import session_utils as _su_mod
+    return min((_su_mod._USER_START.get(u, 0) for u in users), default=0)
+
+
+def _wks_worker(config, resolve, stats_key, interval, stop_event):
+    """Background thread generating workstation-specific benign events.
+
+    resolve() returns (hostname, scoped_ctx) for the host this worker serves right now, or
+    None while it has none (a new hire's machine before their start date, or a rotation
+    slot with no host today). Asked every iteration, so a rotation slot moves to its next
+    host when the UTC day changes."""
     _DEFER_IDS.on = True
-    stats = _worker_stats[hostname]
+    stats = _worker_stats[stats_key]
     gens = list(_WKS_BENIGN_GENS.keys())
     weights = list(_WKS_BENIGN_GENS.values())
+    hostname = stats_key
     while not stop_event.is_set():
         try:
+            served = resolve()
+            if served is None:
+                _DC_TLS.dc = None
+                stop_event.wait(timeout=60)
+                continue
+            hostname, scoped_ctx = served
+            _DC_TLS.dc = next((d for d in (_site_dc(u) for u in scoped_ctx) if d), None)
             choice = random.choices(gens, weights=weights, k=1)[0]
             fn = _BENIGN_GENERATORS[choice]
             result = fn(config, scoped_ctx)
@@ -10440,12 +11102,16 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
             if hostname:
                 hosts.setdefault(hostname, []).append(uname)
 
+    core, rot_n, rotation = _plan_endpoints(wcfg, hosts)
+
     # Initialize per-worker stats
     _worker_stats["dc"] = {"events_generated": 0, "last_event_time": 0}
     _worker_stats["threats"] = {"events_generated": 0, "last_event_time": 0, "last_fired": None}
-    _N_BENIGN_WORKERS = 1 + len(hosts)
-    for hostname in hosts:
+    _N_BENIGN_WORKERS = 1 + len(core) + rot_n
+    for hostname in core:
         _worker_stats[hostname] = {"events_generated": 0, "last_event_time": 0}
+    for i in range(rot_n):
+        _worker_stats[f"rotating-{i:03d}"] = {"events_generated": 0, "last_event_time": 0}
 
     # DC worker
     dc_interval = base_interval * wcfg.get("dc_interval_multiplier", 0.5)
@@ -10455,15 +11121,37 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
         daemon=True, name="logsim-win-dc",
     ).start()
 
-    # Per-workstation workers
+    # Per-workstation workers: one per core host, plus the rotation slots
     wks_interval = base_interval * wcfg.get("wks_interval_multiplier", 1.0)
-    for hostname, user_list in hosts.items():
-        scoped_ctx = {u: session_context[u] for u in user_list}
+
+    def _fixed(hostname, scoped_ctx):
+        def resolve():
+            return (hostname, scoped_ctx) if any(_is_onboarded(u) for u in scoped_ctx) else None
+        return resolve
+
+    def _slot(i):
+        def resolve():
+            today = rotation()
+            if i >= len(today):
+                return None
+            h = today[i]
+            return h, {u: session_context[u] for u in hosts[h]}
+        return resolve
+
+    for hostname in core:
+        scoped_ctx = {u: session_context[u] for u in hosts[hostname]}
         threading.Thread(
             target=_carry_focus(_wks_worker),
-            args=(config, scoped_ctx, hostname, wks_interval, _workers_stop),
+            args=(config, _fixed(hostname, scoped_ctx), hostname, wks_interval, _workers_stop),
             daemon=True,
             name=f"logsim-win-{hostname.split('.')[0]}",
+        ).start()
+    for i in range(rot_n):
+        threading.Thread(
+            target=_carry_focus(_wks_worker),
+            args=(config, _slot(i), f"rotating-{i:03d}", wks_interval, _workers_stop),
+            daemon=True,
+            name=f"logsim-win-rot{i:03d}",
         ).start()
 
     # Release thread: hands scheduled events out at their timestamps (ids assigned then)

@@ -92,3 +92,6 @@ state/
 *.tfvars
 !*.tfvars.example
 terraform/**/*-key.json
+
+# XDR orchestration run ledger (local, durable, not source)
+xdr_runs/

@@ -1104,36 +1104,53 @@ def _generate_cloud_app_control_event(config, user, dept, internal_host_ip, devi
     return logs
 
 
-def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
+def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info,
+                            artifact=None, exact_user=False):
     """File blocked after sandbox detonation — definitive malware verdict.
 
     Returns [DNS precursor, NSSFWlog TCP/80 blocked, NSSWeblog sandbox block] or None.
+
+    `artifact` (orchestrated XDR runs): {filename, sha256, url} of a file the box
+    REALLY downloaded (e.g. the WildFire test PE). The weblog then names that exact
+    file, hash and URL, and is recorded as ALLOWED with a malicious sandbox verdict
+    -- the file did reach the endpoint, so a "Blocked" record (and the paired TCP/80
+    firewall block) would contradict the endpoint telemetry; those are left out.
     """
     zscaler_conf = config.get('zscaler_config', {})
     threats = zscaler_conf.get('sandbox_threats', [])
-    if not threats:
+    if not threats and not artifact:
         return None
-    threat    = random.choice(threats)
+    threat    = random.choice(threats) if threats else {"category": "Malware",
+                                                       "name": "Trojan.Generic", "type": "exe"}
     filename  = f"document_{random.randint(1000, 9999)}.{threat.get('type', 'exe').lower()}"
     file_hash = hashlib.md5(f"{filename}{time.time()}".encode()).hexdigest()
+    url, host = f"http://download.unsafe-storage.com/{filename}", "download.unsafe-storage.com"
+    if artifact:
+        filename  = artifact.get("filename") or filename
+        file_hash = artifact.get("sha256") or file_hash
+        if artifact.get("url"):
+            url = artifact["url"]
+            host = url.split("://", 1)[-1].split("/", 1)[0]
     dest_ip = _random_external_ip()
     logs = []
     # Log 1: DNS precursor
     logs.append(_dns_precursor_event(config, user, dept, device_info, internal_host_ip))
-    # Log 2: NSSFWlog — TCP/80 blocked
-    logs.append(_fw_event(config, user, dept, device_info,
-                          internal_host_ip, dest_ip, 80, "6",
-                          "Blocked", "Block_Sandbox_Verdict", "HTTP",
-                          threat.get('category', "Malware"), threat.get('name', "Unknown"),
-                          "Unknown", "10",
-                          random.randint(200, 2_000), random.randint(300, 1_500)))
+    # Log 2: NSSFWlog — TCP/80 blocked (not for a delivered artifact; see docstring)
+    if not artifact:
+        logs.append(_fw_event(config, user, dept, device_info,
+                              internal_host_ip, dest_ip, 80, "6",
+                              "Blocked", "Block_Sandbox_Verdict", "HTTP",
+                              threat.get('category', "Malware"), threat.get('name', "Unknown"),
+                              "Unknown", "10",
+                              random.randint(200, 2_000), random.randint(300, 1_500)))
     # Log 3: NSSWeblog — sandbox verdict
     fields = {
-        "action": "Blocked",
+        "action": "Allowed" if artifact else "Blocked",
         "urlcat": "Malicious Content", "urlsupercat": "Security",
         "urlclass": "Malicious Content",
         "riskscore": "100",
-        "responsecode": "403", "reason": "Sandbox Verdict",
+        "responsecode": "200" if artifact else "403",
+        "reason": "Allowed" if artifact else "Sandbox Verdict",
         "malwarecat": threat.get('category', "Malware"), "threatname": threat.get('name', "Unknown"),
         "threatscore": "100", "malwareclass": "Sandbox", "malwaretype": threat.get('type', "exe"),
         "fileHash": file_hash, "filename": filename, "filetype": threat.get('type', "exe"),
@@ -1143,8 +1160,8 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
         "useragent": (device_info.get('user_agent') or get_user_agent(None, user)),
         "devicehostname": device_info['hostname'], "deviceowner": device_info['owner'],
         "deviceostype":   device_info['os_type'],  "deviceosversion": device_info['os_version'],
-        "eurl":  f"http://download.unsafe-storage.com/{filename}",
-        "ehost": "download.unsafe-storage.com",
+        "eurl":  url,
+        "ehost": host,
         "cip": internal_host_ip, "sip": dest_ip,
         "proto": "HTTP",
         "bytesin":  random.randint(200, 2_000),
@@ -1152,6 +1169,8 @@ def _generate_sandbox_event(config, user, dept, internal_host_ip, device_info):
         "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
         "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
         "cefSeverity": "10", "event_type": "sandbox",
+        # Orchestrated: the exact box user (no UPN suffix), as the other XDR events.
+        "suser": user if exact_user else None,
     }
     logs.append(_format_nss_log_as_cef(fields, user, dept, 'nssweblog'))
     return logs
@@ -2686,8 +2705,17 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
     base_ms   = int(time.time() * 1000)
     interval  = random.randint(30, 90) * 1000          # fixed tempo per beacon
     jitter    = int(interval * 0.05)                   # small jitter, still regular
+    # One egress for the whole train: a host's NAT address doesn't change between
+    # callbacks a minute apart. _client_public_ip() picks a random location IP that
+    # _format_nss_log_as_cef only replaces for ROSTER users, so for anyone else
+    # (the XDR box user) a per-callback pick rotated the source across three
+    # addresses -- and "Zscaler — Web C2 Beacon (entity-mapped v2)" counts per
+    # source IP, so 19 callbacks split 7/5/4/3 and never reached its 8 (2026-11-18).
+    egress = _client_public_ip(zscaler_conf)
     logs = []
-    n_beacons = random.randint(12, 20)
+    # >= 16: the train spans up to ~28 min, so it can straddle the rule's 30-minute
+    # bin boundary; with 16+ callbacks the larger half still holds the >= 8 it needs.
+    n_beacons = random.randint(16, 20)
     for _i in range(n_beacons):
         method = random.choices(["GET", "POST"], weights=[70, 30])[0]
         uri    = random.choice(["/api/v1/checkin", "/gate.php", "/submit.php", "/beacon", "/j/collect"])
@@ -2703,7 +2731,7 @@ def _generate_web_c2_beacon(config, user, dept, internal_host_ip, device_info,
             "eurl": f"http://{c2_domain}{uri}", "ehost": c2_domain,
             "cip": internal_host_ip, "sip": c2_ip, "proto": "HTTP",
             "bytesin": random.randint(120, 400), "bytesout": random.randint(200, 900),  # small, regular
-            "sourceTranslatedAddress": _client_public_ip(zscaler_conf),
+            "sourceTranslatedAddress": egress,
             "flexString1": random.choice(zscaler_conf.get('locations', ["HQ"])),
             "cefSeverity": "5",
             # Orchestrated events pin the EXACT box user (no @examplecorp.com) so the
@@ -3454,6 +3482,10 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
             if scenario_event == "large_download":
                 return _generate_large_download(config, user, dept, internal_host_ip, device_info,
                                                 exact_user=_exact_user, domain_override=_domain)
+            if scenario_event == "sandbox_threat":
+                _art = {k: _ctx.get(k) for k in ("filename", "sha256", "url") if _ctx.get(k)}
+                return _generate_sandbox_event(config, user, dept, internal_host_ip, device_info,
+                                               artifact=_art or None, exact_user=_exact_user)
         return _NAMED_THREATS[scenario_event](config, user, dept, internal_host_ip, device_info)
 
     user, dept, internal_host_ip, device_info = _get_user_and_device_info(

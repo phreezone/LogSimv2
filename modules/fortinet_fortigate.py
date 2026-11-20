@@ -324,8 +324,8 @@ _IPS_SIGNATURES = [
 
 # Real FortiGate app-control blocked applications with FortiGuard app IDs
 _APP_CONTROL_BLOCKS = [
-    {"app": "BitTorrent",           "appid": 15001, "category": "P2P.File-Sharing", "risk": "high"},
-    {"app": "Tor.Network",          "appid": 16390, "category": "Proxy",            "risk": "critical"},
+    {"app": "BitTorrent",           "appid": 15001, "category": "P2P", "risk": "high"},
+    {"app": "Tor",                  "appid": 15565, "category": "Proxy",            "risk": "critical"},
     {"app": "TeamViewer",           "appid": 20306, "category": "Remote.Access",    "risk": "medium"},
     {"app": "Ultrasurf",            "appid": 16388, "category": "Proxy",            "risk": "high"},
     {"app": "CryptoMining.Generic", "appid": 46021, "category": "CryptoMining",     "risk": "high"},
@@ -339,6 +339,46 @@ _APP_CONTROL_BLOCKS = [
 # FortiGuard URL category numeric IDs for the cat field → used by xdm.observer.type
 _URL_CAT_BENIGN  = [30, 31, 34, 36, 37, 39, 41, 42, 46, 47, 49, 52, 81, 82]  # education, finance, health...
 _URL_CAT_BLOCKED = [3, 4, 11, 14, 24, 26, 59, 61, 72, 83, 86, 96, 98, 99]   # hacking, malicious, proxy...
+
+# FortiGuard web-filter category (id -> name), the subset used for benign sites.
+# Numbers/names are the `get webfilter categories` list (FortiOS 7.4.5 snapshot).
+_FG_WEBCAT_NAMES = {
+    23: "Web-based Email", 24: "File Sharing and Storage", 25: "Streaming Media and Download",
+    31: "Finance and Banking", 36: "News and Media", 37: "Social Networking",
+    39: "Reference", 41: "Search Engines and Portals", 42: "Shopping", 49: "Business",
+    52: "Information Technology", 69: "Instant Messaging", 75: "Internet Radio and TV",
+    81: "Secure Websites", 82: "Content Servers", 89: "Auction", 95: "Online Meeting",
+    100: "Artificial Intelligence Technology",
+}
+# App category -> web category, then per-app / per-domain overrides (most specific wins).
+_WEBCAT_BY_APPCAT = {
+    "Collaboration": 49, "Business": 49, "Cloud.IT": 52, "Cloud.Storage": 24, "Update": 52,
+    "Social.Media": 37, "Video/Audio": 25, "Email": 23, "Shopping": 42,
+    "General.Interest": 39, "AI": 100,
+}
+_WEBCAT_BY_APP = {
+    "Google.Search": 41, "Bing": 41, "Zoom": 95, "Teams": 95, "Webex": 95, "Google.Meet": 95, "WhatsApp": 69,
+    "Spotify": 75, "Microsoft.Telemetry": 52, "eBay": 89, "PayPal": 31, "Stripe": 31,
+    "Intuit.QuickBooks": 31, "Okta": 52, "Microsoft.Authentication": 52,
+}
+_WEBCAT_BY_DOMAIN = {
+    "weather.com": 36, "bbc.co.uk": 36, "cnn.com": 36, "nytimes.com": 36,
+    "cdnjs.cloudflare.com": 82, "git.examplecorp.com": 52, "one.one.one.one": 52,
+    "rdp-gw.examplecorp.com": 52, "rdp.internal.examplecorp.local": 52,
+}
+
+
+def _webcat_for(domain, app_name, app_category):
+    """(cat id, FortiGuard category name) a webfilter would assign this site."""
+    host = str(domain or "").lower()
+    best = None
+    for suffix, cid in _WEBCAT_BY_DOMAIN.items():
+        if host == suffix or host.endswith("." + suffix):
+            if best is None or len(suffix) > len(best[0]):
+                best = (suffix, cid)
+    cid = (best[1] if best else _WEBCAT_BY_APP.get(app_name)
+           or _WEBCAT_BY_APPCAT.get(app_category) or 81)
+    return cid, _FG_WEBCAT_NAMES[cid]
 
 # External country/city data for geo enrichment
 _EXT_LOCATIONS = [
@@ -357,17 +397,193 @@ _EXT_LOCATIONS = [
 _SRC_OS_WINDOWS = ["Windows 10", "Windows 11", "Windows Server 2019", "Windows Server 2022"]
 _SRC_OS_SERVER  = ["Linux 5.4 (CentOS 7)", "Linux 5.15 (Ubuntu 22.04)", "Linux 4.18 (RHEL 8)", "Windows Server 2019", "Windows Server 2022"]
 
-# Common benign app/protocol data
-_BENIGN_APPS = [
-    ("HTTPS.BROWSER", 40568, "Web.Client",    "medium"),
-    ("HTTPS",         40568, "Network.Service","low"),
-    ("HTTP",          15893, "Network.Service","low"),
-    ("Office365",     41025, "Collaboration",  "low"),
-    ("Zoom",          43052, "Video/Audio",    "low"),
-    ("Teams",         43119, "Collaboration",  "low"),
-    ("Slack",         43156, "Collaboration",  "low"),
-    ("Dropbox",       18311, "Cloud.Storage",  "medium"),
+# Generic web/protocol identities: what FortiGate reports for a session to a site with
+# no application signature of its own.
+_GENERIC_APPS = [
+    ("HTTPS.BROWSER", 40568, "Web.Client",     "medium"),
+    ("HTTPS",         40568, "Network.Service", "low"),
+    ("HTTP",          15893, "Network.Service", "low"),
 ]
+
+# Named applications and the destination domains that ARE that application:
+#   (app, category, risk, "domain-suffix domain-suffix ...")
+# A named app is only ever reported for a destination that really is that app.
+# Before 2026-11-15 every traffic event drew its app from an 8-entry list at random,
+# so ~12% of generic web sessions (to ntp.org, ups.com, ubuntu mirrors...) were
+# labelled Dropbox and the same share Zoom/Teams/Slack/Office365.
+# IDs for the first seven names are the long-standing values; every other ID is a
+# stable simulated one (crc32 of the name), not a FortiGuard signature number.
+_SAAS_APPS = [
+    # Microsoft 365 / identity / cloud
+    ("Office365",              "Collaboration",  "low",    "outlook.office365.com office365.com office.com office.net outlook.com outlook.live.com"),
+    ("Teams",                  "Collaboration",  "low",    "teams.microsoft.com teams.live.com"),
+    ("Microsoft.OneDrive",     "Cloud.Storage",  "medium", "examplecorp-my.sharepoint.com onedrive.live.com 1drv.com"),
+    ("Microsoft.SharePoint",   "Collaboration",  "low",    "sharepoint.com"),
+    ("Microsoft.Authentication","Cloud.IT",      "low",    "login.microsoftonline.com login.live.com"),
+    ("Microsoft.Graph.API",    "Cloud.IT",       "low",    "graph.microsoft.com"),
+    ("Microsoft.Azure.Portal", "Cloud.IT",       "low",    "portal.azure.com management.azure.com"),
+    ("Microsoft.Telemetry",    "Network.Service","low",    "vortex.data.microsoft.com events.data.microsoft.com settings-win.data.microsoft.com"),
+    ("Microsoft.Windows.Update","Update",        "low",    "windowsupdate.microsoft.com delivery.mp.microsoft.com"),
+    ("Microsoft.VSCode.Update","Update",         "low",    "update.code.visualstudio.com"),
+    ("Bing",                   "Web.Client",     "low",    "bing.com"),
+    # Google
+    ("Google.Search",          "Web.Client",     "low",    "www.google.com"),
+    ("Gmail",                  "Email",          "low",    "mail.google.com"),
+    ("Google.Docs",            "Collaboration",  "low",    "docs.google.com"),
+    ("Google.Meet",            "Video/Audio",    "low",    "meet.google.com"),
+    ("Google.Cloud.Console",   "Cloud.IT",       "low",    "console.cloud.google.com"),
+    ("Google.API",             "Cloud.IT",       "low",    "googleapis.com"),
+    ("Google.Chrome.Update",   "Update",         "low",    "dl.google.com update.googleapis.com"),
+    ("YouTube",                "Video/Audio",    "medium", "youtube.com youtu.be"),
+    # Meetings / chat / storage
+    ("Zoom",                   "Video/Audio",    "low",    "zoom.us zoom.com"),
+    ("Slack",                  "Collaboration",  "low",    "slack.com slack-edge.com"),
+    ("Webex",                  "Video/Audio",    "low",    "webex.com"),
+    ("Box",                    "Cloud.Storage",  "medium", "box.com boxcdn.net"),
+    ("Dropbox",                "Cloud.Storage",  "medium", "dropbox.com dropboxapi.com dropboxusercontent.com"),
+    ("WhatsApp",               "Collaboration",  "low",    "whatsapp.com"),
+    # Work management / design
+    ("Atlassian",              "Collaboration",  "low",    "atlassian.net atlassian.com"),
+    ("Trello",                 "Collaboration",  "low",    "trello.com"),
+    ("Bitbucket",              "Cloud.IT",       "low",    "bitbucket.org"),
+    ("Asana",                  "Collaboration",  "low",    "asana.com"),
+    ("Monday.com",             "Collaboration",  "low",    "monday.com"),
+    ("Notion",                 "Collaboration",  "low",    "notion.so"),
+    ("Miro",                   "Collaboration",  "low",    "miro.com"),
+    ("Figma",                  "Collaboration",  "low",    "figma.com"),
+    ("Adobe.Cloud",            "Cloud.IT",       "low",    "adobe.com adobe.io"),
+    # Business systems
+    ("Salesforce",             "Business",       "low",    "salesforce.com force.com"),
+    ("Okta",                   "Cloud.IT",       "low",    "okta.com"),
+    ("ServiceNow",             "Business",       "low",    "service-now.com servicenow.com"),
+    ("Zendesk",                "Business",       "low",    "zendesk.com"),
+    ("Workday",                "Business",       "low",    "workday.com"),
+    ("DocuSign",               "Business",       "low",    "docusign.net docusign.com"),
+    ("HubSpot",                "Business",       "low",    "hubspot.com"),
+    ("Mailchimp",              "Business",       "low",    "mailchimp.com"),
+    ("Intuit.QuickBooks",      "Business",       "low",    "intuit.com quickbooks.com"),
+    ("SAP.Concur",             "Business",       "low",    "concursolutions.com concur.com"),
+    ("ADP",                    "Business",       "low",    "adp.com"),
+    ("BambooHR",               "Business",       "low",    "bamboohr.com"),
+    ("Greenhouse",             "Business",       "low",    "greenhouse.io"),
+    ("Expensify",              "Business",       "low",    "expensify.com"),
+    ("Oracle.NetSuite",        "Business",       "low",    "netsuite.com"),
+    ("Twilio",                 "Cloud.IT",       "low",    "twilio.com"),
+    ("Stripe",                 "Business",       "low",    "stripe.com"),
+    ("FedEx",                  "Business",       "low",    "fedex.com"),
+    ("UPS",                    "Business",       "low",    "ups.com"),
+    ("PayPal",                 "Business",       "low",    "paypal.com"),
+    # Cloud / developer / operations
+    ("GitHub",                 "Cloud.IT",       "low",    "github.com githubusercontent.com"),
+    ("GitLab",                 "Cloud.IT",       "low",    "gitlab.com"),
+    ("Amazon.S3",              "Cloud.IT",       "low",    "s3.us-east-1.amazonaws.com s3.amazonaws.com"),
+    ("Amazon.AWS.Console",     "Cloud.IT",       "low",    "console.aws.amazon.com signin.aws.amazon.com"),
+    ("Docker.Hub",             "Cloud.IT",       "low",    "docker.com docker.io"),
+    ("npm",                    "Cloud.IT",       "low",    "npmjs.org npmjs.com"),
+    ("PyPI",                   "Cloud.IT",       "low",    "pypi.org pythonhosted.org"),
+    ("StackOverflow",          "Collaboration",  "low",    "stackoverflow.com"),
+    ("JetBrains",              "Cloud.IT",       "low",    "jetbrains.com"),
+    ("Datadog",                "Cloud.IT",       "low",    "datadoghq.com"),
+    ("PagerDuty",              "Cloud.IT",       "low",    "pagerduty.com"),
+    # Software updates / vendor services
+    ("Apple.Update",           "Update",         "low",    "swscan.apple.com mesu.apple.com"),
+    ("Mozilla.Update",         "Update",         "low",    "aus5.mozilla.org"),
+    ("Ubuntu.Update",          "Update",         "low",    "archive.ubuntu.com security.ubuntu.com"),
+    ("RedHat.Update",          "Update",         "low",    "cdn.redhat.com"),
+    ("PaloAlto.Update",        "Update",         "low",    "updates.paloaltonetworks.com"),
+    # Social / media / consumer web
+    ("LinkedIn",               "Social.Media",   "medium", "linkedin.com"),
+    ("Facebook",               "Social.Media",   "medium", "facebook.com"),
+    ("Instagram",              "Social.Media",   "medium", "instagram.com"),
+    ("Twitter",                "Social.Media",   "medium", "twitter.com x.com"),
+    ("Reddit",                 "Social.Media",   "medium", "reddit.com"),
+    ("Wikipedia",              "General.Interest","low",   "wikipedia.org"),
+    ("Netflix",                "Video/Audio",    "medium", "netflix.com"),
+    ("Spotify",                "Video/Audio",    "medium", "spotify.com"),
+    ("Vimeo",                  "Video/Audio",    "medium", "vimeo.com"),
+    ("Amazon",                 "Shopping",       "low",    "www.amazon.com"),
+    ("eBay",                   "Shopping",       "low",    "ebay.com"),
+    # Generative AI
+    ("ChatGPT",                "AI",             "medium", "chatgpt.com openai.com"),
+    ("Claude",                 "AI",             "medium", "claude.ai"),
+    ("Google.Gemini",          "AI",             "medium", "gemini.google.com"),
+    ("Microsoft.Copilot",      "AI",             "medium", "copilot.microsoft.com"),
+    ("Perplexity",             "AI",             "medium", "perplexity.ai"),
+]
+
+# Fixed historical IDs (tenant data already carries them); the rest are derived.
+_APP_FIXED_IDS = {"Office365": 41025, "Zoom": 43052, "Teams": 43119,
+                  "Slack": 43156, "Dropbox": 18311}
+
+
+def _build_app_catalog():
+    import zlib
+    by_name = {a[0]: a for a in _GENERIC_APPS}
+    domain_app = {}
+    for name, cat, risk, suffixes in _SAAS_APPS:
+        appid = _APP_FIXED_IDS.get(name) or 10000 + zlib.crc32(name.encode()) % 40000
+        by_name[name] = (name, appid, cat, risk)
+        for s in suffixes.split():
+            domain_app[s] = name
+    return by_name, domain_app
+
+
+# app name -> (app, appid, category, risk); destination suffix -> app name.
+_BENIGN_APP_BY_NAME, _APP_BY_DOMAIN = _build_app_catalog()
+_BENIGN_APPS = list(_BENIGN_APP_BY_NAME.values())
+
+
+# One identity (id, category, default risk) per protocol app. Every generator used to
+# pick its own: SSH was 15897 in some events and 15895 in others, SMB 16102/File.Sharing
+# or 15445/Network.Service, LDAP 16072 or 15389, and SSL shared SSH's id 15897.
+# _format_fortinet_cef normalises FTNTFGTappid/appcat to this table (risk stays
+# per-event), and _app_for_destination reads it for non-web ports.
+_CANON_APPS = {
+    "SSH":      (15897, "Remote.Access",   "medium"),
+    "RDP":      (16100, "Remote.Access",   "medium"),
+    "SMB":      (16102, "File.Sharing",    "low"),
+    "FTP":      (15896, "File.Sharing",    "low"),
+    "SMTP":     (15900, "Email",           "low"),
+    "LDAP":     (16072, "Network.Service", "low"),
+    "NTP":      (16195, "Network.Service", "low"),
+    "HTTP":     (15893, "Network.Service", "low"),
+    "HTTPS":    (40568, "Network.Service", "low"),
+    "SSL":      (15898, "Network.Service", "low"),
+    # FortiGuard's real signature (fortiguard.com/appcontrol/15565): one name, not
+    # Tor.Browser in traffic logs and Tor.Network in app-control logs.
+    "Tor":      (15565, "Proxy",           "critical"),
+}
+
+
+def _app_for_destination(dhost, dpt):
+    """(app, appid, category, risk) a FortiGate would report for this destination.
+
+    The longest matching domain suffix wins, so a specific host (a tenant's
+    examplecorp-my.sharepoint.com -> OneDrive) beats its parent domain
+    (sharepoint.com -> SharePoint). Any other web session is generic HTTPS.BROWSER /
+    HTTPS (443) or HTTP (80); other ports report their service."""
+    host = str(dhost or "").lower().rstrip(".")
+    if host:
+        best = None
+        for suffix, name in _APP_BY_DOMAIN.items():
+            if host == suffix or host.endswith("." + suffix):
+                if best is None or len(suffix) > len(best[0]):
+                    best = (suffix, name)
+        if best:
+            return _BENIGN_APP_BY_NAME[best[1]]
+    try:
+        port = int(dpt)
+    except (TypeError, ValueError):
+        port = 443
+    if port == 443:
+        return _BENIGN_APP_BY_NAME["HTTPS.BROWSER" if random.random() < 0.7 else "HTTPS"]
+    if port == 80:
+        return _BENIGN_APP_BY_NAME["HTTP"]
+    svc = _port_to_service(port)
+    if svc in _CANON_APPS:
+        return (svc,) + _CANON_APPS[svc]
+    return (_port_to_service(port), 15000 + port % 1000, "Network.Service", "low")
+
 
 # Ports XSIAM's NDR lateral-movement analytics treats as an "administrative
 # action": remote shell, remote file transfer and remote console services.
@@ -375,7 +591,7 @@ _BENIGN_APPS = [
 # builder seeds with a random benign value is overwritten with the real service.
 _ADMIN_SERVICE_PORTS = {
     22:  ("SSH",     "SSH",    15895, "Network.Service", "medium"),
-    69:  ("TFTP",    "TFTP",   16072, "Network.Service", "medium"),
+    69:  ("TFTP",    "TFTP",   15069, "Network.Service", "medium"),
     512: ("EXEC",    "REXEC",  16221, "Remote.Access",   "high"),
     992: ("TELNETS", "Telnet", 15894, "Remote.Access",   "high"),
 }
@@ -583,7 +799,7 @@ def _tor_exit_country(tor_entry):
 
 # Port → FortiGate service name mapping (real FortiGate service names)
 _PORT_SERVICE_MAP = {
-    21: "FTP", 22: "SSH", 23: "TELNET", 25: "SMTP", 53: "DNS",
+    21: "FTP", 22: "SSH", 23: "TELNET", 25: "SMTP", 53: "DNS", 88: "KERBEROS",
     80: "HTTP", 110: "POP3", 123: "NTP", 143: "IMAP", 161: "SNMP",
     389: "LDAP", 443: "HTTPS", 445: "SMB", 465: "SMTPS", 514: "SYSLOG",
     587: "SMTP", 636: "LDAPS", 993: "IMAPS", 995: "POP3S",
@@ -683,6 +899,19 @@ def _format_fortinet_cef(config, logid, log_type, subtype, log_level, extensions
 
     merged = {**base, **extensions_dict}
 
+    # One id/category per protocol app, whichever generator emitted it. A category of
+    # "unscanned" is the deliberate rare-AppID marker, so it is kept.
+    _canon = _CANON_APPS.get(merged.get("FTNTFGTapp"))
+    if _canon:
+        merged["FTNTFGTappid"] = _canon[0]
+        if merged.get("FTNTFGTappcat") != "unscanned":
+            merged["FTNTFGTappcat"] = _canon[1]
+    elif merged.get("FTNTFGTapp") and not merged.get("FTNTFGTappid"):
+        # An app with no id of its own (TELNET, IRC, tcp/139...): stable simulated id,
+        # derived the same way as the SaaS catalog, never a blank.
+        import zlib
+        merged["FTNTFGTappid"] = 10000 + zlib.crc32(str(merged["FTNTFGTapp"]).encode()) % 40000
+
     # AD domain-qualify bare usernames so XSIAM Identity can stitch
     # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com).
     # Orchestrated events set _no_user_qualify to keep the EXACT box user (bare).
@@ -740,7 +969,7 @@ def _base_traffic_fields(config, src_ip, shost, user, dst_ip, dhost, proto, dpt,
     rcvd_bytes    = random.randint(10000, 300000)
     src_mac       = _random_mac(shost)
     os_name       = src_os or random.choice(_SRC_OS_WINDOWS)
-    app_entry     = random.choice(_BENIGN_APPS)
+    app_entry     = _app_for_destination(dhost, dpt)
 
     return {
         "src":                      src_ip,
@@ -795,7 +1024,15 @@ def _base_traffic_fields(config, src_ip, shost, user, dst_ip, dhost, proto, dpt,
 
 # Benign event generators
 
-def _benign_destination(config, user, weighted=True):
+def _is_web_destination(dest):
+    """True when the destination is a site you browse (443/80), not a DNS/NTP/SSH host."""
+    ports = dest.get("ports")
+    if ports:
+        return bool(set(ports) & {443, 80})
+    return "Web Browsing" in (dest.get("service_types") or ["Web Browsing"])
+
+
+def _benign_destination(config, user, weighted=True, web_only=False):
     """(domain, ip) for a benign destination, where the ip is what that NAME resolves to.
 
     Before 2026-09-18 the name and the address were chosen from two unrelated
@@ -807,6 +1044,8 @@ def _benign_destination(config, user, weighted=True):
     so a DNS response and the connection that follows carry the same address.
     """
     destinations = config.get("benign_egress_destinations") or [{}]
+    if web_only:
+        destinations = [d for d in destinations if _is_web_destination(d)] or destinations
     dest = (weighted_destination(user, destinations) if weighted
             else random.choice(destinations))
     domain = dest.get("domain") or dest.get("name", "example.com").lower().replace(" ", "")
@@ -825,8 +1064,21 @@ def _generate_traffic_forward(config, src_ip, user, shost):
     """Normal outbound web browsing — traffic:forward allow."""
     dest, domain, dst_ip = _benign_destination(config, user)
     geo          = _ext_geo()
-    app_entry    = random.choice(_BENIGN_APPS)
     duration_s   = random.randint(10, 600)
+
+    # A public resolver (dns.google) is reached over DoH/443 -- clients here resolve
+    # through the internal Infoblox grid, never straight to 8.8.8.8:53.
+    if not _is_web_destination(dest) and (dest.get("ports") or [0])[0] != 53:
+        # NTP / SSH host from the shared egress list: report its real service
+        # and port, not a fabricated HTTPS session with a URL.
+        dpt = 123 if "ntp" in domain.lower() else int((dest.get("ports") or [443])[0])
+        fields = _base_traffic_fields(
+            config, src_ip, shost, user, dst_ip, domain,
+            "17" if dpt in (53, 123) else "6", dpt, "accept",
+            duration_s=min(duration_s, 120), dst_country=dest.get("country", geo["country"])
+        )
+        fields.update({"app": _port_to_service(dpt), "msg": f"{_port_to_service(dpt)} session to {domain}"})
+        return _format_fortinet_cef(config, "0000000013", "traffic", "forward", "notice", fields)
 
     fields = _base_traffic_fields(
         config, src_ip, shost, user, dst_ip, domain, "6", 443, "accept",
@@ -834,10 +1086,6 @@ def _generate_traffic_forward(config, src_ip, user, shost):
     )
     fields.update({
         "app":              "HTTPS",
-        "FTNTFGTapp":       app_entry[0],
-        "FTNTFGTappid":     app_entry[1],
-        "FTNTFGTappcat":    app_entry[2],
-        "FTNTFGTapprisk":   app_entry[3],
         "request":          f"/{domain}/",
         "FTNTFGThttpmethod":"GET",
         "FTNTFGThttpcode":  random.choice(["200", "200", "200", "301", "304"]),
@@ -899,22 +1147,22 @@ def _generate_inbound_block(config):
 
 def _generate_webfilter_allow(config, src_ip, user, shost):
     """Outbound web request inspected and allowed — utm:webfilter ftgd_allow."""
-    dest, domain, dst_ip = _benign_destination(config, user, weighted=False)
-    cat_id       = random.choice(_URL_CAT_BENIGN)
+    dest, domain, dst_ip = _benign_destination(config, user, weighted=False, web_only=True)
     geo          = _ext_geo()
 
     fields = _base_traffic_fields(
         config, src_ip, shost, user, dst_ip, domain, "6", 443, "accept",
         dst_country=dest.get("country", geo["country"])
     )
+    cat_id, cat_name = _webcat_for(domain, fields.get("FTNTFGTapp"), fields.get("FTNTFGTappcat"))
     fields.update({
         "app":              "HTTPS",
         "request":          f"https://{domain}/",
         "hostname":         domain,
         "FTNTFGTeventtype": "ftgd_allow",
         "cat":              str(cat_id),
-        "FTNTFGTcatdesc":   "General Interest",
-        "requestContext":   "General Interest",
+        "FTNTFGTcatdesc":   cat_name,
+        "requestContext":   cat_name,
         "FTNTFGThttpmethod":"GET",
         "FTNTFGThttpcode":  "200",
         "requestClientApplication": random.choice(_BROWSER_UA),
@@ -993,7 +1241,7 @@ def _generate_admin_event(config):
     # baseline.
     user         = (mgmt_plane.admin_user(config) if random.random() < 0.85
                     else random.choice(admin_users))
-    mgmt_ip      = forti_conf.get("management_ip", "172.16.200.1")
+    mgmt_ip      = forti_conf.get("management_ip", "10.0.30.14")
     src_ip       = mgmt_plane.admin_source(config)
     is_success   = random.random() > 0.15
 
@@ -1120,7 +1368,7 @@ def _generate_antivirus_allow(config, src_ip, user, shost):
     inspected and found clean.  File downloads, email attachments, and web content
     all pass through FortiAV; the vast majority result in a clean verdict.
     """
-    dest, domain, dst_ip = _benign_destination(config, user, weighted=False)
+    dest, domain, dst_ip = _benign_destination(config, user, weighted=False, web_only=True)
 
     file_extensions = ["exe", "dll", "zip", "docx", "xlsx", "pdf", "msi", "cab"]
     file_ext   = random.choice(file_extensions)
@@ -1202,7 +1450,7 @@ def _generate_ipsec_vpn_event(config):
 
 def _generate_ssl_inspection(config, src_ip, user, shost):
     """SSL deep-packet inspection certificate event — utm:ssl."""
-    dest, domain, dst_ip = _benign_destination(config, user, weighted=False)
+    dest, domain, dst_ip = _benign_destination(config, user, weighted=False, web_only=True)
     cipher       = random.choice(_TLS_CIPHERS)
     tls_ver      = random.choice(_TLS_VERSIONS)
 
@@ -1262,8 +1510,7 @@ def _generate_rdp_internal(config, src_ip, user, shost):
 def _generate_ftp_download(config, src_ip, user, shost):
     """Benign internal FTP download — workstation to internal file server."""
     forti_conf = _get_config(config)
-    servers = config.get("internal_servers", ["10.0.10.50"])
-    dst_ip = random.choice(servers)
+    dst_ip = random.choice(resolver.file_servers(config, src_ip) or ["10.0.10.50"])
     lan_iface = forti_conf.get("interface_lan", "port10")
     duration_s = random.randint(10, 300)
 
@@ -1297,8 +1544,7 @@ def _generate_ftp_download(config, src_ip, user, shost):
 def _generate_smb_internal(config, src_ip, user, shost):
     """Benign internal SMB file share access — workstation to file server."""
     forti_conf = _get_config(config)
-    servers = config.get("internal_servers", ["10.0.10.50"])
-    dst_ip = random.choice(servers)
+    dst_ip = random.choice(resolver.file_servers(config, src_ip) or ["10.0.10.50"])
     lan_iface = forti_conf.get("interface_lan", "port10")
     duration_s = random.randint(5, 120)
 
@@ -1971,7 +2217,7 @@ def _simulate_auth_brute_force(config):
     print(f"    - Fortinet Module simulating: Admin brute force")
     forti_conf  = _get_config(config)
     admin_users = forti_conf.get("admin_users", ["admin", "root"])
-    mgmt_ip     = forti_conf.get("management_ip", "172.16.200.1")
+    mgmt_ip     = forti_conf.get("management_ip", "10.0.30.14")
     attacker_ip = _random_external_ip()
     target_user = random.choice(admin_users)
     attempt_cnt = random.randint(20, 50)
@@ -2605,8 +2851,8 @@ def _simulate_tor_connection(config, src_ip, user, shost):
         "FTNTFGTsentpkt":   random.randint(50, 500),
         "FTNTFGTrcvdpkt":   random.randint(200, 2000),
         "app":              "Tor" if tor_port != 443 else "HTTPS",
-        "FTNTFGTapp":       "Tor.Browser",
-        "FTNTFGTappid":     16390,
+        "FTNTFGTapp":       "Tor",
+        "FTNTFGTappid":     15565,
         "FTNTFGTappcat":    "Proxy",
         "FTNTFGTapprisk":   "critical",
         "FTNTFGTapplist":   _get_config(config).get("applist", "g-default"),
@@ -3548,13 +3794,13 @@ _ABNORMAL_VPN_OS = ["Linux", "Kali Linux 2024.2", "Ubuntu 22.04", "Android 13",
                     "macOS (unknown build)", "FreeBSD 14"]
 
 
-def _get_domain_controllers(config):
-    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses."""
+def _get_domain_controllers(config, src_ip=None):
+    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses. With
+    src_ip, a new hire's workstation gets its own site's DCs."""
     forti_conf = _get_config(config)
     dcs = forti_conf.get("domain_controllers") or config.get("domain_controllers")
-    if dcs:
-        return dcs
-    return ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+    dcs = dcs or ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+    return resolver.domain_controllers_for(config, src_ip, dcs) if src_ip else dcs
 
 
 def _b32_chunk(n):
@@ -3821,7 +4067,7 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost):
     """Normal AD auth: workstation -> its DC on LDAP/Kerberos/SMB. Baseline traffic
     so LDAP recon and AD anomalies stand out. Returns a single log string."""
     forti_conf = _get_config(config)
-    dc        = random.choice(_get_domain_controllers(config))
+    dc        = random.choice(_get_domain_controllers(config, src_ip))
     lan_iface = forti_conf.get("interface_lan", "port10")
     port      = random.choice([389, 389, 636, 88, 88, 445])
     svc       = {389: "LDAP", 636: "LDAPS", 88: "Kerberos", 445: "SMB"}[port]
@@ -4077,7 +4323,7 @@ def _fgt_admin_session(config, user, src, actions, method="ssh", start=None,
     """failures x 32002 -> 32001 login -> config/exec events -> 32003 logout.
     actions: list of (logid, fields) built by _fgt_cfg_attr / _fgt_cfg_exec."""
     forti_conf = _get_config(config)
-    dst = (forti_conf.get("management_ip", "172.16.200.1")
+    dst = (forti_conf.get("management_ip", "10.0.30.14")
            if src.startswith(("10.", "172.", "192.168."))
            else forti_conf.get("vpn_gateway_ip", "203.0.113.20"))
     ui = f"{method}({src})"
@@ -4150,7 +4396,7 @@ def _simulate_mgmt_config_backup(config, session_context=None):
     """BENIGN: the nightly backup job pulls the config over SCP."""
     host, acct = mgmt_plane.backup(config)
     return [_fgt_mgmt_event(config, "0100032143", "information", time.time(), {
-        "duser": acct, "src": host, "dst": _get_config(config).get("management_ip", "172.16.200.1"),
+        "duser": acct, "src": host, "dst": _get_config(config).get("management_ip", "10.0.30.14"),
         "FTNTFGTui": f"ssh({host})", "act": "backup", "outcome": "success",
         "FTNTFGTlogdesc": "Configuration backed up by SCP",
         "msg": f"System config file has been downloaded by user {acct} via SCP"})]
@@ -4204,7 +4450,7 @@ def _fgt_logging_toggle(config, user, src, ts, enable):
     old, new = ("disable", "enable") if enable else ("enable", "disable")
     forti_conf = _get_config(config)
     return _fgt_mgmt_event(config, "0100044546", "information", ts, {
-        "duser": user, "src": src, "dst": forti_conf.get("management_ip", "172.16.200.1"),
+        "duser": user, "src": src, "dst": forti_conf.get("management_ip", "10.0.30.14"),
         "FTNTFGTui": f"ssh({src})", **_fgt_cfg_attr("log.syslogd.setting",
                                                      f"status[{old}->{new}]")[1]})
 
@@ -4263,7 +4509,7 @@ def _simulate_snmp_unexpected_source(config, session_context=None):
         t += random.randint(1, 4)
     for community in ("public", "private", "cisco"):
         out.append(_fgt_mgmt_event(config, "0100029021", "warning", t, {
-            "src": src, "dst": _get_config(config).get("management_ip", "172.16.200.1"),
+            "src": src, "dst": _get_config(config).get("management_ip", "10.0.30.14"),
             "dpt": 161, "act": "snmp-query", "outcome": "failed",
             "FTNTFGTlogdesc": "SNMP query failed",
             "msg": f"SNMP query failed from {src}: community '{community}' not configured"}))
@@ -4387,7 +4633,7 @@ def generate_log(config, scenario=None, threat_level="Realistic", benign_only=Fa
         return [_fgt_logging_toggle(config, _sup["user"], _sup["src"], now, enable=True),
                 _fgt_mgmt_event(config, "0100032003", "information", now + 3, {
                     "duser": _sup["user"], "src": _sup["src"],
-                    "dst": forti_conf.get("management_ip", "172.16.200.1"),
+                    "dst": forti_conf.get("management_ip", "10.0.30.14"),
                     "FTNTFGTui": f"ssh({_sup['src']})", "act": "logout", "outcome": "success",
                     "FTNTFGTlogdesc": "Admin logout successful",
                     "FTNTFGTduration": int(now - _sup["since"]),

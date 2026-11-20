@@ -343,41 +343,58 @@ class XsiamClient:
 
     def get_open_incidents(self, minutes_back: int = 1440, user: Optional[str] = None,
                            host: Optional[str] = None,
-                           statuses=OPEN_STATUSES) -> List[Dict[str, Any]]:
+                           statuses=OPEN_STATUSES,
+                           time_field: str = "creation_time") -> List[Dict[str, Any]]:
         """Return OPEN incidents (optionally filtered to a user and/or host entity).
 
         `user`/`host` match case-insensitively against the incident's `users`/`hosts`
         entity lists; `user` also matches a domain-qualified form (DOMAIN\\user).
+
+        `time_field` picks what `minutes_back` bounds: "creation_time" (cases opened
+        in the window) or "modification_time" (cases that changed in the window). Use
+        the latter to find an OLD case that is still open and still collecting
+        alerts -- a box-case opened days ago keeps absorbing each run's network alerts
+        but is invisible to a creation-time window (2026-11-18: case 70436, opened
+        11-07, split a run). Status is filtered server-side, one query per status,
+        so the page budget is spent on open cases only (this tenant holds ~6k open).
         """
         since = int((time.time() - minutes_back * 60) * 1000)
         u = (user or "").lower()
         h = (host or "").lower()
         out: List[Dict[str, Any]] = []
-        # Page through creation_time-desc results so a box-case is not missed when the
-        # tenant has produced >100 incidents in the window. Cap the sweep so a busy
-        # tenant can't turn cleanup into an unbounded scan.
+        seen = set()
+        # Page through newest-first so a box-case is not missed when the tenant has
+        # produced >100 incidents in the window. Cap the sweep so a busy tenant can't
+        # turn cleanup into an unbounded scan.
         PAGE, MAX_PAGES = 100, 10
-        for pg in range(MAX_PAGES):
-            res = self._post("incidents/get_incidents/", {
-                "filters": [{"field": "creation_time", "operator": "gte", "value": since}],
-                "search_from": pg * PAGE, "search_to": pg * PAGE + PAGE,
-                "sort": {"field": "creation_time", "keyword": "desc"},
-            })
-            incs = (res.get("reply", {}) or {}).get("incidents", []) or []
-            for inc in incs:
-                if statuses and inc.get("status") not in statuses:
-                    continue
-                if user:
-                    users = [str(x).lower() for x in (inc.get("users") or [])]
-                    if not any(x == u or x.endswith("\\" + u) for x in users):
+        for status in (statuses or (None,)):
+            filters = [{"field": time_field, "operator": "gte", "value": since}]
+            if status:
+                filters.append({"field": "status", "operator": "eq", "value": status})
+            for pg in range(MAX_PAGES):
+                res = self._post("incidents/get_incidents/", {
+                    "filters": filters,
+                    "search_from": pg * PAGE, "search_to": pg * PAGE + PAGE,
+                    "sort": {"field": time_field, "keyword": "desc"},
+                })
+                incs = (res.get("reply", {}) or {}).get("incidents", []) or []
+                for inc in incs:
+                    if statuses and inc.get("status") not in statuses:
                         continue
-                if host:
-                    hosts = [str(x).lower() for x in (inc.get("hosts") or [])]
-                    if not any(h in x for x in hosts):
+                    if inc.get("incident_id") in seen:
                         continue
-                out.append(inc)
-            if len(incs) < PAGE:
-                break
+                    if user:
+                        users = [str(x).lower() for x in (inc.get("users") or [])]
+                        if not any(x == u or x.endswith("\\" + u) for x in users):
+                            continue
+                    if host:
+                        hosts = [str(x).lower() for x in (inc.get("hosts") or [])]
+                        if not any(h in x for x in hosts):
+                            continue
+                    seen.add(inc.get("incident_id"))
+                    out.append(inc)
+                if len(incs) < PAGE:
+                    break
         return out
 
     def update_incident(self, incident_id, update_data: Dict[str, Any]) -> Dict[str, Any]:

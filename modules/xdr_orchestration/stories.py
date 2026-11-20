@@ -13,6 +13,7 @@
 # src_ip/hostname — is injected by the orchestrator, mirroring the proven
 # run_beaconing_implant_scenario pattern.)
 
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -35,6 +36,13 @@ class Step:
     technique: dict                       # {"id","test_numbers","executor"?, "input_args"?}
     params: dict = field(default_factory=dict)      # shared per-step vars (dest/port/app/domain/url)
     network: List[NetworkEvent] = field(default_factory=list)
+    # ENDPOINT detection expectation: alert-name substrings that are ALTERNATES of the
+    # one detection the technique itself should raise on the Cortex agent. Left empty,
+    # _annotate() fills it from TECHNIQUE_CATALOG. Network expectations are NOT set
+    # here -- the scorecard derives them from each NetworkEvent's emitting module
+    # (expectations.py), so they always match what the generator was built to trip.
+    expected_alerts: List[str] = field(default_factory=list)
+    mitre: dict = field(default_factory=dict)        # {"tactic","technique_id","technique"}
     prereqs: bool = False                 # run the atomic's -GetPrereqs before firing (tests that
                                           # need a target file/tool staged first, e.g. file deletion)
     cleanup: bool = False                 # run the atomic's -Cleanup after the step (persistence etc.)
@@ -102,6 +110,106 @@ def _internal_lateral_net() -> List["NetworkEvent"]:
         NetworkEvent("Zscaler Web Gateway", "rdp_lateral"),
         NetworkEvent("Zscaler Web Gateway", "smb_rare_file_transfer"),
     ]
+
+
+# ── Detection / ATT&CK catalog ─────────────────────────────────────────────────
+# Maps each validated technique id to its ATT&CK (tactic, technique name) and a
+# best-effort set of alert-name substrings it should trigger. _annotate() fills any
+# Step that didn't set these explicitly. The expected_alerts are EXPECTATIONS the
+# user tunes against their own tenant's analytic names — a miss on the scorecard
+# means "not observed", which is itself the signal worth seeing. Low-signal recon
+# techniques intentionally carry no expected_alerts (they rarely alert alone) but
+# still carry their ATT&CK mapping for the coverage map.
+TECHNIQUE_CATALOG = {
+    "T1082":     {"tactic": "Discovery", "technique": "System Information Discovery", "expected_alerts": []},
+    "T1016":     {"tactic": "Discovery", "technique": "System Network Configuration Discovery", "expected_alerts": []},
+    "T1033":     {"tactic": "Discovery", "technique": "System Owner/User Discovery", "expected_alerts": []},
+    "T1057":     {"tactic": "Discovery", "technique": "Process Discovery", "expected_alerts": []},
+    "T1049":     {"tactic": "Discovery", "technique": "System Network Connections Discovery", "expected_alerts": []},
+    "T1087.001": {"tactic": "Discovery", "technique": "Account Discovery: Local Account", "expected_alerts": []},
+    "T1518.001": {"tactic": "Discovery", "technique": "Security Software Discovery", "expected_alerts": ["Security Software"]},
+    "T1105":     {"tactic": "Command and Control", "technique": "Ingress Tool Transfer", "expected_alerts": ["Ingress Tool", "LOLBin", "Download"]},
+    # Names the agent actually raised on 2026-11-18 (XDR Agent, box-tied):
+    # "Credential Gathering Protection - <id>" (many ids, one per rule hit) and
+    # "Memory dumping with comsvcs.dll". Matching is case-insensitive substring.
+    "T1003.001": {"tactic": "Credential Access", "technique": "OS Credential Dumping: LSASS Memory", "expected_alerts": ["Credential Gathering Protection", "Memory dumping", "LSASS", "Credential Dump", "comsvcs", "MiniDump"]},
+    "T1552.001": {"tactic": "Credential Access", "technique": "Unsecured Credentials: Credentials In Files", "expected_alerts": ["Unsecured Credential", "Credentials In Files", "password"]},
+    "T1070.004": {"tactic": "Defense Evasion", "technique": "Indicator Removal: File Deletion", "expected_alerts": ["Indicator Removal", "File Deletion"]},
+    "T1074.001": {"tactic": "Collection", "technique": "Data Staged: Local Data Staging", "expected_alerts": ["Data Staged", "Staging", "Archive"]},
+    "T1048.003": {"tactic": "Exfiltration", "technique": "Exfiltration Over Unencrypted Non-C2 Protocol", "expected_alerts": ["Exfiltration", "Exfil"]},
+    "T1547.001": {"tactic": "Persistence", "technique": "Boot/Logon Autostart: Registry Run Keys", "expected_alerts": ["Run Key", "Registry Run", "Autostart"]},
+    # Matches the analytics alert "Uncommon local scheduled task created" (2026-11-18).
+    "T1053.005": {"tactic": "Persistence", "technique": "Scheduled Task/Job: Scheduled Task", "expected_alerts": ["Scheduled Task"]},
+    # Builtin wildfire_pe payload. Confirmed 2026-11-18: "WildFire Malware", source
+    # XDR Agent, high, action "Detected (Post Detected)", ~10 min after the run (the
+    # file stays on disk so the agent can upload it for the verdict).
+    "T1204.002": {"tactic": "Execution", "technique": "User Execution: Malicious File", "expected_alerts": ["WildFire Malware"]},
+}
+
+
+# Network-signal expectations are derived, not written here: the scorecard asks each
+# NetworkEvent's emitting module which analytic / correlation rule that event is built
+# to trip (expectations.py). A step can therefore never expect an alert it doesn't
+# emit, and a network miss always means "sent, the detector didn't fire".
+
+
+# ── Palo Alto NGFW as the default network vendor ──────────────────────────────
+# Every step's network signal also gets a PAN NGFW rendering, derived from the vendor
+# events it already declares (so YAML stories get it too). PAN is the one network
+# vendor sent by default; the others are opt-in per run (orchestrator network_vendors).
+PANW_MODULE = "Palo Alto Networks NGFW"
+DEFAULT_NETWORK_VENDORS = (PANW_MODULE,)
+
+# other-vendor event -> PAN NGFW event (panw_ngfw._THREAT_DISPATCH / _XDR_EVENTS)
+PANW_EQUIVALENT = {
+    "C2_BEACON": "xdr_c2_beacon", "web_c2_beacon": "xdr_c2_beacon", "C2_EGRESS": "xdr_c2_beacon",
+    "DNS_TUNNEL": "dns_tunnel_pattern",
+    "port_scan": "port_scan",
+    "smb_share_enumeration": "rare_smb", "smb_new_host_lateral": "rare_smb",
+    "smb_rare_file_transfer": "rare_smb",
+    "rdp_lateral": "rare_rdp",
+    "data_exfil": "large_upload_https",
+    "large_download": "xdr_web_download", "sandbox_threat": "xdr_web_download",
+    "reverse_ssh_tunnel": "unusual_ssh_external",
+}
+
+
+def panw_equivalents(network) -> List["NetworkEvent"]:
+    """The PAN NGFW events matching a step's other-vendor events, one per distinct
+    (event, domain). Internal source (the box's LAN IP): the firewall logs the
+    pre-NAT client, as PAN does."""
+    out, seen = [], set()
+    for ne in network or []:
+        if ne.module == PANW_MODULE:
+            continue
+        ev = PANW_EQUIVALENT.get(ne.event)
+        if not ev:
+            continue
+        dom = ne.context.get("domain") if ev == "xdr_c2_beacon" else None
+        if (ev, dom) in seen:
+            continue
+        seen.add((ev, dom))
+        out.append(NetworkEvent(PANW_MODULE, ev, context={"domain": dom} if dom else {}))
+    return out
+
+
+def _annotate(story: "Story") -> "Story":
+    """Fill each step's mitre + expected_alerts from TECHNIQUE_CATALOG where the step
+    didn't set them explicitly, and add the step's PAN NGFW network events (unless it
+    already lists some). Idempotent; returns the same story. Every consumer
+    (run_story, list_stories, mitre_coverage) annotates, so steps always carry their
+    ATT&CK mapping without the builders having to repeat it."""
+    for step in story.steps:
+        if step.network and not any(ne.module == PANW_MODULE for ne in step.network):
+            step.network = list(step.network) + panw_equivalents(step.network)
+        tid = (step.technique or {}).get("id")
+        cat = TECHNIQUE_CATALOG.get(tid, {})
+        if not step.mitre:
+            step.mitre = {"tactic": cat.get("tactic"), "technique_id": tid,
+                          "technique": cat.get("technique")}
+        if not step.expected_alerts:
+            step.expected_alerts = list(cat.get("expected_alerts") or [])
+    return story
 
 
 def get_reference_story() -> Story:
@@ -181,6 +289,47 @@ def get_quick_story() -> Story:
                                  context={"domain": c2_domain}, external=True),
                     *_fw_egress(c2_domain),
                 ],
+            ),
+        ],
+    )
+
+
+# ── WildFire malware-delivery story ───────────────────────────────────────────
+
+def _wildfire_pe() -> dict:
+    """Builtin payload step spec: download + run Palo Alto's WildFire test PE
+    (payloads.py). T1204.002 = User Execution: Malicious File."""
+    return {"id": "T1204.002", "executor": "builtin", "payload": "wildfire_pe"}
+
+
+def get_wildfire_story() -> Story:
+    """Malware delivery that the Cortex agent judges with a REAL WildFire verdict.
+
+    The Atomic techniques exercise behaviour; this exercises the agent's malware
+    module. Palo Alto's WildFire test PE (fresh SHA-256 on every download, verdict
+    always malware) is fetched over plain HTTP to C:\\Users\\Public\\Downloads -- outside
+    the Atomic allow-list paths -- and executed, so the agent queries WildFire on a
+    never-seen hash and raises its WildFire malware alert (allow ~5 min for the
+    verdict). The paired Zscaler sandbox record names the same file, hash and URL.
+    The file stays until the next WildFire run removes it: deleting it right away
+    stopped the agent's WildFire upload (no verdict, no alert)."""
+    return Story(
+        id="xdr_wildfire",
+        name="XDR WildFire: malware test file delivered and run (real WildFire verdict)",
+        tactics=["Discovery", "Execution"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery — System Owner/User (whoami), the operator orienting first.",
+                 _wa("T1033")),
+            Step(
+                "Execution — download Palo Alto's WildFire test PE over HTTP and run it; "
+                "Zscaler records the same file with a malicious sandbox verdict.",
+                _wildfire_pe(),
+                network=[NetworkEvent("Zscaler Web Gateway", "sandbox_threat")],
+                # No cleanup: the agent needs the file on disk to upload it for the
+                # WildFire verdict. The next run removes it (payloads.py).
+                cleanup=False,
+                post_delay=5.0,
             ),
         ],
     )
@@ -410,6 +559,94 @@ def get_fullchain_story() -> Story:
     )
 
 
+# ── Data-driven stories (YAML) ─────────────────────────────────────────────────
+# Tier-2 #4: author stories as YAML under modules/xdr_orchestration/stories/ without
+# touching Python. The built-in Python builders above are the validated canon; YAML
+# files ADD new stories (or override a built-in of the same id). YAML is optional —
+# if PyYAML isn't installed, the loader logs once and returns nothing.
+
+STORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stories")
+
+
+def story_from_dict(d: dict) -> Story:
+    """Build a Story (with Steps + NetworkEvents) from a plain dict — the shape a
+    YAML file deserializes to. Unknown keys are ignored; sensible defaults fill the
+    rest, so a minimal story file is just id/name/steps."""
+    steps = []
+    for sd in (d.get("steps") or []):
+        tech = sd.get("technique") or {}
+        if isinstance(tech, str):                     # allow `technique: T1033` shorthand
+            tech = {"id": tech, "test_numbers": "1", "executor": "winrm_atomic"}
+        tech.setdefault("executor", "winrm_atomic")
+        tech.setdefault("test_numbers", "1")
+        nets = []
+        for ne in (sd.get("network") or []):
+            nets.append(NetworkEvent(
+                module=ne["module"], event=ne["event"],
+                context=dict(ne.get("context") or {}), external=bool(ne.get("external", False))))
+        steps.append(Step(
+            narrative=sd.get("narrative", ""),
+            technique=tech,
+            params=dict(sd.get("params") or {}),
+            network=nets,
+            expected_alerts=list(sd.get("expected_alerts") or []),
+            mitre=dict(sd.get("mitre") or {}),
+            prereqs=bool(sd.get("prereqs", False)),
+            cleanup=bool(sd.get("cleanup", False)),
+            pre_delay=float(sd.get("pre_delay", 0.0)),
+            post_delay=float(sd.get("post_delay", 2.0)),
+        ))
+    return Story(
+        id=d["id"], name=d.get("name", d["id"]),
+        steps=steps,
+        tactics=list(d.get("tactics") or []),
+        anchor_dhcp=bool(d.get("anchor_dhcp", True)),
+        anchor_logon=bool(d.get("anchor_logon", True)),
+    )
+
+
+def load_yaml_stories(story_dir: str = STORY_DIR, *, verbose: bool = False) -> dict:
+    """Return {id: builder} for every *.yaml/*.yml in `story_dir`. Each builder is a
+    closure that rebuilds a fresh Story from the parsed dict on every call (so a run
+    can mutate its own copy). Best-effort: a bad file is skipped with a note, never
+    raised; a missing dir or missing PyYAML returns {}."""
+    if not os.path.isdir(story_dir):
+        return {}
+    try:
+        import yaml
+    except Exception as e:
+        print(f"[XDR] YAML stories skipped — PyYAML not installed ({e}); "
+              "`pip install pyyaml` to author stories as files.")
+        return {}
+    builders = {}
+    for fn in sorted(os.listdir(story_dir)):
+        if not fn.lower().endswith((".yaml", ".yml")):
+            continue
+        path = os.path.join(story_dir, fn)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            if not data.get("id"):
+                print(f"[XDR] YAML story {fn} skipped — no 'id'.")
+                continue
+            built = story_from_dict(data)              # validate it builds now
+            # ...and that it names real modules/events (validate.py). Errors keep the
+            # file out of the registry so it can never be fired; warnings just print.
+            from .validate import validate_story, errors, format_problems
+            problems = validate_story(built)
+            if errors(problems):
+                print(f"[XDR] YAML story {fn} skipped — invalid:\n{format_problems(problems)}")
+                continue
+            if problems:
+                print(f"[XDR] YAML story {fn} loaded with warnings:\n{format_problems(problems)}")
+            builders[data["id"]] = (lambda dd: (lambda: story_from_dict(dd)))(data)
+            if verbose:
+                print(f"[XDR] loaded YAML story {data['id']} from {fn}")
+        except Exception as e:
+            print(f"[XDR] YAML story {fn} skipped — {e}")
+    return builders
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 _STORY_BUILDERS = {
@@ -419,22 +656,59 @@ _STORY_BUILDERS = {
     "xdr_lateral":     get_lateral_story,
     "xdr_persistence": get_persistence_story,
     "xdr_fullchain":   get_fullchain_story,
+    "xdr_wildfire":    get_wildfire_story,
 }
+# YAML stories add to / override the built-ins (user-authored canon lives in files).
+_STORY_BUILDERS.update(load_yaml_stories())
 
 
 def list_stories() -> list:
-    """[{id, name, steps, techniques, tactics}] for the console story picker."""
+    """[{id, name, steps, techniques, tactics, expectations, problems}] for the console
+    picker. `expectations` counts DETECTIONS (endpoint + derived network), not needles;
+    `problems` is validate_story()'s list (warnings only -- errored stories never load)."""
+    from .scorecard import collect_expectations   # lazy: scorecard reads module maps
+    from .validate import validate_story
     out = []
     for sid, build in _STORY_BUILDERS.items():
-        s = build()
+        s = _annotate(build())
         out.append({
+            "problems": validate_story(s),
             "id": s.id,
             "name": s.name,
             "steps": len(s.steps),
             "techniques": [st.technique["id"] for st in s.steps],
             "tactics": list(s.tactics),
+            # with the default vendor set (PAN NGFW only)
+            "expectations": len(collect_expectations(s, vendors=list(DEFAULT_NETWORK_VENDORS))),
+            "network_vendors": sorted({ne.module for st in s.steps for ne in st.network}),
         })
     return out
+
+
+def mitre_coverage() -> dict:
+    """ATT&CK coverage map across all registered stories (Tier-1 #2): which tactics
+    and techniques the suite exercises, and which stories cover each technique.
+    Feeds a coverage heatmap in the console / an at-a-glance 'what do we cover?'."""
+    tactics = {}            # tactic -> {technique_id -> {"technique","stories":[...]}}
+    for sid, build in _STORY_BUILDERS.items():
+        s = _annotate(build())
+        for st in s.steps:
+            m = st.mitre or {}
+            tac = m.get("tactic") or "Unmapped"
+            tid = m.get("technique_id") or (st.technique or {}).get("id")
+            bucket = tactics.setdefault(tac, {})
+            row = bucket.setdefault(tid, {"technique": m.get("technique"), "stories": []})
+            if s.id not in row["stories"]:
+                row["stories"].append(s.id)
+    # Flatten to a stable, display-friendly structure.
+    out = []
+    for tac in sorted(tactics):
+        techs = [{"technique_id": tid, "technique": v["technique"], "stories": v["stories"]}
+                 for tid, v in sorted(tactics[tac].items(), key=lambda kv: kv[0] or "")]
+        out.append({"tactic": tac, "techniques": techs})
+    totals = {"tactics": len(tactics),
+              "techniques": len({tid for b in tactics.values() for tid in b})}
+    return {"totals": totals, "by_tactic": out}
 
 
 def override_domain(story: Story, new_domain: str) -> Story:
@@ -460,18 +734,68 @@ def override_domain(story: Story, new_domain: str) -> Story:
     return story
 
 
+def story_domains(story: Story) -> list:
+    """Every distinct C2/exfil domain the story uses (step params + network contexts)."""
+    out = []
+    for step in story.steps:
+        for d in [step.params.get("domain")] + [ne.context.get("domain") for ne in step.network]:
+            if d and d not in out:
+                out.append(d)
+    return out
+
+
+def fresh_domain(domain: str, token: str) -> str:
+    """'update-check-svc.net' + 'k3f9' -> 'update-check-svc-k3f9.net'."""
+    name, dot, tld = domain.rpartition(".")
+    return f"{name}-{token}.{tld}" if dot else f"{domain}-{token}"
+
+
+def freshen_domains(story: Story, token: str) -> dict:
+    """Per-run option (default ON): give every story domain a run-unique tag, in place.
+
+    Why: the shipped C2 correlation rules suppress repeats for 1 hour keyed on
+    source IP + domain, and every run fires from the same box IP. Two runs of a
+    story within the hour (2026-11-18: persistence at 18:42 and 19:15) left Check
+    Point, Fortinet and Infoblox silent on the second -- suppressed, not missed. A
+    fresh domain per run keeps each run independently detectable. Distinct domains
+    stay distinct (each gets the same tag). Rewrites step params, input_args
+    strings (so the real technique hits the same host) and network contexts.
+    Returns {old: new}."""
+    mapping = {d: fresh_domain(d, token) for d in story_domains(story)}
+    for step in story.steps:
+        d = step.params.get("domain")
+        if d in mapping:
+            step.params["domain"] = mapping[d]
+        for holder in (step.params.get("input_args"), (step.technique or {}).get("input_args")):
+            if isinstance(holder, dict):
+                for k, v in list(holder.items()):
+                    if isinstance(v, str):
+                        for old, new in mapping.items():
+                            v = v.replace(old, new)
+                        holder[k] = v
+        for ne in step.network:
+            if ne.context.get("domain") in mapping:
+                ne.context = {**ne.context, "domain": mapping[ne.context["domain"]]}
+    return mapping
+
+
 def all_technique_ids() -> list:
-    """Every distinct technique id across all stories — used by the Kickstarter to
-    install exactly the prereqs any story might need."""
+    """Every distinct ATOMIC technique id across all stories — used by the Kickstarter
+    to install exactly the prereqs any story might need. Builtin payload steps
+    (payloads.py) are skipped: they need no Atomic prereqs, and asking Atomic for
+    their technique's prereqs would stage unrelated test files."""
     ids = []
     for build in _STORY_BUILDERS.values():
         for st in build().steps:
+            if (st.technique or {}).get("executor") == "builtin":
+                continue
             if st.technique["id"] not in ids:
                 ids.append(st.technique["id"])
     return ids
 
 
 def get_story(story_id: str) -> Optional[Story]:
-    """Resolve a story by id (defaults handled by the caller)."""
+    """Resolve a story by id (defaults handled by the caller). Annotated so every
+    step carries its ATT&CK mapping + detection expectations."""
     build = _STORY_BUILDERS.get(story_id)
-    return build() if build else None
+    return _annotate(build()) if build else None
