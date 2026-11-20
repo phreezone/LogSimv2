@@ -234,6 +234,7 @@ def build_session_context(config):
     """
     session_context = {}
     _KNOWN_DEVICE_IPS.clear()
+    _IP_OWNER.clear()
 
     # Department registry + affinity strength, so the weighting helpers can bias
     # by department without every call site having to pass one.
@@ -243,6 +244,7 @@ def build_session_context(config):
                                             _DEPT_AFFINITY_STRENGTH))
     _USER_DEPARTMENT.clear()
     _USER_DEVICES.clear()
+    load_estate(config)
     for _u, _p in config.get('user_profiles', {}).items():
         if _p.get('department'):
             _USER_DEPARTMENT[_norm_user(_u)] = _p['department']
@@ -357,6 +359,9 @@ def build_session_context(config):
             'role':             profile.get('role', ''),
             'email':            profile.get('email', f"{username}@examplecorp.com"),
             'aws_iam_user':     profile.get('aws_iam_user'),
+            'gcp_iam_user':     profile.get('gcp_iam_user'),
+            'office':           profile.get('office'),
+            'start_date':       profile.get('start_date'),
             'active_devices':   active_devices,
             # Shortcuts – modules can use these directly for the common case
             'primary_ip':       primary_dev.get('ip'),
@@ -367,6 +372,9 @@ def build_session_context(config):
         }
         _KNOWN_DEVICE_IPS.update(d.get('ip') for d in active_devices.values()
                                  if isinstance(d, dict) and d.get('ip'))
+        for d in active_devices.values():
+            if isinstance(d, dict) and d.get('ip'):
+                _IP_OWNER.setdefault(d['ip'], username)
 
     _ACTIVE_CONTEXT.clear()
     _ACTIVE_CONTEXT.update(session_context)
@@ -417,7 +425,13 @@ def recurring_host(key, n=3):
     fh = focus_host()
     if fh and fh[0]:
         return fh
-    users = sorted(u for u, p in _ACTIVE_CONTEXT.items() if (p or {}).get("primary_ip"))
+    # Base-estate users only: drawn from all 5,000 the sorted population changed and every
+    # recurring pair the tenant had learned moved to someone else (and could land on a new
+    # hire before their start date). Over the base roster the draw is the one it always was.
+    users = sorted(u for u, p in _ACTIVE_CONTEXT.items()
+                   if (p or {}).get("primary_ip") and u not in _USER_START)
+    if not users:
+        users = sorted(u for u, p in _ACTIVE_CONTEXT.items() if (p or {}).get("primary_ip"))
     if not users:
         return None
     chosen = random.Random(f"recurring|{key}").sample(users, min(n, len(users)))
@@ -427,8 +441,13 @@ def recurring_host(key, n=3):
 
 
 def stable_subset(items, key, n=2):
-    """`n` of `items`, the same ones on every run for `key`."""
+    """`n` of `items`, the same ones on every run for `key`. Usernames of later hires
+    (user_profiles.*.start_date) are left out when any others remain, so a subset drawn
+    over the roster is the one the base estate always had (see recurring_host)."""
     items = sorted({str(i) for i in (items or [])})
+    if _USER_START:
+        kept = [i for i in items if i not in _USER_START]
+        items = kept or items
     if len(items) <= n:
         return items
     return random.Random(f"subset|{key}").sample(items, n)
@@ -610,8 +629,111 @@ def get_random_user(session_context, preferred_device_type=None):
     """
     if not session_context:
         return None
-    username = random.choice(list(session_context.keys()))
+    username = random.choice(pickable_users(session_context))
     return get_user_by_name(session_context, username, preferred_device_type)
+
+
+# --- Estate: offices, SIDs, onboarding, site domain controllers -----------------------
+# Filled from config by load_estate() (build_session_context calls it). Base-estate users
+# carry no start_date and are active from the first run; tools/estate_generator.py gives
+# the 4,499 later hires a start_date, and before it they exist in the directory but never
+# act -- the estate grows by ~50 genuinely first-seen people a day.
+_USER_OFFICE: dict = {}
+_USER_RID: dict = {}
+_USER_START: dict = {}          # username -> UTC epoch day of their first working day
+_ONBOARDING = {"on": True}
+_SITE_DCS: dict = {}            # office city -> sorted DC short names
+_PICKABLE: dict = {}            # id(session_context) -> (ctx, len, day, [usernames])
+_IP_OWNER: dict = {}            # active device IP -> username (this run)
+
+
+def ip_owner(ip):
+    """The user whose active device holds `ip` this run, or None."""
+    return _IP_OWNER.get(ip)
+
+
+def _epoch_day(ts=None):
+    return int((time.time() if ts is None else ts) // 86400)
+
+
+def load_estate(config):
+    """Index the per-user estate fields (office, sid_rid, start_date) and the site DCs."""
+    import datetime as _dt
+    _USER_OFFICE.clear()
+    _USER_RID.clear()
+    _USER_START.clear()
+    _SITE_DCS.clear()
+    _PICKABLE.clear()
+    _ONBOARDING["on"] = bool(((config.get('user_behavior') or {}).get('onboarding') or {})
+                             .get('enabled', True))
+    for u, p in (config.get('user_profiles') or {}).items():
+        p = p or {}
+        if p.get('office'):
+            _USER_OFFICE[u] = p['office']
+        if p.get('sid_rid') is not None:
+            _USER_RID[u] = int(p['sid_rid'])
+        if p.get('start_date'):
+            try:
+                d = _dt.date.fromisoformat(str(p['start_date']))
+                _USER_START[u] = (d - _dt.date(1970, 1, 1)).days
+            except ValueError:
+                pass
+    for name, h in sorted((config.get('domain_controller_hosts') or {}).items()):
+        if isinstance(h, dict) and h.get('site'):
+            _SITE_DCS.setdefault(h['site'], []).append(name)
+
+
+def user_office(username):
+    """The office city a user works from, or None when the estate does not say."""
+    return _USER_OFFICE.get(username)
+
+
+def user_rid(username):
+    """The user's domain RID (config sid_rid), or None for identities outside the roster."""
+    return _USER_RID.get(username)
+
+
+def is_new_hire(username):
+    """True for users added after the base estate (they carry a start_date)."""
+    return username in _USER_START
+
+
+def is_onboarded(username, ts=None):
+    """False only for a pre-provisioned new hire whose start date is still ahead."""
+    s = _USER_START.get(username)
+    if s is None or not _ONBOARDING["on"]:
+        return True
+    return _epoch_day(ts) >= s
+
+
+def onboarding_day():
+    """Cache key for anything filtered by is_onboarded(): changes once a UTC day."""
+    return _epoch_day() if _USER_START and _ONBOARDING["on"] else 0
+
+
+def pickable_users(session_context):
+    """Usernames a benign generator may draw: everyone already onboarded. Cached per
+    roster and UTC day -- this used to build list(session_context) on every call, ~5,000
+    keys per event at the expanded estate's size."""
+    day = onboarding_day()
+    hit = _PICKABLE.get(id(session_context))
+    if hit and hit[0] is session_context and hit[1] == len(session_context) and hit[2] == day:
+        return hit[3]
+    names = [u for u in session_context if is_onboarded(u)] or list(session_context)
+    _PICKABLE[id(session_context)] = (session_context, len(session_context), day, names)
+    return names
+
+
+def site_dc(username):
+    """Short name of the domain controller at a NEW HIRE's office (stable per user), or
+    None for base-estate users, whose DC-side events keep the configured DC so the
+    tenant's existing baselines stay where they are."""
+    if username not in _USER_START:
+        return None
+    dcs = _SITE_DCS.get(_USER_OFFICE.get(username))
+    if not dcs:
+        return None
+    return dcs[int(hashlib.sha256(f"dc|{username}".encode()).hexdigest(), 16) % len(dcs)]
 
 
 def get_user_by_name(session_context, username, preferred_device_type=None):
@@ -641,6 +763,7 @@ def get_user_by_name(session_context, username, preferred_device_type=None):
             'email':        profile.get('email'),
             'display_name': profile.get('display_name'),
             'aws_iam_user': profile.get('aws_iam_user'),
+            'gcp_iam_user': profile.get('gcp_iam_user'),
         }
 
     return {
@@ -655,6 +778,7 @@ def get_user_by_name(session_context, username, preferred_device_type=None):
         'email':        profile.get('email'),
         'display_name': profile.get('display_name'),
         'aws_iam_user': profile.get('aws_iam_user'),
+        'gcp_iam_user': profile.get('gcp_iam_user'),
     }
 
 
@@ -1457,7 +1581,8 @@ def stable_beacon_pairs(key, config, session_context=None, n=4):
     for uname, p in profiles.items():
         devs  = (p or {}).get("devices") or []
         prim  = next((d for d in devs if d.get("is_primary") and d.get("subnet")), None)
-        if uname and prim:
+        # base-estate users only, so the pairs are the ones the tenant already learned
+        if uname and prim and not (p or {}).get("start_date"):
             cands.append((uname, prim["subnet"]))
     cands.sort()
     pairs = []

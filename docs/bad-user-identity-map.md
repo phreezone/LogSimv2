@@ -61,7 +61,7 @@ as the IP. A join on the egress alone pairs the target with every other account 
 4. AD SID ↔ sAMAccountName: from Windows events (4624 etc. carry both); ↔ Entra only via the CIE identity map.
 5. Okta user id ↔ UPN: from Okta itself (`actor.id` + `actor.alternateId` in the same record).
 6. AWS IAM user ↔ person: **needs an explicit mapping** (`user_profiles.<user>.aws_iam_user`) — the name has no fixed relation to the AD account.
-7. GCP `principalEmail` = UPN (no `gcp_iam_user` is configured for anyone).
+7. GCP `principalEmail` = UPN. Only users with `user_profiles.<user>.gcp_iam_user` set (219, mainly IT and DevOps; the value is their email) appear as GCP human principals.
 8. Display name ↔ UPN: from Entra / Okta records.
 9. Host: hostname ↔ FQDN (append `.examplecorp.local`) ↔ MAC ↔ internal IP (Infoblox DHCP leases carry all of them).
 10. Internal IP ↔ egress IP: firewall NAT fields (§2).

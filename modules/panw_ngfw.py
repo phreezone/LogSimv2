@@ -1052,10 +1052,10 @@ def _benign_internal(config, session_context):
         # AD authentication, directory lookups, RPC and SYSVOL/NETLOGON SMB go to the domain
         # controllers. XSIAM classifies a host as a DC from exactly this traffic, which the
         # SMB-from-DC and DCSync-from-non-DC detectors depend on.
-        dst_ip = random.choice(_dcs(config))
+        dst_ip = random.choice(resolver.domain_controllers_for(config, src_ip, _dcs(config)))
     elif app.startswith("ms-ds-smb"):
         # Workstation SMB to a file server (the other 70% of SMB; 30% went to a DC above).
-        dst_ip = random.choice(resolver.file_servers(config) or ["10.0.10.50"])
+        dst_ip = random.choice(resolver.file_servers(config, src_ip) or ["10.0.10.50"])
     else:
         dst_ip = random.choice(config.get("internal_servers") or ["10.0.10.50"])
     dpt = (_APP.get(app, (None,)*5)[4] or [445])[0]

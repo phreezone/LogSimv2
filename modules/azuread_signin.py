@@ -255,6 +255,11 @@ def _benign_mix(config, user, loc):
                         resource=ac.pick_baseline_resource(user),
                         ca_result="success", conditional="success", mfa=True,
                         auth_method=random.choice(ac.MFA_METHODS[:3]))]
+    if r < 0.78 and not ac.has_phone(user):   # no phone: the same sign-in, from their computer
+        return [_signin(user, loc, interactive=(random.random() < 0.4),
+                        app=random.choice(["Microsoft Teams", "Microsoft Office", "OneDrive SyncEngine"]),
+                        client_app="Mobile Apps and Desktop clients", ca_result="success",
+                        conditional="success")]
     if r < 0.78:   # mobile sign-in from a phone (cellular egress + registered mobile device)
         mloc = ac.egress(user, remote_prob=0.0, mobile_prob=1.0)
         return [_signin(user, mloc, interactive=(random.random() < 0.4),

@@ -1510,7 +1510,7 @@ def _generate_rdp_internal(config, src_ip, user, shost):
 def _generate_ftp_download(config, src_ip, user, shost):
     """Benign internal FTP download — workstation to internal file server."""
     forti_conf = _get_config(config)
-    dst_ip = random.choice(resolver.file_servers(config) or ["10.0.10.50"])
+    dst_ip = random.choice(resolver.file_servers(config, src_ip) or ["10.0.10.50"])
     lan_iface = forti_conf.get("interface_lan", "port10")
     duration_s = random.randint(10, 300)
 
@@ -1544,7 +1544,7 @@ def _generate_ftp_download(config, src_ip, user, shost):
 def _generate_smb_internal(config, src_ip, user, shost):
     """Benign internal SMB file share access — workstation to file server."""
     forti_conf = _get_config(config)
-    dst_ip = random.choice(resolver.file_servers(config) or ["10.0.10.50"])
+    dst_ip = random.choice(resolver.file_servers(config, src_ip) or ["10.0.10.50"])
     lan_iface = forti_conf.get("interface_lan", "port10")
     duration_s = random.randint(5, 120)
 
@@ -3794,13 +3794,13 @@ _ABNORMAL_VPN_OS = ["Linux", "Kali Linux 2024.2", "Ubuntu 22.04", "Android 13",
                     "macOS (unknown build)", "FreeBSD 14"]
 
 
-def _get_domain_controllers(config):
-    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses."""
+def _get_domain_controllers(config, src_ip=None):
+    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses. With
+    src_ip, a new hire's workstation gets its own site's DCs."""
     forti_conf = _get_config(config)
     dcs = forti_conf.get("domain_controllers") or config.get("domain_controllers")
-    if dcs:
-        return dcs
-    return ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+    dcs = dcs or ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+    return resolver.domain_controllers_for(config, src_ip, dcs) if src_ip else dcs
 
 
 def _b32_chunk(n):
@@ -4067,7 +4067,7 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost):
     """Normal AD auth: workstation -> its DC on LDAP/Kerberos/SMB. Baseline traffic
     so LDAP recon and AD anomalies stand out. Returns a single log string."""
     forti_conf = _get_config(config)
-    dc        = random.choice(_get_domain_controllers(config))
+    dc        = random.choice(_get_domain_controllers(config, src_ip))
     lan_iface = forti_conf.get("interface_lan", "port10")
     port      = random.choice([389, 389, 636, 88, 88, 445])
     svc       = {389: "LDAP", 636: "LDAPS", 88: "Kerberos", 445: "SMB"}[port]

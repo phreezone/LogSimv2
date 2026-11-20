@@ -985,7 +985,7 @@ def _generate_benign_smb_event(config, src_ip, user, shost=None):
     """
     firepower_conf = _get_config(config)
     internal_iface = firepower_conf.get('inbound_interface', 'inside')
-    dest_ip = random.choice(resolver.file_servers(config) or ['10.0.10.50'])
+    dest_ip = random.choice(resolver.file_servers(config, src_ip) or ['10.0.10.50'])
     start_ms, end_ms = _conn_timing(random.randint(500, 60_000))
 
     fields = _base_fields(config, src_ip, user, shost)
@@ -3289,10 +3289,12 @@ def _generate_scenario_log(config, scenario, session_context=None):
 _dns_tunnel_target_map: dict = {}   # src_ip -> stable (resolver, tunnel_domain) for DNS-tunnel recurrence
 
 
-def _fp_domain_controllers(config):
-    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses."""
+def _fp_domain_controllers(config, src_ip=None):
+    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses. With
+    src_ip, a new hire's workstation gets its own site's DCs."""
     dcs = _get_config(config).get('domain_controllers') or config.get('domain_controllers')
-    return dcs or ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+    dcs = dcs or ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+    return resolver.domain_controllers_for(config, src_ip, dcs) if src_ip else dcs
 
 
 def _b32_chunk(n):
@@ -3457,7 +3459,7 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost=None):
     recon stands out). Returns (fields, cef_name) tuple (single-event)."""
     firepower_conf = _get_config(config)
     internal_iface = firepower_conf.get('inbound_interface', 'inside')
-    dc   = random.choice(_fp_domain_controllers(config))
+    dc   = random.choice(_fp_domain_controllers(config, src_ip))
     port = random.choice([389, 389, 636, 88, 88, 445])
     svc  = {389: "LDAP", 636: "LDAPS", 88: "Kerberos", 445: "SMB"}[port]
     start_ms, end_ms = _conn_timing(random.randint(50, 3_000))

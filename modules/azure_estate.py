@@ -313,9 +313,10 @@ def pick_nonstandard(config, context=None):
     if fi:
         return user_caller(fi, ac.egress(fi)["ip"])
     profiles = (config or {}).get("user_profiles") or {}
-    pool = [u for u, p in profiles.items()
-            if p.get("role") not in _ALL_AZURE_ROLES and p.get("department") not in ("IT", "DevOps", "Security")
-            and ac.lifecycle_cohort(u) == "active"]
+    pool = ac.cached_pool("azure_nonstandard", profiles,
+                          lambda u, p: p.get("role") not in _ALL_AZURE_ROLES
+                          and p.get("department") not in ("IT", "DevOps", "Security")
+                          and ac.lifecycle_cohort(u) == "active")
     if pool:
         un = random.choice(pool)
         user = ac._norm(un, profiles[un])
@@ -324,16 +325,10 @@ def pick_nonstandard(config, context=None):
     return user_caller(user, ac.egress(user)["ip"])
 
 
-_POOLS = {}
-
-
 def _role_pool(config, roles):
     profiles = (config or {}).get("user_profiles") or {}
-    key = (id(profiles), roles)
-    if key not in _POOLS:
-        _POOLS[key] = sorted(u for u, p in profiles.items()
-                             if p.get("role") in roles and ac.lifecycle_cohort(u) == "active")
-    return _POOLS[key]
+    return ac.cached_pool(("azure_role",) + tuple(roles), profiles,
+                          lambda u, p: p.get("role") in roles and ac.lifecycle_cohort(u) == "active")
 
 
 try:

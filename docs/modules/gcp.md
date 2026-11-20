@@ -8,7 +8,7 @@ Simulates Google Cloud Audit Log events for the XSIAM `google_cloud_logging_raw`
 
 - **XIF:** GoogleCloudLogging pack — `GCP_MAP_COMMON_FIELDS` + `GCP_MAP_AUDIT_LOGS`
 - **Key XDM fields:** `insertId`, `logName`, `severity`, `resource.labels.project_id`, `resource.type`, `protoPayload.authenticationInfo.principalEmail`, `protoPayload.requestMetadata.callerIp`, `protoPayload.methodName`, `protoPayload.status.code`
-- **Identity:** uses `session_context[user].email` or `gcp_config.service_accounts`; optional per-user override via `gcp_iam_user` in user_profiles
+- **Identity:** human principals are only users with `gcp_iam_user` set in user_profiles (219 users, mainly IT and DevOps; the value is their email). Everything else is `gcp_config.service_accounts`. A roster where nobody has `gcp_iam_user` falls back to any user. See [estate.md](../estate.md).
 
 ---
 

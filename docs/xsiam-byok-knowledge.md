@@ -19,12 +19,12 @@ HOW TO USE THIS FILE
 |---|---|
 | Organization | ExampleCorp |
 | Owner (team / contact) | TODO |
-| Last reviewed | 2026-11-15 |
+| Last reviewed | 2026-11-19 |
 | Industry / compliance regimes | TODO |
 | Corporate email domain | examplecorp.com |
 | Active Directory domain | EXAMPLECORP (DNS: examplecorp.local) |
 | Public website | www.examplecorp.com |
-| Headcount (directory) | 501 user accounts in 15 departments |
+| Headcount (directory) | 5,000 user accounts in 15 departments. 501 are active from the start; the other 4,499 are pre-provisioned new hires who start about 50 a day from 2026-11-21 to 2027-02-18 (`user_profiles.*.start_date`) and have no activity before that date |
 | Countries with offices | United States (7 offices), Canada (Toronto), Ireland (Dublin), United Kingdom (London) |
 | Countries with NO business presence | Everything else. No office or Zscaler location exists outside the ten sites in section 1. |
 
@@ -49,7 +49,7 @@ Public NAT/egress addresses per office. Many users share a few addresses, so an 
 | London | GB | BT (2856) | 83.245.18.10-13 | Yes | |
 | Toronto, ON | CA | Rogers Communications (812) | 99.221.22.10-13 | Yes | |
 
-Each user is assigned to one office and normally appears from that office's pool.
+Each user is assigned to one office (`user_profiles.*.office`) and normally appears from that office's pool. New hires are spread across the sites by size: Columbus about 25%, Austin and New York 12% each, Seattle 10%, Chicago 9%, Fremont 8%, Atlanta and London 7% each, Dublin and Toronto 5% each.
 
 **How to use this:** Sign-ins and web traffic from these addresses are corporate. Do not attribute an event to one user from a shared egress IP alone; correlate on user, device or session. A user appearing from an office other than their own is notable but not by itself malicious.
 
@@ -57,8 +57,8 @@ Each user is assigned to one office and normally appears from that office's pool
 
 | Item | Value |
 |---|---|
-| Home / remote work | Permitted (modeled). Users sign in from a residential ISP in their own office's metro (for example Spectrum, Comcast, AT&T Internet, Verizon Fios, Virgin Media, Bell). Each user keeps one home /24 and one address in it. Home devices are named `<DEPT>-HM-nnn` and sit in 172.16.100.0/24. |
-| Mobile sign-ins | Permitted (modeled). Carrier LTE/5G addresses (T-Mobile, Verizon Wireless, AT&T Mobility, Vodafone, Three, Rogers, Bell) in the user's own metro. Mobile devices are in 10.10.50.0/24. |
+| Home / remote work | Permitted (modeled). Users sign in from a residential ISP in their own office's metro (for example Spectrum, Comcast, AT&T Internet, Verizon Fios, Virgin Media, Bell). Each user keeps one home /24 and one address in it. Home devices are named `<DEPT>-HM-nnn` and sit in 172.16.100.0/24 (base estate) or 172.20.0.0/21 (new hires). |
+| Mobile sign-ins | Permitted (modeled). Carrier LTE/5G addresses (T-Mobile, Verizon Wireless, AT&T Mobility, Vodafone, Three, Rogers, Bell) in the user's own metro. Mobile devices are in 10.10.50.0/24. New hires have no phones, so they never sign in from a mobile device or carrier address. |
 | Corporate VPN gateways | Cisco ASA AnyConnect; FortiGate SSL VPN at 203.0.113.20; Check Point gateway 203.0.113.10 |
 | Firewall NAT pools | 203.0.113.0/27 (Palo Alto PA-VM-01), 203.0.113.0/28 (Cisco ASA-FW-01) |
 | Zscaler (web proxy) egress IPs | 198.51.100.10, 198.51.100.11, 198.51.100.12 (users behind Zscaler appear from these addresses) |
@@ -74,29 +74,30 @@ Each user is assigned to one office and normally appears from that office's pool
 
 ## 2. Internal networks, segments and zones
 
-All offices appear to share one logical internal address plan; per-site subnets are not distinguished in the telemetry.
+User endpoints share one logical address plan by department, not by site. Servers outside the original ranges sit in one server subnet per site (10.0.20.0/24 Columbus, 10.0.21.0/24 to 10.0.29.0/24 for the other nine sites, rows below).
 
 | Segment | CIDR | Zone | Purpose | Key hosts / notes |
 |---|---|---|---|---|
-| Sales endpoints | 192.168.10.0/24 | LAN (user) | Laptops, Sales dept. | `SALES-LT-nnn` |
-| Engineering endpoints | 192.168.20.0/24 | LAN (user) | Laptops and workstations | `ENG-WS-nnn` |
-| Marketing endpoints | 192.168.30.0/24 | LAN (user) | Laptops | |
-| HR endpoints | 192.168.40.0/24 | LAN (user) | Laptops | |
-| Finance endpoints | 192.168.50.0/24 | LAN (user) | Workstations | Sensitive: payroll, AP/AR |
-| IT endpoints | 192.168.60.0/24 | LAN (user) | Laptops and workstations | IT staff are privileged |
-| Operations endpoints | 192.168.70.0/24 | LAN (user) | Laptops | |
-| Legal endpoints | 192.168.80.0/24 | LAN (user) | Laptops | Sensitive: contracts |
-| Security endpoints | 192.168.90.0/24 | LAN (user) | Laptops and workstations | SOC / IR staff |
-| DevOps endpoints | 192.168.100.0/24 | LAN (user) | Laptops and workstations | Privileged cloud access |
-| Data Science endpoints | 192.168.110.0/24 | LAN (user) | Laptops and workstations | |
-| Customer Success endpoints | 192.168.120.0/24 | LAN (user) | Laptops | |
-| Product endpoints | 192.168.130.0/24 | LAN (user) | Laptops | |
-| Support endpoints | 192.168.140.0/24 | LAN (user) | Workstations | |
-| Procurement endpoints | 192.168.150.0/24 | LAN (user) | Laptops | |
-| Mobile devices | 10.10.50.0/24 | Mobile | Phones (iPhone, Pixel, Galaxy) named `<USER>-<MODEL>` | |
-| Home / remote devices | 172.16.100.0/24 | Remote | Home-office devices | `<DEPT>-HM-nnn` |
+| Sales endpoints | 192.168.10.0/24 to 192.168.11.0/24, 192.168.16.0/24 to 192.168.18.0/24 | LAN (user) | Laptops, Sales dept. | `SALES-LT-nnn` |
+| Engineering endpoints | 192.168.20.0/24 to 192.168.29.0/24 | LAN (user) | Laptops and workstations | `ENG-WS-nnn` |
+| Marketing endpoints | 192.168.30.0/24 to 192.168.32.0/24 | LAN (user) | Laptops |  |
+| HR endpoints | 192.168.40.0/24 to 192.168.41.0/24 | LAN (user) | Laptops |  |
+| Finance endpoints | 192.168.50.0/24 to 192.168.51.0/24 | LAN (user) | Workstations | Sensitive: payroll, AP/AR |
+| IT endpoints | 192.168.60.0/24 to 192.168.61.0/24 | LAN (user) | Laptops and workstations | IT staff are privileged |
+| Operations endpoints | 192.168.70.0/24 to 192.168.72.0/24 | LAN (user) | Laptops |  |
+| Legal endpoints | 192.168.80.0/24 to 192.168.81.0/24 | LAN (user) | Laptops | Sensitive: contracts |
+| Security endpoints | 192.168.90.0/24 to 192.168.91.0/24 | LAN (user) | Laptops and workstations | SOC / IR staff |
+| DevOps endpoints | 192.168.100.0/24 to 192.168.101.0/24 | LAN (user) | Laptops and workstations | Privileged cloud access |
+| Data Science endpoints | 192.168.110.0/24 to 192.168.111.0/24 | LAN (user) | Laptops and workstations |  |
+| Customer Success endpoints | 192.168.120.0/24 to 192.168.123.0/24 | LAN (user) | Laptops |  |
+| Product endpoints | 192.168.130.0/24 to 192.168.132.0/24 | LAN (user) | Laptops |  |
+| Support endpoints | 192.168.140.0/24 to 192.168.143.0/24 | LAN (user) | Workstations |  |
+| Procurement endpoints | 192.168.150.0/24 to 192.168.151.0/24 | LAN (user) | Laptops |  |
+| Mobile devices | 10.10.50.0/24 | Mobile | Phones (iPhone, Pixel, Galaxy) named `<USER>-<MODEL>` | Base-estate users only |
+| Home / remote devices | 172.16.100.0/24, 172.20.0.0/21 | Remote | Home-office devices | `<DEPT>-HM-nnn`; 172.20.0.0/21 holds new hires' home devices |
 | Web / public services | 10.0.10.0/24 | DMZ / servers | www.examplecorp.com web farm | 10.0.10.50-52 (public web farm only), 10.0.10.1 (Zscaler VPN gw), 10.0.10.254 (network device), 10.0.10.10 (DC01) |
 | Server / data infrastructure | 10.0.20.0/24 | Server | Databases, backup, vCenter, monitoring | 10.0.20.10 DC02, 10.0.20.11-14 databases, 10.0.20.15 VM backup proxy, 10.0.20.16 APP01, 10.0.20.20 vCenter, 10.0.20.30-32 file servers FS01/FS02/FILE01, 10.0.20.40 Exchange, 10.0.20.41 SharePoint, 10.0.20.50 print server, 10.0.20.1 gateway |
+| Site server subnets | 10.0.21.0/24 (Austin), 10.0.22.0/24 (Seattle), 10.0.23.0/24 (New York), 10.0.24.0/24 (Chicago), 10.0.25.0/24 (Fremont), 10.0.26.0/24 (Atlanta), 10.0.27.0/24 (Dublin), 10.0.28.0/24 (London), 10.0.29.0/24 (Toronto) | Server | Per-site domain controller, file, print, DHCP and SCCM distribution-point servers | Host .10/.11 DCs, .30/.31 file servers, .50 print, .60/.61 SQL, .90 DHCP, .93 SCCM DP; .1 gateway |
 | Management / admin | 10.0.30.0/24 | Management | NOC and firewall administration | Jump hosts 10.0.30.30 and 10.0.30.31; 10.0.30.40 SNMP poller; 10.0.30.5 Check Point management server; 10.0.30.11-14 firewall management (see 2c); 10.0.30.1 gateway |
 | Infrastructure services | 10.1.0.0/16 | Server | DNS/DHCP and application servers | 10.1.1.2 Infoblox DC1, 10.1.5.20-21 servers, 10.1.100.10-11 databases, 10.1.255.254 network device |
 | Data center B | 10.100.0.0/16 | Server | Servers and databases | 10.100.1.1-2, 10.100.10.10-11 |
@@ -105,7 +106,7 @@ All offices appear to share one logical internal address plan; per-site subnets 
 | Guest Wi-Fi | TODO | Guest | Infoblox network view `guest-wifi` | CIDR unknown |
 | Infoblox DC2 | 10.1.1.3 | Server | Second DNS server | Inside the infrastructure-services range with DC1 |
 
-**How to use this:** An endpoint subnet identifies the owning department (for example a 192.168.50.x source is Finance). Servers should not initiate connections to the internet from the Server or DMZ zones except for known update and backup destinations. Admin protocols (SSH, RDP, WinRM, SNMP, firewall management) should originate from 10.0.30.0/24.
+**How to use this:** An endpoint subnet identifies the owning department (for example a 192.168.50.x or 192.168.51.x source is Finance; each department owns 192.168.D0.0/24 to 192.168.D9.0/24 except the four quiet /24s 192.168.12-15). Servers should not initiate connections to the internet from the Server or DMZ zones except for known update and backup destinations. Admin protocols (SSH, RDP, WinRM, SNMP, firewall management) should originate from 10.0.30.0/24.
 
 ### 2a. DMZ and exposed services
 
@@ -122,9 +123,9 @@ Probing of paths such as `/admin.php`, `/wp-login.php`, `/.env`, `/.git/config`,
 | Service | Host / IP | Notes |
 |---|---|---|
 | DNS / DHCP (Infoblox NIOS 9.0.3) | infoblox-dc1-01 (10.1.1.2), infoblox-dc2-01 (10.1.1.3) | DNS views `internal-lan`, `dmz-services`; network views `default`, `guest-wifi`; RPZ zones `rpz.infoblox.internal`, `bloxone-rpz-malware`, `rpz.threat-intel.corp` |
-| Internal DNS names | examplecorp.local, ad.examplecorp.local, dc01/dc02, fileserver, exchange, sharepoint, vcenter (all `.examplecorp.local`) | |
-| Domain controllers | DC01.examplecorp.local (10.0.10.10), DC02.examplecorp.local (10.0.20.10) | Windows events arrive through Windows Event Collector. See section 6a-1 for further DC names. |
-| VMware vCenter | vcenter.corp.examplecorp.local, 10.0.20.20 | Manages three ESXi hosts |
+| Internal DNS names | examplecorp.local, ad.examplecorp.local, dc01-dc16, fileserver, fs01-fs14, exchange, sharepoint, vcenter (all `.examplecorp.local`) | Full list in section 6a-1 |
+| Domain controllers | DC01 10.0.10.10 (Columbus); DC02 10.0.20.10 (Columbus); DC03 10.1.5.10 (Columbus); DC04 192.168.1.10 (New York); DC05 172.16.10.10 (Austin); DC06 10.0.23.10 (New York); DC07 10.0.21.10 (Austin); DC08 10.0.22.10 (Seattle); DC09 10.0.22.11 (Seattle); DC10 10.0.24.10 (Chicago); DC11 10.0.25.10 (Fremont); DC12 10.0.26.10 (Atlanta); DC13 10.0.28.10 (London); DC14 10.0.28.11 (London); DC15 10.0.27.10 (Dublin); DC16 10.0.29.10 (Toronto) | Windows events arrive through Windows Event Collector. Base-estate users authenticate against DC01 and the firewalls show their LDAP/Kerberos to DC01-DC05; new hires use their own site's DC. |
+| VMware vCenter | vcenter.corp.examplecorp.local, 10.0.20.20; VCENTER02 10.0.28.20 (London, DR) | Manages 24 ESXi hosts |
 | Network-config backup host | 10.1.5.20 (BACKUP01) | Account `svc_netbackup` |
 | VM backup proxy | 10.0.20.15 | Account `svc_vmbackup` |
 | SNMP poller | 10.0.30.40 | Polls 8 network devices |
@@ -271,35 +272,35 @@ Backups run every night, including freeze weekends and holidays, and are expecte
 | Corporate email / UPN domain | examplecorp.com (assumption for UPN) |
 | AD domain | EXAMPLECORP / examplecorp.local |
 | Okta org / Entra tenant names | TODO |
-| Username format | `<first initial>.<lastname>`, for example `a.tucker`; a numeric suffix resolves collisions (`a.cox2`, `w.shah2`); apostrophes are kept (`j.o'brien`). Email is `<username>@examplecorp.com`. |
+| Username format | `<first initial>.<lastname>`, for example `a.tucker`; a numeric suffix resolves collisions (`a.cox2`, `w.shah2`). Usernames, emails and display names use the letters A-Z only: no apostrophes, hyphens or accents (the three former `o'brien` accounts are now `j.obrien`, `l.obrien` and `a.obrien`). Email is `<username>@examplecorp.com`. |
 | Demo / legacy usernames | Some modules use a smaller set of short usernames such as `jsmith`, `mjohnson`, `alee`, `bwilliams`, `cbrown`, `dtaylor`, `ewhite`, `fmartin`, `gjackson`, `hthompson`, `j.doe`, `a.smith`, `b.jones`. Treat them as employees. |
 | Device hostname format | `<DEPT>-LT-nnn` (laptop), `<DEPT>-WS-nnn` (workstation), `<DEPT>-HM-nnn` (home/remote device), `<FIRST INITIAL><SURNAME>-<MODEL>` (mobile). The department prefix identifies the owning team; see section 5e for every prefix. |
 | Admin account naming | Network admins `netadmin.<user>`; shared team account `fw_ops` |
 | Service account naming | `svc_<purpose>`, for example `svc_netbackup`, `svc_vmbackup`, `svc_vcenter` |
-| Devices modeled | 303 laptops, 263 workstations, 362 mobile, 156 home devices |
+| Devices modeled | 2,994 laptops, 2,640 workstations, 362 mobile, 1,661 home devices |
 | Contractor / vendor policy | TODO |
 | Dormant account definition | TODO |
 | Leaver process | TODO |
 
 ### 5a. Departments and roles
 
-| Department | Users | Subnet | Representative roles |
+| Department | Users | Endpoint subnets | Roles (headcount) |
 |---|---|---|---|
-| Engineering | 75 | 192.168.20.0/24 | Software Engineer, Staff Engineer, Principal Engineer, Engineering Manager, Intern SWE |
-| Sales | 50 | 192.168.10.0/24 | Account Executive, BDR, Sales Engineer, Regional Manager |
-| IT | 37 | 192.168.60.0/24 | IT Administrator, Systems Administrator, Cloud Administrator, Network Engineer, Systems Engineer, Help Desk, IT Director |
-| DevOps | 33 | 192.168.100.0/24 | DevOps Engineer, SRE, Cloud Architect, Platform Engineer, Infrastructure Lead |
-| Marketing | 31 | 192.168.30.0/24 | Marketing Manager, Content Strategist, Brand Designer |
-| Finance | 31 | 192.168.50.0/24 | Controller, Finance Director, Accounts Payable, Financial Analyst |
-| Operations | 31 | 192.168.70.0/24 | Operations Manager, Process Engineer, Supply Chain Lead |
-| Customer Success | 31 | 192.168.120.0/24 | Customer Success Manager, Renewal Manager, CS Director |
-| Support | 31 | 192.168.140.0/24 | Support Engineer, Tier 2 Support, Technical Writer |
-| Procurement | 31 | 192.168.150.0/24 | Procurement Director, Vendor Manager, Purchasing Manager |
-| Security | 28 | 192.168.90.0/24 | CISO, SOC Analyst, Incident Responder, Threat Hunter, Security Engineer, GRC Analyst |
-| Data Science | 28 | 192.168.110.0/24 | Data Scientist, ML Engineer, Data Engineer |
-| Product | 27 | 192.168.130.0/24 | Product Manager, Product Director, UX Researcher |
-| HR | 22 | 192.168.40.0/24 | HR Director, Recruiter, Compensation Analyst, HRIS Analyst |
-| Legal | 15 | 192.168.80.0/24 | Senior Counsel, Corporate Counsel, Legal Director, Paralegal |
+| Engineering | 1,400 | 192.168.20.0/24 to 192.168.29.0/24 | Software Engineer 400, Senior Software Engineer 370, Engineering Manager 120, Associate Software Engineer 110, Frontend Engineer 96, Staff Software Engineer 70, QA Engineer 50, Mobile Engineer 45, Technical Program Manager 30, Software Engineer in Test 30, Software Engineering Intern 25, Principal Engineer 25, Senior Engineering Manager 20, Director of Engineering 8, VP of Engineering 1 |
+| Sales | 750 | 192.168.10.0/24 to 192.168.11.0/24, 192.168.16.0/24 to 192.168.18.0/24 | Account Executive 170, Sales Development Representative 120, Senior Account Executive 110, Enterprise Account Executive 90, Sales Engineer 80, Business Development Representative 60, Sales Manager 60, Sales Operations Analyst 20, Senior Sales Engineer 20, Regional Sales Director 8, Sales Enablement Manager 6, Sales Operations Manager 5, VP of Sales 1 |
+| Support | 500 | 192.168.140.0/24 to 192.168.143.0/24 | Support Engineer 140, Technical Support Specialist 120, Senior Support Engineer 60, Support Analyst 60, Support Team Lead 35, Support Manager 25, Technical Writer 20, Escalation Engineer 20, Knowledge Base Specialist 10, Support Operations Analyst 9, Director of Support 1 |
+| Customer Success | 450 | 192.168.120.0/24 to 192.168.123.0/24 | Customer Success Manager 160, Senior Customer Success Manager 70, Technical Account Manager 60, Renewal Manager 40, Onboarding Specialist 40, Implementation Specialist 30, Customer Success Team Manager 30, Customer Success Operations Analyst 14, Customer Success Director 5, VP of Customer Success 1 |
+| Operations | 350 | 192.168.70.0/24 to 192.168.72.0/24 | Operations Analyst 80, Business Operations Specialist 50, Operations Coordinator 50, Supply Chain Analyst 40, Operations Manager 30, Senior Operations Analyst 30, Process Engineer 25, Facilities Coordinator 12, Supply Chain Manager 10, Facilities Manager 10, Process Improvement Manager 8, Operations Director 4, VP of Operations 1 |
+| Marketing | 330 | 192.168.30.0/24 to 192.168.32.0/24 | Digital Marketing Specialist 35, Product Marketing Manager 35, Content Strategist 30, Marketing Manager 30, Marketing Analyst 25, Demand Generation Manager 25, Content Writer 25, Marketing Coordinator 23, Brand Designer 20, Marketing Operations Specialist 20, Growth Analyst 15, SEO Specialist 12, Events Manager 12, Social Media Manager 10, Marketing Director 6, Marketing Intern 6, Chief Marketing Officer 1 |
+| Product | 230 | 192.168.130.0/24 to 192.168.132.0/24 | Product Manager 75, Senior Product Manager 50, Product Analyst 20, Associate Product Manager 20, Product Designer 20, Group Product Manager 15, UX Researcher 10, Principal Product Manager 8, Product Director 6, Product Operations Manager 5, VP of Product 1 |
+| Finance | 175 | 192.168.50.0/24 to 192.168.51.0/24 | Financial Analyst 25, Staff Accountant 25, Senior Accountant 20, Accounts Payable Specialist 15, FP&A Analyst 15, Senior Financial Analyst 15, Accounts Receivable Specialist 12, Finance Manager 8, Payroll Specialist 8, Tax Analyst 5, Billing Specialist 5, FP&A Manager 4, Internal Auditor 4, Treasury Analyst 4, Finance Director 3, Tax Manager 2, Assistant Controller 2, Controller 1, CFO 1, VP of Finance 1 |
+| IT | 175 | 192.168.60.0/24 to 192.168.61.0/24 | Help Desk Analyst 35, Desktop Support Technician 30, IT Support Specialist 15, Network Engineer 14, Systems Engineer 12, Systems Administrator 12, IT Administrator 10, Endpoint Engineer 10, Cloud Administrator 8, IT Business Analyst 8, IT Manager 7, Identity and Access Engineer 6, IT Asset Analyst 6, IT Director 1, Chief Information Officer 1 |
+| DevOps | 175 | 192.168.100.0/24 to 192.168.101.0/24 | DevOps Engineer 40, Site Reliability Engineer 35, Senior DevOps Engineer 30, Platform Engineer 25, Infrastructure Engineer 15, Cloud Engineer 13, Cloud Architect 8, Infrastructure Lead 8, Director of Infrastructure 1 |
+| Data Science | 150 | 192.168.110.0/24 to 192.168.111.0/24 | Data Scientist 30, Data Engineer 30, Machine Learning Engineer 22, Data Analyst 18, Senior Data Scientist 18, Analytics Engineer 12, Data Science Manager 8, Research Scientist 5, Data Science Intern 3, Principal Data Scientist 3, Director of Data Science 1 |
+| HR | 140 | 192.168.40.0/24 to 192.168.41.0/24 | Recruiter 25, HR Business Partner 18, HR Generalist 18, Senior Recruiter 12, HR Coordinator 12, Recruiting Coordinator 12, HRIS Analyst 8, Benefits Specialist 8, Compensation Analyst 6, HR Manager 6, Learning and Development Specialist 6, Talent Acquisition Manager 3, People Operations Specialist 3, HR Director 2, Chief People Officer 1 |
+| Security | 65 | 192.168.90.0/24 to 192.168.91.0/24 | SOC Analyst 12, Security Engineer 9, Senior Security Analyst 6, Security Analyst 6, Incident Responder 5, GRC Analyst 5, Senior Security Engineer 4, Security Manager 4, Threat Hunter 3, Threat Intelligence Analyst 3, Security Architect 3, Application Security Engineer 2, CISO 1, Director of Security Operations 1, Director of GRC 1 |
+| Procurement | 60 | 192.168.150.0/24 to 192.168.151.0/24 | Purchasing Specialist 12, Procurement Analyst 10, Vendor Manager 8, Strategic Sourcing Analyst 8, Senior Procurement Analyst 6, Procurement Coordinator 6, Contract Manager 5, Procurement Manager 4, Procurement Director 1 |
+| Legal | 50 | 192.168.80.0/24 to 192.168.81.0/24 | Corporate Counsel 10, Paralegal 10, Senior Corporate Counsel 6, Contract Specialist 6, Contracts Manager 6, Legal Operations Analyst 3, Privacy Counsel 3, Legal Director 2, Compliance Manager 2, General Counsel 1, Deputy General Counsel 1 |
 
 Behavior is correlated by department: users in one department tend to visit similar destinations and move similar volumes, so a user who deviates from their department peers is more notable than one who matches them.
 
@@ -309,29 +310,53 @@ Behavior is correlated by department: users in one department tend to visit simi
 
 | Title | Department | Accounts |
 |---|---|---|
-| CISO | Security | g.strand, k.freeman, s.kwon, j.mcdonald, l.coleman |
-| IT Director | IT | a.reed, s.ferreira, j.ahmed2 |
-| Controller | Finance | x.hayashi, w.shah2, r.park, j.mcintosh, s.green, f.grant |
-| Finance Director | Finance | i.nielsen, e.shin, d.magnusson |
-| HR Director | HR | d.greco, j.perez, p.griffin |
-| Legal Director / Counsel | Legal | k.christensen, n.hughes, w.dubois, k.jung, p.gray, w.appiah, s.morgan, i.turner, s.klein, y.castillo |
-| Procurement Director | Procurement | d.snyder, j.kwon, m.mcdonald, b.alves, d.lambert, m.watanabe, r.omar |
-| Customer Success Director | CustomerSuccess | c.reed, e.ahmed, s.young, y.perry |
-| Product Director | Product | g.cruz, m.butler, d.warren |
+| Customer Success Director | Customer Success | c.reed, e.ahmed, n.romero, s.young, y.perry |
+| VP of Customer Success | Customer Success | j.moreno |
+| Director of Data Science | Data Science | c.riojas |
+| Director of Infrastructure | DevOps | d.concepcion |
+| Director of Engineering | Engineering | a.holloway, j.lopez, j.siler, k.fredrick, k.mathur, m.brown2, s.rosen, t.weller |
+| VP of Engineering | Engineering | m.tripoli |
+| CFO | Finance | a.amorim |
+| Controller | Finance | f.grant |
+| Finance Director | Finance | d.magnusson, e.shin, i.nielsen |
+| VP of Finance | Finance | e.wilkinson |
+| Chief People Officer | HR | i.comeau |
+| HR Director | HR | d.greco, j.perez |
+| Chief Information Officer | IT | d.paris |
+| IT Director | IT | a.reed |
+| Deputy General Counsel | Legal | l.hyatt |
+| General Counsel | Legal | t.graser |
+| Legal Director | Legal | k.christensen, s.mondragon |
+| Chief Marketing Officer | Marketing | m.patterson |
+| Marketing Director | Marketing | c.correa, c.montrose, c.sommers, j.fedak, m.siddiqui, r.albritton |
+| Operations Director | Operations | a.pinnell, a.read, r.flury, t.castle |
+| VP of Operations | Operations | b.west |
+| Procurement Director | Procurement | b.alves |
+| Product Director | Product | d.warren, g.cruz, j.mohler, k.rohrer, m.butler, r.hargrove |
+| VP of Product | Product | t.willey |
+| Regional Sales Director | Sales | a.silverstein, b.lefler, c.martin, j.hinson, k.lobb, m.paez, r.fewell, t.rogers |
+| VP of Sales | Sales | h.matzke |
+| CISO | Security | g.strand |
+| Director of GRC | Security | j.mcdonald |
+| Director of Security Operations | Security | k.freeman |
+| Director of Support | Support | n.rowell |
 
 **Privileged by role (IT infrastructure):**
 
 | Role | Accounts |
 |---|---|
-| IT Administrator | a.leroy, c.kato, m.eriksson, e.rivera |
-| Systems Administrator | j.howard |
-| Systems Engineer | a.reyes, r.wells, s.russo, c.ford, e.oh |
-| Cloud Administrator | i.mensah, b.sanders, j.thomas |
-| Network Engineer | a.cox2, m.bennett, h.roberts, r.marino, d.howard, a.petit, j.fox, b.lawson |
+| IT Director | a.reed |
+| IT Administrator | a.leroy, a.redwine, b.linville, c.kato, c.kloss, e.rivera, h.madrigal, m.eriksson, n.berryhill, p.spurling |
+| Systems Engineer | a.reyes, c.ford, d.fulk, e.oh, h.botello, j.belles, j.johnston, j.sharpe, k.meidinger, r.wells, s.russo, t.lozano |
+| Systems Administrator | a.yard, f.spisak, j.garling, j.howard, k.mero, k.valle, l.abad, n.borba, s.massengill, t.hou, w.cervantes, z.mendivil |
+| Cloud Administrator | b.craine, b.sanders, d.poulsen, i.mensah, j.thomas, l.bobo, n.baginski, n.milton |
+| Network Engineer | a.cox2, a.petit, b.lawson, c.baillargeon, d.fernandes, d.howard, h.roberts, j.fox, j.kao, k.mcguinness, m.bennett, m.huffman, m.strader, r.marino |
+| Identity and Access Engineer | a.deitz, e.alvey, h.mccune, j.alvarado, j.johnsen, s.howerton |
+| Help Desk Analyst | a.cera, a.hedrick, a.manchester, a.ogle, b.mayorga, b.roos, b.willie, c.davis, e.ledoux, g.almaguer, g.hansard, g.hemmings, g.sloop, h.armenta, j.dolan, j.rager, k.farren, k.funk, k.stall, l.enos, l.maynor, m.henriquez, n.hall, o.lindo, p.grissom, r.badalamenti, r.dampier, r.sifford, r.stickle, s.corona, s.james, s.pera, t.abner, v.sudderth, w.mishra |
 
 **Network and firewall administrators:** `netadmin.jlee`, `netadmin.pkhan`, `netadmin.rortiz`, `fw_ops` (expected only from 10.0.30.0/24). FortiGate admins: `admin`, `f_admin_01`, `sec_ops`, `root`, `netops_svc`. Infoblox admins: `infoadmin`, `noc-user`, `soc-analyst`. ESXi administrators: `root`, `svc_vcenter`, `vmadmin`.
 
-**Cloud access:** 167 of 501 users have an AWS IAM user. By department: Engineering 55, Security 27, DevOps 23, IT 21, Data Science 17, Product 7, Sales 4, Marketing 3, Operations 3, Support 3, Customer Success 2, HR 1, Procurement 1. No users are mapped to Google Cloud IAM users.
+**Cloud access:** 1,673 of 5,000 users have an AWS IAM user (each department keeps the share it had in the 501-user estate). By department: Engineering 1027, DevOps 122, IT 99, Data Science 91, Security 63, Sales 60, Product 60, Support 48, Operations 34, Marketing 32, Customer Success 29, HR 6, Procurement 2. 219 users have Google Cloud access (principal = their email), mainly IT and DevOps: DevOps 105, IT 61, Engineering 28, Data Science 15, Security 10. Only these users appear as human principals in GCP audit logs.
 
 ### 5c. Service accounts
 
@@ -360,7 +385,7 @@ Behavior is correlated by department: users in one department tend to visit simi
 
 ### 5e. Device naming by department
 
-Every employee device is named after the department that owns it, so a hostname tells you the team, the device class and the expected subnet. Hostnames are upper case and unique (except one mobile-name collision, below). Windows events show them as fully qualified names, for example `MKT-LT-001.examplecorp.local`.
+Every employee device is named after the department that owns it, so a hostname tells you the team, the device class and the expected subnet. Hostnames are upper case and unique. Windows events show them as fully qualified names, for example `MKT-LT-001.examplecorp.local`.
 
 **Format**
 
@@ -368,35 +393,35 @@ Every employee device is named after the department that owns it, so a hostname 
 |---|---|---|---|
 | Office laptop | `<PREFIX>-LT-nnn` | `MKT-LT-001`, `HR-LT-014` | Its department's office subnet (section 5a), through the office NAT pool |
 | Office workstation | `<PREFIX>-WS-nnn` | `ENG-WS-038`, `SUP-WS-004` | Its department's office subnet |
-| Home / remote device | `<PREFIX>-HM-nnn` | `SALES-HM-012`, `HR-HM-003` | Home subnet 172.16.100.0/24 (home ISP addresses, VPN or Zscaler) |
-| Mobile phone | `<FIRST INITIAL><SURNAME up to 8 characters>[2]-<MODEL>` | `AGREEN-PIXEL7`, `CDOYLE2-GALAXYS24`, `LO'BRIEN-PIXEL8` | Mobile subnet 10.10.50.0/24 |
+| Home / remote device | `<PREFIX>-HM-nnn` | `SALES-HM-012`, `HR-HM-003` | Home subnet 172.16.100.0/24 or, for new hires, 172.20.0.0/21 (home ISP addresses, VPN or Zscaler) |
+| Mobile phone | `<FIRST INITIAL><SURNAME up to 8 characters>[2]-<MODEL>` | `AGREEN-PIXEL7`, `CDOYLE2-GALAXYS24`, `LOBRIEN-PIXEL8` | Mobile subnet 10.10.50.0/24 (base-estate users only) |
 
-- `nnn` is a three-digit sequence number starting at 001 and counted separately for each prefix and class (`MKT-LT-001` to `MKT-LT-031`; `MKT-HM-001` to `MKT-HM-008`). There are no gaps.
-- Each user has one primary office device (a laptop, or a workstation in the technical departments). 84 of the 501 users have only that device; the others also have a mobile phone, a home device, or both. Technical departments (Data Science, DevOps, Engineering, IT, Security) give some users both a workstation and a laptop.
-- Mobile names are built from the username: first initial plus the surname cut to 8 characters (`JHAMILTO` for j.hamilton). Apostrophes are kept (`LO'BRIEN`, `AO'BRIEN`). A trailing `2` marks the second user with the same name (`WSHAH2`, `ACOX2`). The model is `IPHONE` (optionally 12, 13, 13PRO, 14, 15, 15PRO), `PIXEL` (PIXEL8), `PIXELFOLD`, `GALAXYS` (GALAXYS24), `GALAXYULTRA` or `ONEPLUS` (ONEPLUS12). iPhones run iOS; every other model runs Android.
-- Counts: 303 laptops, 263 workstations, 156 home devices, 362 mobile (180 iOS, 182 Android). Home devices run Windows (74), macOS (62) and Ubuntu (20).
+- `nnn` is a sequence number starting at 001 and counted separately for each prefix and class (`MKT-LT-001` to `MKT-LT-330`). It grows to four digits past 999 (`ENG-WS-1000`). There are no gaps.
+- Each user has one primary office device (a laptop, or a workstation in the technical departments). 2,704 of the 5,000 users have only that device; the others also have a home device, a phone (base-estate users only), or both. Technical departments (Data Science, DevOps, Engineering, IT, Security) give some users both a workstation and a laptop.
+- Mobile names are built from the username: first initial plus the surname cut to 8 characters (`JHAMILTO` for j.hamilton). A trailing `2` marks the second user with the same name (`WSHAH2`, `ACOX2`, `LHANSEN2`). The model is `IPHONE` (optionally 12, 13, 13PRO, 14, 15, 15PRO), `PIXEL` (PIXEL8), `PIXELFOLD`, `GALAXYS` (GALAXYS24), `GALAXYULTRA` or `ONEPLUS` (ONEPLUS12). iPhones run iOS; every other model runs Android.
+- Counts: 2,994 laptops, 2,640 workstations, 1,661 home devices, 362 mobile (180 iOS, 182 Android). Home devices run Windows (857), macOS (624), Ubuntu (180).
 - Ubuntu endpoints exist only in Data Science, DevOps, Engineering and Security. Every other department uses Windows and macOS only.
-- Collision: `LHANSEN-IPHONE12` is the mobile name of both l.hansen (Support) and la.hansen (Finance).
+- The one former collision is gone: la.hansen's phone is now `LHANSEN2-IPHONE12` (l.hansen keeps `LHANSEN-IPHONE12`).
 
 **Prefixes by department**
 
-| Department | Prefix | Users | Laptops `<P>-LT-nnn` | Workstations `<P>-WS-nnn` | Home `<P>-HM-nnn` | Mobile | Endpoint OS mix (laptops + workstations) | Endpoint subnet |
+| Department | Prefix | Users | Laptops `<P>-LT-nnn` | Workstations `<P>-WS-nnn` | Home `<P>-HM-nnn` | Mobile | Endpoint OS mix (laptops + workstations) | Endpoint subnets |
 |---|---|---|---|---|---|---|---|---|
-| Customer Success | `CS-` | 31 | 31 | - | 11 | 20 | Windows 21, macOS 10 | 192.168.120.0/24 |
-| Data Science | `DS-` | 28 | 9 | 28 | 5 | 23 | Ubuntu 17, macOS 13, Windows 7 | 192.168.110.0/24 |
-| DevOps | `DEVOPS-` | 33 | 13 | 33 | 7 | 27 | Ubuntu 19, Windows 15, macOS 12 | 192.168.100.0/24 |
-| Engineering | `ENG-` | 75 | 24 | 75 | 25 | 52 | Windows 36, macOS 34, Ubuntu 29 | 192.168.20.0/24 |
-| Finance | `FIN-` | 31 | - | 31 | 10 | 23 | Windows 22, macOS 9 | 192.168.50.0/24 |
-| HR | `HR-` | 22 | 22 | - | 8 | 14 | Windows 15, macOS 7 | 192.168.40.0/24 |
-| IT | `IT-` | 37 | 9 | 37 | 5 | 25 | Windows 32, macOS 14 | 192.168.60.0/24 |
-| Legal | `LEG-` | 15 | 15 | - | 5 | 11 | Windows 9, macOS 6 | 192.168.80.0/24 |
-| Marketing | `MKT-` | 31 | 31 | - | 8 | 19 | Windows 19, macOS 12 | 192.168.30.0/24 |
-| Operations | `OPS-` | 31 | 31 | - | 9 | 26 | Windows 24, macOS 7 | 192.168.70.0/24 |
-| Procurement | `PROC-` | 31 | 31 | - | 11 | 22 | Windows 21, macOS 10 | 192.168.150.0/24 |
-| Product | `PROD-` | 27 | 27 | - | 8 | 20 | Windows 17, macOS 10 | 192.168.130.0/24 |
-| Sales | `SALES-` | 50 | 50 | - | 27 | 34 | macOS 27, Windows 23 | 192.168.10.0/24 |
-| Security | `SEC-` | 28 | 10 | 28 | 12 | 21 | macOS 17, Windows 11, Ubuntu 10 | 192.168.90.0/24 |
-| Support | `SUP-` | 31 | - | 31 | 5 | 25 | Windows 26, macOS 5 | 192.168.140.0/24 |
+| Customer Success | `CS-` | 450 | 450 | - | 156 | 20 | Windows 306, macOS 144 | 192.168.120.0/24 to 192.168.123.0/24 |
+| Data Science | `DS-` | 150 | 39 | 150 | 33 | 23 | Ubuntu 95, macOS 62, Windows 32 | 192.168.110.0/24 to 192.168.111.0/24 |
+| DevOps | `DEVOPS-` | 175 | 68 | 175 | 34 | 27 | Ubuntu 106, Windows 70, macOS 67 | 192.168.100.0/24 to 192.168.101.0/24 |
+| Engineering | `ENG-` | 1,400 | 460 | 1400 | 507 | 52 | Windows 663, macOS 657, Ubuntu 540 | 192.168.20.0/24 to 192.168.29.0/24 |
+| Finance | `FIN-` | 175 | - | 175 | 60 | 23 | Windows 126, macOS 49 | 192.168.50.0/24 to 192.168.51.0/24 |
+| HR | `HR-` | 140 | 140 | - | 50 | 14 | Windows 99, macOS 41 | 192.168.40.0/24 to 192.168.41.0/24 |
+| IT | `IT-` | 175 | 45 | 175 | 30 | 25 | Windows 156, macOS 64 | 192.168.60.0/24 to 192.168.61.0/24 |
+| Legal | `LEG-` | 50 | 50 | - | 21 | 11 | Windows 32, macOS 18 | 192.168.80.0/24 to 192.168.81.0/24 |
+| Marketing | `MKT-` | 330 | 330 | - | 79 | 19 | Windows 200, macOS 130 | 192.168.30.0/24 to 192.168.32.0/24 |
+| Operations | `OPS-` | 350 | 350 | - | 100 | 26 | Windows 268, macOS 82 | 192.168.70.0/24 to 192.168.72.0/24 |
+| Procurement | `PROC-` | 60 | 60 | - | 25 | 22 | Windows 37, macOS 23 | 192.168.150.0/24 to 192.168.151.0/24 |
+| Product | `PROD-` | 230 | 230 | - | 61 | 20 | Windows 143, macOS 87 | 192.168.130.0/24 to 192.168.132.0/24 |
+| Sales | `SALES-` | 750 | 750 | - | 400 | 34 | macOS 405, Windows 345 | 192.168.10.0/24 to 192.168.11.0/24, 192.168.16.0/24 to 192.168.18.0/24 |
+| Security | `SEC-` | 65 | 22 | 65 | 28 | 21 | macOS 40, Ubuntu 24, Windows 23 | 192.168.90.0/24 to 192.168.91.0/24 |
+| Support | `SUP-` | 500 | - | 500 | 77 | 25 | Windows 426, macOS 74 | 192.168.140.0/24 to 192.168.143.0/24 |
 
 **How to use this:** Read the prefix to find the owning department, then compare the department with the connection. A `HR-` or `FIN-` device that appears on another department's subnet, an office device on the home or mobile subnet, or a device used by someone other than its department's staff deserves a closer look. Servers do not follow this pattern (section 6).
 
@@ -410,6 +435,20 @@ Every employee device is named after the department that owns it, so a hostname 
 |---|---|---|---|
 | DC01.examplecorp.local | Domain controller | 10.0.10.10 | Also an ESXi VM named DC01 |
 | DC02.examplecorp.local | Domain controller | 10.0.20.10 | Domain controller only (the SNMP poller moved to 10.0.30.40; no longer listed as a database server) |
+| DC03 | Domain controller | 10.1.5.10 | Site: Columbus |
+| DC04 | Domain controller | 192.168.1.10 | Site: New York |
+| DC05 | Domain controller | 172.16.10.10 | Site: Austin |
+| DC06 | Domain controller | 10.0.23.10 | Site: New York |
+| DC07 | Domain controller | 10.0.21.10 | Site: Austin |
+| DC08 | Domain controller | 10.0.22.10 | Site: Seattle |
+| DC09 | Domain controller | 10.0.22.11 | Site: Seattle |
+| DC10 | Domain controller | 10.0.24.10 | Site: Chicago |
+| DC11 | Domain controller | 10.0.25.10 | Site: Fremont |
+| DC12 | Domain controller | 10.0.26.10 | Site: Atlanta |
+| DC13 | Domain controller | 10.0.28.10 | Site: London |
+| DC14 | Domain controller | 10.0.28.11 | Site: London |
+| DC15 | Domain controller | 10.0.27.10 | Site: Dublin |
+| DC16 | Domain controller | 10.0.29.10 | Site: Toronto |
 | fileserver.examplecorp.local | File server (DNS name) | 10.0.20.30 | Alias for FS01; no longer shares an address with the web farm |
 | FS01 / FS02 (also written FS-01, FS-02) | File servers named in Windows events | 10.0.20.30 / 10.0.20.31 (simulator assignment, owner to confirm) | SMB shares and Kerberos service names `cifs/fs01` and `cifs/fs02.examplecorp.local`; see the share list below |
 | FILE01 | File server | 10.0.20.32 (simulator assignment, owner to confirm) | ESXi VM |
@@ -418,14 +457,16 @@ Every employee device is named after the department that owns it, so a hostname 
 | APP01 | Application server | 10.0.20.16 (DNS) | ESXi VM; see 6a-1 |
 | EXCH01 | Exchange server | 10.0.20.40 (DNS name `exchange`) | ESXi VM; see 6a-1 |
 | BACKUP01 | Backup server | 10.1.5.20 (DNS) | ESXi VM; backup jobs run nightly at 02:00 UTC |
-| esxi01 / esxi02 / esxi03 .corp.examplecorp.local | VMware ESXi hosts | TODO | Managed by vCenter 10.0.20.20; datastores `datastore1`, `ds-prod-nfs01`, `ds-vsan-01` |
+| FS03-FS14 | Site file servers | FS03 10.0.20.33 (Columbus), FS04 10.0.21.30 (Austin), FS05 10.0.22.30 (Seattle), FS06 10.0.23.30 (New York), FS07 10.0.23.31 (New York), FS08 10.0.24.30 (Chicago), FS09 10.0.25.30 (Fremont), FS10 10.0.26.30 (Atlanta), FS11 10.0.27.30 (Dublin), FS12 10.0.28.30 (London), FS13 10.0.28.31 (London), FS14 10.0.29.30 (Toronto) | New hires' SMB/FTP goes to their own site's file servers |
+| esxi01-esxi24.corp.examplecorp.local | VMware ESXi hosts | TODO | Managed by vCenter 10.0.20.20; datastores `datastore1`, `ds-prod-nfs01`, `ds-vsan-01`, `ds-prod-nfs02`, `ds-vsan-02`, `ds-vsan-nyc01`, `ds-vsan-lon01`, `ds-backup-01` |
 | vcenter.corp.examplecorp.local | vCenter Server | 10.0.20.20 | |
+| Other member servers | Infrastructure added with the 5,000-user estate | PRINT02 10.0.21.50, PRINT03 10.0.22.50, PRINT04 10.0.23.50, PRINT05 10.0.24.50, PRINT06 10.0.25.50, PRINT07 10.0.26.50, PRINT08 10.0.27.50, PRINT09 10.0.28.50, PRINT10 10.0.29.50, SQL02 10.0.20.60, SQL03 10.0.20.61, SQL04 10.0.20.62, SQL05 10.0.20.63, SQL06 10.0.20.64, SQL07 10.0.20.65, SQL08 10.0.20.66, SQL09 10.0.23.60, SQL10 10.0.23.61, SQL11 10.0.28.60, SQL12 10.0.28.61, EXCH02 10.0.20.42, SP02 10.0.20.43, SP03 10.0.20.44, ADFS01 10.0.20.70, ADFS02 10.0.20.71, WAP01 10.0.10.70, WAP02 10.0.10.71, AADC01 10.0.20.72, AADC02 10.0.20.73, ROOTCA01 10.0.20.80, CA01 10.0.20.81, CA02 10.0.20.82, NPS02 10.1.5.22, DHCP01 10.0.20.90, DHCP02 10.0.20.91, DHCP03 10.0.23.90, DHCP04 10.0.28.90, WSUS01 10.0.20.92, SCCM01 10.0.20.93, SCCMDP01 10.0.21.93, SCCMDP02 10.0.22.93, SCCMDP03 10.0.23.93, SCCMDP04 10.0.24.93, SCCMDP05 10.0.25.93, SCCMDP06 10.0.26.93, SCCMDP07 10.0.27.93, SCCMDP08 10.0.28.93, SCCMDP09 10.0.29.93, BACKUP02 10.1.5.23, BACKUP03 10.1.5.24, BACKUP04 10.0.28.25, VCENTER02 10.0.28.20, APP02 10.0.20.100, APP03 10.0.20.101, APP04 10.0.20.102, APP05 10.0.20.103, APP06 10.0.20.104, APP07 10.0.20.105, APP08 10.0.20.106, APP09 10.0.20.107, APP10 10.0.20.108, APP11 10.0.20.109, APP12 10.0.20.110, APP13 10.0.20.111, APP14 10.0.20.112, APP15 10.0.20.113, APP16 10.0.20.114, APP17 10.0.20.115, APP18 10.0.20.116, APP19 10.0.20.117, APP20 10.0.20.118, WEB01 10.0.10.80, WEB02 10.0.10.81, WEB03 10.0.10.82, WEB04 10.0.10.83, WEB05 10.0.10.84, WEB06 10.0.10.85, WEB07 10.0.10.86, WEB08 10.0.10.87, KMS01 10.0.20.95, MON02 10.0.30.41 | DNS names are the lower-case host names (section 6a-1) |
 | www.examplecorp.com | Public web farm | 10.0.10.50, .51, .52 | Apache, TCP 443; these addresses answer no internal DNS name |
-| Database servers | Application databases | 10.0.20.11-14, 172.16.50.5-7, 192.168.5.10-11, 10.1.100.10-11, 10.100.10.10-11, 172.17.20.20, 172.18.30.30, 192.168.50.50, 10.0.100.100-101, 172.31.50.50 | Plus names such as prod-rds-instance-1, dev-mysql-server, analytics-redshift, legacy-oracle-db, finance-postgres-db |
+| Database servers | Application databases | 10.0.20.11, 10.0.20.12, 10.0.20.13, 10.0.20.14, 172.16.50.5, 172.16.50.6, 172.16.50.7, 192.168.5.10, 192.168.5.11, 10.1.100.10, 10.1.100.11, 10.100.10.10, 10.100.10.11, 172.17.20.20, 172.18.30.30, 192.168.50.50, 10.0.100.100, 10.0.100.101, 172.31.50.50, 10.0.20.60, 10.0.20.61, 10.0.20.62, 10.0.20.63, 10.0.20.64, 10.0.20.65, 10.0.20.66, 10.0.23.60, 10.0.23.61, 10.0.28.60, 10.0.28.61 | Plus names such as prod-rds-instance-1, dev-mysql-server, analytics-redshift, legacy-oracle-db, finance-postgres-db |
 
 **File server shares.** Named in Windows events: `\\FS-01\Finance` (Budgets, Payroll), `\\FS-01\HR\Personnel`, `\\FS-01\Legal\Contracts`, `\\FS-02\Engineering\Designs`. The generic shares on each file server are `Shared`, `Departments` and `Home$` (data on D:), and `Backups` on the backup server (E:). Access to Finance, HR and Legal shares is expected only from those departments' endpoint subnets (section 2).
 
-**File-server traffic as the firewalls see it.** The firewalls (ASA, Firepower, FortiGate, Check Point, Palo Alto) record routine workstation SMB (TCP 445) and FTP to the three file servers only: FS01 10.0.20.30, FS02 10.0.20.31 and FILE01 10.0.20.32. Palo Alto also sends about 30% of its routine SMB to the domain controllers (SYSVOL/NETLOGON). SMB to any other server, to a workstation, or to a file server the user has never used, is the signal.
+**File-server traffic as the firewalls see it.** The firewalls (ASA, Firepower, FortiGate, Check Point, Palo Alto) record routine workstation SMB (TCP 445) and FTP from base-estate users to the three file servers only: FS01 10.0.20.30, FS02 10.0.20.31 and FILE01 10.0.20.32. A new hire's workstation uses its own site's file servers (FS03-FS14 above; Columbus new hires use FS01, FS02, FILE01 and FS03). Palo Alto also sends about 30% of its routine SMB to the domain controllers (SYSVOL/NETLOGON). SMB to any other server, to a workstation, or to a file server the user has never used, is the signal.
 
 **ESXi hosts: expected administrators and commands.** Administrative logons to ESXi come from `svc_vcenter`/`vpxuser` (vCenter), `svc_vmbackup` (backup proxy), the ops jump hosts, and the local console (127.0.0.1). Routine shell commands are common `esxcli` and `vim-cmd` queries (listing, status, get). Turning SSH or the ESXi Shell on and off for maintenance is routine and is normally followed by turning it off again. Uncommon commands are anything that adds accounts, disables the firewall, clears or redirects syslog, loads kernel modules, installs unsigned VIBs, or stages tooling or an encryptor on the host. TODO: list the named people who administer ESXi.
 
@@ -438,6 +479,17 @@ Every employee device is named after the department that owns it, so a hostname 
 | dc03 | 10.1.5.10 | Additional DC name in the zone |
 | dc04 | 192.168.1.10 | Additional DC name in the zone |
 | dc05 | 172.16.10.10 | Additional DC name in the zone |
+| dc06 | 10.0.23.10 | Domain controller (New York) |
+| dc07 | 10.0.21.10 | Domain controller (Austin) |
+| dc08 | 10.0.22.10 | Domain controller (Seattle) |
+| dc09 | 10.0.22.11 | Domain controller (Seattle) |
+| dc10 | 10.0.24.10 | Domain controller (Chicago) |
+| dc11 | 10.0.25.10 | Domain controller (Fremont) |
+| dc12 | 10.0.26.10 | Domain controller (Atlanta) |
+| dc13 | 10.0.28.10 | Domain controller (London) |
+| dc14 | 10.0.28.11 | Domain controller (London) |
+| dc15 | 10.0.27.10 | Domain controller (Dublin) |
+| dc16 | 10.0.29.10 | Domain controller (Toronto) |
 | ad | 10.0.10.10, 10.0.20.10 | `ad.examplecorp.local`, an alias for the first two DCs |
 | fs01 / fileserver | 10.0.20.30 | File server; `fileserver` is an alias |
 | fs02 | 10.0.20.31 | File server |
@@ -450,6 +502,7 @@ Every employee device is named after the department that owns it, so a hostname 
 | app01 | 10.0.20.16 | |
 | backup01 | 10.1.5.20 | |
 | radius | 10.1.5.21 | |
+| fs03-fs14, print02-print10, sql02-sql12, exch02, sp02-sp03, adfs01-02, wap01-02, aadc01-02, rootca01, ca01-02, nps02, dhcp01-04, wsus01, sccm01, sccmdp01-09, backup02-04, vcenter02, app02-app20, web01-web08, kms01, mon02 | see 6a | One name per server added with the 5,000-user estate |
 | infoblox-dc1-01 / infoblox-dc2-01 | 10.1.1.2 / 10.1.1.3 | DNS grid members |
 | any other internal server | `srv-<a>-<b>-<c>-<d>.examplecorp.local` | For example `srv-172-31-10-10` for 172.31.10.10 |
 
@@ -464,7 +517,7 @@ Every employee device is named after the department that owns it, so a hostname 
 | EDR / agent management | TODO | TODO | |
 | Security Operations team | Security department (SOC Analyst, Incident Responder, Threat Hunter) | Business hours (section 4a) | |
 
-**How to use this:** Use host names and roles to judge criticality. Treat DC01, DC02, SQL01, FILE01, EXCH01, BACKUP01, the ESXi hosts, vCenter and the finance databases as critical.
+**How to use this:** Use host names and roles to judge criticality. Treat every domain controller (DC01-DC16), the certificate authorities (ROOTCA01, CA01, CA02), AD FS and Entra Connect (ADFS01-02, AADC01-02), SQL01-SQL12, the file servers, EXCH01-02, BACKUP01-04, the ESXi hosts, both vCenters and the finance databases as critical.
 
 ---
 
