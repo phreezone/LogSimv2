@@ -10512,7 +10512,7 @@
     }
   ],
   "_estate_generator": {
-    "_comment": "Estate expanded by tools/estate_generator.py; do not run it on this file again.",
+    "_comment": "Estate expanded by _local_validation/estate_generator.py (a local tool, not in the repo); do not run it on this file again.",
     "seed": "logsim-estate-5000-v1",
     "base_users": 501,
     "users": 5000,

@@ -1982,7 +1982,7 @@ def _stable_user_sid(username: str) -> str:
         if sid:
             return sid
         # Roster users carry their RID in config (user_profiles.*.sid_rid, assigned
-        # collision-free by tools/estate_generator.py): 1100 + hash % 8,900 gave ~1,400
+        # collision-free by the local estate generator): 1100 + hash % 8,900 gave ~1,400
         # of 5,000 users someone else's SID. Identities outside the roster keep the hash.
         rid = _user_rid(username)
         if rid is None:

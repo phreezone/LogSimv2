@@ -635,7 +635,7 @@ def get_random_user(session_context, preferred_device_type=None):
 
 # --- Estate: offices, SIDs, onboarding, site domain controllers -----------------------
 # Filled from config by load_estate() (build_session_context calls it). Base-estate users
-# carry no start_date and are active from the first run; tools/estate_generator.py gives
+# carry no start_date and are active from the first run; the estate generator (_local_validation/estate_generator.py, local only) gives
 # the 4,499 later hires a start_date, and before it they exist in the directory but never
 # act -- the estate grows by ~50 genuinely first-seen people a day.
 _USER_OFFICE: dict = {}

@@ -1,7 +1,7 @@
 # The simulated estate (5,000 users)
 
 `config.json` describes one company, ExampleCorp: its people, their devices, its offices and
-its servers. Until 2026-11-19 it held 501 users. `tools/estate_generator.py` expanded it to
+its servers. Until 2026-11-19 it held 501 users. A one-off estate generator expanded it to
 5,000 people with the department sizes, servers and applications a company of that size
 would have. This page covers what the generator wrote, the config keys it added, and the
 behaviour that depends on them.
@@ -177,12 +177,13 @@ Total Windows volume is still set by the dashboard rate (`_BENIGN_RATE`) and
 
 ## Re-running the generator
 
-The generator refuses to run on an expanded config: it checks for the `_estate_generator`
-marker and exactly 501 users. To rebuild, restore the 501-user `config.json` from git
-history and run:
+The generator is a local tool and is not in the repository. It lives in the git-ignored
+`_local_validation/estate_generator.py`, alongside the other local validation scripts.
+It refuses to run on an expanded config: it checks for the `_estate_generator` marker and
+exactly 501 users. To rebuild, restore the 501-user `config.json` from git history and run:
 
 ```bash
-python tools/estate_generator.py --names-dir <dir> --report estate_report.md
+python _local_validation/estate_generator.py --names-dir <dir> --report estate_report.md
 ```
 
 `<dir>` must hold `ssa_1980_2010_male.txt`, `ssa_1980_2010_female.txt` and
