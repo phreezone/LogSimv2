@@ -363,9 +363,11 @@ was ingested and still raised nothing. `4741` is therefore not what feeds
 machine-creation analytics in this tenant, so this detector cannot establish
 that the machine is "new" regardless of how the delegation half is shaped.
 
-The vendor page also declares a **Test Period of 12 Hours**, so a delayed alert
-cannot be ruled out completely. Re-probe only if a real `4741` ever drives a
-machine-creation alert here.
+The vendor page declares a **Test Period of 12 Hours**. The last batch was
+2026-11-18 06:14Z; a re-check on 2026-11-19, more than 24 hours later, returned
+**no alert**, so the window is closed and no delayed alert exists. The item is
+not waiting on a re-check — it is blocked on the missing "new machine" signal.
+Re-probe only if a real `4741` ever drives a machine-creation alert here.
 
 ### Container targets are evaluated; the AdminSDHolder ACL is analytic-specific (2026-11-16)
 
