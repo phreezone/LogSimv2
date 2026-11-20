@@ -1,7 +1,7 @@
 # Zscaler Web Gateway
 
 **Dataset:** `zscaler` (XSIAM parser)
-**Transport:** HTTP (Broker VM NSS feed simulation)
+**Transport:** native syslog to the Broker VM Syslog Collector (Cribl fallback); lands in `zscaler_nssweblog_raw` / `zscaler_nssfwlog_raw`
 **Format:** CEF (ArcSight Common Event Format)
 
 Simulates Zscaler NSS (Nanolog Streaming Service) feed events covering web proxy, cloud firewall, DLP, sandbox, and network threat detection. Two distinct log streams are generated: `nssweblog` (web proxy events) and `nssfwlog` (cloud firewall events). These correspond to the two Zscaler NSS feed types and produce different CEF structures.
@@ -13,51 +13,123 @@ Simulates Zscaler NSS (Nanolog Streaming Service) feed events covering web proxy
 | `nssweblog` | `nssweblog` | `Web Traffic` | Web browsing, malware downloads, DLP, sandbox, data exfil, cloud app control |
 | `nssfwlog` | `nssfwlog` | `Firewall Traffic` | Outbound/inbound TCP/UDP, port scan, brute force, Tor, DNS C2, RDP, SSH, SMB |
 
-### CEF Header Format
+### Web feed (`nssweblog`): the Cortex feed template
+
+The web line is built by `_format_nss_weblog_cef` in exactly the Feed Output Format that
+the Cortex guide *Ingest logs from Zscaler Internet Access* (Syslog Collector applet)
+tells admins to paste (Feed Output Type = Custom, Feed Escape Character `=`). The
+Zscaler modeling rule (`demisto/content` → `Packs/Zscaler/ModelingRules/ZscalerModelingRule_2_11`)
+reads exactly these keys.
 
 ```
-CEF:0|Zscaler|{log_product}|6.1|0|{cef_name}|{cefSeverity}|
+<14>%s{mon} %02d{dd} %02d{hh}:%02d{mm}:%02d{ss} zscaler-nss CEF:0|Zscaler|NSSWeblog|5.0|%s{action}|%s{reason}|3|
 ```
 
-Syslog PRI is `<14>`. All events include `rt` (epoch ms), `suser` (user@domain), `externalId`, `deviceHostName`, `deviceOwner`, `deviceOperatingSystem`, `deviceOperatingSystemVersion`, `sourceTranslatedAddress`, `flexString1`/`flexString1Label=location`, `dept`, `clienttranstime`, `servertranstime`, `ssldecrypted`, `contentclass`.
+| CEF key | Zscaler field | XDM (modeling rule) |
+|---|---|---|
+| `act` | `%s{action}` | `xdm.observer.action` |
+| `app` | `%s{proto}` | `xdm.network.protocol_layers` |
+| `cat` | `%s{urlcat}` | `xdm.network.application_protocol_category` |
+| `dhost` | `%s{ehost}` | `xdm.network.http.domain` |
+| `dst` / `src` | `%s{sip}` / `%s{cip}` | target / source IPs |
+| `in` / `out` | `%d{respsize}` / `%d{reqsize}` | `xdm.target.sent_bytes` / `xdm.source.sent_bytes` |
+| `outcome` | `%s{respcode}` | `xdm.network.http.response_code` |
+| `request` | `%s{eurl}` (no protocol) | `xdm.network.http.url` |
+| `rt` | `%s{mon} %02d{dd} %d{yy} %02d{hh}:%02d{mm}:%02d{ss}` (UTC) | sets `_time`; back-dating works (verified) |
+| `sourceTranslatedAddress` | `%s{cintip}` | `xdm.source.ipv4` |
+| `requestClientApplication` | `%s{ua}` | `xdm.source.user_agent` |
+| `requestMethod` | `%s{reqmethod}` | `xdm.network.http.method` |
+| `suser` | `%s{login}` | `xdm.source.user.username` |
+| `spriv` | `%s{location}` | `xdm.source.zone` |
+| `externalId` | `%d{recordid}` | `xdm.session_context_id` |
+| `fileType` | `%s{filetype}` (DOWNLOADED file type name, e.g. `RAR Files`) | `xdm.target.process.executable.file_type` |
+| `reason` | `%s{reason}` | `xdm.event.outcome_reason` |
+| `destinationServiceName` | `%s{appname}` | `xdm.target.interface` |
+| `cn1` / `cn1Label=riskscore` | `%d{riskscore}` | `xdm.alert.severity` |
+| `cs1` / `cs1Label=dept` | `%s{dept}` | raw only |
+| `cs2` / `cs2Label=urlsupercat` | `%s{urlsupercat}` | `xdm.network.http.url_category` |
+| `cs3` / `cs3Label=appclass` | `%s{appclass}` | raw only |
+| `cs4` / `cs4Label=malwarecat` | `%s{malwarecat}` | `xdm.alert.category` |
+| `cs5` / `cs5Label=threatname` | `%s{threatname}` | `xdm.alert.name` |
+| `cs6` / `cs6Label=dlpeng` | `%s{dlpeng}` | raw only |
+| `ZscalerNSSWeblogURLClass` | `%s{urlclass}` | `xdm.event.type` |
+| `ZscalerNSSWeblogDLPDictionaries` | `%s{dlpdict}` | raw only |
+| `requestContext` | `%s{ereferer}` | raw only |
+| `contenttype` | `%s{contenttype}` | `xdm.network.http.content_type` |
+| `unscannabletype` | `%s{unscannabletype}` | raw only |
+| `deviceowner` | `%s{deviceowner}` | raw only |
+| `devicehostname` | `%s{devicehostname}` | `xdm.source.host.hostname` |
 
-### Key CEF Field Mappings
+**Opt-in: file names.** The template has no file name. The Zscaler fields are
+`%s{filename}` (downloaded file) and `%s{upload_filename}` (uploaded file). They are
+appended in labelled slots whose label is the Zscaler field name:
 
-Field slots are chosen to match the **XSIAM Zscaler content pack** modeling rule
-(`demisto/content` → `Packs/Zscaler/ModelingRules/ZscalerModelingRule_1_3`). The
-"→ xdm.*" notes below are the XDM fields XSIAM derives from each CEF key on the
-VM-based (CEF/Broker) ingestion path (`zscaler_nssweblog_raw` / `zscaler_nssfwlog_raw`).
+```
+flexString1=%s{filename} flexString1Label=filename
+flexString2=%s{upload_filename} flexString2Label=upload_filename
+```
 
-**nssweblog fields (consumed by XSIAM web model):**
-- `act` → action → `xdm.observer.action`
-- `cs2`/`cs2Label=urlcat` → URL category → `xdm.network.http.url_category`
-- `cs4`/`cs4Label=malwarecat` → `xdm.alert.category`
-- `cs5`/`cs5Label=threatname` → `xdm.alert.name`
-- `cn1` → `xdm.alert.severity` (threatscore on threats, else riskscore)
-- `ZscalerNSSWeblogURLClass` → URL class → `xdm.event.type` (XSIAM reads this exact custom key, **not** `cs1`)
-- `spriv` → `xdm.source.zone`
-- `destinationServiceName` → `xdm.target.interface` (set from app name)
-- `devicehostname` (lowercase, custom key) → `xdm.source.host.hostname`
-- `outcome` → HTTP response code; `request`→URL; `dhost`→domain; `contenttype`, `requestMethod`, `requestClientApplication`, `suser`, `src`(cip), `dst`(sip), `sourceTranslatedAddress`, `externalId`, `app`(proto), `fileType`, `in`/`out` (bytes)
+A file on a POST/PUT is an upload (`flexString2`); otherwise it is a download
+(`flexString1`, plus `fileType`). Hunting example:
+`dataset = zscaler_nssweblog_raw | filter flexString2Label = "upload_filename" and flexString2 contains "Financial"`.
 
-**nssweblog raw-only fields (queryable in XQL, NOT XDM-mapped by XSIAM):**
-- `cs1`/`cs1Label=urlclass` → kept for correlation rules that filter `cs1 = "Malicious Content"`
-- `cs3`=malwareclass, `cs6`=riskscore, `cn2`=filesize, `cn3`=totalsize, `fileName`, `fileHash`, `appname`, `appclass`, `urlsupercat`
-- `proto`, `spt`, `dpt`, `destCountry`, `destinationTranslatedAddress` → schema columns the web model doesn't XDM-map; populated for raw-XQL completeness. Derived centrally in `_format_nss_log_as_cef`: `dpt` from proto (443/80), `spt` random ephemeral, `destCountry` Allowed→US/Blocked→Unknown, `destinationTranslatedAddress`=server IP
-- DLP events override `cs1-cs3` with `dlpengine`, `dlpdictionary`, `dlprulename` (the DLP rule lands in `cs3`, which the DLP correlation rule reads); `cn1` carries riskscore so severity still resolves
-- A `<base>Label` key is suppressed when its partner value is absent (no orphan labels)
+**Why labelled slots and not the Zscaler names.** Cortex creates a column only for
+keys in the CEF dictionary or in its own template. Any other `key=value` is folded
+into the value of the key before it, corrupting that field. Live tests (2026-11-14/15)
+showed this for `filename=`, `upload_filename=`, `ZscalerNSSWeblogFileName=` and
+`ZscalerNSSWeblogUploadFileName=`. The modeling rule maps no file name either. So
+nothing outside this table is emitted on the web feed.
 
-**nssfwlog fields (fully aligned with XSIAM firewall model):**
-- `act` → action → `xdm.observer.action`
-- `cs2`/`cs2Label=nwapp` → rule label → `xdm.network.rule`
-- `cs3`/`cs3Label=nwsvc` → network service → `xdm.network.application_protocol`
-- `cs5` → URL category (uppercased + enum-mapped by XSIAM)
-- `cs6`/`cs6Label=threatname` → `xdm.alert.name`
-- `cat` → threat category → `xdm.alert.category`
-- `cn1`/`cn1Label=duration` → `xdm.event.duration`
-- `src`/`dst`→IPs, `spt`/`dpt`→ports, `sourceTranslatedAddress`/`destinationTranslatedAddress`→NAT, `destCountry`→`xdm.target.location.country`, `spriv`→user groups, `proto`→`xdm.network.ip_protocol`
-- header `cefName`/`cefSeverity`/`cefVersion` → event type / alert severity / content version
-- `cs1`=department, `cs4`=destCountry retained as raw hunting fields (not in the FW schema; ignored by XDM)
+Every key is printed on every line, and an empty field reads `None` (as NSS renders a
+fixed template). That string therefore also reaches XDM, e.g. `xdm.alert.name = "None"`
+on benign events, as it would from a real feed.
+
+### Firewall feed (`nssfwlog`): the Cortex feed template
+
+Built by `_format_nss_fwlog_cef` in exactly the firewall Feed Output Format from the same
+Cortex guide, including its `cs6label` (lower-case l; Cortex still files it under the
+`cs6Label` column) and `cs5Label` placed before `cs5`. No opt-in fields: the firewall
+reference has no file names.
+
+```
+<14>%s{mon} %02d{dd} %02d{hh}:%02d{mm}:%02d{ss} zscaler-nss-fw CEF:0|Zscaler|NSSFWlog|5.7|%s{action}|%s{rulelabel}|3|
+```
+
+| CEF key | Zscaler field | XDM (modeling rule) |
+|---|---|---|
+| `act` | `%s{action}` (`Allowed` / `Blocked`) | `xdm.observer.action` |
+| `suser` | `%s{login}` | `xdm.source.user.username` |
+| `src` / `spt` | `%s{csip}` / `%d{csport}` | `xdm.source.ipv4` / `xdm.source.port` |
+| `dst` / `dpt` | `%s{cdip}` / `%d{cdport}` | `xdm.target.ipv4` / `xdm.target.port` |
+| `deviceTranslatedAddress` / `deviceTranslatedPort` | `%s{ssip}` / `%d{ssport}` (Zscaler egress) | raw only |
+| `destinationTranslatedAddress` / `destinationTranslatedPort` | `%s{sdip}` / `%d{sdport}` | `xdm.target.host.ipv4_addresses` |
+| `sourceTranslatedAddress` / `sourceTranslatedPort` | `%s{tsip}` / `%d{tsport}` (client tunnel IP) | `xdm.source.host.ipv4_addresses` |
+| `proto` | `%s{ipproto}` (`TCP`; Cortex stores the raw column as `6`) | `xdm.network.ip_protocol` |
+| `tunnelType` / `dnat` / `stateful` | `%s{ttype}` / `%s{dnat}` / `%s{stateful}` | raw only |
+| `spriv` | `%s{location}` | `xdm.source.user.groups` |
+| `reason` | `%s{rulelabel}` | `xdm.event.outcome_reason` |
+| `in` / `out` | `%ld{inbytes}` / `%ld{outbytes}` | `xdm.target.sent_bytes` / `xdm.source.sent_bytes` |
+| `rt` | `%s{mon} %02d{dd} %02d{hh}:%02d{mm}:%02d{ss}` (no year; UTC) | sets `_time`; back-dating works (verified) |
+| `deviceDirection` | literal `1` | raw only |
+| `cs1` / `cs1Label=dept` | `%s{dept}` | raw only |
+| `cs2` / `cs2Label=nwService` | `%s{nwsvc}` | `xdm.network.rule` (Cortex maps the service here) |
+| `cs3` / `cs3Label=nwApp` | `%s{nwapp}` | `xdm.network.application_protocol` |
+| `cs4` / `cs4Label=aggregated` | `%s{aggregate}` | raw only |
+| `cs6` / `cs6label=threatname` | `%s{threatname}` | `xdm.alert.name` |
+| `cn1` / `cn1Label=durationms` | `%d{durationms}` | `xdm.event.duration` |
+| `cn2` / `cn2Label=numsessions` | `%d{numsessions}` | raw only |
+| `cs5Label=ipCat`, `cs5` | `%s{ipcat}` | `xdm.network.http.url_category` (enum-mapped) |
+| `cat` | `%s{threatcat}` | `xdm.alert.category` |
+| `destCountry` | `%s{destcountry}` (code, e.g. `USA`) | `xdm.target.location.country` |
+| `avgduration` | `%d{avgduration}` | raw only |
+
+The header name is the rule label (`xdm.event.type`). Severity is the template's fixed
+`3` (`xdm.alert.severity`). Sessions are not aggregated: `aggregated=No`,
+`numsessions=1`, `avgduration=0`. `ttype` is `Z-Tunnel 2.0` for Client Connector users
+and `GRE` for site traffic. Neither of those two values is verified against a tenant.
+
+The per-event tables below list the values each generator SETS. The wire format is
+the template above.
 
 ---
 

@@ -1483,7 +1483,7 @@
   {
     "name": "Zscaler \u2014 Malicious Web Content Blocked (Post-Phishing)",
     "severity": "SEV_030_MEDIUM",
-    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter cs1 = \"Malicious Content\"\n       or cat contains \"Spyware\" or cat contains \"Malware\" or cat contains \"Phishing\"\n       or cat contains \"Adware\" or cat contains \"Botnet\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter ZscalerNSSWeblogURLClass = \"Malicious Content\"\n       or cat contains \"Spyware\" or cat contains \"Malware\" or cat contains \"Phishing\"\n       or cat contains \"Adware\" or cat contains \"Botnet\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
     "is_enabled": true,
     "description": "Zscaler NSS web log Blocked action on malicious web content (Malicious Content / Malware / Spyware / Phishing / Adware / Botnet category) \u2014 victim browser reached the payload host after the phishing click. Correlated to the victim by src IP and suser.",
     "alert_name": "Zscaler \u2014 Malicious Web Content Blocked (Post-Phishing)",
@@ -1847,7 +1847,7 @@
   {
     "name": "Zscaler \u2014 DLP Block on Upload to Cloud Storage (Insider Exfil)",
     "severity": "SEV_030_MEDIUM",
-    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter reason = \"DLP Block\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dlp_rule = cs3, dst_ip = dst\n",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter reason = \"DLP Block\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dlp_engine = cs6, upload_file = flexString2, dst_ip = dst\n",
     "is_enabled": true,
     "description": "Zscaler NSS web log Blocked action with reason=DLP Block \u2014 insider uploading sensitive data (Source Code / PII) to external cloud storage (Online Storage category, e.g. mega.nz). Correlated to the insider by src and suser.",
     "alert_name": "Zscaler \u2014 DLP Block on Upload to Cloud Storage (Insider Exfil)",
@@ -3238,7 +3238,7 @@
   {
     "name": "Zscaler \u2014 C2 / Malicious Domain Blocked (Post-DNS Beacon)",
     "severity": "SEV_040_HIGH",
-    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter cs1 = \"Malicious Content\" or cat contains \"Malware\" or cat contains \"Spyware\"\n       or cat contains \"Botnet\" or cat contains \"Command\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter ZscalerNSSWeblogURLClass = \"Malicious Content\" or cat contains \"Malware\" or cat contains \"Spyware\"\n       or cat contains \"Botnet\" or cat contains \"Command\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
     "is_enabled": true,
     "description": "Zscaler NSS web log Blocked action on a malicious/C2 category \u2014 the web proxy blocking the C2 domain attempt after the DNS RPZ block + NXDOMAIN cycling. Correlated to the victim by src and suser.",
     "alert_name": "Zscaler \u2014 C2 / Malicious Domain Blocked (Post-DNS Beacon)",
@@ -3436,7 +3436,7 @@
   {
     "name": "Zscaler \u2014 Second C2 Domain Blocked (Web Proxy)",
     "severity": "SEV_040_HIGH",
-    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter cs1 = \"Malicious Content\" or cat contains \"Malware\" or cat contains \"Spyware\"\n       or cat contains \"Botnet\" or cat contains \"Command\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter ZscalerNSSWeblogURLClass = \"Malicious Content\" or cat contains \"Malware\" or cat contains \"Spyware\"\n       or cat contains \"Botnet\" or cat contains \"Command\" or cat contains \"Exploit\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dst_ip = dst\n",
     "is_enabled": true,
     "description": "Zscaler NSS web log Blocked action on a malicious/C2 category \u2014 web proxy blocking the second C2 candidate after the first DNS RPZ block. Correlated to the victim by src and suser.",
     "alert_name": "Zscaler \u2014 Second C2 Domain Blocked (Web Proxy)",
