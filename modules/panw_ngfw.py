@@ -508,7 +508,7 @@ def _dst_device(config, ip, host):
     """Device-ID columns for an internal destination (prefix 'dest_device_')."""
     if not _is_internal(ip):
         return {}
-    if ip in set(_dcs(config)):
+    if ip in _all_dc_ips(config):
         return _server_device(ip, host, "Windows")
     if ip in set(config.get("internal_servers") or []):
         return _server_device(ip, host)
@@ -612,7 +612,7 @@ def _zone_tables(config):
         hosts[h] = "servers"
     for h in config.get("database_servers") or ():
         hosts[h] = "database"
-    for h in _dcs(config):
+    for h in _all_dc_ips(config):
         hosts[h] = "identity"
     for h in _dmz_servers(config):
         hosts[h] = "dmz"
@@ -1749,6 +1749,17 @@ def _dcs(config):
     """Domain-controller IPs XSIAM already classifies as DCs."""
     return (_get_config(config).get("domain_controllers")
             or config.get("domain_controllers") or ["10.0.10.10", "10.0.20.10"])
+
+
+def _all_dc_ips(config):
+    """Every DC address: _dcs() plus the per-site DCs in domain_controller_hosts, which new
+    hires authenticate against. Classification only (identity zone, Windows server
+    Device-ID); the random DC picks keep drawing from _dcs()."""
+    out = set(_dcs(config))
+    for h in (config.get("domain_controller_hosts") or {}).values():
+        if isinstance(h, dict) and h.get("ip"):
+            out.add(h["ip"])
+    return out
 
 
 def _conn(config, src, dst, dpt, app, action="allow", *, suser=None, shost=None, duser=None,
