@@ -15,8 +15,7 @@ Okta.
 | `azuread_campaigns` | *(coordinator — sends through the feeds above, plus Windows over WEC)* | — | — |
 
 The Microsoft 365 workloads (Exchange, SharePoint/OneDrive, DLP, General) are on
-[microsoft-365.md](microsoft-365.md). The detection research behind both pages is in
-[MICROSOFT_DETECTION_CATALOG.md](../../MICROSOFT_DETECTION_CATALOG.md).
+[microsoft-365.md](microsoft-365.md).
 
 ## Transport: the Cribl receiver (no Cribl instance needed)
 

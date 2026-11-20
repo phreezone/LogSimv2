@@ -277,7 +277,6 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 | Value cardinality (generated domains, files, cloud IDs, user-agents) | [docs/value-cardinality.md](docs/value-cardinality.md) |
 | Microsoft Entra ID feeds, the Cribl receiver transport, identity campaigns | [docs/modules/microsoft-entra.md](docs/modules/microsoft-entra.md) |
 | Microsoft 365 workloads (Exchange, SharePoint/OneDrive, DLP, General) | [docs/modules/microsoft-365.md](docs/modules/microsoft-365.md) |
-| Microsoft detection research and coverage | [MICROSOFT_DETECTION_CATALOG.md](MICROSOFT_DETECTION_CATALOG.md) |
 | Firewall & VPN analytics — what each firewall can fire, and why the rest can't | [docs/firewall-analytics.md](docs/firewall-analytics.md) |
 | Firewall management plane (device admin, config changes, logging suppression, SNMP) | [docs/firewall-management-plane.md](docs/firewall-management-plane.md) |
 
