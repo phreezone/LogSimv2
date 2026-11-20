@@ -29,7 +29,7 @@ Generates native Windows Security-channel Event XML targeting XSIAM's Identity A
 
 ## AD / Identity Threat Scenarios
 
-Named threat generators (via `scenario_event` = the key below, or fired individually). The 19 in the table below target published analytics; 7 more, added on 2026-11-01, cover AD identity attacks; 5 (`wip_` prefix) generate correct events but depend on an identity-graph baseline or are still under investigation.
+Named threat generators (via `scenario_event` = the key below, or fired individually). The 22 in the table below target published analytics; 5 (`wip_` prefix) generate correct events but depend on an identity-graph baseline or are still under investigation.
 
 **Detections:**
 
@@ -46,6 +46,7 @@ Named threat generators (via `scenario_event` = the key below, or fired individu
 | `PRIV_GROUP_ADDITION` | User added to a Windows privileged group | Analytics BIOC |
 | `ACCOUNT_LOCKOUT` | Multiple user accounts failed login due to account lockouts | XDR Analytics |
 | `DEFAULT_ACCOUNT_ENABLED` | A user enabled the Windows DefaultAccount | Analytics BIOC |
+| `DEFAULT_ACCOUNT_MASQUERADE` | A user created a new local account with the name of a default local account | Analytics BIOC |
 | `SUSPICIOUS_ACCOUNT_CREATION` | Suspicious hidden user created | Analytics BIOC |
 | `MASS_ACCOUNT_DELETION` | A user deleted multiple users for the first time | XDR Analytics |
 | `MULTIPLE_SERVICE_TICKETS` | Abnormal issuance of weakly encrypted service tickets to a user | XDR Analytics |
@@ -140,6 +141,7 @@ after three or more isolated probe batches each, so they are **WIP**.
 | `suspicious_sam_change` | **Confirmed** | Low "Suspicious sAMAccountName change" fired 2026-11-08 18:59Z. The state-carrying **4781** rename record is what the analytic keys on, not the 4742 alone. The Medium "to DC hostname" variation is not selected by `NewTargetUserName=DC01` alone; its discriminator remains unknown. |
 | `dnshostname_spoofing` | **Confirmed** | Medium "Suspicious dNSHostName attribute change to DC name" fired 2026-11-18 04:44:08Z (alert 803275) and again 05:06:32Z (803488), together with "Suspicious account attribute modification that matches that of a sensitive machine account" (803276 / 803489). The carrier is the **4742**, and the new value has to equal the FQDN of a DC the identity graph actually knows. See "dNSHostName spoofing: the 4742 carries it, and the value must be a real DC" below. |
 | `priv_cert_request` | **Confirmed** | Low "Suspicious privileged certificate request via certificate template" fired 2026-11-16 17:22Z (alert 799505) on a request submitted **by** `Administrator` for an ordinary user. The reverse shape (ordinary requester, privileged requested subject/SAN) is silent, as is the same requester again within the 1-day dedup window. See "Privileged certificate request: the *requester* is the privileged identity" below. |
+| `default_account_masquerade` | **Confirmed** | Low "Masquerading as a default local account" fired 2026-11-19 02:22Z (alerts 811838, 811841) and the Medium "…for the first time" at 02:25Z (811926, 811928, 811929). The shipped generator then fired 4 of 4 Medium (811937, 811942, 811946, 811948). The carrier must be a **local** `4720` logged on the member server (`TargetDomainName` = machine short name, machine-local SID); a DC-hosted `4720` is a domain account creation and raises nothing. The variation is chosen by the creator's 30-day creation count: 10 creations → Low, 0 → Medium. See "Masquerading as a default local account: a *local* 4720, and the creator's history picks the variation" below. |
 | `pkinit_auth` | **WIP** | 4 batches, 0 alerts. Tried the Microsoft-documented smart-card shape (4768 `PreAuthType=15`, `PreAuthEncryptionType=0x12`, cert issuer/serial/thumbprint), `PreAuthType` 14/16/17, rogue and enterprise issuers, short/full issuer DN, machine and user targets, missing cert, `4771` failure, `TicketOptions=0x60810010`, loopback `::1`, realm-qualified `ServiceName`, and a 4768 correlated with a preceding `msDS-KeyCredentialLink` write. All shapes ingested with the fields intact in both `microsoft_windows_raw` and `xdr_data`. |
 | `spn_cleared` | **WIP** | 5 batches, 0 alerts. Tried 4742 `ServicePrincipalNames` empty / `-` / absent, 5136 `%%14675` delete pairs, 5136 `%%14674` add-with-empty-value, 4662 write-property, and a same-account state transition (4742 with real SPNs, then 4742 with `-`). Batches 4–5 added the missing realism: `UserAccountControl` `%%2080` / `0x1000` (instead of `-`), the "only SPN changed" 4742 shape (`SamAccountName`/`DnsHostName` left as `-`), a real tenant asset (`FS01$`) as well as a new machine, and deleted-value renderings `-` / empty / absent. All shapes ingested; none alerted. Batch 6 re-ran the module's full sequence after the CRLF fix (9 events, real CRLF) — still 0 alerts. |
 | `kerberos_relay` | **WIP** | 7 batches, 0 alerts. Tried the published KrbRelayUp endpoint signature alone (4624 type 3, Kerberos, local Administrator RID 500, loopback) with `127.0.0.1` / `::1` / `::ffff:127.0.0.1` and `WorkstationName` `FS01` / `-`, then the full sequence 4768 → DC 4624 → 4769 → endpoint 4624 → 4672 → 4688 → 4689 against the real `FS01` asset. Batch 4 varied the target SID (machine-local vs synthetic-domain vs the tenant's real domain `S-1-5-21-2795392456-4107320412-3908095700` Administrator), the subject (machine account + `0x3e7` + `lsass.exe` vs anonymous `S-1-0-0`), and the target host (`FS01` vs `DC01`); all six events ingested with the fields intact and produced no alert. **Batches 5–7 ran after the CRLF fix below.** The stored `action_evtlog_message` now carries real CRLF (58–59 per 4624, 0 bare LF) and the published XQL hunt for this analytic returns the synthetic rows verbatim (`auth_package=Kerberos`, `logon_type=3`, `network=127.0.0.1`, `sid` ending `-500`). Batch 6 covered machine-local and real-domain Administrator SIDs; batch 7 fired the module's own full 7-event sequence against `SQL01`. Neither the Cribl receiver path nor attributing the WEC event to a real agent hostname (`Windows10-Workstation1`) changed anything — both still land as `EVENT_LOG_DOMAIN_CONTROLLER` with null `agent_ip_addresses`/`identity_enrichment`. That collector class is now the standing blocker: real agent 4624s are stamped `EVENT_LOG_AGENT_EVENT_LOG`, and no WEC/Cribl record can be. See "event_sub_type: WEC vs agent" below. |
@@ -288,6 +290,53 @@ Process note: the first run of this probe put all three hosts into a single
 240-event message and was silently truncated to its first 71 events, so only the
 first source was fairly tested. See "Probe deliveries must be chunked".
 
+### Masquerading as a default local account: a *local* 4720, and the creator's history picks the variation (2026-11-19)
+
+"Masquerading as a default local account" had never fired and had no generator.
+The analytic is a single-event Identity Analytics detection: *"A user created a
+new local account with the name of a default local account, such as Guest and
+DefaultAccount."* Its variations are "…for the first time" (Medium) and
+"Masquerading as a default Administrator account" (Informational).
+
+Ground truth came from the tenant's own `4720`s over 90 days:
+
+| `4720`s | Host | `TargetDomainName` | `TargetSid` |
+|---|---|---|---|
+| 18 domain account creations | `DC01.examplecorp.local` | `EXAMPLECORP` | domain SID |
+| 2 real **local** creations (`CodexSandboxOffline`, `CodexSandboxOnline`) | `jumpbox` | `JUMPBOX` | `S-1-5-21-629004114-70386281-1153430282-1005` |
+
+A local account creation is audited **by the member server**, with the machine's
+short name as the account domain and a machine-local SID. The module's `4720`
+builder always logged on the DC, which is a domain account creation — that shape
+raises nothing here.
+
+Both batches re-hosted the `4720` (and the `4732` that adds the new account to
+the local Administrators group) on the member server, changing nothing else:
+
+| Attempt | Shape | Alert |
+|---|---|---|
+| 02:22Z | creator `m.magnusson` (10 account creations in 30 days): `DefaultAccount` on `IT-WS-026`, `Guest` on `FIN-WS-006`, local `Administrator` on `SUP-WS-025` | **LOW 811838** and **LOW 811841**; nothing for the `Administrator` variant |
+| 02:25Z | three creators with **0** `4720`s in 90 days (`d.lambert`, `a.novikov`, `h.jung`), one variant each on a fresh host | **MEDIUM 811926, 811928, 811929** — "for the first time" |
+| 02:35Z | the **shipped generator**, four renders (24 events) on `FIN-WS-004`, `PROD-LT-004`, `CS-LT-031`, `SUP-WS-001`, all first-time creators | **MEDIUM 811937, 811942, 811946, 811948** — 4 of 4 |
+
+The alert text states the discriminator outright: *"This user has created 10 user
+accounts in the past 30 days"* for the Low, and *"This user has created 0 user
+accounts in the past 30 days … This is the first time the user has created an
+account in the past 30 days"* for the Medium. So the variation is a property of
+the **creator**, not of the account name or the host — the same shape produced
+Low or Medium purely on the creator's history.
+
+The generator therefore emits the local `4720` shape and picks a random Windows
+user as the creator. Most session-context users have no account-creation history,
+so the Medium is the usual outcome; a user that the simulator has already used
+for `suspicious_account_creation` raises the Low instead. Both are the right
+detection, so no history-bias is applied.
+
+The separate "Local user account creation" analytics did **not** fire for the
+same events (0 rows in 90 days, including the tenant's real `jumpbox`
+creations), even though the `4720`s are the first local accounts on those hosts.
+That is unverified — it may need a longer baseline — and is not relied on.
+
 ### New machine delegation: `4741` does not make a machine "new" (2026-11-18)
 
 `new_machine_delegation` had never alerted in 90 days, although the shipped
@@ -314,9 +363,11 @@ was ingested and still raised nothing. `4741` is therefore not what feeds
 machine-creation analytics in this tenant, so this detector cannot establish
 that the machine is "new" regardless of how the delegation half is shaped.
 
-The vendor page also declares a **Test Period of 12 Hours**, so a delayed alert
-cannot be ruled out completely. Re-probe only if a real `4741` ever drives a
-machine-creation alert here.
+The vendor page declares a **Test Period of 12 Hours**. The last batch was
+2026-11-18 06:14Z; a re-check on 2026-11-19, more than 24 hours later, returned
+**no alert**, so the window is closed and no delayed alert exists. The item is
+not waiting on a re-check — it is blocked on the missing "new machine" signal.
+Re-probe only if a real `4741` ever drives a machine-creation alert here.
 
 ### Container targets are evaluated; the AdminSDHolder ACL is analytic-specific (2026-11-16)
 

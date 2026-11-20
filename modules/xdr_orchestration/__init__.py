@@ -37,7 +37,7 @@ from .stories import (
     Story, Step, NetworkEvent,
     get_reference_story, get_quick_story, get_intrusion_story,
     get_lateral_story, get_persistence_story, get_fullchain_story,
-    get_story, list_stories, all_technique_ids, override_domain,
+    get_story, list_stories, all_technique_ids, all_atomic_tests, all_builtin_payloads, override_domain,
     mitre_coverage, story_from_dict, load_yaml_stories, TECHNIQUE_CATALOG,
 )
 from .orchestrator import (
@@ -73,6 +73,8 @@ __all__ = [
     "get_story",
     "list_stories",
     "all_technique_ids",
+    "all_atomic_tests",
+    "all_builtin_payloads",
     "override_domain",
     "mitre_coverage",
     "story_from_dict",

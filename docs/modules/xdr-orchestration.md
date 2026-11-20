@@ -144,6 +144,8 @@ Stories (also registered as CLI scenarios 24/25/26):
 
 Every technique is non-destructive and cleanup-capable (test numbers validated live via `-ShowDetails`). The `xdr_intrusion` story uses the `Step.prereqs` hook to stage a technique's target (e.g. the file T1070.004 deletes) with `-GetPrereqs` before firing.
 
+**`xdr_recon`** (a dashboard story — runnable from the story picker, not a numbered CLI scenario) breaks the `xdr_reference` discovery sweep out as a standalone, fire-on-demand recon stage: the same seven read-only techniques (T1082 systeminfo / T1016 ipconfig·arp·route / T1033 whoami / T1057 tasklist / T1049 netstat / T1087.001 net user / T1518.001 AV·EDR discovery), with the netstat step paired to a synthetic internal SMB share-enumeration + port scan from the box (and its default PAN NGFW rendering). Non-destructive, read-only, nothing to clean up. These rarely alert alone — hence no `expected_alerts` — but they build the behavioural picture and the correlation volume the analytics key on, and the arc stitches to the one discovered identity like every other story.
+
 ### WildFire stage (`xdr_wildfire`)
 
 The Atomic tests exercise behaviour. This story exercises the agent's **malware module** with a real WildFire verdict. It uses a **builtin payload** (`payloads.py`): a fixed, reviewed PowerShell script run over the same WinRM channel as the Atomic tests. It is selected with:
@@ -166,6 +168,61 @@ The step's matching Zscaler `sandbox_threat` record is built from the payload's 
 **Confirmed on 2026-11-18:** about 10 minutes after the run, the agent raised **`WildFire Malware`**: source `XDR Agent`, severity high, action `Detected (Post Detected)`. It landed in the run's single case, and the scorecard scored the T1204.002 row 1/1. The agent allowed the never-seen hash to run and alerted once WildFire returned the malware verdict.
 
 The box needs outbound HTTP to `wildfire.paloaltonetworks.com`. Builtin steps install no Atomic prereqs; the Kickstarter skips them.
+
+### Behaviour stages (`xdr_procdump`, `xdr_squiblydoo`, `xdr_shadow_delete`, `xdr_cradle`, `xdr_encoded`, `xdr_tamper`)
+
+More **builtin-payload** stories, each a short arc (orient with `whoami`, then one high-signal behaviour). They are endpoint-only — the detection is the behaviour on the box, so there is no synthetic network half — and each drops any files outside the Atomic allow-list paths, like `wildfire_pe`. None installs an Atomic prereq. (The one exception is `xdr_cradle` in its optional `http(s)`-url mode, which adds a synthetic perimeter egress half; see below.)
+
+| id | Technique | What the payload does | Why it fires |
+|---|---|---|---|
+| `xdr_procdump` | T1003.001 — LSASS Memory | Downloads Sysinternals **ProcDump** to `C:\Users\Public\Downloads` and runs `procdump -accepteula -ma lsass.exe`. The dump (LSASS memory) is deleted immediately; the tool is cleaned up after. | Credential Gathering / LSASS access on a **Microsoft-signed** tool — proves the behavioral detection, not a file signature. Complements the comsvcs.dll MiniDump in `xdr_intrusion`/`xdr_lateral`. |
+| `xdr_squiblydoo` | T1218.010 — Regsvr32 | Stages a benign local COM scriptlet and runs `regsvr32 /s /n /u /i:<sct> scrobj.dll`; the scriptlet spawns `cmd.exe` to write a marker. Scriptlet + marker cleaned up after. | Behavioral Threat Protection: regsvr32 proxy-executing script and spawning a child. A **local** scriptlet is used (no fetch) so the stage is self-contained. |
+| `xdr_shadow_delete` | T1490 — Inhibit System Recovery | Invokes `vssadmin delete shadows /shadow={…} /quiet`. | Ransomware-prep behaviour the agent flags and usually **prevents**. **Non-destructive by design**: the shadow id is a random, non-existent GUID, so no real shadow copy is removed, while the command line the detector keys on is still produced. A hard wipe would use `delete shadows /all /quiet` — deliberately not the default. |
+| `xdr_cradle` | T1059.001 — PowerShell | Stages a tiny local marker-writing `.ps1`, then launches a **child `powershell.exe`** whose command line is the canonical cradle `IEX (New-Object Net.WebClient).DownloadString('<url>')`. `.ps1` + marker cleaned up after. | PowerShell command-line / script-block analytics key on `System.Net.WebClient` + `DownloadString` + `Invoke-Expression` — the **command-line shape**, not what runs. **Benign + self-contained by default**: the URL is a `file://` pointing at the staged marker script, so no bytes leave the box and IEX only runs our own marker write. Run as a visible child process **deliberately** — not via the base64/certutil delivery that hides legit scripts (§ transport) — so the agent sees the artifact. Pass an `http(s)` `url` per run (`run_story(..., cradle_url=…)`) for a true-egress cradle (fetches + IEXes whatever that URL serves — point it only at trusted content; no marker then). **Only in that mode** the step also emits a synthetic perimeter half — a Zscaler web-proxy record naming the exact fetched URL/host plus the firewall egress fan-out (and the default PAN NGFW rendering), all pinned to that URL's host — so the scorecard shows a **network**-sourced detection alongside the endpoint one. A `file://` run emits none of it, and the scorecard scores only what was actually emitted (`summary["network_emitted"]`), so the common path never reads as a network miss. |
+| `xdr_encoded` | T1027.010 — Command Obfuscation | Builds a benign inner command (marker write + `Write-Host`), base64-encodes its UTF-16LE bytes on the box, and launches a **child `powershell.exe -EncodedCommand <base64>`**. Marker cleaned up after. | The near-universal "suspicious / encoded PowerShell" heuristic keys on the `-EncodedCommand`/`-enc` flag carrying a base64 blob on a powershell command line. **Benign**: the decoded command only writes a marker and prints a line (verified to contain no `IEX`/download/destructive verbs). Run as a visible child **deliberately** — the base64/certutil delivery exists to *avoid* this very alert, so here it is inverted. |
+| `xdr_tamper` | T1562.001 — Impair Defenses | `Set-MpPreference -DisableRealtimeMonitoring $true` + `Add-MpPreference -ExclusionPath`, then **reverts both immediately**; cleanup re-asserts the revert. | The Defender-tamper BIOC fires on the attempt; protection is left **ON**. **Reversible by design.** Reuses the `disable_defender` payload from the `xdr_evasion` chain, broken out as a one-shot. If **Tamper Protection** is enabled the disable is blocked — itself the detection. |
+
+Each payload's `judge` counts success as "the behaviour reached the box" — whether the agent let it complete (Report mode) or blocked it (prevention); only a payload that could not run at all (e.g. a failed ProcDump download, or a cradle that could not stage its local script) is a failure. The expected endpoint alert names in `TECHNIQUE_CATALOG` for T1218.010, T1490, T1059.001 and T1027.010 are **best-effort** and should be tuned against the tenant after the first run (the names the agent actually raises show up under "Also fired for this run"); T1003.001 reuses the confirmed credential-dumping names.
+
+### Scenario chains (P4)
+
+Four multi-step **scenario** stories recombine the builtin palette (all self-contained, non-destructive, cleanup-capable — no Atomic prereq downloads):
+
+| id | Chain | New builtin techniques |
+|---|---|---|
+| `xdr_ransomware` | recon → LSASS dump (comsvcs) → **shadow-copy deletion** → **mass-encryption simulation** + ransom note | T1486 `ransomware_sim` (scratch dir only), reuses T1490 |
+| `xdr_cred_theft` | LOLBin ingress → **Mimikatz** → **SAM/SYSTEM/SECURITY hive dump** → **LaZagne** → HTTP exfil (aligned synthetic net) | T1003.001 `mimikatz`, T1003.002 `sam_hive_dump`, T1555 `lazagne` |
+| `xdr_evasion` | **Squiblydoo** → **mshta** → **MSBuild inline task** → **disable Defender** (reverted) → **clear event log** | T1218.005 `mshta_proxy`, T1127.001 `msbuild_inline`, T1562.001 `disable_defender`, T1070.001 `clear_event_log` |
+| `xdr_persistence_sweep` | Run key → scheduled task (Atomic) → **new service** → **WMI event subscription** → **Startup-folder .lnk** | T1543.003 `new_service`, T1546.003 `wmi_subscription`, T1547.001 `startup_folder` |
+
+Non-destructive by design: `ransomware_sim` only rewrites files it creates in a scratch dir and drops a clearly-labelled simulation note; `sam_hive_dump` deletes the hives immediately; `disable_defender` reverts real-time protection and removes its exclusion; `clear_event_log` clears a custom `LogSim-<tag>` log, not Security; every persistence foothold is removed in cleanup.
+
+**Mimikatz and LaZagne** are staged by the Kickstarter (`EXTRA_TOOLS`, GitHub "latest" asset URLs) and run from the staged copy. The agent may quarantine them on download — that's itself a detection — in which case those steps report "not staged" and the LOLBin `sam_hive_dump` still fires. All P4 `expected_alerts` are **best-effort**; tune them against the tenant after the first run.
+
+### Atomic-test-backed stages (vetted, by test number)
+
+For techniques better served by a community-reviewed test than a bespoke payload, a story step just references an **Atomic Red Team** test by pinned number (`_wa("T1548.002", "4")`); the executor runs `Invoke-AtomicTest` on the box. Nothing offensive is authored here — the technique content is Atomic's, installed by the Kickstarter, and prereqs resolve **only** for the pinned test number (so the heavier variants' downloads, e.g. the UACME/WinPwn tests under T1548.002, are never pulled).
+
+`xdr_privesc` fills **Privilege Escalation** (no other story covered it), as a priv-esc → evasion → foothold chain of three vetted, non-destructive, self-contained, cleanup-capable tests:
+
+| Step | Atomic test | What it does |
+|---|---|---|
+| Privilege Escalation | **T1548.002-4** | Bypass UAC via Fodhelper (PowerShell) — HKCU `ms-settings` hijack; cleanup deletes the key |
+| Defense Evasion | **T1036.003-7** | Masquerading — copy `cmd.exe` to `%TEMP%\svchost.exe`, run it, stop it; cleanup removes the copy |
+| Persistence | **T1136.001-4** | Create a local user via `net.exe`; cleanup deletes the account |
+
+Each pinned test was chosen because it is Windows, has Atomic cleanup, and needs no remote download.
+
+`xdr_lolbin` adds two more Atomic-backed stages (Execution + Defense Evasion):
+
+| Step | Atomic test | What it does |
+|---|---|---|
+| Execution | **T1047-5** | WMI Execute Local Process — `wmic process call create notepad.exe`; cleanup ends the process |
+| Defense Evasion | **T1197-1** | Bitsadmin Download — `bitsadmin /transfer` creates a BITS job that fetches a benign Atomic-repo markdown (not executed); cleanup deletes the file |
+
+The BITS job's download target is a benign public markdown; a failed fetch is non-fatal since the BITS **job creation** is the telemetry. `wmic` is present on this Windows 10 box (note: Microsoft deprecates it and disables it by default on Windows 11 24H2+).
+
+(A firewall-tamper stage, T1562.004, was considered but left out: its Atomic definition 404'd on both the raw and HTML paths at build time, so no test number is pinned rather than guess one.)
 
 ### Story check (offline)
 
@@ -232,7 +289,29 @@ To turn it off, untick **Fresh C2 domain each run** in the console, or send `fre
 
 ## The Kickstarter (console-generated one-shot installer)
 
-`modules/xdr_orchestration/kickstarter.py` renders a self-contained PowerShell script from the running console's own values (its IP/URL, a scoped token, and exactly the atomics the stories need). Download it from the tab's **Generate workstation installer** button or `GET /api/v1/attack/kickstarter`. Run it **elevated** on a bare box and it: enables WinRM (firewall scoped to the console IP + `LocalAccountTokenFilterPolicy`), installs Invoke-AtomicRedTeam + the story prereqs **unattended** (NuGet/PSGallery/powershell-yaml pre-satisfied), verifies the Cortex agent, self-checks (mirrors preflight), and phones home readiness to `/api/v1/attack/register`. Idempotent; ships with `-Uninstall`. Lab-only, watermarked.
+`modules/xdr_orchestration/kickstarter.py` renders a self-contained PowerShell script from the running console's own values (its IP/URL, a scoped token, exactly the atomics the stories need, and the builtin-payload tooling they need). Download it from the tab's **Generate workstation installer** button or `GET /api/v1/attack/kickstarter`. Run it **elevated** on a bare box and it: enables WinRM (firewall scoped to the console IP + `LocalAccountTokenFilterPolicy`), installs Invoke-AtomicRedTeam + the story prereqs **unattended** (NuGet/PSGallery/powershell-yaml pre-satisfied), **stages builtin-payload tooling** (currently ProcDump → `C:\ProgramData\LogSim`, for the `procdump_lsass` stage), verifies the Cortex agent, self-checks (mirrors preflight), checks outbound connectivity for the run-time download stages, and phones home readiness to `/api/v1/attack/register`. Idempotent; ships with `-Uninstall` (which also removes the staged tools). Lab-only, watermarked.
+
+**What the box needs for each stage, and who provides it:** the Atomic steps use Invoke-AtomicRedTeam + `-GetPrereqs` (installed). `procdump_lsass` needs ProcDump — **staged** by the Kickstarter (`all_builtin_payloads()` tells it which tools to stage), and the payload copies the staged copy at run time, falling back to a live download from `live.sysinternals.com` if the box was not kickstarted. `squiblydoo` (regsvr32 + scrobj.dll) and `vss_shadow_delete` (vssadmin) use **built-in Windows binaries** — nothing to download. The admin's full token for LSASS access (SeDebugPrivilege) comes from `LocalAccountTokenFilterPolicy=1`. The only stage that cannot be pre-staged is `wildfire_pe`: it must download a **fresh-hash** test PE from `wildfire.paloaltonetworks.com` (plain HTTP) every run, so the Kickstarter instead verifies that host is reachable (warn-only — not every run uses it).
+
+### Run once: self-heal + live manifest
+
+The Kickstarter is built so a **single run sticks** — you should not have to regenerate or re-run it as stories grow or the box drifts.
+
+- **Self-heal scheduled task.** The first run copies the script to `C:\ProgramData\LogSim\logsim-kickstarter.ps1` and registers a task **`LogSim XDR Self-Heal`** (at boot + daily 03:00, as `SYSTEM`) that re-runs it in **`-Refresh`** mode. Refresh re-asserts WinRM + the scoped firewall rule + `LocalAccountTokenFilterPolicy`, so a reboot or GPO sweep can't leave the box red, and ensures Atomic is present. It's idempotent; you can also run `-Refresh` by hand.
+- **Live provisioning manifest.** Each refresh fetches `GET /api/v1/attack/kickstarter/manifest` — the exact Atomic **tests** (`all_atomic_tests()` → each technique with its *pinned* test numbers) and builtin-payload tools (`all_builtin_payloads()`) any registered story needs, computed live from the registry — and installs/stages whatever is **missing** (`-GetPrereqs` is idempotent; tools are staged only when absent). **Add a story later and the box provisions it on its next refresh**, no regenerate, no re-run. If the console is unreachable the refresh falls back to the test/tool list baked into the script at generation time, so an offline box still provisions what it shipped with.
+- **Prereqs are scoped to the pinned tests.** The box runs `Invoke-AtomicTest <id> -TestNumbers <n> -GetPrereqs`, never per-technique. This matters: resolving a whole technique makes Atomic try to satisfy *every* test under it, including cloud tests whose prereqs pull the **retired AzureAD module** and LSASS tests whose prereqs download **Process Hacker from a SourceForge mirror** — both of which fail with "failed to meet prerequisites" and neither of which our stories use (the LSASS step is comsvcs.dll, test 2). Scoping to the pinned tests means those downloads are never attempted.
+- **Inventory reporting folded in.** Every install and refresh POSTs to `/api/v1/attack/register` not just the PASS/FAIL self-check but an `inventory` (Atomic installed, techniques provisioned, which tools are staged, token policy, whether the self-heal task exists, and the manifest source + mode), so the console's readiness view shows exactly what each box has.
+- **Rollback.** `-Uninstall` removes the self-heal task, the staged tools (`C:\ProgramData\LogSim`), WinRM/firewall/token config, and the atomics.
+
+A new tool-based stage added later just needs its staging branch in the Kickstarter's `Stage-Tools` function; the manifest already carries its payload name, so kickstarted boxes stage it automatically on their next refresh.
+
+### Extra lab tools (staged, not auto-fired)
+
+Beyond the tools a stage needs, the Kickstarter stages a short list of **extra lab tools** — present on the box for an operator (or a future stage) to call, but not fired by any current stage. It's defined by `kickstarter.EXTRA_TOOLS`, served in the manifest as `extra_tools`, staged by `Stage-ExtraTools`, reported in the inventory, and removed by `-Uninstall` with the rest of `C:\ProgramData\LogSim`.
+
+- **Process Hacker** (`ProcessHacker.exe`). A process/credential-inspection hacktool with no clean headless CLI, so it's staged for **manual** use (e.g. dumping lsass by hand in a demo, which the Cortex agent flags) and as a ready dependency for a future Process-Hacker stage — it is **not** auto-fired. It's pulled from `downloads.sourceforge.net` (SourceForge's mirror **redirector**, which picks a healthy mirror — deliberately not a single pinned mirror host like the `versaweb.dl.sourceforge.net` that fails DNS), the `processhacker-2.39-bin.zip` is expanded, and the x64 `ProcessHacker.exe` is copied into `C:\ProgramData\LogSim`. Staging is idempotent and non-fatal; on a prevention-mode box the agent may quarantine it on write (in which case it just isn't staged).
+
+Adding another lab tool is one entry in `EXTRA_TOOLS` (name, on-disk file, URL, and — for a `.zip` — the member to extract); kickstarted boxes stage it on their next refresh with no regenerate.
 
 ## Roadmap
 

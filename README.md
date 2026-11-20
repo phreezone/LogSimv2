@@ -113,6 +113,7 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `account_lockout` | Excessive user lockouts | Low | T1110 |
 | `suspicious_account_lockout` | Excessive account lockouts on suspicious users | Medium | T1110 |
 | `default_account_enabled` | User enabled a default local account | Low | T1078.001 |
+| `default_account_masquerade` | User created a new local account named after a default local account | Low–Medium | T1078.001 |
 | `sms_admins_addition` | User added to SMS Admins group | Medium | T1098 |
 | `suspicious_account_creation` | Suspicious hidden user account created | Low | T1136 |
 | `mass_account_deletion` | Multiple user accounts deleted | Medium | T1531 |
@@ -146,6 +147,15 @@ ordinary victims, so the variation is not name- or history-based. The generator
 targets the "commonly targeted users" variation and does not attempt this one
 (see `docs/modules/windows.md`).
 
+`default_account_masquerade` was verified on 2026-11-19 (LOW 811838/811841, then
+MEDIUM 811926/811928/811929, then the shipped generator 4 of 4: 811937, 811942,
+811946, 811948). The account must be created as a **local** account
+on a member server — the `4720` is logged by the endpoint with the machine's
+short name as `TargetDomainName` and a machine-local SID — so the generator
+re-hosts the record off the DC. The variation follows the creator's 30-day
+creation count: a user with existing creations raises the Low base, a first-time
+creator the Medium "…for the first time" (see `docs/modules/windows.md`).
+
 **WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 
 | Generator | Reason |
@@ -154,13 +164,14 @@ targets the "commonly targeted users" variation and does not attempt this one
 | `wip_irregular_service_tgs` | Only ever raises the weak-encryption ticket alert that `multiple_service_tickets` owns; `irregular_tgt_burst` covers its intended detection. Background only — not offered on demand |
 | `wip_sccm_container_recon` | Full real shape (4662 reads + the DC's 1644 LDAP search naming the container) still silent; every real 1644 in the tenant is agent-collected, WEC lands as `EVENT_LOG_DOMAIN_CONTROLLER` (see `docs/modules/windows.md`) |
 | `wip_esc4_template_modification` | 3 batches (5136 only → +4662 legs → +CA 4899/4900) still silent. The detector's own collection reference names 4899/4900/4662; those EventData names are unverifiable because Microsoft publishes no per-event page (see `docs/modules/windows.md`) |
-| `wip_new_machine_delegation` | 3 batches (config-only → RBCD/constrained/unconstrained chains → same chains with a DC-side machine 4624 + TGT) still silent. A fresh `4741` by a first-time creator does not raise "Rare machine account creation", so `4741` does not drive machine-creation analytics here and the detector cannot see a "new" machine (see `docs/modules/windows.md`) |
+| `wip_new_machine_delegation` | 3 batches (config-only → RBCD/constrained/unconstrained chains → same chains with a DC-side machine 4624 + TGT) still silent. A fresh `4741` by a first-time creator does not raise "Rare machine account creation", so `4741` does not drive machine-creation analytics here and the detector cannot see a "new" machine. Its 12-hour Test Period has since elapsed with no late alert (see `docs/modules/windows.md`) |
 
 Two former rows here were stale and have been removed: the key-credential and
 sAMAccountName generators are `shadow_credentials` and `suspicious_sam_change`,
 and both are **confirmed**. "Masquerading as a default local account" is a
-variation of the confirmed `default_account_enabled` analytic with no generator
-yet, so it does not belong in a table of `wip_`-prefixed generators.
+separate analytic (not a variation of `default_account_enabled`) and now has its
+own generator, `default_account_masquerade`, which is **confirmed** — so it does
+not belong in a table of `wip_`-prefixed generators either.
 
 **Endpoint execution telemetry** (for the advanced linked kill chains): the module also generates **4688 process trees** (Office → PowerShell → cmd → LOLBin, with real parent/child linkage and command lines), **4697** (a service was installed — malware persistence), and **1102** (the audit log was cleared — anti-forensics). Emitted via the `PROCESS_TREE`, `SERVICE_INSTALL`, and `CLEAR_LOGS` scenario events. Verified to ingest and parse in `microsoft_windows_raw`. *Note:* the Broker VM's WEC subscription must forward these Event IDs for them to reach XSIAM — see the Subscription Filter note below.
 

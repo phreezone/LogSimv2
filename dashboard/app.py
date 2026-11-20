@@ -2001,23 +2001,41 @@ def api_attack_kickstarter():
     """Return the console-generated PowerShell one-shot that turns a bare box into
     a preflight-green target (WinRM scoped to this console + unattended Atomic +
     agent check + phone-home). Downloadable .ps1."""
-    from modules.xdr_orchestration import render_kickstarter, all_technique_ids
+    from modules.xdr_orchestration import (render_kickstarter, all_atomic_tests,
+                                            all_builtin_payloads)
     console_ip = request.args.get("console_ip") or _console_lan_ip()
     # Prefer an explicit override, else the URL the browser reached us on.
     console_url = request.args.get("console_url") or request.host_url.rstrip("/")
     ps = render_kickstarter(console_url=console_url, console_ip=console_ip,
-                            token=_API_KEY or "", technique_ids=all_technique_ids())
+                            token=_API_KEY or "", atomic_tests=all_atomic_tests(),
+                            builtin_payloads=all_builtin_payloads())
     resp = make_response(ps)
     resp.headers["Content-Type"] = "text/plain; charset=utf-8"
     resp.headers["Content-Disposition"] = "attachment; filename=logsim-kickstarter.ps1"
     return resp
 
 
+@app.get("/api/attack/kickstarter/manifest")
+def api_attack_kickstarter_manifest():
+    """The box's provisioning manifest: every Atomic technique and builtin-payload
+    tool any registered story needs, computed LIVE from the registry. The Kickstarter's
+    self-heal task fetches this on each refresh and installs/stages whatever is
+    missing — so adding a story never needs the installer regenerated or re-run."""
+    from modules.xdr_orchestration import (all_technique_ids, all_atomic_tests,
+                                            all_builtin_payloads)
+    from modules.xdr_orchestration.kickstarter import EXTRA_TOOLS
+    return jsonify({"techniques": all_technique_ids(),          # ids only (display/legacy)
+                    "atomic_tests": all_atomic_tests(),          # id + pinned test numbers
+                    "builtin_payloads": all_builtin_payloads(),
+                    "extra_tools": EXTRA_TOOLS,                   # lab tools staged for manual/future use
+                    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+
+
 @app.post("/api/attack/register")
 def api_attack_register():
     """Phone-home endpoint the Kickstarter POSTs readiness to. Records the box's
-    self-check so the console can reflect it. Authenticated by the shared token
-    like every other /api route."""
+    self-check and provisioning inventory so the console can reflect it. Authenticated
+    by the shared token like every other /api route."""
     body = request.get_json(silent=True) or {}
     host = str(body.get("hostname") or "unknown")
     _ATTACK_READINESS[host] = {**body, "received_at": time.time()}
@@ -3461,6 +3479,7 @@ def _register_v1_aliases():
         ("/api/v1/attack/coverage",           "api_attack_coverage",     ["GET"]),
         ("/api/v1/attack/ledger",             "api_attack_ledger",       ["GET"]),
         ("/api/v1/attack/kickstarter",        "api_attack_kickstarter",  ["GET"]),
+        ("/api/v1/attack/kickstarter/manifest", "api_attack_kickstarter_manifest", ["GET"]),
         ("/api/v1/attack/register",           "api_attack_register",     ["POST"]),
     ]
     view_funcs = app.view_functions
