@@ -40,13 +40,13 @@ EVENT_INTERVAL = 1.2   # default relative benign volume: directory-audit changes
 # Threat rate governed centrally by ac.ThreatGate / ac.THREAT_EPISODES_PER_HOUR (see _GATE below).
 
 ADMIN_ROLES = ("IT Administrator", "IT Director", "Systems Engineer")
-HELPDESK_ROLES = ("Help Desk", "IT Administrator")
+HELPDESK_ROLES = ("Help Desk Analyst", "IT Administrator")
 _ID_PREFIX = {"Core Directory": "Directory", "Self-service Password Management": "SSPR",
               "Authentication Methods": "Authentication Methods", "Account Provisioning": "Sync"}
 # Directory-lifecycle operators: the only admins who create/delete users in the baseline. Other
 # admins (IT Director, Systems Engineer) carry heavy admin activity but never delete accounts, so
 # a deletion by one of them reads as 'deletion by a non-standard account'.
-LIFECYCLE_ROLES = ("Help Desk", "IT Administrator")
+LIFECYCLE_ROLES = ("Help Desk Analyst", "IT Administrator")
 _LIFECYCLE_ACTIVITIES = {"Add user", "Delete user", "Hard Delete user", "Restore user"}
 
 # SaaS app catalogs live in azure_common (shared with the O365 directory feed). Benign events draw

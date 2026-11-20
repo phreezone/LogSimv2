@@ -91,6 +91,7 @@ EXCLUDED = {
         "new_ftp_server",                                                  # inbound clients
         "server_outbound_http", "dc_smb_outbound",                         # server / DC source
         "mgmt_logging_suppressed", "mgmt_config_harvest", "mgmt_admin_unexpected_source",
+        "mgmt_config_route_change",       # firewall admin session; ASA/Firepower/FortiGate had it
     },
     "Cisco ASA Firewall": {
         "failed_connections_burst",                                        # outside-in
@@ -195,6 +196,12 @@ EXCLUDED = {
         "TOR_LOGIN", "BEDROCK_TOR_USAGE", "API_CALL_FROM_TOR", "CONSOLE_LOGIN_BRUTE_FORCE",
         "IMDS_CREDENTIAL_THEFT", "K8S_SA_OUTSIDE_CLUSTER", "ROOT_USER_ACTIVITY",
         "CONSOLE_FIRST_LOGIN_NONUSER", "CROSS_ACCOUNT_ASSUME_ROLE",
+        # Added 2026-11-18 by the full allow-list audit (8 trials each, 0 kept of 8). These
+        # pick their own actor and ignore the target's IAM user: ASSUME_ROLE_WITH_SAML names
+        # a roster SAML user (dave / bob), and the other three run as an EC2 / DevOps
+        # instance role. Records carry the office egress, which alone never links one.
+        "ASSUME_ROLE_WITH_SAML", "S3_COPY_TO_FOREIGN_ACCOUNT", "COMPUTE_OUTSIDE_REGION",
+        "IAM_UNUSUAL_ACTIVITY",
     },
 }
 

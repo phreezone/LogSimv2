@@ -677,7 +677,7 @@ def rare_ext_email(rnd=None):
 
 
 # Actors who are NOT part of any admin baseline — a 'non-standard account' for admin-type operations.
-_ADMIN_ROLE_NAMES = frozenset({"IT Administrator", "IT Director", "Systems Engineer", "Help Desk",
+_ADMIN_ROLE_NAMES = frozenset({"IT Administrator", "IT Director", "Systems Engineer", "Help Desk Analyst",
                                "Security Engineer", "Security Analyst"})
 
 
@@ -690,8 +690,9 @@ def pick_nonstandard_actor(config=None, context=None):
         return fi
     profiles = (config or {}).get("user_profiles") or {}
     if profiles:
-        non_admin = [u for u, p in profiles.items()
-                     if p.get("role") not in _ADMIN_ROLE_NAMES and lifecycle_cohort(u) == "active"]
+        non_admin = cached_pool("non_admin", profiles,
+                                lambda u, p: p.get("role") not in _ADMIN_ROLE_NAMES
+                                and lifecycle_cohort(u) == "active")
         if non_admin:
             u = random.choice(non_admin)
             return _norm(u, profiles[u])
@@ -714,11 +715,19 @@ _LIFECYCLE_DORMANT_PCT = 6
 _LIFECYCLE_DEPARTED_PCT = 6
 
 
-@functools.lru_cache(maxsize=None)
 def lifecycle_cohort(username):
-    """Deterministic lifecycle cohort for an identity: 'active' | 'dormant' | 'departed'.
+    """Lifecycle cohort for an identity: 'active' | 'dormant' | 'departed', or 'pending' for
+    a pre-provisioned new hire whose start date (user_profiles.*.start_date) is still ahead.
+    A pending account exists in the directory but, like the reserved cohorts, is never
+    drawn by the benign baseline -- so on its first day it is a genuinely new user."""
+    if _su is not None and not _su.is_onboarded(username):
+        return "pending"
+    return _cohort_hash(username)
 
-    Memoised: it is a pure hash of the username, and the roster filters call it for every
+
+@functools.lru_cache(maxsize=None)
+def _cohort_hash(username):
+    """The hash part of lifecycle_cohort(). Memoised: the roster filters call it for every
     user on every event -- uncached that was ~500 SHA-256s per Exchange event (~90% of the
     module's generation time)."""
     b = _h("lifecycle:v1:" + str(username)) % 100
@@ -882,12 +891,30 @@ def _active_profile_names(profiles):
     """ACTIVE-cohort usernames of a user_profiles dict (all names if none are active),
     cached per roster -- this ran a cohort check over every profile on every event. The
     dict itself is kept in the entry so its id cannot be reused by another object."""
+    day = _su.onboarding_day() if _su is not None else 0
     hit = _ACTIVE_NAMES.get(id(profiles))
-    if hit is not None and hit[0] is profiles and hit[1] == len(profiles):
+    if hit is not None and hit[0] is profiles and hit[1] == len(profiles) and hit[3] == day:
         return hit[2]
     names = [n for n in profiles if lifecycle_cohort(n) == "active"] or list(profiles)
-    _ACTIVE_NAMES[id(profiles)] = (profiles, len(profiles), names)
+    _ACTIVE_NAMES[id(profiles)] = (profiles, len(profiles), names, day)
     return names
+
+
+_CACHED_POOLS = {}
+
+
+def cached_pool(tag, profiles, pred):
+    """Usernames of `profiles` satisfying pred(username, profile), cached per roster, tag and
+    UTC day (new hires join the pools on their start date). The role and cohort filters
+    used to rescan every profile on every call -- 5,000 at the expanded estate's size."""
+    day = _su.onboarding_day() if _su is not None else 0
+    key = (tag, id(profiles))
+    hit = _CACHED_POOLS.get(key)
+    if hit is not None and hit[0] is profiles and hit[1] == len(profiles) and hit[2] == day:
+        return hit[3]
+    pool = sorted(u for u, p in profiles.items() if pred(u, p))
+    _CACHED_POOLS[key] = (profiles, len(profiles), day, pool)
+    return pool
 
 
 def pick_distinct_users(config, n):
@@ -1001,7 +1028,7 @@ def pick_by_role(config, roles, departments=None, owner_of=None):
     if fi:
         return fi
     profiles = (config or {}).get("user_profiles") or {}
-    key = (tuple(roles), tuple(departments or ()))
+    key = (tuple(roles), tuple(departments or ()), _su.onboarding_day() if _su is not None else 0)
     if key not in _ROLE_POOLS:
         # Admins who "do the work" are active by definition — never draw a reserved (dormant/
         # departed) account for a baseline admin action.
@@ -1320,6 +1347,17 @@ def device_name(user, mobile=False):
     return f'{un.split(".")[0].capitalize()}-Phone' if mobile else f'{un.upper().replace(".", "")}-PC'
 
 
+def has_phone(user):
+    """Whether a user signs in from a phone at all. New hires carry no phone (estate
+    decision 2026-11-19), so they never show a mobile device or carrier egress. Base-estate
+    users keep their mobile activity whether or not a phone is configured for them (one
+    without a configured phone falls back to the <First>-Phone name, as before)."""
+    un = (user or {}).get("username")
+    if _su is None or not _su.is_new_hire(un):
+        return True
+    return _su.user_device_name(un, mobile=True) is not None
+
+
 def device_for(user, new=False, mobile=False):
     """deviceDetail for a sign-in. Stable per user by default (coherent device baseline); a
     brand-new unmanaged device when new=True -> feeds 'new device seen' anomaly detectors.
@@ -1360,8 +1398,16 @@ def network_location_details(loc):
     return []
 
 
+_OFFICE_BY_CITY = {o["city"]: o for o in OFFICES}
+
+
 def office_for(user):
-    """The stable office site a user belongs to (by department)."""
+    """The stable office site a user works from: user_profiles.*.office when the estate
+    names one (every profile does since the 5,000-user expansion; base users keep the
+    site the department hash below gave them), else the department hash."""
+    city = _su.user_office(user.get("username")) if _su is not None else None
+    if city in _OFFICE_BY_CITY:
+        return _OFFICE_BY_CITY[city]
     return OFFICES[_h("site:" + str(user.get("department", "Unknown"))) % len(OFFICES)]
 
 
@@ -1395,6 +1441,8 @@ def egress(user, remote_prob=0.25, mobile_prob=0.08):
     if fi and fi["username"] == un:
         return focus_loc()
     site = office_for(user)
+    if not has_phone(user):
+        mobile_prob = 0.0                                 # no phone, no carrier egress
     r = random.random()
     if r >= mobile_prob:
         block = int(time.time() // _EGRESS_BLOCK_S)

@@ -1239,20 +1239,67 @@ def _get_sensitive_apps(config):
     return overlap if overlap else (all_apps[:5] if all_apps else _DEFAULT_SENSITIVE)
 
 
-def _user_preferred_app(username, all_apps):
-    """Pick an app with per-user affinity.  80% of the time the user accesses one of
-    their 3-5 'preferred' apps (determined by username hash); 20% any random app.
-    This produces realistic UEBA baselines where each user has habitual apps."""
-    if len(all_apps) <= 3:
-        return random.choice(all_apps)
-    # Deterministic preferred subset: hash username → stable seed → pick 3-5 apps
-    h = int(hashlib.sha256(username.encode()).hexdigest(), 16)
-    rng = random.Random(h)
-    k = min(rng.randint(3, 5), len(all_apps))
-    preferred = rng.sample(all_apps, k)
+def _habitual_apps(username, apps):
+    """A user's 3-5 habitual apps out of `apps`, fixed by a hash of the username."""
+    if len(apps) <= 3:
+        return list(apps)
+    rng = random.Random(int(hashlib.sha256(username.encode()).hexdigest(), 16))
+    return rng.sample(apps, min(rng.randint(3, 5), len(apps)))
+
+
+_USER_APPS: dict = {}    # (username, id(okta_config)) -> (assigned apps, habitual apps)
+
+
+def user_apps(config, username):
+    """The SSO apps assigned to a user, and their habitual few, per
+    okta_config.app_entitlements: every user gets 'core', their department's list and
+    1-3 'optional' picks fixed by a hash of their name. Base-estate users also keep the
+    habitual apps the pre-entitlement model gave them (a hash sample of the first
+    legacy_app_count apps), so their existing baselines carry over.
+
+    Without app_entitlements every app is assigned (the previous behaviour)."""
+    okta = config.get("okta_config", {}) or {}
+    all_apps = okta.get("okta_sso_apps") or ["Microsoft Office 365"]
+    key = (username, id(okta))
+    hit = _USER_APPS.get(key)
+    if hit is not None:
+        return hit
+    ent = okta.get("app_entitlements") or {}
+    if not ent:
+        out = (list(all_apps), _habitual_apps(username, list(all_apps)))
+    else:
+        prof = (config.get("user_profiles") or {}).get(username) or {}
+        rng = random.Random(int(hashlib.sha256(f"okta-apps|{username}".encode()).hexdigest(), 16))
+        optional = list(ent.get("optional") or [])
+        lo, hi = (ent.get("optional_per_user") or [1, 3])[:2]
+        picks = rng.sample(optional, min(len(optional), rng.randint(int(lo), int(hi))))
+        assigned = list(ent.get("core") or []) +             list((ent.get("departments") or {}).get(prof.get("department"), [])) + picks
+        legacy_n = int(ent.get("legacy_app_count") or 0)
+        if legacy_n and not prof.get("start_date"):
+            habitual = _habitual_apps(username, list(all_apps[:legacy_n]))
+        else:
+            habitual = _habitual_apps(username, list(dict.fromkeys(assigned)))
+        known = set(all_apps)
+        assigned = [a for a in dict.fromkeys(assigned + habitual) if a in known] or list(all_apps)
+        out = (assigned, [a for a in habitual if a in assigned] or assigned[:3])
+    _USER_APPS[key] = out
+    return out
+
+
+def _user_preferred_app(username, all_apps, config=None):
+    """Pick an app with per-user affinity: 80% one of the user's 3-5 habitual apps, 20%
+    any app ASSIGNED to them (user_apps). Before the entitlement model the 20% was any
+    app in the tenant, so over a week every user touched every app and "first access to
+    an app" never had anything to find; now an app outside the user's assignments is
+    genuinely new for them. This produces realistic UEBA baselines where each user has
+    habitual apps."""
+    if config is None:
+        habitual, assigned = _habitual_apps(username, all_apps), all_apps
+    else:
+        assigned, habitual = user_apps(config, username)
     if random.random() < 0.80:
-        return random.choice(preferred)
-    return random.choice(all_apps)
+        return random.choice(habitual)
+    return random.choice(assigned)
 
 
 def _generate_sso_access(config, user_info, session_context=None):
@@ -1262,7 +1309,7 @@ def _generate_sso_access(config, user_info, session_context=None):
         username=(user_info or {}).get('username'),
         session_context=session_context)
     all_apps = config.get("okta_config", {}).get("okta_sso_apps", ["Microsoft Office 365"])
-    app    = _user_preferred_app(user_info["username"], all_apps)
+    app    = _user_preferred_app(user_info["username"], all_apps, config)
     target = [{"id": _app_instance_id(app), "type": "AppInstance",
                "displayName": app, "alternateId": app, "detailEntry": {"signOnModeType": _app_sign_on_mode(app)}}]
     return _assemble(
@@ -2421,7 +2468,8 @@ def _generate_app_assigned_to_user(config, user_info, session_context=None):
         username=(user_info or {}).get('username'),
         session_context=session_context)
     target_user = _build_actor(user_info["username"], user_info["full_name"])
-    app         = random.choice(config.get("okta_config", {}).get("okta_sso_apps", ["Salesforce"]))
+    # an admin assigns an app the user's role is entitled to
+    app         = random.choice(user_apps(config, user_info["username"])[0])
     targets = [
         _build_target_user(target_user)[0],
         {
@@ -2524,6 +2572,17 @@ _RARE_SSO_APPS = [
     "Legacy HR Portal", "Old Payroll System", "Dev Environment SSO",
     "Staging ServiceNow", "Internal Wiki", "Finance Archive",
     "Backup Identity Provider", "Shadow IT App",
+    # Widened 2026-11-19 with the 5,000-user estate: decommissioned, sandbox and
+    # break-glass apps nobody uses day to day, so "rare app" picks stop repeating.
+    "Legacy Expense Portal", "Old Intranet (SharePoint 2013)", "Sandbox Salesforce",
+    "UAT Workday", "Staging Okta Admin", "Retired Jira Server", "Archive Confluence",
+    "Legacy VPN Portal", "Old Citrix Gateway", "Test Snowflake Account",
+    "Dev Databricks Workspace", "QA Zendesk", "Legacy Concur", "Old Benefits Portal",
+    "Former Payroll Vendor", "Break-Glass Admin Portal", "Emergency Access Vault",
+    "Pilot Analytics Tool", "Trial BI Platform", "Legacy CRM", "Old Ticketing System",
+    "Decommissioned Wiki", "M&A Data Room", "Board Portal (Legacy)", "Legacy Learning Portal",
+    "Contractor Portal", "Partner Extranet", "Supplier Portal (Old)", "Legacy Code Review",
+    "Unused Survey Tool", "Old Marketing Automation", "Demo Environment SSO",
 ]
 
 

@@ -728,7 +728,7 @@ def _generate_benign_log(config, session_context=None):
 
     elif log_type == 'smb_internal':
         # Internal SMB file-share access — workstation to file server (intra-zone, both Internal)
-        file_server = random.choice(resolver.file_servers(config) or [src_ip])
+        file_server = random.choice(resolver.file_servers(config, src_ip) or [src_ip])
         extensions = {
             "act": "Accept",
             "src": src_ip, "dst": file_server,
@@ -770,7 +770,7 @@ def _generate_benign_log(config, session_context=None):
 
     elif log_type == 'ftp_download':
         # Internal FTP download — workstation pulling files from internal FTP server
-        ftp_server = random.choice(resolver.file_servers(config) or [src_ip])
+        ftp_server = random.choice(resolver.file_servers(config, src_ip) or [src_ip])
         ftp_dur = random.randint(10, 300)
         extensions = {
             "act": "Accept",
@@ -1097,7 +1097,7 @@ def _simulate_auth_brute_force(config, src_ip, user, shost):
     elif auth_port in [389, 636]:  # LDAP/LDAPS → Domain Controller
         # A domain controller, named as the grid names it. The name and address
         # used to disagree: dhost said dc01 while dst was a random member server.
-        dest_ip     = random.choice(_cp_domain_controllers(config))
+        dest_ip     = random.choice(_cp_domain_controllers(config, src_ip))
         dhost       = resolver.internal_fqdn(config, dest_ip)
         auth_method = "LDAP"
     elif auth_port == 443:   # VPN-SSL → gateway
@@ -2480,10 +2480,12 @@ def _simulate_rare_smtp_session(config, src_ip, user, shost):
 _dns_tunnel_target_map: dict = {}   # src_ip -> stable (resolver_ip, tunnel_domain) for DNS-tunnel recurrence
 
 
-def _cp_domain_controllers(config):
-    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses."""
+def _cp_domain_controllers(config, src_ip=None):
+    """DC IPs for LDAP/Kerberos traffic; falls back to synthesized DC addresses. With
+    src_ip, a new hire's workstation gets its own site's DCs."""
     dcs = config.get(CONFIG_KEY, {}).get('domain_controllers') or config.get('domain_controllers')
-    return dcs or ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+    dcs = dcs or ["10.0.10.10", "10.0.20.10", "10.1.5.10", "192.168.1.10", "172.16.10.10"]
+    return resolver.domain_controllers_for(config, src_ip, dcs) if src_ip else dcs
 
 
 def _cp_b32_chunk(n):

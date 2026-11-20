@@ -114,11 +114,11 @@ XSIAM ships no analytic for these, but each has clear log evidence and pairs wit
 | Key | Default | Purpose |
 |---|---|---|
 | `syslog_port` | `1518` | Broker VM collector port for this source (Vendor = VMware, Product = ESXi, Format = Raw) |
-| `hosts` | 3 `esxiNN.corp.examplecorp.local` | Cluster hostnames — stable so each host is a real entity for host-baselined analytics |
+| `hosts` | 24 `esxiNN.corp.examplecorp.local` | Cluster hostnames — stable so each host is a real entity for host-baselined analytics |
 | `mgmt_ip` | `127.0.0.1` | What `hostd` records for local/console (DCUI/esxcli) auth; remote logons carry the client IP |
 | `admins` | `root`, `svc_vcenter`, `vmadmin` | Local/service ESXi identities (fallback when no session context) |
-| `datastores` | `datastore1`, `ds-prod-nfs01`, `ds-vsan-01` | Datastore names for storage + snapshot events |
-| `vms` | `DC01`…`BACKUP01` | Guest VM names for power/snapshot events |
+| `datastores` | `datastore1`, `ds-prod-nfs01`, `ds-vsan-01`, `ds-prod-nfs02`, `ds-vsan-02`, `ds-vsan-nyc01`, `ds-vsan-lon01`, `ds-backup-01` | Datastore names for storage + snapshot events |
+| `vms` | `DC01`-`DC16` and every member server (112 names) | Guest VM names for power/snapshot events |
 
 ---
 

@@ -1,0 +1,252 @@
+# PAN NGFW threat logs — how the other threat types look
+
+Research notes (2026-11-15) for extending `modules/panw_ngfw.py` beyond the eight
+`vulnerability` signatures the tenant's real pa440 carries. Three kinds of evidence are kept
+apart: **documented** (Palo Alto's field reference), **observed** (Elastic's open test data and
+the tenant's own alerts) and **unconfirmed** (needs a real row to settle).
+
+## 1. Threat log layout (documented)
+
+Palo Alto's *Threat Log Fields* page (PAN-OS 12.x) gives the CSV order:
+
+`FUTURE_USE, Receive Time, Serial, Type, Threat/Content Type, FUTURE_USE, Generated Time,
+Source, Destination, NAT src, NAT dst, Rule, Source User, Dest User, Application, Vsys,
+Source Zone, Dest Zone, Inbound IF, Outbound IF, Log Action, FUTURE_USE, Session ID, Repeat
+Count, Sport, Dport, NAT sport, NAT dport, Flags, Protocol, Action, URL/Filename, Threat ID,
+Category, Severity, Direction, Sequence, Action Flags, Src Location, Dst Location, FUTURE_USE,
+Content Type, PCAP ID, File Digest, Cloud, URL Index, User Agent, File Type, X-Forwarded-For,
+Referer, Sender, Subject, Recipient, Report ID, …, Threat Category, Content Version, …`
+
+The Cortex Syslog Collector's custom format carries the same data as named keys (`misc`,
+`threat_id`, `threat_name`, `threat_category`, `direction`, `user_agent`, `xff`, `severity`
+as `$number-of-severity`). Which fields each subtype uses:
+
+| Subtype | Meaning | `misc` holds | Subtype-only fields |
+|---|---|---|---|
+| `vulnerability` | exploit detected by a Vulnerability Protection profile | URL or file name, if any | — |
+| `spyware` | Anti-Spyware profile: phone-home / C2, DNS signatures, sinkhole | domain, URL or file | — |
+| `virus` | Antivirus profile | file name | — |
+| `wildfire-virus` | virus detected via an Antivirus profile from the WildFire signature feed | file name | — |
+| `wildfire` | WildFire verdict after the firewall submitted a file | file name | `filedigest`, `cloud`, `filetype`, `reportid`, `url_idx` |
+| `ml-virus` | WildFire Inline ML verdict via an Antivirus profile | file name | `partial_hash` |
+| `file` | File Blocking profile match | file name or file type | — |
+| `data` | Data Filtering profile match | file name | `reportid` |
+| `scan` / `flood` / `packet` | Zone Protection profile | — | — |
+| `url` | URL filtering (carried in the URL log) | the URI | `user_agent`, `referer`, `http_method`, `content_type`, `xff` |
+
+Documented value sets:
+
+- **action**: alert, allow, deny, drop, drop-all-packets, reset-client, reset-server,
+  reset-both, block-url, block-ip, random-drop, sinkhole, syncookie-sent, block-continue,
+  continue, block-override, override-lockout, override, and `block` (WildFire only: file
+  blocked and uploaded).
+- **severity**: informational, low, medium, high, critical.
+- **category** (the `category` column, not the threat category): URL category for `url`; for
+  `wildfire` it is the verdict `malware` / `phishing` / `grayware` / `benign`; `any` otherwise.
+- **direction**: client-to-server or server-to-client. Documented as `0` / `1` in some
+  releases; the live rows and the Cortex format use the words.
+- **Threat ID ranges**: 8000–8099 scan, 8500–8599 flood, 9999 URL filtering, 10000–19999
+  spyware phone-home, 20000–29999 spyware download, 30000–44999 vulnerability exploit,
+  52000–52999 file type, 60000–69999 data filtering. Virus, WildFire-feed and DNS-C2
+  signatures no longer use a range: they have permanent, globally unique IDs (hence the
+  9-digit IDs below). Filter by subtype and `threat_category` instead of ID ranges.
+- **Flags** bit `0x20000000` = file submitted to WildFire.
+- In the default CSV `Threat ID` is `name(id)` for most subtypes; the Cortex format splits it
+  into `threat_name` and `threat_id` (the live rows carry both).
+
+## 2. What each subtype looks like (observed, Elastic's public test data)
+
+323 threat rows from Elastic's `panw` integration test fixtures, parsed with the documented
+field order. Signature names are Palo Alto's published names. No WildFire row is in the set.
+
+| Subtype | Shapes seen |
+|---|---|
+| `spyware` (112 rows) | Mostly **DNS**: app `dns`/`dns-base`, udp/53, actions `drop`, `drop-packet`, `sinkhole`, `drop-all-packets`; severity mostly medium; `thr_category` `dns-malware`, `domain-edl`, `dns-proxy`. Names look like `generic:<domain>(327891564)`, `Proxy:<domain>(109010004)`, `Suspicious Domain(12000000)`; `misc` is the queried domain. Classic phone-home: `Bredolab.Gen Command and Control Traffic(13024)`, `misc` a file/URI. |
+| `virus` (5) | server-to-client, app `web-browsing`, actions `reset-both` / `reset-server`, severity medium; `thr_category` `elf` or `script-av`; name `Virus/Linux.<name>(419149938)`; `misc` the file name; content version `Antivirus-<n>-<n>`. |
+| `file` (10) | server-to-client `web-browsing`, actions `deny` / `alert`, severity low; threat `Windows Executable (EXE)(52020)`; `misc` the file name; threat ID in the 52000 range. |
+| `data` (34) | `PII(60000)`, severity informational, actions `reset-both` / `alert`, mostly server-to-client; `misc` a page name. |
+| `scan` (1) | `SCAN: Host Sweep(8002)`, medium, action alert, app `not-applicable`, `thr_category` `scan`. |
+| `vulnerability` (2) | `Potential HTML Evasion Technique Detected in HTTP Response(91883)`, low, alert, `thr_category` `protocol-anomaly`. |
+| `url` (159) | threat ID 9999; actions `block-url` / `alert`; categories include `malware-sites`, `not-resolved`, `private-ip-addresses`. (Covered by the module's URL log.) |
+
+The content-version string looks like `AppThreat-<n>-<n>` (vulnerability, file) or
+`Antivirus-<n>-<n>` (virus).
+
+## 3. WildFire (documented; no sample line found)
+
+- A `wildfire` threat row is a **verdict** on a file the firewall submitted: `category` is
+  `malware`, `phishing` (links), `grayware` or `benign`; `filedigest` is the file's hash,
+  `cloud` the WildFire cloud FQDN, `filetype` the file kind (PE, PDF, APK, ELF, MS Office,
+  archive, script, …), `reportid` the analysis ID, `misc` the file name, `url_idx` links it to
+  the URL log of the download. Action `block` appears only here.
+- WildFire Submissions severity (documented, version-dependent): grayware with any action is
+  **low**; benign is **informational**; a submission blocked and forwarded is
+  **informational**; in 10.2, malicious + allow is **high**. Threat-log entries for a malicious
+  verdict with block/alert, from the WildFire signature feed, are **medium**.
+- Palo Alto publishes harmless WildFire test files (PE, APK, macOS, ELF) whose verdict is
+  always malware; they are for checking forwarding, and no antivirus signature exists for the
+  PE test file, so it is logged as a submission, not blocked.
+- **`wildfire-virus` vs `wildfire`** (LogRhythm's *V 2.0 Wildfire-Virus Threat Messages*
+  device-mapping guide, which mirrors Palo Alto's PAN-OS 10.1 field text). `wildfire-virus` is a
+  signature detection on a file by an Antivirus profile, fed by the WildFire signature feed:
+  `misc` is the **file name** and it carries none of the submission fields (`filedigest`,
+  `cloud`, `reportid`). It is a *different row* from the `wildfire` submission verdict. The
+  guide splits it by action into two behaviours, which is how a generator should split it too:
+  **a potentially malicious file allowed** (action `alert`/`allow`, a detected-malware event) and
+  **a malicious file blocked by WildFire** (`drop` / `reset-*`, a failed-malware event). The
+  `block` action is WildFire-submission only. The guide holds no sample line and no signature
+  names or IDs.
+- **Unconfirmed**: an exact `wildfire` or `wildfire-virus` row (threat name format, `cloud`
+  value, `filetype` spelling, which `action`) is not in any source I found, including the
+  LogRhythm guide. The tenant's own `panw_ngfw_threat_raw` has none yet, so a real row is
+  needed before building either.
+
+## 4. How XSIAM turns a threat log into an alert (observed, the tenant's `PAN_NGFW` alerts)
+
+The Cortex docs describe no subtype/severity matrix. The tenant's own alerts from the pa440
+show the mapping (read-only query, 2026-11-15):
+
+| Alert field | Comes from |
+|---|---|
+| `alert_name` | `threat_name` |
+| `alert_source` | `PAN_NGFW` (tag `DS:PANW/NGFW`) |
+| `category` | the subtype, capitalised (`Vulnerability`) |
+| `severity` | the threat's severity, upper-cased (MEDIUM / HIGH / CRITICAL) |
+| `description` | `<Threat category> (<misc>)` when `misc` exists (`Hacktool (host:port/path)`), otherwise the category text (`Code-Execution`, `Vulnerability Exploit Detection`) |
+| `action` | from the firewall action: `drop` → `PREVENTED__DROPPED_THE_SESSION_`; `alert` → `DETECTED__RAISED_AN_ALERT_` |
+| `misc`, `app_category`, `app_subcategory`, `app_technology`, zones, `fw_rule_name`, `fw_serial_number`, `ngfw_vsys_name` | the corresponding threat-log columns |
+| `original_tags` | `DS:PANW/NGFW`, plus `R:<...>` tags such as `R:Vulnerability Scanners` (scanner signatures) |
+
+Two documented Cortex analytics read threat logs: *Analytics enhanced NGFW – Rare Internal
+Firewall Vulnerability Threat Alert* (Informational; needs threat logs and an XDR Agent) and
+*Massive upload to a rare storage or mail domain* / *Recurring access to rare domain* (these
+also need the XDR Agent). So on a firewall-only feed the alerts that appear are the native
+`PAN_NGFW` ones.
+
+Not yet shown by the tenant: whether `spyware`, `virus`, `wildfire` and `file` threat rows
+raise native alerts, and at which severity. Informational-severity rows may not.
+
+## 5. What this means for the generator
+
+Buildable now, with shapes from section 2:
+
+- **Spyware (DNS)**: udp/53 from an internal host to the resolver, `sinkhole` / `drop`,
+  `thr_category` `dns-malware`, `misc` the domain. Needs real signature names and IDs.
+- **Spyware (phone-home)**: a classic C2 callback to a rare external host, severity high or
+  critical, `drop` / `reset-both`.
+- **Virus**: server-to-client download of a file, `reset-both`, `thr_category` `elf` /
+  `script-av`.
+- **File / data / scan**: low-severity, mostly noise; the scan and flood signatures belong
+  with the traffic detectors (`SCAN: Host Sweep(8002)` matches a port sweep).
+
+Every one needs **real Threat IDs and names from the tenant**: the generator never invents
+IDs. The scheduled 12-hour job reads them from `panw_ngfw_threat_raw` after the user's own
+threat generation, and builds what the rows prove.
+
+## 6. Where real signature IDs come from
+
+The PAN-OS *Threat Details* page (Monitor > Logs > Threat, ACC, Objects > Security Profiles)
+documents the per-signature metadata: Name, ID, Description, Severity, CVE, Bugtraq ID, Vendor
+ID, Reference and the exempt profiles/IPs. It contains **no sample log lines and no signature
+list**, so it does not settle the open WildFire / spyware row shapes. The lookup for real
+IDs, names, severities and CVEs is the Threat Vault (`threatvault.paloaltonetworks.com`),
+which requires a Palo Alto sign-in and cannot be read unauthenticated. The generator therefore
+keeps taking IDs from rows the tenant already holds, or from the user-supplied
+`panw_ngfw_config.threat_signatures`. A threat log only exists when a Threat Prevention
+licence, current content updates and Anti-Spyware / Vulnerability Protection / Antivirus
+profiles on the rule are all in place.
+
+## 7. A suggested CEF line, Threat ID 9999, URL categories
+
+**Suggested sample line** (`CEF:0|Palo Alto Networks|PAN-OS|11.0.0|THREAT|vulnerability|5| src= dst= sppt= dpt= proto=6 deviceExternalId= cat=vulnerability act=reset-both reason=Buffer Overflow Attack detected`).
+Not used. It is not the Syslog Collector custom format this module targets (`PANW|NGFW_CEF`,
+literal Cortex keys, routed by `__firewall_type`), and it does not match PAN-OS's native CEF
+either: the native header carries the Threat ID and threat name (`...|<threat-id>|<subtype>-<name>|<sev>|`),
+and `reason=` is not a PAN-OS field. Its threat name has no ID, so it cannot map to a signature.
+The real feed in the tenant (8 vulnerability signatures) is the reference instead.
+
+**Threat ID 9999** is the ID PAN-OS stamps on URL-filtering events written to the threat log
+(the documented 9999 range note), so those alerts come from the URL engine, not an exploit
+signature. Community threads say it appears for credential-phishing prevention (flag
+`credential-detected`), and also floods "high" severity events on URL categories that were
+explicitly allowed. The community page itself is behind a bot challenge and was not read
+directly; this is from search snippets. Generator consequence: a `url`-subtype threat row
+(`threat_id` 9999, name from the URL category) is a distinct shape from the vulnerability rows
+and needs a real tenant row to copy before it is built.
+
+**URL categories** (Advanced URL Filtering, 111 predefined, updated 2026-09-02) are
+lowercase-hyphenated in logs (`internet-communications-and-telephony`, `newly-registered-domain`,
+`real-time-detection`, `scanning-activity`, `ransomware`, `compromised-website`, `parked`,
+`encrypted-dns`, AI classes such as `ai-conversational-assistant`). A URL can carry up to four
+categories plus a risk category (`high-risk` / `medium-risk` / `low-risk`). The generator's
+pools were checked against this list: `internet-communications` was not a valid name and is
+now `internet-communications-and-telephony`; shopping, news, reference-and-research,
+ai-conversational-assistant, internet-portals and travel joined the benign pool, and
+ransomware, compromised-website, scanning-activity and parked the risky one.
+
+**Threat Vault signature detail (user-supplied screenshot, current content).** Verified signature:
+ID 40020, "Digium Asterisk IAX2 Call Number Denial Of Service Vulnerability", severity medium,
+category `brute-force`, default action `alert`, CVE-2009-2346, PAN-OS 8.1.0 minimum (no maximum),
+first release content 761 (2018-01-03), status released. Not yet in the generator: it is absent
+from the tenant's threat feed (30-day query), and the App-ID PAN assigns to IAX2 (UDP/4569)
+traffic is not confirmed, which a threat session needs. Fields shown by the detail view map to
+the log as `threat_id`, `threat_name`, `severity`, `threat_category`; the default action is
+the profile's, so the log's action can differ.
+
+**Rejected source: PAN's Splunk-App-Data-Generator sample** (`bin/data/pan_incident.txt`).
+It is PAN-OS 4/5-era legacy CSV (2012-13) and does not describe PAN-OS 10+, so nothing is built
+from it: its IDs, names, verdict severities and column order are not trusted for current
+content. Only the PAN-OS 10+ real feed in the tenant (and current PAN documentation) is used.
+
+**More Threat Vault signature details (screenshots, documentation).** 19999 `Bot:
+Backdoor_Win32_Agobot_pnd_pnj` (backdoor, high, reset-both); 59995 `Manufacturer default username
+and password found in HTTP Basic Authentication` (insecure-credentials, informational, alert,
+PAN-OS 9.1+); 21975, 21976 and 21980 `Pastebin Command and Control Traffic Detection` (spyware,
+critical, reset-both: three signatures, one name). The user asked for these as threat logs only,
+no paired traffic logs. The informational one is background-only since informational alerts never
+reach the alerts table.
+
+**Further Threat Vault details (screenshots).** 21985 `Schoolboy Downloader Traffic Detection`
+(downloader, critical, reset-both); 97622 / 97623 / 97625 `PHP Remote Code Execution
+Vulnerability` (code-execution, critical, reset-server, CVE pair, content 9162, 2026-10-21);
+97630 `Moxa TN-5900 Firmware Command Injection Vulnerability` (code-execution, critical,
+reset-server, CVE-2021-46560, content 9166). Built as threat logs only.
+
+97650 `TRENDnet TEW-432BRP Firmware Command Injection Vulnerability` (code-execution, critical,
+reset-server, CVE-2026-10061, content 9171, 2026-11-09) and 543004 `PHP Memory Corruption
+Vulnerability` (code-execution, critical, reset-server; the same CVE pair as the PHP RCE
+signatures, content 9162) were added the same way, as threat logs only.
+
+## Sources
+
+- PAN-DB URL categories: https://docs.paloaltonetworks.com/advanced-url-filtering/administration/url-filtering-basics/url-categories
+- Community: Threat ID 9999 generated by PAN NGFW:
+  https://live.paloaltonetworks.com/t5/cortex-xdr-discussions/threat-id-9999-generated-by-pan-ngfw/td-p/470909
+
+- PAN-OS *Threat Details* (signature metadata fields):
+  https://docs.paloaltonetworks.com/ngfw/help/12-2/web-interface-basics/threat-details
+
+- PAN-OS *Threat Log Fields* (syslog field descriptions):
+  https://docs.paloaltonetworks.com/ngfw/administration/monitoring/use-syslog-for-monitoring/syslog-field-descriptions/threat-log-fields
+- PAN-OS *Log Types and Severity Levels* and *View WildFire Logs and Analysis Reports*:
+  https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-admin/monitoring/view-and-manage-logs/log-types-and-severity-levels
+  https://docs.paloaltonetworks.com/advanced-wildfire/administration/monitor-wildfire-activity/view-wildfire-logs-and-analysis-reports/view-wildfire-logs-and-analysis-reports-pan-os
+- WildFire test files: https://docs.paloaltonetworks.com/wildfire/10-1/wildfire-admin/submit-files-for-wildfire-analysis/verify-wildfire-submissions/test-a-sample-malware-file
+- LogRhythm *V 2.0 Wildfire-Virus Threat Messages* (device mapping guide):
+  https://docs.logrhythm.com/devices/docs/v-2-0-wildfire-virus-threat-messages
+- Cortex *Ingest NGFW logs using the Syslog collector* (custom format) and *Palo Alto Networks
+  Firewall threat Logs* analytics:
+  https://cortex-docs.paloaltonetworks.com/analytics-alerts/alerts-by-data-source/palo-alto-networks-firewall-threat-logs
+- Elastic `panw` integration test fixtures (open source):
+  https://github.com/elastic/integrations/tree/main/packages/panw/data_stream/panos/_dev/test/pipeline
+
+## 8. Live pa440 CEF traffic rows (2026-11-16)
+
+The first genuine PAN-OS 12.2.4-h1 CEF rows (3 traffic logs, `_collector_type: Syslog`,
+`log_source_name: pa440`; one delivered twice) were compared with ours. Traffic keys matched
+closely; the generator now follows the real rows for: `log_time`/`time_generated` format
+(`Nov 16 2026 18:46:43 GMT`), uppercase `log_type`/header type, the device version, NAT keys
+always present (zeroed), and a rising `sequence_no` counter. Threat/URL syslog rows from the
+pa440 had not arrived yet, so the threat and URL logs adopt the same conventions by
+assumption, not from evidence. Open: whether syslog threat rows carry a `threat_id` column and
+a word `severity`, and whether they raise native PAN NGFW alerts (our 2026-11-15 probe did not).

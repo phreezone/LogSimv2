@@ -77,11 +77,15 @@ except ImportError:
 try:
     from modules.session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
                                         publish_activity, pick_active_session, CORRELATE_PROB,
-                                        carry_focus as _carry_focus, focus_user as _focus_user)
+                                        carry_focus as _carry_focus, focus_user as _focus_user,
+                                        is_onboarded as _is_onboarded, is_new_hire as _is_new_hire,
+                                        site_dc as _site_dc, user_rid as _user_rid)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
                                publish_activity, pick_active_session, CORRELATE_PROB,
-                               carry_focus as _carry_focus, focus_user as _focus_user)
+                               carry_focus as _carry_focus, focus_user as _focus_user,
+                               is_onboarded as _is_onboarded, is_new_hire as _is_new_hire,
+                               site_dc as _site_dc, user_rid as _user_rid)
 
 
 def _publish_logon(u):
@@ -1977,8 +1981,13 @@ def _stable_user_sid(username: str) -> str:
         sid = _USER_SIDS.get(username)
         if sid:
             return sid
-        h = hashlib.sha1(username.encode()).digest()
-        rid = 1100 + (int.from_bytes(h[:4], "big") % 8_900)
+        # Roster users carry their RID in config (user_profiles.*.sid_rid, assigned
+        # collision-free by tools/estate_generator.py): 1100 + hash % 8,900 gave ~1,400
+        # of 5,000 users someone else's SID. Identities outside the roster keep the hash.
+        rid = _user_rid(username)
+        if rid is None:
+            h = hashlib.sha1(username.encode()).digest()
+            rid = 1100 + (int.from_bytes(h[:4], "big") % 8_900)
         sid = f"{_SYNTH_DOMAIN_SID}-{rid}"
         _USER_SIDS[username] = sid
         return sid
@@ -2284,8 +2293,17 @@ def _get_dns_domain(config):
     return _cf(config).get("dns_domain", "examplecorp.local")
 
 
+# Set by a workstation worker while it generates for a new hire: that user's site DC
+# (session_utils.site_dc). Base-estate hosts, the DC worker and threats leave it unset
+# and keep the configured DC, so the tenant's existing DC baselines stay where they are.
+_DC_TLS = threading.local()
+
+
 def _get_dc_hostname(config):
     """Synthetic DC hostname used for DC-originated events (4740/4768/4769/4771/4776)."""
+    site = getattr(_DC_TLS, "dc", None)
+    if site:
+        return _fqdn(site, config)
     return _cf(config).get("domain_controller_hostname", "DC01.examplecorp.local")
 
 
@@ -2332,6 +2350,8 @@ def _get_windows_users(session_context):
         return []
     windows_users = []
     for uname, prof in session_context.items():
+        if not _is_onboarded(uname):
+            continue          # a new hire before their start date has no activity yet
         if (prof.get("primary_os_type") or "").lower() == "windows":
             info = get_user_by_name(session_context, uname)
             if info and info.get("hostname"):
@@ -11024,14 +11044,78 @@ def _dc_worker(config, session_context, interval, stop_event):
         stop_event.wait(timeout=_BENIGN_RATE.pace(interval, _N_BENIGN_WORKERS))
 
 
-def _wks_worker(config, scoped_ctx, hostname, interval, stop_event):
-    """Background thread generating workstation-specific benign events."""
+def _plan_endpoints(wcfg, hosts):
+    """Split the Windows workstations into always-on core hosts and daily rotation slots.
+
+    windows_events_config.endpoint_cap = {"active": N, "core": K}: at most N hosts generate
+    on a given UTC day -- the first K in estate order (base-estate hosts, then new hires
+    by start date) every day, and N-K slots filled each day by a deterministic draw from
+    the remaining hosts whose user has started. At 5,000 users there are ~2,700 Windows
+    workstations; one always-on thread each spread the module's events/s so thin that no
+    host built a baseline, and cost a thread per machine. Hosts outside today's draw are
+    simply switched off, as real machines are, and come back on later days.
+
+    Returns (core host list, rotation slot count, rotation() -> today's host list)."""
+    cap_cfg = wcfg.get("endpoint_cap") or {}
+    try:
+        cap = int(cap_cfg.get("active") or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap <= 0 or len(hosts) <= cap:
+        return list(hosts), 0, lambda: []
+
+    base = sorted(h for h in hosts if not all(_is_new_hire(u) for u in hosts[h]))
+    new = sorted((h for h in hosts if all(_is_new_hire(u) for u in hosts[h])),
+                 key=lambda h: (_hire_day(hosts[h]), h))
+    ordered = base + new
+    core_n = max(0, min(int(cap_cfg.get("core", cap // 2) or 0), cap))
+    core, pool = ordered[:core_n], ordered[core_n:]
+    rot_n = cap - len(core)
+    cache = {}
+    lock = threading.Lock()
+
+    def rotation():
+        day = int(time.time() // 86400)
+        with lock:
+            if cache.get("day") != day:
+                live = [h for h in pool if any(_is_onboarded(u) for u in hosts[h])]
+                rng = random.Random(f"win-endpoint-rotation|{day}")
+                cache["day"], cache["hosts"] = day, rng.sample(live, min(rot_n, len(live)))
+            return cache["hosts"]
+
+    return core, rot_n, rotation
+
+
+def _hire_day(users):
+    """Earliest start day among a host's users (0 for base-estate users)."""
+    try:
+        from modules import session_utils as _su_mod
+    except ImportError:  # pragma: no cover
+        import session_utils as _su_mod
+    return min((_su_mod._USER_START.get(u, 0) for u in users), default=0)
+
+
+def _wks_worker(config, resolve, stats_key, interval, stop_event):
+    """Background thread generating workstation-specific benign events.
+
+    resolve() returns (hostname, scoped_ctx) for the host this worker serves right now, or
+    None while it has none (a new hire's machine before their start date, or a rotation
+    slot with no host today). Asked every iteration, so a rotation slot moves to its next
+    host when the UTC day changes."""
     _DEFER_IDS.on = True
-    stats = _worker_stats[hostname]
+    stats = _worker_stats[stats_key]
     gens = list(_WKS_BENIGN_GENS.keys())
     weights = list(_WKS_BENIGN_GENS.values())
+    hostname = stats_key
     while not stop_event.is_set():
         try:
+            served = resolve()
+            if served is None:
+                _DC_TLS.dc = None
+                stop_event.wait(timeout=60)
+                continue
+            hostname, scoped_ctx = served
+            _DC_TLS.dc = next((d for d in (_site_dc(u) for u in scoped_ctx) if d), None)
             choice = random.choices(gens, weights=weights, k=1)[0]
             fn = _BENIGN_GENERATORS[choice]
             result = fn(config, scoped_ctx)
@@ -11132,12 +11216,16 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
             if hostname:
                 hosts.setdefault(hostname, []).append(uname)
 
+    core, rot_n, rotation = _plan_endpoints(wcfg, hosts)
+
     # Initialize per-worker stats
     _worker_stats["dc"] = {"events_generated": 0, "last_event_time": 0}
     _worker_stats["threats"] = {"events_generated": 0, "last_event_time": 0, "last_fired": None}
-    _N_BENIGN_WORKERS = 1 + len(hosts)
-    for hostname in hosts:
+    _N_BENIGN_WORKERS = 1 + len(core) + rot_n
+    for hostname in core:
         _worker_stats[hostname] = {"events_generated": 0, "last_event_time": 0}
+    for i in range(rot_n):
+        _worker_stats[f"rotating-{i:03d}"] = {"events_generated": 0, "last_event_time": 0}
 
     # DC worker
     dc_interval = base_interval * wcfg.get("dc_interval_multiplier", 0.5)
@@ -11147,15 +11235,37 @@ def _ensure_orchestrator(config, session_context, threat_level, benign_only):
         daemon=True, name="logsim-win-dc",
     ).start()
 
-    # Per-workstation workers
+    # Per-workstation workers: one per core host, plus the rotation slots
     wks_interval = base_interval * wcfg.get("wks_interval_multiplier", 1.0)
-    for hostname, user_list in hosts.items():
-        scoped_ctx = {u: session_context[u] for u in user_list}
+
+    def _fixed(hostname, scoped_ctx):
+        def resolve():
+            return (hostname, scoped_ctx) if any(_is_onboarded(u) for u in scoped_ctx) else None
+        return resolve
+
+    def _slot(i):
+        def resolve():
+            today = rotation()
+            if i >= len(today):
+                return None
+            h = today[i]
+            return h, {u: session_context[u] for u in hosts[h]}
+        return resolve
+
+    for hostname in core:
+        scoped_ctx = {u: session_context[u] for u in hosts[hostname]}
         threading.Thread(
             target=_carry_focus(_wks_worker),
-            args=(config, scoped_ctx, hostname, wks_interval, _workers_stop),
+            args=(config, _fixed(hostname, scoped_ctx), hostname, wks_interval, _workers_stop),
             daemon=True,
             name=f"logsim-win-{hostname.split('.')[0]}",
+        ).start()
+    for i in range(rot_n):
+        threading.Thread(
+            target=_carry_focus(_wks_worker),
+            args=(config, _slot(i), f"rotating-{i:03d}", wks_interval, _workers_stop),
+            daemon=True,
+            name=f"logsim-win-rot{i:03d}",
         ).start()
 
     # Release thread: hands scheduled events out at their timestamps (ids assigned then)
