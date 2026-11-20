@@ -322,6 +322,20 @@ class DryRunExecutor:
             res.outputs = {"url": WILDFIRE_TEST_URL, "path": path,
                            "file_name": path.rsplit("\\", 1)[-1], "sha256": None,
                            "downloaded": True, "dry_run": True}
+        elif payload == "download_cradle" and action == "execute":
+            # Model remote vs local so the gated perimeter egress (and the scorecard)
+            # can be exercised with no box: a url param => remote (host surfaced).
+            url = params.get("url")
+            remote = bool(url)
+            outs = {"staged": True, "executed": True, "remote": remote,
+                    "url": url or "file:///dry-run.ps1", "dry_run": True}
+            if remote:
+                try:
+                    from urllib.parse import urlparse
+                    outs["host"] = urlparse(url).hostname
+                except Exception:
+                    pass
+            res.outputs = outs
         res.command = f"builtin:{payload}"
         return res
 

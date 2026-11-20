@@ -154,6 +154,7 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
               only_steps=None, skip_steps=None, pace: Optional[float] = None,
               domain_override: Optional[str] = None,
               fresh_domains: bool = True,
+              cradle_url: Optional[str] = None,
               network_vendors=None,
               anchor_dhcp: Optional[bool] = None,
               anchor_logon: Optional[bool] = None,
@@ -180,6 +181,11 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
       pace / timing_profile / jitter : campaign timing (Tier-2 #5). `timing_profile`
                                 is one of timing.PACE_PROFILES; `pace` multiplies the
                                 scale; `jitter` (0..1) randomizes each delay.
+      cradle_url              : for the xdr_cradle story, fetch THIS http(s) url instead
+                                of the benign local file:// script -- a true-egress test.
+                                Only then does the cradle step emit its synthetic
+                                perimeter egress half (web proxy + firewall), pinned to
+                                this url's host. Validated like a payload url.
       domain_override         : replace the story's C2/exfil domain for this run.
       fresh_domains           : (default ON; ignored with domain_override) tag every
                                 story domain with a run-unique suffix so the C2
@@ -233,6 +239,10 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
                "run_domains": run_domains,
                # Network vendors sent this run; the scorecard only expects their alerts.
                "network_vendors": vendors, "vendors_skipped": {},
+               # {step index (1-based): ["module/event", ...]} actually emitted this
+               # run. The scorecard scores only these, so a conditional event gated off
+               # (only_if_output) never reads as a network miss.
+               "network_emitted": {},
                "timing": timing.to_dict(), "prevention": None, "scorecard": None,
                # Epoch seconds; the scorecard sizes its alert window from this so a
                # long run (or a late Re-score) still covers the run's first alerts.
@@ -276,6 +286,16 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
                               f"({len(_errors(problems))} error(s)) — orchestrator refuses to fire")
         print(f"[XDR] ABORT — {summary['aborted']}")
         return _finalize(summary)
+
+    # 0b) Validate an optional cradle egress url up front — a bad url should refuse
+    #     before touching the box, not fail mid-run.
+    if cradle_url:
+        from .payloads import validate_params as _vp
+        _err = _vp("download_cradle", {"tag": "x", "url": cradle_url})
+        if _err:
+            summary["aborted"] = f"cradle_url invalid: {_err}"
+            print(f"[XDR] ABORT — {summary['aborted']}")
+            return _finalize(summary)
 
     # 1) Connection.
     if connection is None:
@@ -372,6 +392,10 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
         input_args = tech.get("input_args") or step.params.get("input_args")
         builtin = tech.get("executor") == "builtin"
         builtin_params = {"tag": run_tag}
+        # Per-run cradle egress test: feed the http(s) url to the cradle payload so it
+        # fetches remotely (outputs["remote"] True) and its gated perimeter half fires.
+        if cradle_url and tech.get("payload") == "download_cradle":
+            builtin_params["url"] = cradle_url
         # Some tests need a target file/tool staged first (e.g. file deletion).
         if step.prereqs and not builtin:
             pr = executor.get_prereqs(tech["id"], tech.get("test_numbers"))
@@ -395,8 +419,17 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
         outs = getattr(r, "outputs", None) or {}
         artifact = {k: v for k, v in {"filename": outs.get("file_name"),
                                       "sha256": outs.get("sha256"),
-                                      "url": outs.get("url")}.items() if v}
+                                      "url": outs.get("url"),
+                                      # A fetched host (e.g. the cradle's remote url)
+                                      # pins the perimeter egress to the real dest.
+                                      "domain": outs.get("host")}.items() if v}
         for ne in step.network:
+            # Conditional event: emit only if the real technique took that path this
+            # run (e.g. a cradle run that actually fetched a remote url). A gated-off
+            # event is simply not emitted -- not a skipped vendor, not a miss.
+            gate = getattr(ne, "only_if_output", None)
+            if gate and not outs.get(gate):
+                continue
             if ne.module not in vendors:
                 k = f"{ne.module}/{ne.event}"
                 summary["vendors_skipped"][k] = summary["vendors_skipped"].get(k, 0) + 1
@@ -406,6 +439,7 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
                     "hostname": host_name, "user": user}
             ctx = {**base, **artifact, **ne.context}
             summary["emitted"] += _emit(all_modules, ne.module, ne.event, ctx, config, verbose)
+            summary["network_emitted"].setdefault(i, []).append(f"{ne.module}/{ne.event}")
 
         # 6c) Cleanup the technique's artifacts (persistence etc.) so nothing is left
         #     behind — the creation telemetry already fired during execute().

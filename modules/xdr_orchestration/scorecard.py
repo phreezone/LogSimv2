@@ -64,8 +64,21 @@ def _sent(network, vendors):
     return [ne for ne in (network or []) if ne.module in vendors]
 
 
+def _emitted(network, idx, emitted_map):
+    """The step's network events ACTUALLY emitted this run (orchestrator's
+    summary["network_emitted"]). When emitted_map is None (summaries from before it
+    was recorded, or a static manifest with no run) fall back to all of them, so the
+    old vendor-only path is unchanged. JSON round-trips int keys to str, so accept
+    both. A conditional event gated off (only_if_output) is absent here, so it is
+    neither an expectation nor a miss."""
+    if emitted_map is None:
+        return network
+    allowed = set(emitted_map.get(idx) or emitted_map.get(str(idx)) or [])
+    return [ne for ne in (network or []) if f"{ne.module}/{ne.event}" in allowed]
+
+
 def collect_expectations(story, selected_steps: Optional[List[int]] = None,
-                         vendors=None) -> list:
+                         vendors=None, emitted_map=None) -> list:
     """The DETECTIONS this run should produce -- one row per distinct alert, not per
     alert-name guess, so the score counts detections rather than needles.
 
@@ -91,20 +104,22 @@ def collect_expectations(story, selected_steps: Optional[List[int]] = None,
             out.append({**base, "source": "endpoint",
                         "label": mitre.get("technique") or tech or endpoint[0],
                         "needles": endpoint, "emitted": []})
-        detections, _ = network_detections(_sent(getattr(step, "network", None), vendors))
+        net = _emitted(_sent(getattr(step, "network", None), vendors), idx, emitted_map)
+        detections, _ = network_detections(net)
         for d in detections:
             out.append({**base, "source": "network", **d})
     return out
 
 
 def untracked_emissions(story, selected_steps: Optional[List[int]] = None,
-                        vendors=None) -> list:
+                        vendors=None, emitted_map=None) -> list:
     """Network events the run emits that no known analytic or rule is built to detect
     (e.g. Zscaler large_download). Shown for transparency; never scored."""
     from .expectations import network_detections
     out = []
     for idx, step in _selected(story, selected_steps):
-        for tag in network_detections(_sent(getattr(step, "network", None), vendors))[1]:
+        net = _emitted(_sent(getattr(step, "network", None), vendors), idx, emitted_map)
+        for tag in network_detections(net)[1]:
             out.append({"step": idx, "emitted": tag})
     return out
 
@@ -338,7 +353,9 @@ def build_scorecard(story, summary: dict, identity: dict, *, client=None,
     user = (identity or {}).get("username")
     host = (identity or {}).get("hostname")
     vendors = summary.get("network_vendors")      # None: older run, all vendors sent
-    expectations = collect_expectations(story, summary.get("selected_steps"), vendors)
+    emitted_map = summary.get("network_emitted")  # None: older run, score all sent
+    expectations = collect_expectations(story, summary.get("selected_steps"), vendors,
+                                        emitted_map)
 
     # Build/resolve the client — any failure is reported, never raised.
     if client is None:
@@ -461,7 +478,8 @@ def build_scorecard(story, summary: dict, identity: dict, *, client=None,
         "by_source": by_source,
         "matched": matched,
         "missing": missing,
-        "untracked": untracked_emissions(story, summary.get("selected_steps"), vendors),
+        "untracked": untracked_emissions(story, summary.get("selected_steps"), vendors,
+                                          emitted_map),
         "network_vendors": vendors,
         "unexpected": unexpected,
         "alert_cases": alert_cases,
