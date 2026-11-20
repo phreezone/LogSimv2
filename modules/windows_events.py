@@ -3611,6 +3611,42 @@ def _build_4732(user_info, config, *, member_name, member_sid,
     return _build_event(4732, dc_host, event_data, success=True, ts=ts)
 
 
+def _local_machine_sid(host: str) -> str:
+    """Stable machine-local SID for a member server.
+
+    A local account lives in the machine's own SAM, so its SID is
+    S-1-5-21-<machine domain>-<rid> and shares nothing with the AD domain SID.
+    Derived from the host name so repeated runs keep the same identity.
+    """
+    h = uuid.uuid5(uuid.NAMESPACE_DNS, "localsid:" + host).int
+    return "S-1-5-21-%d-%d-%d" % ((h >> 64) % 4_000_000_000,
+                                  (h >> 32) % 4_000_000_000,
+                                  h % 4_000_000_000)
+
+
+def _rehost_to_endpoint(record: dict, host: str, **event_data_overrides) -> dict:
+    """Re-log a DC-shaped account event on the member server that emitted it.
+
+    The 4720/4732 builders log on the domain controller because they were written
+    for domain accounts. A *local* account is audited by the member server
+    itself: Computer is the endpoint and the account's TargetDomainName is the
+    machine's short name, not the AD domain. EventData is corrected and the
+    rendered message rebuilt so the two never disagree; the record number and
+    LSASS PID are re-taken from the endpoint's own sequences.
+    """
+    event_data = dict(record["event_data"])
+    event_data.update(event_data_overrides)
+    out = dict(record)
+    out["computer_name"] = host
+    out["host_name"] = host
+    out["event_data"] = event_data
+    out["message"] = _format_message(int(record["event_id"]), event_data)
+    out["record_id"] = str(_next_record_number(host))
+    _pid_hex, proc_pid = _lsass_pid(host)
+    out["process_pid"] = proc_pid
+    return out
+
+
 def _build_4756(user_info, config, *, member_name, member_sid,
                 target_group="Enterprise Admins", target_sid=None,
                 logon_id=None, ts=None) -> dict:
@@ -8903,6 +8939,80 @@ def _threat_default_account_enabled(config, session_context):
     return events
 
 
+def _threat_default_account_masquerade(config, session_context):
+    """Masquerading as a default local account.
+
+    Detection targets:
+      - "Masquerading as a default local account" (Low)
+      - "Masquerading as a default local account for the first time" (Medium)
+        when the creating user has no account-creation history
+
+    An attacker who already holds a member server creates a *local* account
+    named after a built-in one (Guest, DefaultAccount) so it blends into the
+    machine's own account list.
+
+    Sequence (all on the member server, none on the DC):
+      1. 4624 type 2 + 4672 — attacker is already admin on the box
+      2. 4688 net.exe `net user <name> <pw> /add`
+      3. 4720 local account created — TargetDomainName is the machine's short
+         name and TargetSid is the machine-local SID
+      4. 4732 added to the local Administrators group
+      5. 4689
+
+    The 4720/4732 builders log on the DC, so `_rehost_to_endpoint` moves the
+    record to the endpoint and corrects the account domain. That rehosting is
+    what makes the creation read as a *local* account to the identity graph; a
+    DC-hosted 4720 is a domain account creation and raises nothing here.
+    """
+    u = _pick_windows_user(session_context)
+    if not u:
+        return None
+
+    host = _fqdn(u["hostname"], config)
+    short = host.split(".")[0].upper()
+    target_acct = random.choice(["Guest", "DefaultAccount"])
+    target_sid = _local_machine_sid(host)
+
+    events = []
+    t = time.time()
+    logon_id = _new_logon_id()
+
+    events.append(json.dumps(_build_4624(u, config, logon_type=2,
+                                         auth_pkg=_NEG_PACKAGE,
+                                         target_logon_id=logon_id,
+                                         elevated=True, ts=t)))
+    t += random.uniform(0.2, 0.8)
+    events.append(json.dumps(_build_4672(u, config, logon_id=logon_id,
+                                         is_admin=True, ts=t)))
+    t += random.uniform(3.0, 9.0)
+
+    events.append(json.dumps(_build_4688(
+        u, config,
+        process_name=r"C:\Windows\System32\net.exe",
+        command_line=f"net  user {target_acct} P@ssw0rd123! /add",
+        parent_process=r"C:\Windows\System32\cmd.exe",
+        logon_id=logon_id, ts=t)))
+    t += random.uniform(0.6, 1.8)
+
+    events.append(json.dumps(_rehost_to_endpoint(
+        _build_4720(u, config, target_username=target_acct, target_sid=target_sid,
+                    new_uac_value=_UAC_NORMAL_ACCOUNT, logon_id=logon_id, ts=t),
+        host, TargetDomainName=short)))
+    t += random.uniform(0.4, 1.2)
+
+    events.append(json.dumps(_rehost_to_endpoint(
+        _build_4732(u, config, member_name=f"{short}\\{target_acct}",
+                    member_sid=target_sid, target_group="Administrators",
+                    target_domain="Builtin", logon_id=logon_id, ts=t),
+        host, TargetDomainName="Builtin")))
+    t += random.uniform(1.0, 3.0)
+
+    events.append(json.dumps(_build_4689(
+        u, config, process_name=r"C:\Windows\System32\net.exe",
+        logon_id=logon_id, ts=t)))
+    return events
+
+
 # Threats renamed out of the wip_ ("work in progress") prefix. The old names still
 # dispatch, so saved scenarios and MCP callers keep working.
 _RENAMED_THREATS = {
@@ -10319,6 +10429,7 @@ _THREAT_WEIGHTS = {
     "sensitive_password_reset": 4,
     "password_never_expires":  3,
     "default_account_enabled":     3,
+    "default_account_masquerade":  3,
     # LSASS handle access is a high-signal credential-dumping path, so it is
     # weighted with the other privilege-abuse threats rather than rarely.
     "lsass_handle_access":         5,
@@ -10372,6 +10483,7 @@ _THREAT_GENERATORS = {
     "sensitive_password_reset":     _threat_sensitive_password_reset,
     "password_never_expires":       _threat_password_never_expires,
     "default_account_enabled":          _threat_default_account_enabled,
+    "default_account_masquerade":       _threat_default_account_masquerade,
     "lsass_handle_access":              _threat_lsass_handle_access,
     "account_access_removal":           _threat_account_access_removal,
     "mailbox_export":                   _threat_mailbox_export,
@@ -10428,6 +10540,7 @@ ANALYTIC_ALERTS = {
     "sensitive_password_reset":    "Sensitive account password reset attempt for the first time",
     "password_never_expires":  "A sensitive account was modified to password never expires",
     "default_account_enabled":     "A user enabled the Windows DefaultAccount",
+    "default_account_masquerade":  "A user created a new local account with the name of a default local account",
     # WIP (2026-11-10): the three mailbox detectors ingest on 4104, 4688 and the
     # native MSExchange Management channel but raised no alert after 3 probe
     # batches each. See docs/modules/windows.md "Live verification".
@@ -10651,6 +10764,7 @@ def _generate_scenario_event(scenario_event, config, context):
         "SENSITIVE_PASSWORD_RESET":     _threat_sensitive_password_reset,
         "PASSWORD_NEVER_EXPIRES":       _threat_password_never_expires,
         "DEFAULT_ACCOUNT_ENABLED":          _threat_default_account_enabled,
+        "DEFAULT_ACCOUNT_MASQUERADE":       _threat_default_account_masquerade,
         "LSASS_HANDLE_ACCESS":              _threat_lsass_handle_access,
         "ACCOUNT_ACCESS_REMOVAL":           _threat_account_access_removal,
         "MAILBOX_EXPORT":                   _threat_mailbox_export,
