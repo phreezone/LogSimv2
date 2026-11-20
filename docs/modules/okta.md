@@ -16,7 +16,7 @@ Simulates Okta Identity Engine (OIE) system log events for the XSIAM `okta_raw` 
 
 Events are generated continuously as background noise. Core authentication events (session.start, SSO, MFA verify) are weighted 3× heavier than all others to produce a realistic enterprise baseline.
 
-SSO targets follow `okta_config.app_entitlements` (`okta_sso.user_apps`). Each user is assigned the core apps, their department's apps and 1-3 optional ones out of 350; benign SSO stays inside that set (80% habitual apps). An app outside a user's assignments is therefore genuinely new for them. See [estate.md](../estate.md).
+SSO targets follow `okta_config.app_entitlements` (`okta_sso.user_apps`). Each user is assigned the core apps, their department's apps and 1-3 optional ones out of 350; benign SSO stays inside that set (80% habitual apps). An app outside a user's assignments is therefore genuinely new for them.
 
 **User Session**
 

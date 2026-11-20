@@ -931,7 +931,7 @@ into buffers that `generate_log()` drains. `endpoint_cap` (`active: 800`, `core:
 bounds the workstation workers at 5,000 users: 500 core hosts every day (all base-estate
 machines first) and 300 slots that rotate daily over the rest. A new hire's machine stays
 idle until their `start_date`, and its DC-side events name the DC at their site. User
-SIDs come from `user_profiles.*.sid_rid`. See [estate.md](../estate.md). This is the only ambient mode: the old
+SIDs come from `user_profiles.*.sid_rid`. This is the only ambient mode: the old
 single-threaded mode (`parallel_hosts: false`) was removed on 2026-10-20, and the key is
 no longer read.
 

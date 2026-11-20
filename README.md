@@ -269,7 +269,6 @@ Events appear in XSIAM under the `microsoft_windows_raw` dataset, indexed by the
 |---|---|
 | Installation & `.env` setup | [docs/getting-started.md](docs/getting-started.md) |
 | `config.json` reference (all sections) | [docs/configuration.md](docs/configuration.md) |
-| The simulated company: 5,000 users, sites, servers, onboarding, app entitlements | [docs/estate.md](docs/estate.md) |
 | Transports — native pipes and the Cribl fallback | [docs/transports.md](docs/transports.md) |
 | Running modes & available modules | [docs/how-to-run.md](docs/how-to-run.md) |
 | Attack scenarios (23 kill chains) | [docs/attack-scenarios.md](docs/attack-scenarios.md) |
