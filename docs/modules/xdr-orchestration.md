@@ -317,4 +317,4 @@ Adding another lab tool is one entry in `EXTRA_TOOLS` (name, on-disk file, URL, 
 
 - **Phase 1 (in progress):** `connection.py` ✅ → `executor.py` (WinRMAtomic + DryRun) → one reference story → `orchestrator.py`; `/api/v1/attack/*` routes.
 - **Phase 2:** data-driven story files, closed-loop incident pull-back, tighter time alignment, MCP tools, the Kickstarter installer.
-- **Phase 3:** more executors (Caldera, SSH/Kali), multi-host lateral-movement stories.
+- **Phase 3:** more executors (Caldera, SSH/Kali), multi-host lateral-movement stories — see the design note [Two-Agent Lateral Movement](xdr-two-agent-lateral-design.md) for the seams a real A→B pivot between two differently-named Cortex-agent boxes would need.
