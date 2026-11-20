@@ -156,6 +156,15 @@ re-hosts the record off the DC. The variation follows the creator's 30-day
 creation count: a user with existing creations raises the Low base, a first-time
 creator the Medium "…for the first time" (see `docs/modules/windows.md`).
 
+The generic local-security-group analytics are **not implemented**, because they
+do not evaluate in this tenant. Six verified `4732`s across six
+host/group/member shapes (member server and DC, `Builtin` and domain
+`TargetDomainName`, user and group members, and a non-Administrators group) raised
+nothing, nor did the ten built-in local account additions from the masquerade
+batches, and a 180-day alert-name census finds neither "Member added to a Windows
+local security group" nor either local-Administrator variation. Only the SMS
+Admins variant fires (see `docs/modules/windows.md`).
+
 **WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 
 | Generator | Reason |
