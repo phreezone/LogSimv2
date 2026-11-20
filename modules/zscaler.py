@@ -53,25 +53,6 @@ def _cef_escape(value):
     return s
 
 
-_DEVICE_MODELS = [
-    "20L8S7WC08", "20XW004QUS", "21CB007PUS",      # ThinkPad
-    "MacBookPro18,3", "MacBookAir10,1", "Mac14,7",  # Apple
-    "Latitude 7440", "Latitude 5550", "XPS 9530",   # Dell
-    "EliteBook 840 G10", "ProBook 450 G9",          # HP
-]
-
-
-def _device_model(hostname):
-    """Stable hardware model per device — %s{devicemodel} in the NSS field reference.
-
-    Sticky by hostname so a given endpoint keeps the same model across events; a
-    workstation whose reported hardware changes every log line is a giveaway.
-    """
-    if not hostname:
-        return None
-    return _DEVICE_MODELS[hash(("model", str(hostname))) % len(_DEVICE_MODELS)]
-
-
 def _zscaler_url_encode(url):
     """Hex-encode a URL the way Zscaler does before streaming it to a SIEM.
 
@@ -3053,17 +3034,268 @@ def get_threat_info():
     return result
 
 
-# CEF FORMATTER (unchanged from original)
+# CEF FORMATTER
+
+# %s{filetype} is a Zscaler file-type NAME, not an extension. The extension goes in
+# %s{filesubtype}. The NSS web field reference shows these examples: "RAR Files",
+# "ZIP", "Windows Executables". The remaining names follow the File Type Control
+# list as best known; they are not verified against a tenant's file-type catalogue.
+_ZS_FILETYPE_BY_EXT = {
+    "rar": "RAR Files", "zip": "ZIP", "exe": "Windows Executables",
+    "dll": "Windows Library", "msi": "Windows Installer",
+    "doc": "Microsoft Word", "docx": "Microsoft Word",
+    "xls": "Microsoft Excel", "xlsx": "Microsoft Excel", "csv": "CSV Files",
+    "ppt": "Microsoft PowerPoint", "pptx": "Microsoft PowerPoint",
+    "pdf": "PDF Documents", "txt": "Text", "gz": "GZIP", "tar": "TAR",
+    "7z": "7-Zip", "sql": "SQL", "py": "Python", "java": "Java",
+    "js": "JavaScript", "ps1": "PowerShell", "bat": "Windows Batch",
+}
+
+
+def _zs_filetype(value):
+    """Map a generator's file type (usually an extension) to the Zscaler type name."""
+    if not value:
+        return None
+    v = str(value).strip()
+    if v.lower().lstrip(".") in _ZS_FILETYPE_BY_EXT:
+        return _ZS_FILETYPE_BY_EXT[v.lower().lstrip(".")]
+    if v == "Windows Executable":
+        return "Windows Executables"
+    return v
+
+
+def _zs_none(value):
+    """NSS prints the literal string None for an empty field instead of leaving it out."""
+    return "None" if value is None or value == "" else value
+
+
+def _strip_scheme(url):
+    """%s{eurl} is the URL WITHOUT the protocol (the reference: 'excludes the protocol')."""
+    if not url:
+        return url
+    s = str(url)
+    for p in ("https://", "http://"):
+        if s.lower().startswith(p):
+            return s[len(p):]
+    return s
+
+
+def _format_nss_weblog_cef(fields, user, dept, rt_ms):
+    """NSS web-log line in the exact feed template the Cortex onboarding guide prescribes.
+
+    Source: "Ingest logs from Zscaler Internet Access" (Cortex XSIAM, Syslog Collector
+    applet). Feed Output Type = Custom, with this Feed Output Format:
+
+      %s{mon} %02d{dd} %02d{hh}:%02d{mm}:%02d{ss} zscaler-nss CEF:0|Zscaler|NSSWeblog|5.0|
+      %s{action}|%s{reason}|3|act=%s{action} app=%s{proto} cat=%s{urlcat} dhost=%s{ehost}
+      dst=%s{sip} src=%s{cip} in=%d{respsize} outcome=%s{respcode} out=%d{reqsize}
+      request=%s{eurl} rt=%s{mon} %02d{dd} %d{yy} %02d{hh}:%02d{mm}:%02d{ss}
+      sourceTranslatedAddress=%s{cintip} requestClientApplication=%s{ua}
+      requestMethod=%s{reqmethod} suser=%s{login} spriv=%s{location}
+      externalId=%d{recordid} fileType=%s{filetype} reason=%s{reason}
+      destinationServiceName=%s{appname} cn1=%d{riskscore} cn1Label=riskscore
+      cs1=%s{dept} cs1Label=dept cs2=%s{urlsupercat} cs2Label=urlsupercat
+      cs3=%s{appclass} cs3Label=appclass cs4=%s{malwarecat} cs4Label=malwarecat
+      cs5=%s{threatname} cs5Label=threatname cs6=%s{dlpeng} cs6Label=dlpeng
+      ZscalerNSSWeblogURLClass=%s{urlclass} ZscalerNSSWeblogDLPDictionaries=%s{dlpdict}
+      requestContext=%s{ereferer} contenttype=%s{contenttype}
+      unscannabletype=%s{unscannabletype} deviceowner=%s{deviceowner}
+      devicehostname=%s{devicehostname}
+
+    The Zscaler modeling rule (ZscalerModelingRule_2_11) reads exactly these keys.
+
+    One declared opt-in is appended: the download and upload file names. The template
+    carries no file name. The Zscaler fields are %s{filename} (download) and
+    %s{upload_filename} (upload), but Cortex only splits keys from the CEF dictionary
+    or from this template. Native names such as `filename=`, `upload_filename=` and
+    `ZscalerNSSWeblogFileName=` are folded into the preceding value (live tests,
+    2026-11-14/15). So each value rides in a labelled flexString whose label is the
+    Zscaler field name:
+      flexString1=%s{filename} flexString1Label=filename
+      flexString2=%s{upload_filename} flexString2Label=upload_filename
+
+    Every key is printed on every line, and empty values read None, the way a fixed
+    NSS template renders.
+    """
+    ev = datetime.fromtimestamp(rt_ms / 1000, tz=timezone.utc)
+    action = fields.get("action") or "Allowed"
+    reason = fields.get("reason") or action
+
+    # Download vs upload file. Generators put the file in `filename`; on a POST/PUT the
+    # client is sending it, so it is %s{upload_filename}, and %s{filename} /
+    # %s{filetype} (the DOWNLOADED file) are empty. A generator may also set
+    # upload_filename directly.
+    method = fields.get("reqmethod")
+    down_name, down_type = fields.get("filename"), fields.get("filetype")
+    up_name = fields.get("upload_filename")
+    if up_name is None and down_name and str(method).upper() in ("POST", "PUT"):
+        up_name, down_name, down_type = down_name, None, None
+
+    riskscore = fields.get("riskscore")
+    if riskscore in (None, ""):
+        riskscore = fields.get("threatscore") or 0
+
+    ext = [
+        ("act", action),
+        ("app", fields.get("proto")),
+        ("cat", fields.get("urlcat")),
+        ("dhost", _zscaler_url_encode(fields.get("ehost"))),
+        ("dst", fields.get("sip")),
+        ("src", fields.get("cip")),
+        ("in", fields.get("bytesin") or 0),
+        ("outcome", fields.get("responsecode")),
+        ("out", fields.get("bytesout") or 0),
+        ("request", _zscaler_url_encode(_strip_scheme(fields.get("eurl")))),
+        ("rt", ev.strftime("%b %d %y %H:%M:%S")),
+        ("sourceTranslatedAddress", fields.get("sourceTranslatedAddress")),
+        ("requestClientApplication", fields.get("useragent")),
+        ("requestMethod", method),
+        ("suser", fields.get("suser") or (user if "@" in user else f"{user}@examplecorp.com")),
+        # %s{location}. Generators carry the location in flexString1.
+        ("spriv", fields.get("location") or fields.get("flexString1")),
+        ("externalId", random.randint(1000000, 9999999999)),
+        ("fileType", _zs_filetype(down_type)),
+        ("reason", reason),
+        ("destinationServiceName", fields.get("appname")),
+        ("cn1", int(riskscore)), ("cn1Label", "riskscore"),
+        ("cs1", dept), ("cs1Label", "dept"),
+        ("cs2", fields.get("urlsupercat")), ("cs2Label", "urlsupercat"),
+        ("cs3", fields.get("appclass")), ("cs3Label", "appclass"),
+        ("cs4", fields.get("malwarecat")), ("cs4Label", "malwarecat"),
+        ("cs5", fields.get("threatname")), ("cs5Label", "threatname"),
+        ("cs6", fields.get("dlpengine")), ("cs6Label", "dlpeng"),
+        ("ZscalerNSSWeblogURLClass", fields.get("urlclass")),
+        ("ZscalerNSSWeblogDLPDictionaries", fields.get("dlpdictionary")),
+        ("requestContext", _zscaler_url_encode(_strip_scheme(fields.get("ereferer")))),
+        ("contenttype", fields.get("contenttype")),
+        ("unscannabletype", fields.get("unscannabletype")),
+        ("deviceowner", fields.get("deviceowner")),
+        ("devicehostname", fields.get("devicehostname")),
+        # Opt-in (see docstring).
+        ("flexString1", down_name), ("flexString1Label", "filename"),
+        ("flexString2", up_name), ("flexString2Label", "upload_filename"),
+    ]
+    extension = " ".join(f"{k}={_cef_escape(_zs_none(v))}" for k, v in ext)
+    header = f"CEF:0|Zscaler|NSSWeblog|5.0|{_cef_escape(action)}|{_cef_escape(reason)}|3|"
+    return f"<14>{ev.strftime('%b %d %H:%M:%S')} zscaler-nss {header}{extension}"
+
+
+# %s{destcountry} is the abbreviated country code ("USA" in the reference).
+_ZS_COUNTRY_CODE = {
+    "united states": "USA", "us": "USA", "usa": "USA", "gb": "GBR", "united kingdom": "GBR",
+    "ireland": "IRL", "ie": "IRL", "iran": "IRN", "ukraine": "UKR", "north korea": "PRK",
+    "russia": "RUS", "romania": "ROU", "china": "CHN", "germany": "DEU", "france": "FRA",
+    "netherlands": "NLD", "canada": "CAN", "australia": "AUS", "japan": "JPN", "india": "IND",
+    "brazil": "BRA", "singapore": "SGP",
+}
+_ZS_NO_COUNTRY = {"internal", "reserved", "unknown", "n/a", ""}
+_ZS_IPPROTO = {"6": "TCP", "17": "UDP", "1": "ICMP", "47": "GRE", "50": "ESP"}
+
+
+def _zs_country(value):
+    if value is None or str(value).strip().lower() in _ZS_NO_COUNTRY:
+        return None
+    v = str(value).strip()
+    return _ZS_COUNTRY_CODE.get(v.lower(), v)
+
+
+def _zs_fw_action(value):
+    """%s{action} on the firewall feed is Allowed or Blocked."""
+    return "Allowed" if str(value or "").lower().startswith("allow") else "Blocked"
+
+
+def _zs_egress_ip(location):
+    """%s{ssip}: the Zscaler service-edge address the session leaves from (stable per location)."""
+    pool = ["165.225.38.50", "165.225.38.51", "165.225.72.40", "165.225.72.41"]
+    return pool[sum(map(ord, str(location or "HQ"))) % len(pool)]
+
+
+def _format_nss_fwlog_cef(fields, user, dept, rt_ms):
+    """NSS firewall-log line in the exact feed template the Cortex onboarding guide prescribes.
+
+    Source: "Ingest logs from Zscaler Internet Access" (Cortex XSIAM, Syslog Collector
+    applet), NSS for Firewall, Feed Output Type = Custom:
+
+      %s{mon} %02d{dd} %02d{hh}:%02d{mm}:%02d{ss} zscaler-nss-fw CEF:0|Zscaler|NSSFWlog|5.7|
+      %s{action}|%s{rulelabel}|3|act=%s{action} suser=%s{login} src=%s{csip}
+      spt=%d{csport} dst=%s{cdip} dpt=%d{cdport} deviceTranslatedAddress=%s{ssip}
+      deviceTranslatedPort=%d{ssport} destinationTranslatedAddress=%s{sdip}
+      destinationTranslatedPort=%d{sdport} sourceTranslatedAddress=%s{tsip}
+      sourceTranslatedPort=%d{tsport} proto=%s{ipproto} tunnelType=%s{ttype}
+      dnat=%s{dnat} stateful=%s{stateful} spriv=%s{location} reason=%s{rulelabel}
+      in=%ld{inbytes} out=%ld{outbytes} rt=%s{mon} %02d{dd} %02d{hh}:%02d{mm}:%02d{ss}
+      deviceDirection=1 cs1=%s{dept} cs1Label=dept cs2=%s{nwsvc} cs2Label=nwService
+      cs3=%s{nwapp} cs3Label=nwApp cs4=%s{aggregate} cs4Label=aggregated
+      cs6=%s{threatname} cs6label=threatname cn1=%d{durationms} cn1Label=durationms
+      cn2=%d{numsessions} cn2Label=numsessions cs5Label=ipCat cs5=%s{ipcat}
+      cat=%s{threatcat} destCountry=%s{destcountry} avgduration=%d{avgduration}
+
+    Reproduced as published, including `cs6label` (lower-case l) and `cs5Label` placed
+    before `cs5`. The Zscaler modeling rule (ZscalerModelingRule_2_11) reads these keys.
+    No opt-in fields are added: the firewall reference has no file names.
+
+    Value formats follow the NSS firewall field reference: action is Allowed/Blocked,
+    ipproto is a protocol name (TCP), destcountry is the abbreviated code (USA).
+    Every key is printed on every line; empty strings read None.
+    """
+    ev = datetime.fromtimestamp(rt_ms / 1000, tz=timezone.utc)
+    action = _zs_fw_action(fields.get("action"))
+    rulelabel = fields.get("rulelabel") or ("Default Firewall Filtering Rule"
+                                            if action == "Blocked" else "Allow_All")
+    location = fields.get("location") or fields.get("flexString1")
+    proto = str(fields.get("proto") or "")
+    dst = fields.get("destip")
+    dport = fields.get("destport") or 0
+    dur = int(fields.get("duration_ms") or 0)
+    # %s{ttype}: Client Connector traffic arrives over Z-Tunnel; site traffic over GRE.
+    tunnel = "GRE" if fields.get("_location_traffic") else "Z-Tunnel 2.0"
+    ext = [
+        ("act", action),
+        ("suser", fields.get("suser") or (user if "@" in user else f"{user}@examplecorp.com")),
+        ("src", fields.get("srcip")),
+        ("spt", fields.get("sport") or 0),
+        ("dst", dst),
+        ("dpt", dport),
+        ("deviceTranslatedAddress", _zs_egress_ip(location)),
+        ("deviceTranslatedPort", random.randint(1024, 65535)),
+        ("destinationTranslatedAddress", fields.get("destinationTranslatedAddress") or dst),
+        ("destinationTranslatedPort", dport),
+        ("sourceTranslatedAddress", fields.get("sourceTranslatedAddress")),
+        ("sourceTranslatedPort", random.randint(1024, 65535)),
+        ("proto", _ZS_IPPROTO.get(proto, proto or None)),
+        ("tunnelType", tunnel),
+        ("dnat", "No"),
+        ("stateful", "Yes"),
+        ("spriv", location),
+        ("reason", rulelabel),
+        ("in", fields.get("bytesin") or 0),
+        ("out", fields.get("bytesout") or 0),
+        ("rt", ev.strftime("%b %d %H:%M:%S")),
+        ("deviceDirection", 1),
+        ("cs1", dept), ("cs1Label", "dept"),
+        ("cs2", fields.get("nwsvc")), ("cs2Label", "nwService"),
+        ("cs3", fields.get("nwapp") or fields.get("nwsvc")), ("cs3Label", "nwApp"),
+        ("cs4", "No"), ("cs4Label", "aggregated"),
+        ("cs6", fields.get("threatname")), ("cs6label", "threatname"),
+        ("cn1", dur), ("cn1Label", "durationms"),
+        ("cn2", 1), ("cn2Label", "numsessions"),
+        ("cs5Label", "ipCat"),
+        ("cs5", fields.get("ipcat") or fields.get("urlcat") or "Miscellaneous or Unknown"),
+        ("cat", fields.get("threatcat")),
+        ("destCountry", _zs_country(fields.get("destCountry"))),
+        # %d{avgduration} only means something for an aggregated session; one session here.
+        ("avgduration", 0),
+    ]
+    extension = " ".join(f"{k}={_cef_escape(_zs_none(v))}" for k, v in ext)
+    header = f"CEF:0|Zscaler|NSSFWlog|5.7|{action}|{_cef_escape(rulelabel)}|3|"
+    return f"<14>{ev.strftime('%b %d %H:%M:%S')} zscaler-nss-fw {header}{extension}"
+
 
 def _format_nss_log_as_cef(fields, user, dept, log_product):
-    """Builds the final CEF log string for Zscaler NSS feeds.
+    """Build a Zscaler NSS line for the web (nssweblog) or firewall (nssfwlog) feed.
 
-    CEF header: CEF:0|Zscaler|{NSSWeblog|NSSFWlog}|6.1|{action}|{action}|{severity}|
-    Syslog PRI <14> = facility user (1<<3=8) + info (6) = 14.
-
-    Per Zscaler/Azure Sentinel: signatureId (position 4) and name (position 5)
-    are both the action string (Allowed/Blocked for web, Allow/Blocked for FW).
-    deviceProduct uses mixed case: NSSWeblog, NSSFWlog.
+    Both follow the Cortex onboarding guide's feed templates exactly; see
+    _format_nss_weblog_cef and _format_nss_fwlog_cef. Syslog PRI <14> = user.info.
     """
     # XSIAM keys _time off the CEF rt field. Respect an explicitly-set rt (ms epoch)
     # so time-spread threats (e.g. impossible travel) can back-date events; else now.
@@ -3073,259 +3305,9 @@ def _format_nss_log_as_cef(fields, user, dept, log_product):
     if isinstance(fields.get("sourceTranslatedAddress"), _ClientPublicIP):
         fields = {**fields, "sourceTranslatedAddress":
                   _user_public_ip(fields.get("suser") or user) or str(fields["sourceTranslatedAddress"])}
-    # Zscaler NSS deviceProduct uses mixed case per XSIAM dataset naming
-    _PRODUCT_MAP = {"nssweblog": "NSSWeblog", "nssfwlog": "NSSFWlog"}
-    cef_product = _PRODUCT_MAP.get(log_product, log_product)
-
-    common_map = {
-        "rt": rt,
-        # Ambient events synthesize a UPN (user@examplecorp.com). Orchestrated
-        # (XDR-triggered) events set fields['suser'] to the EXACT box username so it
-        # matches the endpoint identity XSIAM stores (which does no user
-        # normalization) — no fake email domain appended.
-        "suser": fields.get("suser") or (user if '@' in user else f"{user}@examplecorp.com"),
-        "externalId": str(random.randint(1000000, 9999999999)),
-        # Lowercase `devicehostname` is the key the Zscaler modeling rule reads, not
-        # CEF-standard deviceHostName. The nssweblog block maps it to
-        # xdm.source.host.hostname; the nssfwlog block assigns no hostname at all, so
-        # the firewall feed reaches XDM without one. That is a pack-side mapping gap,
-        # not a missing field — the value is present as a native CEF column and is
-        # usable from XQL and correlation rules. Do not try to close it with more CEF
-        # keys; it needs native-JSON transport or a tenant-side modeling rule.
-        "devicehostname":              fields.get("devicehostname"),
-        # `shost` MUST stay immediately after `devicehostname`. It is a recognised CEF
-        # key and acts as the VALUE TERMINATOR: the parser absorbs unrecognised keys
-        # into the preceding value, and deviceOwner / deviceOperatingSystem /
-        # deviceOperatingSystemVersion below are not recognised. Without shost between
-        # them, devicehostname swallows all three and runs on to the next known key.
-        "shost":                       fields.get("devicehostname"),
-        "deviceOwner":                 fields.get("deviceowner"),
-        "deviceOperatingSystem":       fields.get("deviceostype"),
-        "deviceOperatingSystemVersion":fields.get("deviceosversion"),
-        "sourceTranslatedAddress":     fields.get("sourceTranslatedAddress"),
-        "flexString1": fields.get("flexString1"), "flexString1Label": "location",
-        "dept": dept,
-        # %s{eedone} — "Indicates if the characters specified in the Feed Escape
-        # Character field of the NSS feed configuration page were hex encoded".
-        # _cef_escape() hex-encodes `=` (the character XSIAM's onboarding guide
-        # specifies), so a real feed in this configuration reports Yes.
-        "eedone": "Yes",
-        "clienttranstime": random.randint(10, 2000),
-        "servertranstime": random.randint(10, 5000),
-        "ssldecrypted":    random.choice(["Yes", "No"]),
-        "contentclass":    fields.get("contentclass", "Web Browsing"),
-        # Additional documented NSS fields (present in BOTH the web-log and
-        # firewall-log field references, "Zscaler Client Connector Device
-        # Information" and "Miscellaneous"). Cheap fidelity: they are what a real
-        # Client Connector-enrolled endpoint reports. Appended AFTER the fields that
-        # matter for XDM so that, if the CEF parser absorbs an unrecognised key into
-        # the preceding value, it cannot damage devicehostname (which is terminated
-        # by the recognised `shost` immediately after it) — see the note above.
-        "devicetype":       "Zscaler Client Connector",
-        "devicemodel":      _device_model(fields.get("devicehostname")),
-        "deviceappversion": "2.0.0.120",
-        "ztunnelversion":   "ZTUNNEL_1_0",
-        "flow_type":        "ZIA",
-        "company":          "ExampleCorp",
-        "cloudname":        "zscaler.net",
-        "nsssvcip":         "10.10.102.30",
-        "productversion":   "5.0.902.95524_04",
-    }
-    if fields.get("_location_traffic"):
-        # Forwarded by the site's tunnel (e.g. the Infoblox grid's recursion), not
-        # by an enrolled endpoint: there is no Client Connector, so none of its
-        # device fields, and no department -- the identity is the location.
-        for _k in ("devicetype", "devicemodel", "deviceappversion", "ztunnelversion",
-                   "deviceOwner", "deviceOperatingSystem", "deviceOperatingSystemVersion",
-                   "dept"):
-            common_map.pop(_k, None)
-        common_map["contentclass"] = "Network Service"
-
     if log_product == 'nssweblog':
-        # totalsize = full transaction bytes. Fall back to bytesin+bytesout when a
-        # generator doesn't set it explicitly, so cn3 is never empty on a web
-        # transaction that reported byte counts.
-        _totalsize = fields.get("totalsize")
-        if _totalsize is None and (fields.get("bytesin") is not None
-                                   or fields.get("bytesout") is not None):
-            _totalsize = (fields.get("bytesin") or 0) + (fields.get("bytesout") or 0)
-        # Raw-completeness fields: present in the zscaler_nssweblog_raw schema but
-        # NOT XDM-mapped by the web modeling rule (queryable via XQL). Derive sane
-        # values from what the generator already provides.
-        _web_proto = fields.get("proto")
-        _web_dpt = fields.get("destport") or {"HTTPS": 443, "HTTP": 80}.get(_web_proto, 443)
-        _web_spt = fields.get("sport") or random.randint(49152, 65535)
-        _web_destcountry = fields.get("destCountry") or (
-            "United States" if fields.get("action") in ("Allow", "Allowed") else "Unknown")
-        _web_desttrans = fields.get("destinationTranslatedAddress") or fields.get("sip")
-        cef_map  = {
-            # XIF-mapped cs/cn fields (consumed by XSIAM ZscalerModelingRule):
-            "cs2": fields.get("urlcat"),       "cs2Label": "urlcat",       # -> http.url_category
-            "cs4": fields.get("malwarecat"),   "cs4Label": "malwarecat",   # -> alert.category
-            "cs5": fields.get("threatname"),   "cs5Label": "threatname",   # -> alert.name
-            # cn1 -> xdm.alert.severity: use threatscore on threats, else riskscore,
-            # so severity is populated on benign web events too.
-            "cn1": fields.get("threatscore") or fields.get("riskscore"), "cn1Label": "threatscore",
-            # URL class -> xdm.event.type. XSIAM reads the custom key
-            # ZscalerNSSWeblogURLClass; cs1 is kept for back-compat with
-            # correlation rules that filter `cs1 = "Malicious Content"`.
-            "ZscalerNSSWeblogURLClass": fields.get("urlclass"),
-            "spriv": fields.get("spriv", "domain users"),                  # -> source.zone
-            "destinationServiceName": fields.get("appname"),              # -> target.interface
-            # Raw dataset hunting fields (queryable, not XDM-mapped by XSIAM):
-            "cs1": fields.get("urlclass"),     "cs1Label": "urlclass",
-            "cs3": fields.get("malwareclass"), "cs3Label": "malwareclass",
-            "cs6": fields.get("riskscore"),    "cs6Label": "riskscore",
-            "cn2": fields.get("filesize"),     "cn2Label": "filesize",
-            "cn3": _totalsize,                 "cn3Label": "totalsize",
-            # Standard XIF-mapped fields:
-            "act": fields.get("action"),
-            "outcome": fields.get("responsecode"),
-            "reason": fields.get("reason"),
-            "app": fields.get("proto"),
-            "cat": fields.get("urlcat"),
-            # `ehost` / `eurl` are the HEX-ENCODED variants in Zscaler's web-log field
-            # reference (%s{ehost}, %s{eurl}) — the plain forms are %s{host}/%s{url}.
-            # Our internal field names already use the e-prefixed spelling, so both
-            # must actually carry the encoding to match what a real feed streams.
-            "dhost": _zscaler_url_encode(fields.get("ehost")),
-            "dst": fields.get("sip"),    "src": fields.get("cip"),
-            # Zscaler hex-encodes URL characters <=0x20 / >=0x7F before streaming
-            # (space -> %20, newline -> %0A). Applied centrally here so every
-            # generator's eurl gets it without touching each call site.
-            "request": _zscaler_url_encode(fields.get("eurl")),
-            "requestMethod": fields.get("reqmethod"),
-            "requestClientApplication": fields.get("useragent"),
-            "contenttype": fields.get("contenttype"),
-            "in": fields.get("bytesin"),  "out": fields.get("bytesout"),
-            "fileName": fields.get("filename"), "fileType": fields.get("filetype"),
-            "fileHash": fields.get("fileHash"),
-            "appname": fields.get("appname"),
-            "appclass": fields.get("appclass"),
-            "urlsupercat": fields.get("urlsupercat"),
-            # Raw schema columns (not XDM-mapped for web; complete the raw dataset):
-            "proto": _web_proto,
-            "spt": _web_spt, "dpt": _web_dpt,
-            "destCountry": _web_destcountry,
-            "destinationTranslatedAddress": _web_desttrans,
-        }
-        if fields.get("event_type") == "dlp":
-            cef_map.update({
-                "cs1": fields.get("dlpengine"),    "cs1Label": "dlpeng",
-                "cs2": fields.get("dlpdictionary"),"cs2Label": "dlpdict",
-                "cs3": fields.get("dlprule"),      "cs3Label": "dlprulename",
-                "cs4": None, "cs4Label": None,
-                "cs5": None, "cs5Label": None,
-                # DLP isn't a malware threat, so clear threatscore — but keep cn1
-                # populated from riskscore so xdm.alert.severity still resolves.
-                "cn1": fields.get("riskscore"),    "cn1Label": "riskscore",
-            })
-
-    else:  # nssfwlog
-        cef_map  = {
-            # XIF-mapped cs/cn fields:
-            # cs2 carries the firewall RULE name and the modeling rule maps it to
-            # xdm.network.rule, so the label must say so. It previously read "nwapp"
-            # (network application), which described neither the value nor the mapping.
-            "cs2": fields.get("rulelabel"),    "cs2Label": "rulelabel",
-            "cs3": fields.get("nwsvc"),        "cs3Label": "nwsvc",
-            # %s{nwapp} "The network application that was accessed" (example: SSH) —
-            # a documented firewall-feed field and one of the five keys Zscaler
-            # aggregates on. Distinct from nwsvc, "the network service that was used"
-            # (example: HTTP): the vendor's own sample log carries nwsvc=HTTP with
-            # nwapp=ebay, i.e. service vs the specific application. Defaults to the
-            # service, which is what the doc shows for non-web protocols.
-            #
-            # POSITION IS DELIBERATE — keep `nwapp` immediately after `cs3Label`. The
-            # CEF parser absorbs an unrecognised key into the PRECEDING value, so if
-            # nwapp is not recognised on this feed the only casualty is cs3Label, a
-            # label string nothing maps or reads. Moving it next to a value-bearing
-            # key risks destroying that value instead.
-            "nwapp": fields.get("nwapp") or fields.get("nwsvc"),
-            "cs5": fields.get("urlcat"),       "cs5Label": "urlcat",
-            "cs6": fields.get("threatname"),   "cs6Label": "threatname",
-            "cn1": fields.get("duration_ms"),  "cn1Label": "duration",
-            "cat": fields.get("threatcat"),
-            # Raw dataset hunting fields:
-            "cs1": dept,                       "cs1Label": "department",
-            "cs4": fields.get("destCountry"),  "cs4Label": "destCountry",
-            # Standard XIF-mapped fields:
-            "act": fields.get("action"),
-            "reason": fields.get("reason"),
-            "proto": fields.get("proto"),
-            "src": fields.get("srcip"),     "dst": fields.get("destip"),
-            "spt": fields.get("sport"),     "dpt": fields.get("destport"),
-            "in": fields.get("bytesin"),    "out": fields.get("bytesout"),
-            "destCountry": fields.get("destCountry"),
-            "srcCountry": fields.get("srcCountry"),
-            "spriv": fields.get("spriv"),
-            "sourceTranslatedAddress":      fields.get("sourceTranslatedAddress"),
-            "destinationTranslatedAddress": fields.get("destinationTranslatedAddress"),
-            # %s{cdfqdn} — client destination FQDN (Insights "Client Destination
-            # Name"). Carried as CEF dhost so it lands in a destination-name field.
-            # Only set when the generator genuinely knows a domain; None for pure
-            # IP traffic, and the builder drops None.
-            "cdfqdn": fields.get("cdfqdn"),
-            "dhost":  fields.get("cdfqdn"),
-        }
-
-    merged = dict(common_map)
-    merged.update(cef_map)
-    # Drop any "<base>Label" whose partner value is absent — otherwise a dropped
-    # None value (e.g. filesize on a browsing event) leaves an orphan label like
-    # "cn2Label=filesize" with no matching cn2 in the output.
-    for _lbl in [k for k in merged if k.endswith("Label")]:
-        if merged.get(_lbl[:-5]) is None:
-            merged[_lbl] = None
-
-    # The CEF parser recognises a fixed key set PER FEED, and an unrecognised
-    # `key=value` is absorbed into the PRECEDING key's value instead of becoming its
-    # own column. Every key we emit on the FIREWALL feed is recognised. On the WEB feed
-    # the keys below are not, and each one silently destroyed the field preceding it:
-    #     out               <- swallowed fileName
-    #     dpt               <- swallowed destCountry
-    #     flexString1Label  <- swallowed dept..contentclass
-    #     shost             <- swallowed deviceOwner/OS/OSVersion
-    #     fileType          <- swallowed appname/appclass/urlsupercat
-    # `out` is the damaging one: the web modeling rule assigns
-    # xdm.source.sent_bytes = to_integer(out), and "39550844 fileName=records.csv" is
-    # not an integer — so sent_bytes sat at 0% (0/1754) and Large Upload could never
-    # fire from the web feed no matter how many bytes a generator claimed.
-    #
-    # Keep emitting these keys (they are real NSS web-log fields and stay useful for
-    # XQL hunting) but move them into one contiguous block at the END of the
-    # extension, behind a sacrificial recognised key. The parser can then only
-    # corrupt the sacrificial value. `dvchost` is CEF-standard, recognised, and
-    # redundant here — devicehostname and shost already carry the hostname — so
-    # losing it to the absorb costs nothing.
-    if log_product == 'nssweblog':
-        _WEB_UNRECOGNISED = (
-            "deviceOwner", "deviceOperatingSystem", "deviceOperatingSystemVersion",
-            "dept", "eedone", "clienttranstime", "servertranstime", "ssldecrypted",
-            "contentclass", "devicetype", "devicemodel", "deviceappversion",
-            "ztunnelversion", "flow_type", "company", "cloudname", "nsssvcip",
-            "productversion", "fileName", "appname", "appclass", "urlsupercat",
-            "destCountry")
-        _tail = [(k, merged.pop(k)) for k in _WEB_UNRECOGNISED if k in merged]
-        if any(v is not None for _k, v in _tail):
-            merged["dvchost"] = fields.get("devicehostname")
-        for _k, _v in _tail:
-            merged[_k] = _v
-
-    cef_severity = fields.get('cefSeverity', '3')
-    # Zscaler uses the action string as both signatureId (pos 4) and name (pos 5)
-    action_str   = fields.get('action', 'Allow')
-    cef_header   = f"CEF:0|Zscaler|{cef_product}|6.1|{action_str}|{action_str}|{cef_severity}|"
-    extension_parts  = [f"{key}={_cef_escape(value)}" for key, value in merged.items() if value is not None]
-    extension_string = " ".join(extension_parts)
-    # XSIAM's Zscaler onboarding guide specifies a DIFFERENT syslog identifier per NSS
-    # feed type, and both feeds were previously emitted as "zscaler-nss":
-    #   NSS for Firewall -> "%s{mon} %02d{dd} %02d{hh}:%02d{mm}:%02d{ss} zscaler-nss-fw CEF:0"
-    #   NSS for Web      -> "%s{mon} %02d{dd} %02d{hh}:%02d{mm}:%02d{ss} zscaler-nss CEF:0"
-    # (Ingest logs from Zscaler Internet Access, Cortex XDR 3.x documentation.)
-    syslog_host = "zscaler-nss-fw" if log_product == "nssfwlog" else "zscaler-nss"
-    return (f"<14>{datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')} "
-            f"{syslog_host} {cef_header}{extension_string}")
+        return _format_nss_weblog_cef(fields, user, dept, int(rt))
+    return _format_nss_fwlog_cef(fields, user, dept, int(rt))
 
 
 # SCENARIO SUPPORT

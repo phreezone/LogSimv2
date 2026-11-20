@@ -2,7 +2,7 @@
   {
     "name": "Zscaler \u2014 DLP Block on Upload to Cloud Storage (Insider Exfil)",
     "severity": "SEV_030_MEDIUM",
-    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter reason = \"DLP Block\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dlp_rule = cs3, dst_ip = dst\n",
+    "xql_query": "dataset = zscaler_nssweblog_raw\n| filter act = \"Blocked\"\n| filter reason = \"DLP Block\"\n| filter src != null and suser != null\n| alter src_ip = src, user_name = suser, url = request, dlp_engine = cs6, upload_file = flexString2, dst_ip = dst\n",
     "is_enabled": true,
     "description": "Zscaler NSS web log Blocked action with reason=DLP Block \u2014 insider uploading sensitive data (Source Code / PII) to external cloud storage (Online Storage category, e.g. mega.nz). Correlated to the insider by src and suser.",
     "alert_name": "Zscaler \u2014 DLP Block on Upload to Cloud Storage (Insider Exfil)",
