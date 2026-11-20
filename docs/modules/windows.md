@@ -337,6 +337,50 @@ same events (0 rows in 90 days, including the tenant's real `jumpbox`
 creations), even though the `4720`s are the first local accounts on those hosts.
 That is unverified — it may need a longer baseline — and is not relied on.
 
+### The generic local-security-group analytics do not fire here (2026-11-20)
+
+"Member added to a Windows local security group" and its two local-Administrator
+variations — "User added to the Windows local Administrator group" (Low) and
+"Member added to the Windows local Administrator group" (Informational) — have
+never produced an alert in this tenant. A 180-day census of the `alerts` dataset
+(`lowercase(alert_name) contains "group"`) returns 27 distinct alert names and
+none of them is one of these three. The only `4732`-driven alert that does fire
+is "User added to the SMS Admins local group" (18 alerts), which keys on that
+group by name rather than on local-group membership in general.
+
+Two batches of fifteen events delivered six `4732`s, every one verified in
+`xdr_data`:
+
+| Batch | Host | `MemberName` | Group | `TargetDomainName` | Alert |
+|---|---|---|---|---|---|
+| 02:30Z | `FS01` | `EXAMPLECORP\d.lambert` | Administrators | `Builtin` | none |
+| 02:30Z | `FS02` | DN of `a.novikov` | Administrators | `EXAMPLECORP` | none |
+| 02:30Z | `IT-WS-026` | DN of `Domain Admins` | Administrators | `EXAMPLECORP` | none |
+| 02:40Z | `DC01` | DN of `d.lambert` | Administrators | `Builtin` | none |
+| 02:40Z | `DC01` | DN of `a.novikov` | Administrators | `EXAMPLECORP` | none |
+| 02:40Z | `FS01` | DN of `h.jung` | Remote Desktop Users | `Builtin` | none |
+
+The two `DC01` shapes are the working SMS Admins shape exactly — member DN,
+`TargetDomainName` set to the AD domain, event logged by the DC — with only the
+group changed, and both stayed silent. The 02:30Z batch had already covered the
+member-server formats (`DOMAIN\user`, member DN, group DN); the masquerade
+batches covered the remaining case — built-in *local* accounts (`Guest`,
+`DefaultAccount`, and a local `Administrator`) added to the local Administrators
+group on a member server, ten `4732`s in all — and nothing fired either.
+
+Real tenant data agrees. On 2026-10-23 14:17Z the machine account `JUMPBOX$`
+logged four genuine `4732`s on `jumpbox` (adding to `CodexSandboxUsers` and to
+`Users`), and none raised an alert. Their `MemberName` is empty, so they are not
+a clean positive control; a 30-day census of `4732`s otherwise contains only the
+SMS Admins events, these four, and the simulator's own probe traffic.
+
+The family is therefore not evaluating here — not on member servers, not on the
+DC, and not for either member-name format. No generator is shipped for it. A
+third batch was not spent: with the analytic silent across 180 days of tenant
+history and every published variation exercised, another shape would test the
+simulator rather than the detection. The module's `4732` builder stays in use for
+the SMS Admins detections, which do verify.
+
 ### New machine delegation: `4741` does not make a machine "new" (2026-11-18)
 
 `new_machine_delegation` had never alerted in 90 days, although the shipped
