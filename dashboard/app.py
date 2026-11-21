@@ -196,14 +196,8 @@ with open(_CONFIG_PATH, encoding="utf-8") as _f:
 # Apply the same placeholder substitution as log_simulator.py so that
 # GCP_PROJECT_ID / GCP_PROJECT_NUMBER / AWS_ACCOUNT_ID from .env propagate
 # into all config values (resource paths, SA emails, bucket names, etc.)
-_placeholders = {
-    'PLACEHOLDER_GCP_PROJECT_ID':     os.getenv('GCP_PROJECT_ID', ''),
-    'PLACEHOLDER_GCP_PROJECT_NUMBER': os.getenv('GCP_PROJECT_NUMBER', ''),
-    'PLACEHOLDER_AWS_ACCOUNT_ID':     os.getenv('AWS_ACCOUNT_ID', ''),
-}
-for _ph, _val in _placeholders.items():
-    if _val:
-        _config_str = _config_str.replace(_ph, _val)
+from integrations import env_placeholders as _env_placeholders
+_config_str = _env_placeholders.substitute(_config_str)
 CONFIG = json.loads(_config_str)
 
 # ── API authentication (Option B: invisible-to-UI, zero-config default) ───────
@@ -2676,7 +2670,7 @@ def _run_health_checks() -> dict:
         "AWS_ACCESS_KEY_ID":      "AWS",
         "AWS_SECRET_ACCESS_KEY":  "AWS",
         "s3_bucket_name":         "AWS",
-        "aws_account_id":         "AWS",
+        "AWS_ACCOUNT_ID":         "AWS",
         "aws_region":             "AWS",
         "GCP_PROJECT_ID":         "GCP",
         "GCP_PUBSUB_TOPIC":       "GCP",
@@ -2684,13 +2678,22 @@ def _run_health_checks() -> dict:
         "WEC_PFX_PATH":           "WEC",
         "WEC_PFX_PASSWORD":       "WEC",
     }
+    # Account/project ids are read in any letter case (env_placeholders.env_get), the
+    # way the config substitution reads them; unset, logs carry a stand-in id.
+    _id_vars = {var: fb for var, fb in _env_placeholders.PLACEHOLDERS.values()}
     for var, group in ENV_VARS.items():
-        val = os.getenv(var, "")
+        val = _env_placeholders.env_get(var) if var in _id_vars else os.getenv(var, "")
+        if val:
+            detail = "set"
+        elif var in _id_vars:
+            detail = f"not set — logs use the stand-in id {_id_vars[var]}"
+        else:
+            detail = "not set — its sources fall back to Cribl (see Transport routing)"
         results.append({
             "group": group,
             "check": f"{var} defined",
             "status": "ok" if val else "warn",
-            "detail": "set" if val else "not set — its sources fall back to Cribl (see Transport routing)",
+            "detail": detail,
         })
 
     # ── XSIAM Public API credentials (read-back) ──────────────────────────────
@@ -3037,7 +3040,7 @@ def _run_health_checks() -> dict:
         })
 
     # ── 5. GCP Pub/Sub permissions ────────────────────────────────────────────
-    gcp_project = os.getenv("GCP_PROJECT_ID", "")
+    gcp_project = _env_placeholders.env_get("GCP_PROJECT_ID")
     gcp_topic   = os.getenv("GCP_PUBSUB_TOPIC", "")
     inline_key  = os.getenv("GCP_SERVICE_ACCOUNT_KEY_JSON", "")
     adc_path    = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")

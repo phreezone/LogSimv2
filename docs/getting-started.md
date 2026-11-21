@@ -162,7 +162,8 @@ WEC_PFX_PASSWORD=your-pfx-export-password
 
 # Your 12-digit AWS account ID.
 # Used to build CloudTrail S3 key paths AND to substitute PLACEHOLDER_AWS_ACCOUNT_ID
-# throughout config.json (KMS key ARNs, ELB ARNs, etc.) at startup.
+# throughout config.json (KMS key ARNs, ELB ARNs, etc.) at startup. The name is
+# matched in any letter case; if it is unset, a stand-in id (418263950174) is used.
 AWS_ACCOUNT_ID=123456789012
 
 # S3 bucket name where simulated CloudTrail logs are written

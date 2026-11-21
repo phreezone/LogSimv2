@@ -89,6 +89,7 @@ def _tprint(*args, **kwargs):
 
 # Native pipe when configured, else the Cribl receiver (integrations/transport.py).
 from integrations import transport as _transport
+from integrations import env_placeholders as _env_placeholders
 _transport.set_logger(_tprint)
 
 def fetch_tor_exit_nodes():
@@ -687,7 +688,8 @@ def send_s3_message(content_bytes, module, config, event_name):
 
         # Retrieve variables: Prioritize .env (os.getenv) > config.json > Safe Default
         # AWS_ACCOUNT_ID
-        account_id = os.getenv('AWS_ACCOUNT_ID', aws_conf.get('aws_account_id', '123456789012'))
+        account_id = (_env_placeholders.env_get('AWS_ACCOUNT_ID')
+                      or aws_conf.get('aws_account_id', '123456789012'))
 
         # AWS_REGION
         region = os.getenv('AWS_REGION', aws_conf.get('aws_region', 'us-east-1'))
@@ -1799,8 +1801,10 @@ def _fresh_attacker_ip():
 # Helper function to flesh out a user template from config
 def _get_random_user_from_template(config, user_template):
     """Takes a user template from config and returns a fully-fleshed identity object."""
-    account_id = os.getenv('AWS_ACCOUNT_ID')
-    
+    account_id = (_env_placeholders.env_get('AWS_ACCOUNT_ID')
+                  or config.get('aws_config', {}).get('aws_account_id')
+                  or _env_placeholders.aws_account_id())
+
     final_identity = user_template.copy()
     final_identity['accountId'] = account_id
 
@@ -4206,17 +4210,10 @@ def main():
         # setting GCP_PROJECT_ID / GCP_PROJECT_NUMBER / AWS_ACCOUNT_ID in .env
         # propagates into ALL config values (log content, resource names, ARNs),
         # not just the transport-layer lookups that already read os.getenv().
-        _placeholders = {
-            'PLACEHOLDER_GCP_PROJECT_ID':     os.getenv('GCP_PROJECT_ID', ''),
-            'PLACEHOLDER_GCP_PROJECT_NUMBER': os.getenv('GCP_PROJECT_NUMBER', ''),
-            'PLACEHOLDER_AWS_ACCOUNT_ID':     os.getenv('AWS_ACCOUNT_ID', ''),
-        }
-        for _placeholder, _value in _placeholders.items():
-            if _value:
-                config_str = config_str.replace(_placeholder, _value)
-            else:
-                print(f"--- WARNING: {_placeholder} not set in .env — "
-                      f"config.json values using this placeholder will be literal. ---")
+        # The variable is matched in any letter case (Docker/Linux), and an unset one
+        # gets a fixed well-formed stand-in instead of staying literal.
+        from integrations import env_placeholders
+        config_str = env_placeholders.substitute(config_str, warn=print)
 
         config = json.loads(config_str)
         print(f"--- Diagnostic: Successfully loaded '{CONFIG_FILE_PATH}'. ---")

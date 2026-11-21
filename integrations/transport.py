@@ -38,6 +38,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from integrations import cribl_direct
+from integrations.env_placeholders import env_get, is_fallback
 
 NATIVE_TRANSPORTS = ("syslog", "http", "s3", "pubsub", "wec")
 CRIBL = "cribl"
@@ -57,7 +58,8 @@ def set_logger(fn: Callable[[str], None]) -> None:
 
 def _placeholder(v) -> str:
     v = (v or "").strip() if isinstance(v, str) else (v or "")
-    return "" if not v or str(v).startswith("PLACEHOLDER") else str(v)
+    # A stand-in account/project id (env_placeholders) is not a configured cloud.
+    return "" if not v or str(v).startswith("PLACEHOLDER") or is_fallback(v) else str(v)
 
 
 # ── Which pipe a module wants ────────────────────────────────────────────────
@@ -111,7 +113,7 @@ def s3_settings(module, config) -> Tuple[str, bool]:
 def pubsub_settings(module, config) -> Tuple[str, str, bool]:
     """(project_id, topic_id, has_credentials) as send_pubsub_message reads them."""
     conf = module_conf(module, config)
-    project = _placeholder(os.getenv("GCP_PROJECT_ID") or conf.get("gcp_project_id"))
+    project = _placeholder(env_get("GCP_PROJECT_ID") or conf.get("gcp_project_id"))
     topic = _placeholder(os.getenv("GCP_PUBSUB_TOPIC") or conf.get("pubsub_topic"))
     creds = bool(os.getenv("GCP_SERVICE_ACCOUNT_KEY_JSON")
                  or os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
