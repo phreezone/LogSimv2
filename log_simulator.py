@@ -4200,6 +4200,9 @@ def main():
     print("--- XSIAM Log Simulator ---")
     # --- Main Configuration Loading ---
     load_dotenv()
+    # Docker/Linux: make `Cribl_Token=` / `aws_region=` style .env keys visible under
+    # the upper-case names every lookup uses (Windows already ignores case).
+    _env_placeholders.normalize_env_case()
     CONFIG_FILE_PATH = 'config.json'
     config = {}
     try:

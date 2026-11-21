@@ -77,6 +77,9 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from dotenv import load_dotenv
 load_dotenv()
+# Docker/Linux: expose mixed/lower-case .env keys under the upper-case names the code reads.
+from integrations.env_placeholders import normalize_env_case
+normalize_env_case()
 
 from flask import Flask, jsonify, render_template, request, make_response
 import importlib
@@ -1808,6 +1811,7 @@ def _refresh_xdr_env():
         if not path:
             return None
         for k, v in dotenv_values(path).items():
+            k = k.upper()          # code reads upper-case names; .env may not use them
             if k.startswith(("XDR_", "XSIAM_API_")):
                 if v is None or not v.strip():
                     os.environ.pop(k, None)
@@ -2669,9 +2673,9 @@ def _run_health_checks() -> dict:
         "SYSLOG_HOST":            "Syslog",
         "AWS_ACCESS_KEY_ID":      "AWS",
         "AWS_SECRET_ACCESS_KEY":  "AWS",
-        "s3_bucket_name":         "AWS",
+        "S3_BUCKET_NAME":         "AWS",
         "AWS_ACCOUNT_ID":         "AWS",
-        "aws_region":             "AWS",
+        "AWS_REGION":             "AWS",
         "GCP_PROJECT_ID":         "GCP",
         "GCP_PUBSUB_TOPIC":       "GCP",
         "WEC_BROKER_URL":         "WEC",
@@ -2957,9 +2961,10 @@ def _run_health_checks() -> dict:
     # ── 4. AWS S3 permissions ─────────────────────────────────────────────────
     aws_key    = os.getenv("AWS_ACCESS_KEY_ID", "")
     aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY", "")
-    # Accept upper or lower case — .env may use lowercase names
-    aws_bucket = os.getenv("S3_BUCKET_NAME", "") or os.getenv("s3_bucket_name", "")
-    aws_region = os.getenv("AWS_REGION", "") or os.getenv("aws_region", "us-east-1")
+    # Lower/mixed-case .env names were copied to these upper-case names at startup
+    # (normalize_env_case), so one spelling covers both platforms.
+    aws_bucket = os.getenv("S3_BUCKET_NAME", "")
+    aws_region = os.getenv("AWS_REGION", "") or "us-east-1"
     if aws_key and aws_secret and aws_bucket:
         try:
             import boto3 as _boto3
@@ -3033,7 +3038,7 @@ def _run_health_checks() -> dict:
             })
     else:
         missing = [v for v in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "S3_BUCKET_NAME"]
-                   if not (os.getenv(v, "") or os.getenv(v.lower(), ""))]
+                   if not os.getenv(v, "")]
         results.append({
             "group": "AWS S3", "check": "credentials present",
             "status": "skip", "detail": f"not set: {', '.join(missing)}",

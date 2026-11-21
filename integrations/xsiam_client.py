@@ -38,6 +38,11 @@ try:
     load_dotenv()
 except ImportError:  # pragma: no cover
     pass
+try:  # package import; plain import when run as `python integrations/xsiam_client.py`
+    from integrations.env_placeholders import normalize_env_case
+except ImportError:  # pragma: no cover
+    from env_placeholders import normalize_env_case
+normalize_env_case()
 
 
 # XQL results are polled, not returned inline. These bound that wait.

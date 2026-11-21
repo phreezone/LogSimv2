@@ -143,7 +143,7 @@ The dict key (e.g., `"okta_collector"`) is referenced by the module's `collector
 | `PLACEHOLDER_GCP_PROJECT_NUMBER` | `GCP_PROJECT_NUMBER` | Serverless service account emails (`NNN-compute@developer.gserviceaccount.com`) |
 | `PLACEHOLDER_AWS_ACCOUNT_ID` | `AWS_ACCOUNT_ID` | KMS key ARNs, ELB ARNs, target group ARNs in `aws_config` |
 
-The variable names are matched in any letter case, so `aws_account_id=` works under Docker and Linux as well as on Windows. If a variable is not set, its placeholder is replaced by a fixed stand-in (`418263950174` for the AWS account, `examplecorp-sim-prod` for the GCP project ID, `583920174625` for the GCP project number), so events sent through the Cribl fallback still carry well-formed ids. A stand-in never counts as a configured S3 or Pub/Sub destination.
+Every `.env` key is matched in any letter case: at startup each key is also made available under its upper-case name, so `aws_account_id=` or `Cribl_Token=` works under Docker and Linux as well as on Windows (an upper-case key that is set always wins). If a variable is not set, its placeholder is replaced by a fixed stand-in (`418263950174` for the AWS account, `examplecorp-sim-prod` for the GCP project ID, `583920174625` for the GCP project number), so events sent through the Cribl fallback still carry well-formed ids. A stand-in never counts as a configured S3 or Pub/Sub destination.
 
 GCP credentials are set via `.env` — see [Getting Started](getting-started.md).
 

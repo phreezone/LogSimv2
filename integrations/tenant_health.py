@@ -116,6 +116,11 @@ def _load_env():
         load_dotenv()
     except ImportError:
         pass
+    try:  # package import; plain import when run as a script
+        from integrations.env_placeholders import normalize_env_case
+    except ImportError:
+        from env_placeholders import normalize_env_case
+    normalize_env_case()
 
 
 def main(argv=None):

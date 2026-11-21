@@ -49,6 +49,32 @@ def env_get(name: str, default: str = "") -> str:
     return default
 
 
+# Lower-case names other tools read in BOTH cases on purpose; never copied.
+_NORMALIZE_SKIP = frozenset({"http_proxy", "https_proxy", "no_proxy", "all_proxy",
+                             "ftp_proxy"})
+
+
+def normalize_env_case() -> list:
+    """Copy every non-upper-case environment variable to its UPPER-CASE name when that
+    name is unset. Returns the names it set.
+
+    All LogSim code (and boto3) reads upper-case names: CRIBL_TOKEN, S3_BUCKET_NAME,
+    AWS_ACCESS_KEY_ID, ... On Windows the environment ignores case, so a .env written
+    as `Cribl_Token=` or `aws_region=` works; under Docker/Linux it silently does not.
+    Call once right after load_dotenv() (and before anything reads a variable) so both
+    platforms behave alike. An upper-case value that is already set always wins, and
+    on Windows this is a no-op."""
+    copied = []
+    for k, v in list(os.environ.items()):
+        up = k.upper()
+        if up == k or k.lower() in _NORMALIZE_SKIP or not v or not v.strip():
+            continue
+        if not (os.environ.get(up) or "").strip():
+            os.environ[up] = v
+            copied.append(up)
+    return copied
+
+
 def resolve() -> Dict[str, tuple]:
     """{placeholder: (value, from_env)} for every placeholder."""
     out = {}
