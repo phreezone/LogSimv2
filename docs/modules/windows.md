@@ -557,31 +557,71 @@ or Cribl paths changes that — the same wall documented for `kerberos_relay`. T
 is consistent with the published Required Data listing the agent path separately.
 The generator keeps the `1644` leg because it is the correct real-world shape.
 
-### AD CS detectors: what is reachable and what is not (2026-11-17)
+### AD CS detectors: what is reachable and what is not (updated 2026-11-20)
 
 The AD CS module itself is live: alert 799505 carries
 `DT:Active Directory Certificate Services Analytics`, so these analytics are
 evaluating events in this tenant. Of its seven detectors, one is confirmed and
 the rest are out of reach — each for a different, individually measured reason.
 
-**"Vulnerable certificate template loaded" — WIP on an unverifiable field.**
-Seven `4898` deliveries since 2026-10-29 (six of them on 2026-11-16/17) carried
-an ESC1-shaped `TemplateContent` (`msPKI-Certificate-Name-Flag: 0x1`, Client Auth
-EKU, `Authenticated Users` enroll in the SDDL) under five different template
-names, including one literally named `ESC1-Vulnerable`. Zero alerts, and one of
-those batches *did* fire a sibling AD CS analytic. The `TemplateContent` format
-is hand-rolled and there is no way to check it against ground truth:
+**Root cause of every CA silence: `CA\AuditFilter` did not exist.** Until
+2026-11-20 the tenant had never held a single CA audit record from the lab DC,
+even though the CA was issuing certificates normally (`CN=DC1.lab.local` certs
+were being issued by `CN=lab-DC1-CA` throughout). `certutil -getreg
+CA\AuditFilter` returned `0x80070002 ERROR_FILE_NOT_FOUND`: the value had never
+been created, and an absent audit mask means the service audits nothing,
+regardless of the OS audit subcategory. Creating it explicitly and restarting
+the service made events flow immediately:
 
-- the tenant holds only 7 `4898` events and all 7 are this generator's own
-  output, so there is no captured real event to copy;
-- Microsoft does not publish a per-event page for `4898`;
-- the Cortex page explicitly declines to say which event ID or which fields the
-  detector reads ("The detector page does not specify Windows event IDs or
-  certificate-template parsing rules").
+```powershell
+certutil -setreg CA\AuditFilter 127     # enable every CA audit class
+Restart-Service CertSvc
+```
 
-The `_build_4898` docstring already warned about this. Until a real `4898`
-becomes available, further deliveries would be guessing at the same unknown, so
-the detector is parked as WIP rather than probed again.
+The first records arrived at `04:18:29Z` (`4880`, `4897`), and two enrollments
+after a template ACL edit produced `4886` + `4887` + `4898` at `04:21:49Z` and
+`04:22:57Z`. One operational caveat learned at the same time: this DC writes
+~160 events/s and the Security log was a 134 MB circular file — roughly 20
+minutes of retention. `wevtutil sl Security /ms:1073741824` is required before
+trying to collect a sample.
+
+Note that the provider is **`Microsoft-Windows-Security-Auditing`**, Task
+`12805` (`Certification Services`) — not
+`Microsoft-Windows-CertificationAuthority`. `Get-WinEvent -ProviderName` with the
+CA provider name fails with `LogsAndProvidersDontOverlap`; filter by event ID.
+
+**"Vulnerable certificate template loaded" — layout is now ground truth.** A
+real `4898` was captured and settled every unknown that had made the old builder
+unverifiable:
+
+| Item | Captured value |
+|---|---|
+| Provider / task / keyword | `Microsoft-Windows-Security-Auditing`, Task `12805`, `0x8020000000000000` |
+| Version | `0` |
+| EventData (in order) | `TemplateInternalName`, `TemplateVersion`, `TemplateSchemaVersion`, `TemplateOID`, `TemplateDSObjectFQDN`, `DCDNSName`, `TemplateContent`, `SecurityDescriptor` |
+| Empty OID | a single space, not an empty string |
+| `TemplateContent` | the CA's decoded text dump: `flags = 0x…` with one `CT_FLAG_*` line per set bit, then `msPKI-*` blocks, then `pKI*` values; bare LF line endings and a leading blank line |
+| `SecurityDescriptor` | SDDL, a blank line, then a rendered ACE table (`Allow\tLAB\Domain Admins` / `\tEnroll`) |
+
+`_build_4898` was rebuilt on that layout on 2026-11-20: `DCDNSName` added, the
+`Subject*` block removed (a real `4898` carries none), `TemplateContent`
+rendered in the CA's text format with `msPKI-Certificate-Name-Flag = 0x1` /
+`CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT` for ESC1, and a domain-SID SDDL plus ACE
+table in place of the `O:DAG:DAD:PAI(...)` placeholder. What remains unverified
+is only whether the analytic parses this text layout — the field names and the
+shape are no longer guesses. No delivery has been judged against the rebuilt
+builder yet.
+
+**`4886`/`4887` were wrong in four ways.** The captured siblings show that
+`Attributes` is a cdc/rmd/ccm host triple (not `CertificateTemplate:…`), the
+template name is its own `CertificateTemplate` field, a request-supplied SAN
+appears as `Other Name:\n     Principal Name=user@domain` in
+`SubjectAlternativeName`, and both events are Version `1`. The builders now emit
+the captured field set and order, share `RequestId` across the request/issue
+pair, and derive a Windows-style 38-hex serial (`16` + random + zero-padded
+request id) from that id. `4888` mirrors the captured pair but has never been
+observed here.
+
 
 **"Discovery of misconfigured certificate templates using LDAP" — blocked by data
 source, not shape.** Published Required Data is *XDR Agent with eXtended Threat
@@ -613,8 +653,9 @@ CA does not record at all — and it is not documented. WIP.
 
 Two more AD CS detectors are out of reach for reasons unrelated to shape.
 **"Deletion of AD CS certificate database entries"** needs the CA
-database-deletion audit events (`4896`–`4902`), and Microsoft does not publish
-field layouts for those either, so it would be a second unverifiable builder.
+database-deletion audit events (`4896`, `4901`, `4902`). Those are a different
+group from the captured `4880`/`4886`/`4887`/`4897`/`4898` and are still
+uncaptured, with no published field layout.
 **"Unusual certificate management activity"** is a Cloud-module analytic fed by
 AWS/Azure/GCP audit logs, not by Windows events at all.
 
@@ -648,6 +689,19 @@ is the same wall as `4898`, and it is why the generator is `WIP_`-prefixed rathe
 than tuned further. It is shipped as `WIP_ESC4_TEMPLATE_MODIFICATION` so the
 full four-way shape stays available for a retry once a real `4899`/`4900` is
 captured.
+
+**Capture status (2026-11-20).** With `AuditFilter=127` the CA emitted
+`4886`/`4887`/`4898` on every enrollment but still no `4899`/`4900`, including
+across a template ACL edit and a service restart. A fourth attempt is blocked on
+the template itself: the built-in `User` template is schema V1 and its validity
+and renewal fields are read-only, so the content edit that should trigger `4899`
+cannot be made on it. The path is to duplicate `User` into a schema-V4
+(`Windows Server 2016`) template named `LogSim-Test`, publish it
+(`certutil -SetCATemplates +LogSim-Test`), restart `CertSvc`, then edit its
+**Security** tab (expect `4900`) and its **Validity period** (expect `4899`).
+`_build_4899`/`_build_4900` still use the pre-capture six-line `TemplateContent`
+format; they must be rebuilt from that capture before the generator is probed
+again.
 
 ### Sensitive-account classification is inventory-driven (2026-11-16)
 

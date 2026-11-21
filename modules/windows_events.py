@@ -211,12 +211,19 @@ _EVENT_META = {
     4757: {"task": 13826, "category": "Security Group Management",   "version": 0, "outcome": "success"},
     5136: {"task": 14081, "category": "Directory Service Changes",  "version": 0, "outcome": "success"},
     5137: {"task": 14081, "category": "Directory Service Changes",  "version": 0, "outcome": "success"},
-    4886: {"task": 12290, "category": "Certification Services",    "version": 0, "outcome": "success"},
-    4887: {"task": 12290, "category": "Certification Services",    "version": 0, "outcome": "success"},
-    4888: {"task": 12290, "category": "Certification Services",    "version": 0, "outcome": "failure"},
-    4898: {"task": 12293, "category": "Certification Services",    "version": 0, "outcome": "success"},
-    4899: {"task": 12294, "category": "Certification Services",    "version": 0, "outcome": "success"},
-    4900: {"task": 12295, "category": "Certification Services",    "version": 0, "outcome": "success"},
+    # AD CS audit records come from the Security-Auditing provider, not from
+    # Microsoft-Windows-CertificationAuthority: captured 2026-11-20 from DC1.lab.local
+    # shows Provider Name='Microsoft-Windows-Security-Auditing', Task=12805
+    # ("Certification Services") and Keywords=0x8020000000000000.
+    # Versions: 4886/4887 are Version 1, 4898 is Version 0 (all three captured on the
+    # same host). 4888/4899/4900 have never been observed here, so their version
+    # follows the nearest captured sibling and is not independently verified.
+    4886: {"task": 12805, "category": "Certification Services",    "version": 1, "outcome": "success"},
+    4887: {"task": 12805, "category": "Certification Services",    "version": 1, "outcome": "success"},
+    4888: {"task": 12805, "category": "Certification Services",    "version": 1, "outcome": "failure"},
+    4898: {"task": 12805, "category": "Certification Services",    "version": 0, "outcome": "success"},
+    4899: {"task": 12805, "category": "Certification Services",    "version": 0, "outcome": "success"},
+    4900: {"task": 12805, "category": "Certification Services",    "version": 0, "outcome": "success"},
     4720: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4722: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
     4724: {"task": 13824, "category": "User Account Management",   "version": 0, "outcome": "success"},
@@ -1023,27 +1030,43 @@ def _msg_4757(d):
 
 
 def _msg_4886(d):
+    # Captured verbatim from a real 4886 on DC1.lab.local (2026-11-20). Attributes
+    # starts with a newline, so "Attributes:\t" is followed by a blank-looking line
+    # before the cdc/rmd/ccm block; RequestClientInfo does the same.
     return (
-        "Certificate Services received a certificate request.\r\n\r\n"
+        "Certificate Services received a certificate request.\r\n\t\r\n"
         f"Request ID:\t{d.get('RequestId','')}\r\n"
         f"Requester:\t{d.get('Requester','')}\r\n"
-        f"Attributes:\t{d.get('Attributes','')}"
+        f"Attributes:\t{d.get('Attributes','')}\r\n"
+        f"Subject from CSR:\t{d.get('Subject','')}\r\n"
+        f"Subject Alternative Name from CSR:\t{d.get('SubjectAlternativeName','')}\r\n"
+        "\r\n"
+        f"Requested Template:\t{d.get('CertificateTemplate','')}\r\n"
+        f"RequestOSVersion:\t{d.get('RequestOSVersion','')}\r\n"
+        f"RequestCSPProvider:\t{d.get('RequestCSPProvider','')}\r\n"
+        f"RequestClientInfo:\t{d.get('RequestClientInfo','')}\r\n"
+        f"Authentication Service:\t{d.get('AuthenticationService','')}\r\n"
+        f"Authentication Level:\t{d.get('AuthenticationLevel','')}\r\n"
+        f"DCOMorRPC:\t\t{d.get('DCOMorRPC','')}"
     )
 
 
 def _msg_4898(d):
-    # Shape per the published 4898 description: "%1 v%2 (Schema V%3)" then the template
-    # DN, Template Content and Security Descriptor.
+    # Captured verbatim from a real 4898 on DC1.lab.local (2026-11-20). The template
+    # identity line is followed by a line holding a single space, then the template's
+    # DN, then the two dumps. TemplateContent and SecurityDescriptor are bare-LF
+    # multi-line blobs that already end in a newline, hence the extra \r\n here.
     return (
         "Certificate Services loaded a template.\r\n\r\n"
-        f"Version:\t{d.get('TemplateInternalName','')} "
-        f"v{d.get('TemplateVersion','')} "
+        f"{d.get('TemplateInternalName','')} v{d.get('TemplateVersion','')} "
         f"(Schema V{d.get('TemplateSchemaVersion','')})\r\n"
-        f"Template Information:\r\n"
-        f"\tTemplate Content:\t{d.get('TemplateContent','')}\r\n"
-        f"\tSecurity Descriptor:\t{d.get('SecurityDescriptor','')}\r\n"
-        f"\tOID:\t{d.get('TemplateOID','')}\r\n"
-        f"\tTemplate DS Object FQDN:\t{d.get('TemplateDSObjectFQDN','')}"
+        " \r\n"
+        f"{d.get('TemplateDSObjectFQDN','')}\r\n\r\n"
+        "Template Information:\r\n"
+        f"\tTemplate Content:\t\t{d.get('TemplateContent','')}\r\n"
+        f"\tSecurity Descriptor:\t\t{d.get('SecurityDescriptor','')}\r\n"
+        "\r\nAdditional Information:\r\n"
+        f"\tDomain Controller:\t{d.get('DCDNSName','')}"
     )
 
 
@@ -1089,26 +1112,41 @@ def _msg_4900(d):
 
 
 def _msg_4887(d):
+    # Captured verbatim from a real 4887 on DC1.lab.local (2026-11-20).
     return (
-        "Certificate Services approved a certificate request and issued a certificate.\r\n\r\n"
+        "Certificate Services approved a certificate request and issued a certificate.\r\n\t\r\n"
         f"Request ID:\t{d.get('RequestId','')}\r\n"
         f"Requester:\t{d.get('Requester','')}\r\n"
         f"Attributes:\t{d.get('Attributes','')}\r\n"
         f"Disposition:\t{d.get('Disposition','')}\r\n"
         f"SKI:\t\t{d.get('SubjectKeyIdentifier','')}\r\n"
-        f"Subject:\t{d.get('Subject','')}"
+        f"Subject:\t{d.get('Subject','')}\r\n"
+        f"Subject Alternative Name:\r\n{d.get('SubjectAlternativeName','')}\r\n"
+        "\r\n"
+        f"Certificate Template:\t{d.get('CertificateTemplate','')}\r\n"
+        f"Serial Number:\t\t{d.get('SerialNumber','')}\r\n"
+        f"Authentication Service:\t{d.get('AuthenticationService','')}\r\n"
+        f"Authentication Level:\t{d.get('AuthenticationLevel','')}\r\n"
+        f"DCOMorRPC:\t\t{d.get('DCOMorRPC','')}"
     )
 
 
 def _msg_4888(d):
+    # 4888 has never been captured here; layout mirrors the captured 4887 with the
+    # issued-certificate values (SKI, serial) omitted, which is what a denial carries.
     return (
-        "Certificate Services denied a certificate request.\r\n\r\n"
+        "Certificate Services denied a certificate request.\r\n\t\r\n"
         f"Request ID:\t{d.get('RequestId','')}\r\n"
         f"Requester:\t{d.get('Requester','')}\r\n"
         f"Attributes:\t{d.get('Attributes','')}\r\n"
         f"Disposition:\t{d.get('Disposition','')}\r\n"
-        f"SKI:\t\t{d.get('SubjectKeyIdentifier','')}\r\n"
-        f"Subject:\t{d.get('Subject','')}"
+        f"Subject:\t{d.get('Subject','')}\r\n"
+        f"Subject Alternative Name:\r\n{d.get('SubjectAlternativeName','')}\r\n"
+        "\r\n"
+        f"Certificate Template:\t{d.get('CertificateTemplate','')}\r\n"
+        f"Authentication Service:\t{d.get('AuthenticationService','')}\r\n"
+        f"Authentication Level:\t{d.get('AuthenticationLevel','')}\r\n"
+        f"DCOMorRPC:\t\t{d.get('DCOMorRPC','')}"
     )
 
 
@@ -3846,64 +3884,243 @@ def _random_ski():
     return " ".join(f"{random.randint(0,255):02x}" for _ in range(20))
 
 
+# ── AD CS: shared field construction for the CA audit events ────────────────
+# Ground truth for everything below: a real ca-sample.xml captured from the lab DC
+# (DC1.lab.local, Windows Server 2019, CA "lab-DC1-CA") on 2026-11-20, holding one
+# 4886, one 4887 and one 4898. Key facts that the previous builders got wrong:
+#   * provider is Microsoft-Windows-Security-Auditing, Task 12805, Channel Security
+#   * 4898 carries DCDNSName and no Subject* block at all
+#   * TemplateContent is a decoded *text* dump (bare LF, leading blank line), not a
+#     six-line colon-separated list
+#   * SecurityDescriptor is SDDL followed by a blank line and a rendered ACE table
+#   * RequestId/Requester/Attributes/... are the 4886/4887 fields; the template name
+#     is its own CertificateTemplate field, never part of Attributes
+_CA_ENROLL_RIGHT = "0e10c968-78fb-11d2-90d4-00c04f79dc55"  # Certificate-Enrollment
+_CA_REQUEST_CSP = "Microsoft Enhanced Cryptographic Provider v1.0"
+# Client OS build reported by the requester. Not read by any known detector; the
+# captured sample (an enrollment from DC1 itself) reported 10.0.17763.2. Workstation
+# requesters in this estate are Windows 10, so 10.0.19041.1 is used.
+_CA_REQUEST_OS_VERSION = "10.0.19041.1"
+
+
+def _ca_request_host(config, user_info):
+    """The FQDN the CA records as the requesting machine (ccm in Attributes)."""
+    hostname = user_info.get("hostname") or _get_ca_hostname(config)
+    return _fqdn(hostname, config)
+
+
+def _ca_request_attributes(config, user_info):
+    """4886/4887 Attributes, captured shape: a cdc/rmd/ccm host triple.
+
+    The real field begins with a newline and leaves a blank line before ccm.
+    """
+    ca_host = _get_ca_hostname(config)
+    machine = _ca_request_host(config, user_info)
+    return f"\ncdc:{ca_host}\nrmd:{ca_host}\n\nccm:{machine}"
+
+
+def _ca_san_text(san_value, san_kind="upn"):
+    """Render a CSR subjectAltName the way the CA prints it."""
+    if not san_value:
+        return ""
+    if san_kind == "upn":
+        return f"Other Name:\n     Principal Name={san_value}"
+    return f"DNS Name={san_value}"
+
+
+def _ca_request_client_info(requester, machine, process):
+    """4886 RequestClientInfo, captured shape (leading newline, tab-indented)."""
+    return ("\n\tClientId: 0x5\n"
+            f"\tUser: {requester}\n"
+            f"\tMachine: {machine}\n"
+            f"\tProcess: {process}")
+
+
+def _ca_serial_for_request(req_id):
+    """A 38-hex Windows certificate serial tied to the request id.
+
+    Captured shape: '16' tag, 24 random hex characters, then the request id as
+    12 zero-padded hex digits (…000000000004 for RequestId 4).
+    """
+    try:
+        rid = int(req_id)
+    except (TypeError, ValueError):
+        rid = random.randint(1, 0xFFFFFF)
+    return "16" + os.urandom(12).hex() + f"{rid:012x}"
+
+
+def _ca_template_content(template_name, *, enrollee_supplies_subject,
+                         schema_version="2", eku_oids=None):
+    """Render the CA's 4898 TemplateContent text dump.
+
+    Reproduces the captured layout: leading blank line, `flags = 0x…` followed by
+    one decoded CT_FLAG_* line per set bit, one block per msPKI-* attribute, plain
+    `name = value` lines, then the list-valued pKI attributes. Sections are
+    separated by blank lines and every line ends in a bare LF (the captured field
+    contains no CRLF at all).
+
+    `msPKI-Certificate-Name-Flag = 0x1` with CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT is the
+    literal ESC1 condition, and it is rendered exactly as the CA renders it.
+    """
+    eku_oids = eku_oids or [("1.3.6.1.5.5.7.3.2", "Client Authentication")]
+    name_flag = 0x1 if enrollee_supplies_subject else 0x0
+    name_lines = ("  CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT -- 0x1\n"
+                  if enrollee_supplies_subject else "")
+    eku_lines = "".join(f"  {oid} {name}\n" for oid, name in eku_oids)
+    # 0x23a = ADD_EMAIL|PUBLISH_TO_DS|EXPORTABLE_KEY|AUTO_ENROLLMENT|ADD_TEMPLATE_NAME.
+    # The captured default template also had IS_DEFAULT (0x10000); a template created
+    # by hand for an ESC attack does not, so that bit is omitted here.
+    return (
+        "\n"
+        "flags = 0x23a (570)\n"
+        "  CT_FLAG_ADD_EMAIL -- 0x2\n"
+        "  CT_FLAG_PUBLISH_TO_DS -- 0x8\n"
+        "  CT_FLAG_EXPORTABLE_KEY -- 0x10 (16)\n"
+        "  CT_FLAG_AUTO_ENROLLMENT -- 0x20 (32)\n"
+        "  CT_FLAG_ADD_TEMPLATE_NAME -- 0x200 (512)\n"
+        "\n"
+        "msPKI-Private-Key-Flag = 0x10 (16)\n"
+        "  CTPRIVATEKEY_FLAG_EXPORTABLE_KEY -- 0x10 (16)\n"
+        "  CTPRIVATEKEY_FLAG_ATTEST_NONE -- 0x0\n"
+        "  TEMPLATE_SERVER_VER_NONE<<CTPRIVATEKEY_FLAG_SERVERVERSION_SHIFT -- 0x0\n"
+        "  TEMPLATE_CLIENT_VER_NONE<<CTPRIVATEKEY_FLAG_CLIENTVERSION_SHIFT -- 0x0\n"
+        "\n"
+        f"msPKI-Certificate-Name-Flag = 0x{name_flag:x} ({name_flag})\n"
+        f"{name_lines}"
+        "\n"
+        "msPKI-Enrollment-Flag = 0x0\n"
+        "\n"
+        f"msPKI-Template-Schema-Version = {schema_version}\n"
+        "\n"
+        "revision = 7\n"
+        "\n"
+        "msPKI-Template-Minor-Revision = 3\n"
+        "\n"
+        "pKIDefaultKeySpec = 1\n"
+        "\n"
+        "pKIExpirationPeriod = 2 Years\n"
+        "\n"
+        "pKIOverlapPeriod = 6 Weeks\n"
+        "\n"
+        f"cn = {template_name}\n"
+        "\n"
+        f"distinguishedName = {template_name}\n"
+        "\n"
+        "pKIKeyUsage = a0\n"
+        "\n"
+        f"displayName = {template_name}\n"
+        "\n"
+        f"templateDescription = {template_name}\n"
+        "\n"
+        "pKIExtendedKeyUsage =\n"
+        f"{eku_lines}"
+        "\n"
+        "pKIDefaultCSPs =\n"
+        "  Microsoft Enhanced RSA and AES Cryptographic Provider\n"
+        "\n"
+        "msPKI-Supersede-Templates =\n"
+        "\n"
+        "msPKI-RA-Policies =\n"
+        "\n"
+        "msPKI-RA-Application-Policies =\n"
+        "\n"
+        "msPKI-Certificate-Policy =\n"
+        "\n"
+        "msPKI-Certificate-Application-Policy =\n"
+        "\n"
+        "pKICriticalExtensions =\n"
+        "  2.5.29.15 Key Usage\n"
+    )
+
+
+def _ca_template_security_descriptor(config, *, enrollee_supplies_subject):
+    """Render a template SecurityDescriptor: SDDL, blank line, ACE table.
+
+    Captured shape for the built-in User template: owner/group Enterprise Admins
+    (<domain SID>-519), object-specific Enroll ACEs for DA/DU/EA, full-control ACEs
+    for DA and EA, and Read for Authenticated Users. ESC1's missing half is an
+    object-specific Enroll ACE for Authenticated Users, which this adds when
+    `enrollee_supplies_subject` is true.
+    """
+    sid = _SYNTH_DOMAIN_SID
+    domain = _get_domain(config)
+    owner = f"{sid}-519"  # Enterprise Admins, as captured
+    oa = [f"(OA;;RPWPCR;{_CA_ENROLL_RIGHT};;DA)",
+          f"(OA;;RPWPCR;{_CA_ENROLL_RIGHT};;DU)",
+          f"(OA;;RPWPCR;{_CA_ENROLL_RIGHT};;{owner})"]
+    if enrollee_supplies_subject:
+        oa.append(f"(OA;;RPWPCR;{_CA_ENROLL_RIGHT};;AU)")
+    sddl = (f"O:{owner}G:{owner}D:PAI" + "".join(oa) +
+            "(A;;CCDCLCSWRPWPDTLOSDRCWDWO;;;DA)"
+            f"(A;;CCDCLCSWRPWPDTLOSDRCWDWO;;;{owner})"
+            "(A;;LCRPLORC;;;AU)")
+
+    table = [
+        f"Allow\t{domain}\\Domain Admins\n\tEnroll\n",
+        f"Allow\t{domain}\\Domain Users\n\tEnroll\n",
+        f"Allow\t{domain}\\Enterprise Admins\n\tEnroll\n",
+    ]
+    if enrollee_supplies_subject:
+        table.append(f"Allow\t{domain}\\Authenticated Users\n\tEnroll\n")
+    table.extend([
+        f"Allow(0x000f00ff)\t{domain}\\Domain Admins\n\tFull Control\n",
+        f"Allow(0x000f00ff)\t{domain}\\Enterprise Admins\n\tFull Control\n",
+        "Allow(0x00020094)\tNT AUTHORITY\\Authenticated Users\n\tRead\n",
+    ])
+    return sddl + "\n\n" + "".join(table)
+
+
 def _build_4898(user_info, config, *, template_name, enrollee_supplies_subject=True,
-                schema_version="2", template_version="100.2", ts=None) -> dict:
+                schema_version="2", template_version="100.2", template_oid=None,
+                ts=None) -> dict:
     """4898 - Certificate Services loaded a template (CA event).
 
-    Why this exists: 4898 is the CA's "template loaded" record, and the only event
-    that hands a detector the template's *contents* rather than its DN.
-    `msPKI-Certificate-Name-Flag = 0x1` (CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT) inside
-    Template Content is the literal ESC1 condition: a requester may name any
-    subject, including a privileged one. It targets "Vulnerable certificate
-    template loaded" only; "Suspicious certificate template modification" (ESC4) is
-    a directory-service change to the template object, not a load.
+    Rebuilt 2026-11-20 against a real 4898 captured from DC1.lab.local. 4898 is the
+    CA's "template loaded" record and the only event that hands a detector the
+    template's *contents* rather than its DN: `msPKI-Certificate-Name-Flag = 0x1`
+    (CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT) inside Template Content is the literal ESC1
+    condition.
 
-    CAVEAT - measured, not theoretical. Seven deliveries since 2026-10-29 (six of
-    them on 2026-11-16/17) under five template names, including one literally
-    called `ESC1-Vulnerable`, produced zero alerts - one of them in a batch that
-    did fire a sibling AD CS analytic. The EventData names and the TemplateContent
-    layout below cannot be checked against anything: the tenant's only 4898 events
-    are this generator's own output, Microsoft publishes no page for 4898, and the
-    Cortex detector page explicitly does not say which event or fields it reads.
-    Treat this builder as unverified; do not tune it further without a captured
-    real 4898 to compare against.
+    EventData is exactly the captured set, in captured order:
+        TemplateInternalName, TemplateVersion, TemplateSchemaVersion, TemplateOID,
+        TemplateDSObjectFQDN, DCDNSName, TemplateContent, SecurityDescriptor
+
+    TemplateOID is a single space when the template has no OID (as captured for the
+    schema-V1 User template); generated templates here are schema V2 and carry one.
+
+    Still unverified: whether the tenant's ESC1 detector parses this text layout.
+    The field names and the layout itself are no longer guesses.
     """
     ca_host = _get_ca_hostname(config)
     dns_domain = _get_dns_domain(config)
     base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
 
-    # 0x1 = CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT (the ESC1 condition); 0x0 = subject built
-    # from AD, which is the safe configuration.
-    name_flag = "0x1" if enrollee_supplies_subject else "0x0"
-    content = (
-        f"msPKI-Certificate-Name-Flag: {name_flag}\r\n"
-        f"msPKI-Enrollment-Flag: 0x0\r\n"
-        f"msPKI-Private-Key-Flag: 0x10\r\n"
-        f"msPKI-RA-Signature: 0\r\n"                      # 0 = no manager approval (ESC1)
-        f"pKIExtendedKeyUsage: 1.3.6.1.5.5.7.3.2\r\n"     # Client Authentication
-        f"msPKI-Certificate-Application-Policy: 1.3.6.1.5.5.7.3.2"
-    )
-    # Authenticated Users granted Enroll — the other half of ESC1.
-    sd = ("O:DAG:DAD:PAI(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;DA)"
-          "(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;EA)"
-          "(A;;CCDCLCSWRPWPRC;;;AU)")
+    oid = template_oid
+    if oid is None:
+        if str(schema_version) == "1":
+            oid = " "
+        else:
+            oid = (f"1.3.6.1.4.1.311.21.8.{random.randint(1000000, 9999999)}."
+                   f"{random.randint(1000000, 9999999)}")
+
     event_data = {
-        "SubjectUserSid":         _stable_user_sid(user_info["username"]),
-        "SubjectUserName":        user_info["username"],
-        "SubjectDomainName":      _get_domain(config),
-        "SubjectLogonId":         _new_logon_id(),
         "TemplateInternalName":   template_name,
         "TemplateVersion":        template_version,
         "TemplateSchemaVersion":  schema_version,
-        "TemplateOID":            f"1.3.6.1.4.1.311.21.8.{random.randint(1000000, 9999999)}."
-                                  f"{random.randint(1000000, 9999999)}",
+        "TemplateOID":            oid,
         "TemplateDSObjectFQDN":   (f"CN={template_name},CN=Certificate Templates,"
                                    f"CN=Public Key Services,CN=Services,"
                                    f"CN=Configuration,{base_dn}"),
-        "TemplateContent":        content,
-        "SecurityDescriptor":     sd,
+        "DCDNSName":              ca_host,
+        "TemplateContent":        _ca_template_content(
+            template_name,
+            enrollee_supplies_subject=enrollee_supplies_subject,
+            schema_version=schema_version),
+        "SecurityDescriptor":     _ca_template_security_descriptor(
+            config, enrollee_supplies_subject=enrollee_supplies_subject),
     }
     return _build_event(4898, ca_host, event_data, success=True, ts=ts)
+
 
 
 def _build_4899(user_info, config, *, template_name, old_content, new_content,
@@ -3992,85 +4209,102 @@ def _build_4900(user_info, config, *, template_name, old_content, new_content,
 
 
 def _build_4886(user_info, config, *, template_name, request_id=None,
-                san_override=None, san_kind="upn", ts=None) -> dict:
-    """4886 – Certificate Services received a certificate request (CA event)."""
+                san_override=None, san_kind="upn", subject_dn=None,
+                client_process="certreq.exe", ts=None) -> dict:
+    """4886 – Certificate Services received a certificate request (CA event).
+
+    EventData and ordering taken from a real 4886 captured on DC1.lab.local
+    (2026-11-20). The requested template is its own `CertificateTemplate` field;
+    `Attributes` carries only the cdc/rmd/ccm host triple, and a request-supplied
+    subject/SAN appears in `Subject`/`SubjectAlternativeName`, not in Attributes.
+    """
     ca_host = _get_ca_hostname(config)
     domain = _get_domain(config)
-    dns_domain = _get_dns_domain(config)
-    req_id = request_id or str(random.randint(100, 99999))
+    req_id = str(request_id or random.randint(100, 99999))
     requester = f"{domain}\\{user_info['username']}"
-    attrs_parts = [f"CertificateTemplate:{template_name}"]
-    if san_override:
-        attrs_parts.append(f"san:{san_kind}={san_override}")
-    hostname = user_info.get("hostname", "WKS-TEMP")
-    if "." not in hostname:
-        hostname = f"{hostname}.{dns_domain}"
-    attrs_parts.append(f"ccm:{hostname}")
-    attrs = "\r\n".join(attrs_parts)
+    machine = _ca_request_host(config, user_info)
     event_data = {
-        "RequestId":  req_id,
-        "Requester":  requester,
-        "Attributes": attrs,
+        "RequestId":              req_id,
+        "Requester":              requester,
+        "Attributes":             _ca_request_attributes(config, user_info),
+        "Subject":                subject_dn or "",
+        "SubjectAlternativeName": _ca_san_text(san_override, san_kind),
+        "CertificateTemplate":    template_name,
+        "RequestOSVersion":       _CA_REQUEST_OS_VERSION,
+        "RequestCSPProvider":     _CA_REQUEST_CSP,
+        "RequestClientInfo":      _ca_request_client_info(requester, machine,
+                                                          client_process),
+        "AuthenticationService":  "NTLM",
+        "AuthenticationLevel":    "Privacy",
+        "DCOMorRPC":              "DCOM",
     }
     return _build_event(4886, ca_host, event_data, success=True, ts=ts)
 
 
 def _build_4887(user_info, config, *, template_name, request_id=None,
-                san_override=None, san_kind="upn", subject_dn=None, ts=None) -> dict:
-    """4887 – Certificate Services approved and issued a certificate (CA event)."""
+                san_override=None, san_kind="upn", subject_dn=None,
+                serial_number=None, client_process="certreq.exe", ts=None) -> dict:
+    """4887 – Certificate Services approved and issued a certificate (CA event).
+
+    EventData and ordering taken from a real 4887 captured on DC1.lab.local
+    (2026-11-20). Adds Disposition/SKI/Subject/SAN/SerialNumber to the 4886 set and
+    drops the request-only *CSR fields.
+    """
     ca_host = _get_ca_hostname(config)
     domain = _get_domain(config)
     dns_domain = _get_dns_domain(config)
-    req_id = request_id or str(random.randint(100, 99999))
+    req_id = str(request_id or random.randint(100, 99999))
     requester = f"{domain}\\{user_info['username']}"
-    attrs_parts = [f"CertificateTemplate:{template_name}"]
-    if san_override:
-        attrs_parts.append(f"san:{san_kind}={san_override}")
-    hostname = user_info.get("hostname", "WKS-TEMP")
-    if "." not in hostname:
-        hostname = f"{hostname}.{dns_domain}"
-    attrs_parts.append(f"ccm:{hostname}")
-    attrs = "\r\n".join(attrs_parts)
-    dc_parts = dns_domain.split(".")
-    base_dn = ",".join(f"DC={p}" for p in dc_parts)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
     subj = subject_dn or f"CN={user_info['username']},CN=Users,{base_dn}"
     event_data = {
         "RequestId":              req_id,
         "Requester":              requester,
-        "Attributes":             attrs,
+        "Attributes":             _ca_request_attributes(config, user_info),
         "Disposition":            "3",
         "SubjectKeyIdentifier":   _random_ski(),
         "Subject":                subj,
+        "SubjectAlternativeName": _ca_san_text(san_override, san_kind),
+        "CertificateTemplate":    template_name,
+        "SerialNumber":           serial_number or _ca_serial_for_request(req_id),
+        "AuthenticationService":  "NTLM",
+        "AuthenticationLevel":    "Privacy",
+        "DCOMorRPC":              "DCOM",
     }
     return _build_event(4887, ca_host, event_data, success=True, ts=ts)
 
 
 def _build_4888(user_info, config, *, template_name, request_id=None,
-                san_override=None, san_kind="upn", subject_dn=None, ts=None) -> dict:
-    """4888 – Certificate Services denied a certificate request (CA event)."""
+                san_override=None, san_kind="upn", subject_dn=None,
+                client_process="certreq.exe", ts=None) -> dict:
+    """4888 – Certificate Services denied a certificate request (CA event).
+
+    Not captured here; field names and ordering follow its captured siblings 4886
+    and 4887 (4888 is the denial counterpart and carries no SKI or serial).
+    """
     ca_host = _get_ca_hostname(config)
     domain = _get_domain(config)
     dns_domain = _get_dns_domain(config)
-    req_id = request_id or str(random.randint(100, 99999))
+    req_id = str(request_id or random.randint(100, 99999))
     requester = f"{domain}\\{user_info['username']}"
-    attrs_parts = [f"CertificateTemplate:{template_name}"]
-    if san_override:
-        attrs_parts.append(f"san:{san_kind}={san_override}")
-    hostname = user_info.get("hostname", "WKS-TEMP")
-    if "." not in hostname:
-        hostname = f"{hostname}.{dns_domain}"
-    attrs_parts.append(f"ccm:{hostname}")
-    attrs = "\r\n".join(attrs_parts)
-    dc_parts = dns_domain.split(".")
-    base_dn = ",".join(f"DC={p}" for p in dc_parts)
+    base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
     subj = subject_dn or f"CN={user_info['username']},CN=Users,{base_dn}"
     event_data = {
         "RequestId":              req_id,
         "Requester":              requester,
-        "Attributes":             attrs,
+        "Attributes":             _ca_request_attributes(config, user_info),
         "Disposition":            "2",
-        "SubjectKeyIdentifier":   "",
         "Subject":                subj,
+        "SubjectAlternativeName": _ca_san_text(san_override, san_kind),
+        "CertificateTemplate":    template_name,
+        "RequestOSVersion":       _CA_REQUEST_OS_VERSION,
+        "RequestCSPProvider":     _CA_REQUEST_CSP,
+        "RequestClientInfo":      _ca_request_client_info(requester,
+                                                          _ca_request_host(config, user_info),
+                                                          client_process),
+        "AuthenticationService":  "NTLM",
+        "AuthenticationLevel":    "Privacy",
+        "DCOMorRPC":              "DCOM",
     }
     return _build_event(4888, ca_host, event_data, success=False, ts=ts)
 
@@ -8403,6 +8637,7 @@ def _threat_priv_cert_request(config, session_context):
                                          request_id=request_id,
                                          san_override=san_value,
                                          san_kind="upn",
+                                         client_process=os.path.basename(tool[0]),
                                          ts=t)))
     t += random.uniform(0.1, 0.5)
 
@@ -8414,6 +8649,7 @@ def _threat_priv_cert_request(config, session_context):
                                          san_override=san_value,
                                          san_kind="upn",
                                          subject_dn=subject_dn,
+                                         client_process=os.path.basename(tool[0]),
                                          ts=t)))
     t += random.uniform(2.0, 5.0)
 
