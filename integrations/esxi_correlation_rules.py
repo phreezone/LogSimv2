@@ -127,7 +127,7 @@ RULES = [
         category="EXECUTION", tactic="TA0002 - Execution",
         techniques=["T1059.012 - Command and Scripting Interpreter: Hypervisor CLI",
                     "T1675 - ESXi Administration Command"],
-        filter=_SHELL + r''' and _raw_log ~= "\]: .*(system account (add|remove|set)|system permission (set|unset)|network firewall (set --enabled false|unload)|hostsvc/lockdown_disable|syslog config set --loghost=''|auditrecords (remote|local) disable|acceptance set --level CommunitySupported|--no-sig-check|encryption set --require|coredump file set --unconfigure|maintenanceMode set -e true|python -c|wget http|curl http|dd if=/dev/zero of=/vmfs|/tmp/\.|authorized_keys|crontabs/root|vib remove)"''',
+        filter=_SHELL + r''' and _raw_log ~= "\]: .*(system account (add|remove|set)|system permission (set|unset)|network firewall (set --enabled false|unload)|hostsvc/lockdown_disable|syslog config set --loghost=''|auditrecords (remote|local) disable|acceptance set --level CommunitySupported|--no-sig-check|encryption set --require|coredump file set --unconfigure|maintenanceMode set -e true|python -c|wget http|curl http|dd if=/dev/zero of=/vmfs|/tmp/\.|authorized_keys|crontabs/root|rc\.local\.d/|vib remove|cat /etc/(shadow|passwd)|openssl enc |date -s |autostartmanager/enable_autostart false|base64 -d|\\\\x[0-9a-f]{2}|pkill.*(vmx|vmdk))"''',
         alter=f'''| alter command_or_path = {_CMD},
         event_action = "shell command",
         external_target = arrayindex(regextract(_raw_log, "https?://([^/\\s']+)"), 0)''',
@@ -242,11 +242,14 @@ RULES = [
                     "T1490 - Inhibit System Recovery"],
         # ESXi 8: the operator's tag is on '<vm> on  <host> in ha-datacenter is stopping';
         # the 'is powered off' that follows is system-logged with no user.
-        filter=r'_raw_log ~= "(in ha-datacenter is stopping|VirtualMachine\.removeAllSnapshots)" and _raw_log contains " user="',
+        # Also catches the shell-based 'esxcli vm process kill' loop (LockBit/Akira path).
+        filter=r'_raw_log ~= "(in ha-datacenter is stopping|VirtualMachine\.removeAllSnapshots|vm process kill --type=force)" and (_raw_log contains " user=" or _raw_log ~= "shell\[\d+\]")',
         alter=r'''| alter target_object = coalesce(arrayindex(regextract(_raw_log, "Event \d+ : (.+?) on\s+\S+ in ha-datacenter is stopping"), 0),
-                                arrayindex(regextract(_raw_log, "(haTask-\S+removeAllSnapshots\S*)"), 0)),
-        event_action = if(_raw_log contains "is stopping", "vm powered off", "all snapshots removed")
-| alter powered_vm = if(event_action = "vm powered off", target_object, null)''',
+                                arrayindex(regextract(_raw_log, "(haTask-\S+removeAllSnapshots\S*)"), 0),
+                                arrayindex(regextract(_raw_log, "(vm process kill .*)$"), 0)),
+        event_action = if(_raw_log contains "is stopping", "vm powered off",
+                       if(_raw_log contains "vm process kill", "vm process killed", "all snapshots removed"))
+| alter powered_vm = if(event_action in ("vm powered off", "vm process killed"), target_object, null)''',
         # vCenter-driven operations arrive as vpxuser (DRS, scheduled tasks); the person
         # behind them is only visible in vCenter, so this rule watches host-level users.
         post_filter='actor_user != "vpxuser"',
@@ -429,7 +432,7 @@ RULES = [
         category="DISCOVERY", tactic="TA0007 - Discovery",
         techniques=["T1082 - System Information Discovery",
                     "T1087.001 - Account Discovery: Local Account"],
-        filter=_SHELL + r''' and _raw_log ~= "\]: (esxcli system settings advanced list|esxcli network firewall ruleset list|esxcli system account list|esxcli system permission list|vim-cmd vmsvc/getallvms|esxcli storage filesystem list|esxcli network ip interface list|esxcli system snmp get|vim-cmd hostsvc/hostsummary|esxcli software vib list)\s*$"''',
+        filter=_SHELL + r''' and _raw_log ~= "\]: (esxcli system settings advanced list|esxcli network firewall ruleset list|esxcli system account list|esxcli system permission list|vim-cmd vmsvc/getallvms|esxcli storage filesystem list|esxcli network ip interface list|esxcli system snmp get|vim-cmd hostsvc/hostsummary|esxcli software vib list|esxcli vm process list|find /vmfs/volumes|cat /etc/chkconfig\.db|ls .*/rc\.local\.d)\s*$"''',
         alter=f'''| alter command_or_path = {_CMD}, event_action = "discovery command"''',
         extra=",\n       count_distinct(command_or_path) as distinct_commands",
         threshold="distinct_commands >= 6", span="10m",

