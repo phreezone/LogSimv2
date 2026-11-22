@@ -3916,14 +3916,38 @@ def _ca_request_host(config, user_info):
     return _fqdn(hostname, config)
 
 
-def _ca_request_attributes(config, user_info):
-    """4886/4887 Attributes, captured shape: a cdc/rmd/ccm host triple.
+def _ca_request_attributes(config, user_info, *, template_name=None,
+                           san_value=None, san_kind="upn", captured=False):
+    """4886/4887/4888 Attributes — two shapes, both real.
 
-    The real field begins with a newline and leaves a blank line before ccm.
+    **default** (a `certreq -submit -attrib "CertificateTemplate:X\\nsan:upn=..."`
+    enrollment echoes the CSR attribute block)::
+
+        CertificateTemplate:UserAuth-Legacy
+        san:upn=jdoe@examplecorp.local
+        ccm=SALES-LT-001.examplecorp.local
+
+    **captured** (a `Get-Certificate` / DCOM-RPC enrollment, captured verbatim on
+    DC1.lab.local 2026-11-20): a cdc/rmd/ccm host triple with a leading newline and
+    a blank line before ccm. The template is *not* in this string; it is the
+    separate `CertificateTemplate` field.
+
+    The tenant's "Suspicious privileged certificate request" analytic reads the
+    template out of this attribute string. The captured shape does **not** fire it
+    (probe at 2026-11-22 01:27Z, 0 alerts); the request-attribute shape does
+    (alert 826337 at 02:20Z). The analytic also truncates the name at the hyphen
+    ("UserAuth-Legacy" is reported as "UserAuth"), so it is a `\\w+`-style parse
+    of `CertificateTemplate:` rather than a lookup of the dedicated field.
     """
-    ca_host = _get_ca_hostname(config)
     machine = _ca_request_host(config, user_info)
-    return f"\ncdc:{ca_host}\nrmd:{ca_host}\n\nccm:{machine}"
+    if captured or not template_name:
+        ca_host = _get_ca_hostname(config)
+        return f"\ncdc:{ca_host}\nrmd:{ca_host}\n\nccm:{machine}"
+    parts = [f"CertificateTemplate:{template_name}"]
+    if san_value:
+        parts.append(f"san:{san_kind}={san_value}")
+    parts.append(f"ccm:{machine}")
+    return "\n".join(parts)
 
 
 def _ca_san_text(san_value, san_kind="upn"):
@@ -4226,8 +4250,12 @@ def _build_4886(user_info, config, *, template_name, request_id=None,
 
     EventData and ordering taken from a real 4886 captured on DC1.lab.local
     (2026-11-20). The requested template is its own `CertificateTemplate` field;
-    `Attributes` carries only the cdc/rmd/ccm host triple, and a request-supplied
-    subject/SAN appears in `Subject`/`SubjectAlternativeName`, not in Attributes.
+    a request-supplied subject/SAN appears in `Subject`/`SubjectAlternativeName`.
+
+    `Attributes` carries the request-attribute block (`CertificateTemplate:X`,
+    `san:...`, `ccm:...`), not the captured cdc/rmd/ccm-only triple: the tenant's
+    privileged-certificate analytic parses *that* string. See
+    `_ca_request_attributes`.
     """
     ca_host = _get_ca_hostname(config)
     domain = _get_domain(config)
@@ -4237,7 +4265,9 @@ def _build_4886(user_info, config, *, template_name, request_id=None,
     event_data = {
         "RequestId":              req_id,
         "Requester":              requester,
-        "Attributes":             _ca_request_attributes(config, user_info),
+        "Attributes":             _ca_request_attributes(
+            config, user_info, template_name=template_name,
+            san_value=san_override, san_kind=san_kind),
         "Subject":                subject_dn or "",
         "SubjectAlternativeName": _ca_san_text(san_override, san_kind),
         "CertificateTemplate":    template_name,
@@ -4260,6 +4290,9 @@ def _build_4887(user_info, config, *, template_name, request_id=None,
     EventData and ordering taken from a real 4887 captured on DC1.lab.local
     (2026-11-20). Adds Disposition/SKI/Subject/SAN/SerialNumber to the 4886 set and
     drops the request-only *CSR fields.
+
+    `Attributes` carries the request-attribute block (see `_ca_request_attributes`);
+    the tenant analytic reads the template from it.
     """
     ca_host = _get_ca_hostname(config)
     domain = _get_domain(config)
@@ -4271,7 +4304,9 @@ def _build_4887(user_info, config, *, template_name, request_id=None,
     event_data = {
         "RequestId":              req_id,
         "Requester":              requester,
-        "Attributes":             _ca_request_attributes(config, user_info),
+        "Attributes":             _ca_request_attributes(
+            config, user_info, template_name=template_name,
+            san_value=san_override, san_kind=san_kind),
         "Disposition":            "3",
         "SubjectKeyIdentifier":   _random_ski(),
         "Subject":                subj,
@@ -4303,7 +4338,9 @@ def _build_4888(user_info, config, *, template_name, request_id=None,
     event_data = {
         "RequestId":              req_id,
         "Requester":              requester,
-        "Attributes":             _ca_request_attributes(config, user_info),
+        "Attributes":             _ca_request_attributes(
+            config, user_info, template_name=template_name,
+            san_value=san_override, san_kind=san_kind),
         "Disposition":            "2",
         "Subject":                subj,
         "SubjectAlternativeName": _ca_san_text(san_override, san_kind),
@@ -8571,7 +8608,7 @@ def _threat_priv_cert_request(config, session_context):
 
     Sequence:
       1. Administrator authenticates → DC-side 4624 + endpoint 4624 + 4672
-      2. 4688 Certify.exe / certreq.exe / PowerShell process creation
+      2. 4688 Certify.exe / certreq.exe process creation
       3. 4898 the CA loads an ESC1 template (enrollee supplies subject)
       4. 4886 request received, 4887 issued to an ordinary user
       5. 4768 PKINIT TGT request as the certificate subject
@@ -8614,6 +8651,10 @@ def _threat_priv_cert_request(config, session_context):
                                          is_admin=True, ts=t)))
     t += random.uniform(2.0, 5.0)
 
+    # Both tools put CertificateTemplate/san into the request attributes, which is
+    # what the CA echoes in 4886/4887 and what the tenant analytic parses. The
+    # PowerShell `Get-Certificate` (DCOM/RPC) path is deliberately not used: it
+    # records only the cdc/rmd/ccm triple and does not fire the analytic.
     tool = random.choice([
         ("C:\\Users\\Public\\Certify.exe",
          f"Certify.exe request /ca:{_get_ca_hostname(config)} "
@@ -8621,10 +8662,6 @@ def _threat_priv_cert_request(config, session_context):
         ("C:\\Windows\\System32\\certreq.exe",
          f"certreq.exe -submit -attrib \"CertificateTemplate:{template}"
          f"\\nsan:upn={san_value}\" request.req"),
-        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-         f"powershell.exe -ep bypass -c \"Get-Certificate -Template {template} "
-         f"-DnsName {subject}.{dns_domain} "
-         f"-CertStoreLocation Cert:\\CurrentUser\\My\""),
     ])
     events.append(json.dumps(_build_4688(requester, config, process_name=tool[0],
                                          command_line=tool[1],

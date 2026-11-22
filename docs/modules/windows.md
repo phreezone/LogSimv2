@@ -140,7 +140,7 @@ after three or more isolated probe batches each, so they are **WIP**.
 | `shadow_credentials` | **Confirmed** | Medium "Possible shadow credentials addition" fired 2026-11-08 and again 2026-11-10 04:46Z on `WEB43$`/`BACKUP31$` (actors `j.fedorov2`, `o.curtis`). A length sweep proved the Medium variation is selected by the 5136 `AttributeValue` DN-Binary length: only `B:828:` fires Medium; every other length fires the Low "Key credential attribute addition" variation. The generator therefore emits an 828-hex-character KEY_CREDENTIAL blob. |
 | `suspicious_sam_change` | **Confirmed** | Low "Suspicious sAMAccountName change" fired 2026-11-08 18:59Z. The state-carrying **4781** rename record is what the analytic keys on, not the 4742 alone. The Medium "to DC hostname" variation is not selected by `NewTargetUserName=DC01` alone; its discriminator remains unknown. |
 | `dnshostname_spoofing` | **Confirmed** | Medium "Suspicious dNSHostName attribute change to DC name" fired 2026-11-18 04:44:08Z (alert 803275) and again 05:06:32Z (803488), together with "Suspicious account attribute modification that matches that of a sensitive machine account" (803276 / 803489). The carrier is the **4742**, and the new value has to equal the FQDN of a DC the identity graph actually knows. See "dNSHostName spoofing: the 4742 carries it, and the value must be a real DC" below. |
-| `priv_cert_request` | **Confirmed** | Low "Suspicious privileged certificate request via certificate template" fired 2026-11-16 17:22Z (alert 799505) on a request submitted **by** `Administrator` for an ordinary user. The reverse shape (ordinary requester, privileged requested subject/SAN) is silent, as is the same requester again within the 1-day dedup window. See "Privileged certificate request: the *requester* is the privileged identity" below. |
+| `priv_cert_request` | **Confirmed** | Low "Suspicious privileged certificate request via certificate template" fired 2026-11-16 17:22Z (alert 799505) on a request submitted **by** `Administrator` for an ordinary user, and again 2026-11-22 02:20Z (alert 826337) after the AD CS rebuild. The reverse shape (ordinary requester, privileged requested subject/SAN) is silent, as is the same requester again within the 1-day dedup window. The discriminator is the **`Attributes`** string, not the dedicated `CertificateTemplate` field: the analytic parses `CertificateTemplate:<name>` out of `Attributes` and truncates at the hyphen (`UserAuth-Legacy` → "UserAuth"). See "Privileged certificate request: the *requester* is the privileged identity" below. |
 | `default_account_masquerade` | **Confirmed** | Low "Masquerading as a default local account" fired 2026-11-19 02:22Z (alerts 811838, 811841) and the Medium "…for the first time" at 02:25Z (811926, 811928, 811929). The shipped generator then fired 4 of 4 Medium (811937, 811942, 811946, 811948). The carrier must be a **local** `4720` logged on the member server (`TargetDomainName` = machine short name, machine-local SID); a DC-hosted `4720` is a domain account creation and raises nothing. The variation is chosen by the creator's 30-day creation count: 10 creations → Low, 0 → Medium. See "Masquerading as a default local account: a *local* 4720, and the creator's history picks the variation" below. |
 | `pkinit_auth` | **WIP** | 4 batches, 0 alerts. Tried the Microsoft-documented smart-card shape (4768 `PreAuthType=15`, `PreAuthEncryptionType=0x12`, cert issuer/serial/thumbprint), `PreAuthType` 14/16/17, rogue and enterprise issuers, short/full issuer DN, machine and user targets, missing cert, `4771` failure, `TicketOptions=0x60810010`, loopback `::1`, realm-qualified `ServiceName`, and a 4768 correlated with a preceding `msDS-KeyCredentialLink` write. All shapes ingested with the fields intact in both `microsoft_windows_raw` and `xdr_data`. |
 | `spn_cleared` | **WIP** | 5 batches, 0 alerts. Tried 4742 `ServicePrincipalNames` empty / `-` / absent, 5136 `%%14675` delete pairs, 5136 `%%14674` add-with-empty-value, 4662 write-property, and a same-account state transition (4742 with real SPNs, then 4742 with `-`). Batches 4–5 added the missing realism: `UserAccountControl` `%%2080` / `0x1000` (instead of `-`), the "only SPN changed" 4742 shape (`SamAccountName`/`DnsHostName` left as `-`), a real tenant asset (`FS01$`) as well as a new machine, and deleted-value renderings `-` / empty / absent. All shapes ingested; none alerted. Batch 6 re-ran the module's full sequence after the CRLF fix (9 events, real CRLF) — still 0 alerts. |
@@ -808,6 +808,39 @@ verified end to end from the shipped generator, not just from the probe, and the
 dedup window is a rolling ~1 day from the last alert. The same batch also
 delivered its `4898` leg, and "Vulnerable certificate template loaded" stayed
 silent — independent confirmation of that detector's WIP status.
+
+**The rebuild broke the analytic, and `Attributes` is why (2026-11-22).** The
+2026-11-20 rebuild replaced the invented 4886/4887 shapes with the captured
+DC1.lab.local ones: the template moved into its own `CertificateTemplate` field
+and `Attributes` became the captured `cdc`/`rmd`/`ccm` triple. A full generator
+sequence in that shape (9 events, requester `Administrator`, fresh subject
+`c.kelly`) ingested correctly at 01:27Z and raised **nothing** in six hours.
+
+A controlled probe at 02:20Z kept every rebuilt field and message byte but put
+the request-attribute block back into `Attributes` for the same template:
+
+```
+CertificateTemplate:UserAuth-Legacy
+san:upn=a.tucker@examplecorp.local
+ccm:SALES-LT-001.examplecorp.local
+```
+
+Alert **826337** fired at 02:20:26Z, verbatim: "…requested via the template
+**UserAuth**. This certificate was issued for
+CN=a.tucker,CN=Users,DC=examplecorp,DC=local." So:
+
+- the analytic reads the template from **`Attributes`**, not from the
+  `CertificateTemplate` field (which was populated in both batches);
+- it parses `CertificateTemplate:` with a `\w+`-style token, because
+  `UserAuth-Legacy` is reported as `UserAuth` — the same truncation as 799505;
+- a `Get-Certificate`/DCOM-RPC enrollment (the captured shape) cannot trigger
+  this analytic at all. A `certreq -submit -attrib "CertificateTemplate:X\nsan:..."`
+  or Certify enrollment does, because those attributes are echoed into the CA
+  event. That is also the only tool choice the generator now uses.
+
+`_ca_request_attributes(..., captured=True)` still renders the captured triple
+for fidelity checks; the builders default to the request-attribute block because
+that is the shape the detection requires.
 
 ### CRLF reaches `action_evtlog_message`, not the EventData JSON (2026-11-16)
 

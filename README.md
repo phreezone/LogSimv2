@@ -167,12 +167,15 @@ Admins variant fires (see `docs/modules/windows.md`).
 
 The AD CS request pair used by `priv_cert_request` was rebuilt on 2026-11-20
 against real `4886`/`4887`/`4898` captured from the lab DC after the missing
-`CA\AuditFilter` audit mask was created. `Attributes` is a cdc/rmd/ccm host
-triple, the template name is a `CertificateTemplate` field of its own, a
-request-supplied SAN lives in `SubjectAlternativeName`, and `TemplateContent` is
-the CA's decoded text dump rather than the old six-line list. The `4898` field
-layout is now confirmed; whether the "Vulnerable certificate template loaded"
-analytic parses it is still unverified and is the next probe.
+`CA\AuditFilter` audit mask was created. The `4898` field layout and the CA text
+`TemplateContent` are confirmed. One correction came out of the re-probe on
+2026-11-22: the analytic reads the template from the 4886/4887 **`Attributes`**
+string, not from the dedicated `CertificateTemplate` field, so the rebuilt
+cdc/rmd/ccm-only `Attributes` silently broke it. The builders now emit the
+request-attribute block a `certreq -submit -attrib` enrollment produces
+(`CertificateTemplate:<name>` + `san:upn=…` + `ccm:…`), and alert 826337 fired
+from that shape. Whether "Vulnerable certificate template loaded" parses the new
+`4898` is still unverified.
 
 **WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 
