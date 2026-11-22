@@ -1030,16 +1030,19 @@ def _msg_4757(d):
 
 
 def _msg_4886(d):
-    # Captured verbatim from a real 4886 on DC1.lab.local (2026-11-20). Attributes
-    # starts with a newline, so "Attributes:\t" is followed by a blank-looking line
-    # before the cdc/rmd/ccm block; RequestClientInfo does the same.
+    # Captured from a real 4886 on DC1.lab.local (2026-11-20) and byte-identical for
+    # the captured field set. Attributes starts with a newline, so "Attributes:\t" is
+    # followed by a blank-looking line before the cdc/rmd/ccm block; RequestClientInfo
+    # does the same. A request-supplied SAN renders on its own line, as in 4887.
+    san = str(d.get("SubjectAlternativeName", "")).rstrip("\r\n")
+    san_line = f"{san}\r\n" if san else ""
     return (
         "Certificate Services received a certificate request.\r\n\t\r\n"
         f"Request ID:\t{d.get('RequestId','')}\r\n"
         f"Requester:\t{d.get('Requester','')}\r\n"
         f"Attributes:\t{d.get('Attributes','')}\r\n"
         f"Subject from CSR:\t{d.get('Subject','')}\r\n"
-        f"Subject Alternative Name from CSR:\t{d.get('SubjectAlternativeName','')}\r\n"
+        f"Subject Alternative Name from CSR:\r\n{san_line}"
         "\r\n"
         f"Requested Template:\t{d.get('CertificateTemplate','')}\r\n"
         f"RequestOSVersion:\t{d.get('RequestOSVersion','')}\r\n"
@@ -1047,7 +1050,7 @@ def _msg_4886(d):
         f"RequestClientInfo:\t{d.get('RequestClientInfo','')}\r\n"
         f"Authentication Service:\t{d.get('AuthenticationService','')}\r\n"
         f"Authentication Level:\t{d.get('AuthenticationLevel','')}\r\n"
-        f"DCOMorRPC:\t\t{d.get('DCOMorRPC','')}"
+        f"DCOMorRPC:\t\t{d.get('DCOMorRPC','')} "
     )
 
 
@@ -1066,7 +1069,7 @@ def _msg_4898(d):
         f"\tTemplate Content:\t\t{d.get('TemplateContent','')}\r\n"
         f"\tSecurity Descriptor:\t\t{d.get('SecurityDescriptor','')}\r\n"
         "\r\nAdditional Information:\r\n"
-        f"\tDomain Controller:\t{d.get('DCDNSName','')}"
+        f"\tDomain Controller:\t{d.get('DCDNSName','')} "
     )
 
 
@@ -1113,6 +1116,8 @@ def _msg_4900(d):
 
 def _msg_4887(d):
     # Captured verbatim from a real 4887 on DC1.lab.local (2026-11-20).
+    san = str(d.get("SubjectAlternativeName", "")).rstrip("\r\n")
+    san_line = f"{san}\r\n" if san else ""
     return (
         "Certificate Services approved a certificate request and issued a certificate.\r\n\t\r\n"
         f"Request ID:\t{d.get('RequestId','')}\r\n"
@@ -1121,19 +1126,21 @@ def _msg_4887(d):
         f"Disposition:\t{d.get('Disposition','')}\r\n"
         f"SKI:\t\t{d.get('SubjectKeyIdentifier','')}\r\n"
         f"Subject:\t{d.get('Subject','')}\r\n"
-        f"Subject Alternative Name:\r\n{d.get('SubjectAlternativeName','')}\r\n"
+        f"Subject Alternative Name:\r\n{san_line}"
         "\r\n"
         f"Certificate Template:\t{d.get('CertificateTemplate','')}\r\n"
         f"Serial Number:\t\t{d.get('SerialNumber','')}\r\n"
         f"Authentication Service:\t{d.get('AuthenticationService','')}\r\n"
         f"Authentication Level:\t{d.get('AuthenticationLevel','')}\r\n"
-        f"DCOMorRPC:\t\t{d.get('DCOMorRPC','')}"
+        f"DCOMorRPC:\t\t{d.get('DCOMorRPC','')} "
     )
 
 
 def _msg_4888(d):
     # 4888 has never been captured here; layout mirrors the captured 4887 with the
     # issued-certificate values (SKI, serial) omitted, which is what a denial carries.
+    san = str(d.get("SubjectAlternativeName", "")).rstrip("\r\n")
+    san_line = f"{san}\r\n" if san else ""
     return (
         "Certificate Services denied a certificate request.\r\n\t\r\n"
         f"Request ID:\t{d.get('RequestId','')}\r\n"
@@ -1141,12 +1148,12 @@ def _msg_4888(d):
         f"Attributes:\t{d.get('Attributes','')}\r\n"
         f"Disposition:\t{d.get('Disposition','')}\r\n"
         f"Subject:\t{d.get('Subject','')}\r\n"
-        f"Subject Alternative Name:\r\n{d.get('SubjectAlternativeName','')}\r\n"
+        f"Subject Alternative Name:\r\n{san_line}"
         "\r\n"
         f"Certificate Template:\t{d.get('CertificateTemplate','')}\r\n"
         f"Authentication Service:\t{d.get('AuthenticationService','')}\r\n"
         f"Authentication Level:\t{d.get('AuthenticationLevel','')}\r\n"
-        f"DCOMorRPC:\t\t{d.get('DCOMorRPC','')}"
+        f"DCOMorRPC:\t\t{d.get('DCOMorRPC','')} "
     )
 
 
@@ -3920,12 +3927,16 @@ def _ca_request_attributes(config, user_info):
 
 
 def _ca_san_text(san_value, san_kind="upn"):
-    """Render a CSR subjectAltName the way the CA prints it."""
+    """Render a CSR subjectAltName the way the CA prints it.
+
+    The captured field ends with a bare LF, and the message renderer drops that
+    trailing newline before adding its own CRLF.
+    """
     if not san_value:
         return ""
     if san_kind == "upn":
-        return f"Other Name:\n     Principal Name={san_value}"
-    return f"DNS Name={san_value}"
+        return f"Other Name:\n     Principal Name={san_value}\n"
+    return f"DNS Name={san_value}\n"
 
 
 def _ca_request_client_info(requester, machine, process):
