@@ -23,7 +23,7 @@ These fields are not modeled by `CiscoFirepower_1_3.xif` but are preserved in th
 | Field | Description |
 |---|---|
 | `msg` | Human-readable event description; key field for free-text hunting searches |
-| `cs1` / `cs1Label` | Access Control Policy name on connection/IPS/URL/secintel/SMB events; SHA256 hash on malware events (`cs1Label="SHA256"`) |
+| `cs1` / `cs1Label` | Access Control Policy name: `fwPolicy` on connection/IPS/URL/secintel/SMB events, `filePolicy` on File / File Malware events, `policy` on FireAMP events |
 | `cs6` / `cs6Label` | URL Reputation string on connection/URL/upload/SMB events (`cs6Label="URLReputation"`); Intrusion Policy name on IPS events (`cs6Label="IntrusionPolicy"`); Disposition source on malware events (`cs6Label="DispositionSource"`) |
 | `start` / `end` | Connection start and end times in epoch milliseconds |
 | `deviceDirection` | Traffic direction: `1`=outbound (LAN→WAN, default); `0`=inbound (WAN→LAN, set on IPS and inbound_block events) |
@@ -31,9 +31,61 @@ These fields are not modeled by `CiscoFirepower_1_3.xif` but are preserved in th
 | `requestMethod` | HTTP method on HTTP/HTTPS events: `GET` (browsing/malware/URL), `POST`/`PUT` (uploads) |
 | `shost` | Source hostname when available from session context |
 | `dhost` | Destination hostname: malware delivery domain, blocked URL domain, or C2 domain |
-| `sproc` | Source process name on malware events (browser or suspicious process) |
-| `filePath` | Full endpoint path on malware events (e.g., `C:/Users/user/Downloads/fname`) |
-| `fileSize` (`fsize`) | File size in bytes on malware events |
+| `fsize` | File size in bytes on File, File Malware and FireAMP events |
+
+### Severity
+
+Severity follows eNcore's CEF adapter and is written only in the CEF header, never as an
+extension key:
+
+| Record | Rule |
+|---|---|
+| Connection (71, `RNA:1003:1`) | `3` when the FMC rule-action id is below 4 (Pending=1, Allow=2, Trust=3), otherwise `7` (Block=4, Block with Reset=5, Interactive Block=7/8). No other value occurs. |
+| Intrusion (400) | Snort rule priority × impact level, carried as `cn2` / `cn2Label=impact`: High 10/9/7/8/9, Medium 7/6/4/5/6, Low 3/2/0/1/2 for impact 1 (Red) to 5 (Gray). |
+| File (500), File Malware (502), FireAMP (125) | Threat score ÷ 10 (`0` for a clean file). |
+
+Rule-action ids come from the FMC eStreamer Integration Guide, *Access Control Rule Action
+Record Metadata*.
+
+### File and malware events (eNcore records 500 / 502 / 125)
+
+Firepower's CEF keys are fixed by Cisco's eStreamer eNcore client
+(`estreamer/adapters/cef.py`), the CEF path the Cortex Cisco Firepower pack documents.
+`_fp_file_events` follows it exactly:
+
+| Record | Header sig / name | When | Labels |
+|---|---|---|---|
+| 500 | `File:500:1` / `File Event` | A file the file policy identified, clean or unknown (`act=Malware Cloud Lookup`) | `cs1=filePolicy`, `cs2=disposition`, `cs3=speroDisposition` |
+| 502 | `FileMalware:502:1` / `File Malware Event` | The file policy blocked malware (`act=Malware Block`) | same as 500 |
+| 125 | `FireAMP:125:1` / `FireAMP Event` | The malware event FMC raises for the same network transfer (`outcome=Threat Detected in Network File Transfer`, `act=4`, the raw action byte) | `cs1=policy`, `cs2=virusName`, `cs3=disposition`, `cs4=speroDisposition`, `cs5Label=eventDescription` |
+
+All three carry `fname`, `fileHash` (SHA-256), `fileType`, `fsize`, `deviceDirection`
+(eStreamer direction: `1`=Download, `2`=Upload), `dvcpid`, `src`/`dst`/`spt`/`dpt`,
+`app`, `suser`, `rt`, `start`, and `request`/`requestClientApplication` on HTTP.
+Severity is the threat score / 10, in the header only. Keys are written sorted, with
+no `externalId`, `msg`, zones or endpoint fields (`filePath`, `sproc`), as eNcore
+writes them. A network detection has no endpoint path or parent process.
+
+`fileType` is the Firepower file-type name: `MSEXE`, `MSOLE2` (legacy Office) and
+`NEW_OFFICE` (Office Open XML) are confirmed in Cisco documentation; `PDF`, `ZIP`, `RAR`,
+`7Z` and `ISO` are Snort file-type names. A file the policy wouldn't identify (lnk, js,
+hta, csv, txt, gz, images) produces no file event.
+
+Where file events are emitted:
+
+| Generator | Direction | Notes |
+|---|---|---|
+| `malware` | Download | 502 + 125 after the DNS lookup; the file is redrawn until its type is one Firepower identifies |
+| benign FTP (scheduled pull) | Download | `app=FTP Data` on a passive port |
+| `ftp_large_exfil` | Upload | 1-3 files (archive / PII / document) within the session's bytes |
+| `smtp_large_exfil` | Upload | Only on port 25; 587 is STARTTLS, so the FTD sees no attachment |
+| `smb_rare_file_transfer` | Download | 1-3 files read from the share |
+| scenario `log_type=malware` | Download | 502 + 125; an unidentified type gives the 125 alone |
+
+The HTTPS upload generators (`large_file_upload`, `large_download`) stay connection-only:
+without SSL decryption the FTD cannot see the file.
+
+Hunting example: `dataset = cisco_firepower_raw | filter cefName = "File Event" and deviceDirection = 2 and fname contains "Financial"`.
 
 ### Interface Naming Convention
 
@@ -52,9 +104,9 @@ Benign events are dispatched from `_generate_benign_log` with roll-based proport
 
 | Event Type | Description | Key Fields | Weight |
 |---|---|---|---|
-| `connection` | Outbound web browsing (85%) or blocked suspicious port (15%). Browsing: Allow on TCP/80 or 443, 0.5–15 KB request, 20–500 KB response. Blocked: non-standard port (23/137/138/666/4444/31337), Block, cefSeverity=5. | `_syslog_id=430002`, `act=Allow or Block`, `dpt=80/443 or suspicious`, `app=HTTPS/HTTP or UNKNOWN`, `cs2=Allow_Outbound_Web or Block_Suspicious_Ports`, `bytesOut=500–15000`, `bytesIn=20000–500000`, `cs6=url_rep`, `requestMethod=GET` (browsing only), `cefSeverity=3 or 5` | 50% |
+| `connection` | Outbound web browsing (85%) or blocked suspicious port (15%). Browsing: Allow on TCP/80 or 443, 0.5–15 KB request, 20–500 KB response. Blocked: non-standard port (23/137/138/666/4444/31337), Block, cefSeverity=7. | `_syslog_id=430002`, `act=Allow or Block`, `dpt=80/443 or suspicious`, `app=HTTPS/HTTP or UNKNOWN`, `cs2=Allow_Outbound_Web or Block_Suspicious_Ports`, `bytesOut=500–15000`, `bytesIn=20000–500000`, `cs6=url_rep`, `requestMethod=GET` (browsing only), `cefSeverity=3` (Allow) or `7` (Block) | 50% |
 | `internal_app_tier` | Two-event chain: user→app-server HTTPS (TCP/443), then app-server→database MSSQL (TCP/1433). Both are internal sessions (both interfaces = inside). May return a list of 2 events. | `_syslog_id=430002`, `act=Allow`, user→app: `dpt=443`, `app=HTTPS`, `cs4=App-Server-Zone`; app→db: `dpt=1433`, `app=MSSQL`, `cs3=App-Server-Zone`, `cs4=DB-Zone`, both `cefSeverity=3` | 13% |
-| `inbound_block` | External probe blocked at perimeter. `deviceDirection=0`, zones/interfaces reversed. Ports: 22/23/80/443/445/1433/3389/8080/8443. Duration 0–50 ms (blocked at first SYN). | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt=probe_port`, `cs3=Internet-Zone`, `cs4=Server-Zone`, `deviceDirection=0`, `deviceInboundInterface=outside`, `deviceOutboundInterface=inside`, `bytesOut=0`, `bytesIn=40–100`, `cefSeverity` by port (6 for 445/1433/3389, 3 for 80/443/8080/8443, 5 for 22/23) | 22% |
+| `inbound_block` | External probe blocked at perimeter. `deviceDirection=0`, zones/interfaces reversed. Ports: 22/23/80/443/445/1433/3389/8080/8443. Duration 0–50 ms (blocked at first SYN). | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt=probe_port`, `cs3=Internet-Zone`, `cs4=Server-Zone`, `deviceDirection=0`, `deviceInboundInterface=outside`, `deviceOutboundInterface=inside`, `bytesOut=0`, `bytesIn=40–100`, `cefSeverity=7` | 22% |
 | `dns_query` | Benign outbound DNS resolution. UDP/53 to a public resolver (8.8.8.8, 8.8.4.4, 1.1.1.1, 9.9.9.9, 208.67.222.222). Small bytes (~40–100 query, ~80–400 response). | `_syslog_id=430002`, `act=Allow`, `app=DNS`, `dpt=53`, `proto=17`, `cs2=Allow_Outbound_DNS`, `cs6=Trustworthy`, `bytesOut=40–100`, `bytesIn=80–400`, `cefSeverity=3` | 5% |
 | `email_traffic` | Outbound email client connection — IMAPS/993 (50%), SMTPS/465 (30%), or SMTP/587 (20%). IMAPS has large bytesIn (downloading mail); SMTP* has large bytesOut (sending). Duration 5–120 seconds. | `_syslog_id=430002`, `act=Allow`, `app=IMAPS/SMTPS/SMTP`, `dpt=993/465/587`, `proto=6`, `cs2=Allow_IMAPS/Allow_SMTPS/Allow_SMTP`, `cs6=Trustworthy`, `cefSeverity=3`, `bytesIn=1000–300000` (IMAPS) or `bytesOut=1000–300000` (SMTP*) | 5% |
 | `ntp_sync` | NTP time synchronisation. UDP/123 to a public NTP server (pool.ntp.org cluster). Tiny payload (~48–76 bytes each direction). Duration under 100 ms. | `_syslog_id=430002`, `act=Allow`, `app=NTP`, `dpt=123`, `proto=17`, `cs2=Allow_NTP_Outbound`, `cs6=Trustworthy`, `bytesOut=48–76`, `bytesIn=48–76`, `cefSeverity=3` | 3% |
@@ -70,23 +122,23 @@ The **effective** weights are those in `config.json` → `firepower_config.event
 
 | Threat Key | Category | Description | Syslog ID / Key Fields | Weight |
 |---|---|---|---|---|
-| `ips` | Intrusion Prevention | Inbound IPS event: external attacker targeting an internal server. `deviceDirection=0`, zones/interfaces reversed. Picks from `firepower_config.ips_rules` or falls back to `ET-WEB-SQL-INJECTION`. | `_syslog_id=430001` (Intrusion Event), `act=Block`, `src=external`, `dst=internal_server`, `dpt=80/443/445/1433/3389/8080/8443`, `cs5=category/cs5Label=ThreatCategory`, `cs6=ips_policy/cs6Label=IntrusionPolicy`, `cefSeverity=7–10`, `deviceDirection=0`, `bytesIn=0`, `reason=Intrusion Policy Violation` | 30 |
-| `malware` | AMP File Malware | Internal host downloading a file detected as malware. Picks from `firepower_config.malicious_files`. MD5 hash in `fileHash` (32 chars → xdm.target.file.md5); SHA256 in `cs1`. File size: EXE/DLL 50 KB–10 MB, ZIP/RAR/7Z 1–100 MB. Source process: browser or suspicious processes. | `_syslog_id=411002` (Malware Event), `act=Block`, `dpt=80`, `app=HTTP`, `fname`, `fileHash=md5(32)`, `fileType`, `fsize`, `filePath=C:/Users/.../fname`, `sproc=browser_or_suspicious`, `dhost=malware_domain`, `request=http://domain/fname`, `cs1=sha256/cs1Label=SHA256`, `cs6=disposition_source/cs6Label=DispositionSource`, `cefSeverity=10`, `requestMethod=GET` | 25 |
-| `url_filtering` | URL Category Block | Internal user blocked from accessing a prohibited URL category. Picks from `firepower_config.blocked_url_categories`. | `_syslog_id=410001` (URL logging), `act=Block`, `dpt=443`, `app=HTTPS`, `dhost=blocked_domain`, `request=https://domain/`, `cs5=category/cs5Label=URLCategory`, `cs6=url_rep/cs6Label=URLReputation`, `cefSeverity=5`, `bytesOut=200–800`, `bytesIn=0`, `requestMethod=GET` | 20 |
-| `security_intel` | Security Intelligence | DNS query to a known-malicious domain blocked by the Security Intelligence feed. UDP/53. Near-instant block (0–100 ms). | `_syslog_id=430005` (Security Intelligence Event), `act=Block`, `dpt=53`, `proto=17`, `dst=8.8.8.8`, `dhost=malicious_domain`, `request=malicious_domain`, `cs5=SecurityIntelligence`, `cs6=DNS Block List/cs6Label=SecurityIntelligenceCategory`, `cefSeverity=8`, `bytesOut=50–150`, `bytesIn=0` | 15 |
-| `port_scan` | Reconnaissance | External attacker scanning sequential ports on an internal server. 20–50 blocked CONNECTION events from the same source IP. `deviceDirection=0`. Returns list. | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt` varies (sorted sample from 21/22/23/25/53/80/110/135/139/443/445/1433/1521/3306/3389/5900/8080/8443), `cs6=Suspicious`, `cefSeverity=6`, `bytesOut=0`, `bytesIn=40–60`, `deviceDirection=0` | 10 |
-| `brute_force` | Credential Attack | External IP making 20–60 blocked TCP connection attempts to the same service port on an internal server. `deviceDirection=0`. Services: SSH/22 (sev 7), RDP/3389 (sev 8), SMB/445 (sev 7), WinRM/5985 (sev 6), WinRM/5986 (sev 6). Returns list. | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt=22/3389/445/5985/5986`, `app=SSH/RDP/SMB/WinRM`, `cefSeverity=7–8`, `deviceDirection=0`, `bytesOut=0`, `bytesIn=40–80` | 8 |
-| `large_file_upload` | Data Exfiltration | Internal user uploading 100–500 MB to a file-sharing service (mega.nz, wetransfer.com, dropbox.com, etc.) on TCP/443. Duration 30 s–10 min. Single event. | `_syslog_id=430002`, `act=Allow`, `dpt=443`, `app=SSL`, `dhost=upload.domain`, `bytesOut=100MB–500MB`, `bytesIn=1000–5000`, `requestMethod=POST or PUT`, `cs5=File Sharing/cs5Label=URLCategory`, `cs6=Suspicious`, `cefSeverity=6`, long `start/end` window | 10 |
-| `ssh_over_https` | Protocol Anomaly | SSH protocol detected on TCP/443 — DPI reveals SSH inside an HTTPS port. Connection is allowed by web rule. Single event. | `_syslog_id=430002`, `act=Allow`, `dpt=443`, `app=SSH` (anomaly: SSH on 443 not HTTPS), `cs5=Secure Shell/cs5Label=ApplicationProtocol`, `cs6=Moderate Risk`, `cefSeverity=6`, `bytesOut=1000–50000`, `bytesIn=1000–50000` | 5 |
-| `workstation_smb` | Lateral Movement | Workstation-to-workstation SMB/445 blocked. Both interfaces = inside, both zones = User-Zone. Near-instant block (0–300 ms). Single event. | `_syslog_id=430002`, `act=Block`, `dpt=445`, `app=SMB`, `cs2=Block_Lateral_Movement`, `cs5=Lateral Movement`, `cs6=Suspicious`, `cefSeverity=8`, both interfaces = `inside`, `bytesOut=200–2000`, `bytesIn=0` | 5 |
+| `ips` | Intrusion Prevention | Inbound IPS event: external attacker targeting an internal server. `deviceDirection=0`, zones/interfaces reversed. Picks from `firepower_config.ips_rules` or falls back to `ET-WEB-SQL-INJECTION`. | `_syslog_id=430001` (Intrusion Event), `act=Blocked`, `src=external`, `dst=internal_server`, `dpt=80/443/445/1433/3389/8080/8443`, `cs5=category/cs5Label=ThreatCategory`, `cs6=ips_policy/cs6Label=IntrusionPolicy`, `cn2=impact` (1–5), `cefSeverity` from priority × impact (see *Severity*), `deviceDirection=0`, `bytesIn=0`, `reason=Intrusion Policy Violation` | 30 |
+| `malware` | AMP File Malware | Internal host downloads malware over HTTP; the FTD file policy blocks it. Emits the DNS lookup, a File Malware Event (502) and the matching FireAMP Event (125). File name from `threat_files`, redrawn until Firepower identifies the type. See *File and malware events* above. | `FileMalware:502:1` + `FireAMP:125:1`, `dpt=80`, `app=HTTP`, `fname`, `fileHash=sha256`, `fileType` (Firepower name), `fsize`, `deviceDirection=1`, `request=http://domain/fname` | 25 |
+| `url_filtering` | URL Category Block | Internal user blocked from accessing a prohibited URL category. Picks from `firepower_config.blocked_url_categories`. | `_syslog_id=410001` (URL logging), `act=Block`, `dpt=443`, `app=HTTPS`, `dhost=blocked_domain`, `request=https://domain/`, `cs5=category/cs5Label=URLCategory`, `cs6=url_rep/cs6Label=URLReputation`, `cefSeverity=7`, `bytesOut=200–800`, `bytesIn=0`, `requestMethod=GET` | 20 |
+| `security_intel` | Security Intelligence | DNS query to a known-malicious domain blocked by the Security Intelligence feed. UDP/53. Near-instant block (0–100 ms). | `_syslog_id=430005` (Security Intelligence Event), `act=Block`, `dpt=53`, `proto=17`, `dst=8.8.8.8`, `dhost=malicious_domain`, `request=malicious_domain`, `cs5=SecurityIntelligence`, `cs6=DNS Block List/cs6Label=SecurityIntelligenceCategory`, `cefSeverity=7`, `bytesOut=50–150`, `bytesIn=0` | 15 |
+| `port_scan` | Reconnaissance | External attacker scanning sequential ports on an internal server. 20–50 blocked CONNECTION events from the same source IP. `deviceDirection=0`. Returns list. | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt` varies (sorted sample from 21/22/23/25/53/80/110/135/139/443/445/1433/1521/3306/3389/5900/8080/8443), `cs6=Suspicious`, `cefSeverity=7`, `bytesOut=0`, `bytesIn=40–60`, `deviceDirection=0` | 10 |
+| `brute_force` | Credential Attack | External IP making 20–60 blocked TCP connection attempts to the same service port on an internal server. `deviceDirection=0`. Services: SSH/22, RDP/3389, SMB/445, WinRM/5985, WinRM/5986. Returns list. | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt=22/3389/445/5985/5986`, `app=SSH/RDP/SMB/WinRM`, `cefSeverity=7`, `deviceDirection=0`, `bytesOut=0`, `bytesIn=40–80` | 8 |
+| `large_file_upload` | Data Exfiltration | Internal user uploading 100–500 MB to a file-sharing service (mega.nz, wetransfer.com, dropbox.com, etc.) on TCP/443. Duration 30 s–10 min. Single event. | `_syslog_id=430002`, `act=Allow`, `dpt=443`, `app=SSL`, `dhost=upload.domain`, `bytesOut=100MB–500MB`, `bytesIn=1000–5000`, `requestMethod=POST or PUT`, `cs5=File Sharing/cs5Label=URLCategory`, `cs6=Suspicious`, `cefSeverity=3`, long `start/end` window | 10 |
+| `ssh_over_https` | Protocol Anomaly | SSH protocol detected on TCP/443 — DPI reveals SSH inside an HTTPS port. Connection is allowed by web rule. Single event. | `_syslog_id=430002`, `act=Allow`, `dpt=443`, `app=SSH` (anomaly: SSH on 443 not HTTPS), `cs5=Secure Shell/cs5Label=ApplicationProtocol`, `cs6=Moderate Risk`, `cefSeverity=3`, `bytesOut=1000–50000`, `bytesIn=1000–50000` | 5 |
+| `workstation_smb` | Lateral Movement | Workstation-to-workstation SMB/445 blocked. Both interfaces = inside, both zones = User-Zone. Near-instant block (0–300 ms). Single event. | `_syslog_id=430002`, `act=Block`, `dpt=445`, `app=SMB`, `cs2=Block_Lateral_Movement`, `cs5=Lateral Movement`, `cs6=Suspicious`, `cefSeverity=7`, both interfaces = `inside`, `bytesOut=200–2000`, `bytesIn=0` | 5 |
 | `rdp_lateral` | Lateral Movement | Internal RDP blocked — workstation to workstation (50%) or workstation to server. Both interfaces = inside. Single event. | `_syslog_id=430002`, `act=Block`, `dpt=3389`, `app=RDP`, `cs2=Block_Lateral_Movement`, `cs5=Lateral Movement`, `cefSeverity=7`, both interfaces = `inside` | 3 |
 | `tor` | Anonymization | Outbound connection to a Tor exit node. Port: 443 (60%), 9001 (30%), 9030 (10%). Blocked by URL category policy. Single event. | `_syslog_id=430002`, `act=Block`, `dpt=443/9001/9030`, `app=Tor`, `dhost=tor-exit-N.unknown`, `cs5=Tor Network`, `cs6=High Risk`, `cefSeverity=7`, `bytesOut=1000–10000`, `bytesIn=1000–10000` | 3 |
 | `dns_c2_beacon` | C2 / DNS Tunneling | 15–40 UDP/53 `ALLOW` events to the same suspicious resolver. Volume of allowed queries to a consistent suspicious resolver is the XSIAM detection signal (not a single block). Returns list. | `_syslog_id=430002`, `act=Allow`, `dpt=53`, `proto=17`, `cs2=Allow_Outbound_DNS`, `cs6=Trustworthy` (resolver not on block list), `bytesOut=40–100`, `bytesIn=80–400` | 2 |
-| `server_outbound_http` | Command and Control | Internal server initiating outbound HTTP on TCP/80. Allowed (no block rule); the server-as-source + port-80 anomaly is the signal. Single event. | `_syslog_id=430002`, `act=Allow`, `src=internal_server`, `dpt=80`, `app=HTTP`, `suser=SERVER_PROCESS`, `cs5=Uncategorized`, `cs6=Suspicious`, `cefSeverity=7`, `requestMethod=GET` | 2 |
+| `server_outbound_http` | Command and Control | Internal server initiating outbound HTTP on TCP/80. Allowed (no block rule); the server-as-source + port-80 anomaly is the signal. Single event. | `_syslog_id=430002`, `act=Allow`, `src=internal_server`, `dpt=80`, `app=HTTP`, `suser=SERVER_PROCESS`, `cs5=Uncategorized`, `cs6=Suspicious`, `cefSeverity=3`, `requestMethod=GET` | 2 |
 | `internal_smb` | Lateral Movement | Internal user accessing a LAN file server via SMB/445. Both interfaces = inside. Normal business traffic that may appear in threat context. Single event. | `_syslog_id=430002`, `act=Allow`, `dpt=445`, `app=SMB`, `cs2=Allow_Internal_SMB`, `cs3=User-Zone`, `cs4=Server-Zone`, `duser=FILE_SERVER_SVC`, `cs6=Trustworthy`, `cefSeverity=3`, both interfaces = `inside` | 1 |
-| `smb_new_host_lateral` | Lateral Movement | SMB/445 ALLOW events from one workstation to 5–10 different internal hosts. Breadth of distinct SMB targets is the XSIAM UEBA signal. Returns list. | `_syslog_id=430002`, `act=Allow`, `dpt=445`, `app=SMB`, `cs5=Lateral Movement`, `cs6=Suspicious`, `cefSeverity=6`, both interfaces = `inside`, 5–10 distinct `dst` addresses | 4 |
-| `smb_rare_file_transfer` | Data Staging | Single large SMB/445 session (100 MB – 1 GB bytesIn = reading from share). Volume is the UEBA signal. Single event tuple returned. | `_syslog_id=430002`, `act=Allow`, `dpt=445`, `app=SMB`, `bytesIn=100MB–1GB`, `cs5=Data Staging`, `cs6=Suspicious`, `cefSeverity=7`, both interfaces = `inside`, duration 120–900s | 3 |
-| `smb_share_enumeration` | Reconnaissance | 15–40 ALLOW TCP/445 probes to distinct internal IPs. Near-instant sessions (0–100 ms, tiny bytes). Returns list. | `_syslog_id=430002`, `act=Allow`, `dpt=445`, `app=SMB`, `bytesOut=40–200`, `bytesIn=40–200`, `cs5=Network Scan`, `cs6=Suspicious`, `cefSeverity=7`, both interfaces = `inside`, 15–40 distinct `dst` | 5 |
+| `smb_new_host_lateral` | Lateral Movement | SMB/445 ALLOW events from one workstation to 5–10 different internal hosts. Breadth of distinct SMB targets is the XSIAM UEBA signal. Returns list. | `_syslog_id=430002`, `act=Allow`, `dpt=445`, `app=SMB`, `cs5=Lateral Movement`, `cs6=Suspicious`, `cefSeverity=3`, both interfaces = `inside`, 5–10 distinct `dst` addresses | 4 |
+| `smb_rare_file_transfer` | Data Staging | Single large SMB/445 session (100 MB – 1 GB bytesIn = reading from share). Volume is the UEBA signal. Single event tuple returned. | `_syslog_id=430002`, `act=Allow`, `dpt=445`, `app=SMB`, `bytesIn=100MB–1GB`, `cs5=Data Staging`, `cs6=Suspicious`, `cefSeverity=3`, both interfaces = `inside`, duration 120–900s | 3 |
+| `smb_share_enumeration` | Reconnaissance | 15–40 ALLOW TCP/445 probes to distinct internal IPs. Near-instant sessions (0–100 ms, tiny bytes). Returns list. | `_syslog_id=430002`, `act=Allow`, `dpt=445`, `app=SMB`, `bytesOut=40–200`, `bytesIn=40–200`, `cs5=Network Scan`, `cs6=Suspicious`, `cefSeverity=3`, both interfaces = `inside`, 15–40 distinct `dst` | 5 |
 | `vpn_tor_login` | Credential Theft | Successful RA-VPN session from a known Tor exit node — valid corporate credentials authenticated via Tor. **Conversation-complete** in three phases: (1) inbound TLS handshake Tor→`outside:443`, (2) SSL VPN session established (the primary detection event), (3) 1–3 post-auth connections from the VPN-assigned inside IP (pool `firepower_config.vpn_pool`, default `10.250.0.0/16`) to internal servers over SMB/RDP/HTTPS. XSIAM alert: **Recurring access to rare IP**. Returns list. | `_syslog_id=430002`, `src=tor_exit_ip`, `dpt=443` then internal `dpt=445/3389/443`, VPN-assigned `10.250.x.x` source on post-auth events | 3 |
 | `rare_external_rdp` | Lateral Movement / C2 | Outbound RDP from an internal workstation to a **rare external** public IP — reverse RDP tunnel, RDP-based C2, or a compromised endpoint pivoting. Conversation-complete: DNS resolution precedes the session. XSIAM alert: **Rare RDP session to a remote host**. Returns list. | `_syslog_id=430002`, `dpt=3389`, `dhost=rdp-<ip>.example.net`, `bytesOut=10–200 KB`, `bytesIn=50 KB–2 MB`, `duration=1–30min`, preceded by a DNS precursor log | 3 |
 | `rare_ssh` | Suspicious Activity | Outbound SSH to a rare (first-seen) external IP. Conversation-complete: DNS resolution precedes the session. XSIAM alert: **Uncommon SSH session was established**. Returns list. | `_syslog_id=430002`, `act=Allow`, `app=SSH`, `dpt=22`, `dhost=ssh-<ip>.example.net`, `duration=30s–10min`, preceded by a DNS precursor log | 3 |

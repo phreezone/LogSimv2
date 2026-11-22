@@ -22,9 +22,9 @@
 #   Alert:        xdm.alert.category (cs5), xdm.alert.severity (cefSeverity)
 #   URL/App:      xdm.network.http.url (request),
 #                 xdm.source.application.name (requestClientApplication)
-#   File/Malware: xdm.target.file.filename (fname), xdm.target.file.md5 (fileHash),
-#                 xdm.target.file.file_type (fileType)
-#   Process:      xdm.source.process.pid (dvcpid, malware events only)
+#   File/Malware: xdm.target.file.filename (fname), xdm.target.file.md5 (fileHash,
+#                 a SHA-256 as eNcore sends it), xdm.target.file.file_type (fileType)
+#   Process:      xdm.source.process.pid (dvcpid, file and malware events)
 #
 # Additional hunt-relevant fields (not in XIF model, preserved in raw dataset):
 #   msg             - Human-readable event description; key field for threat hunting searches
@@ -37,9 +37,11 @@
 #   requestMethod   - HTTP method (GET/POST/PUT) on HTTP/HTTPS events
 #   shost           - Source hostname when available from session context
 #   dhost           - Destination hostname (malware domain, blocked URL, C2 domain)
-#   sproc           - Source process name (malware events — process that triggered download)
-#   filePath        - Full file path on the endpoint (malware events)
-#   fileSize        - File size in bytes (malware events)
+#   fsize           - File size in bytes (file and malware events)
+#
+# File events follow eNcore records 500 (File Event), 502 (File Malware Event) and
+# 125 (FireAMP Event, network detection). See _fp_file_events for the mapping;
+# deviceDirection there is the eStreamer file direction (1=Download, 2=Upload).
 #
 # Interface naming (Cisco FTD convention — packet-flow perspective):
 #   deviceInboundInterface  = interface where ingress packet arrived  (inside for LAN→WAN)
@@ -244,17 +246,32 @@ SIG_IDS = {
 # Keep legacy alias for any remaining references
 SYSLOG_IDS = SIG_IDS
 
-last_threat_event_time = 0
+# Connection-event actions whose FMC rule-action id is below 4 (Pending=1, Allow=2,
+# Trust=3); eNcore gives these severity 3 and every other action severity 7.
+_FP_RULE_ACTIONS_LOW_SEVERITY = ("Pending", "Allow", "Trust")
 
-# Source process names seen in malware download and execution events
-_BROWSER_PROCESSES = [
-    "chrome.exe", "iexplore.exe", "firefox.exe", "msedge.exe",
-    "outlook.exe", "winword.exe", "excel.exe",
-]
-_SUSPICIOUS_PROCESSES = [
-    "powershell.exe", "cmd.exe", "wscript.exe", "mshta.exe",
-    "rundll32.exe", "regsvr32.exe", "svchost.exe",
-]
+# eNcore intrusion severity (estreamer/adapters/cef.py __severity): rule priority
+# (1 High, 2 Medium, 3 Low) x impact level (1 Red vulnerable, 2 Orange potentially
+# vulnerable, 3 Yellow currently not vulnerable, 4 Blue unknown target, 5 Gray unknown
+# impact). Anything outside the table is 5.
+_FP_IPS_SEVERITY = {
+    1: {1: 10, 2: 9, 3: 7, 4: 8, 5: 9},
+    2: {1: 7,  2: 6, 3: 4, 4: 5, 5: 6},
+    3: {1: 3,  2: 2, 3: 0, 4: 1, 5: 2},
+}
+
+
+def _fp_ips_rating(priority=None, impact=None):
+    """Pick (or take) a Snort rule priority and impact level and return the eNcore
+    severity with them: (severity_str, priority, impact). Blocked attack traffic is
+    mostly High/Medium-priority rules against hosts the FMC host map knows about."""
+    if priority is None:
+        priority = random.choices([1, 2, 3], weights=[50, 40, 10], k=1)[0]
+    if impact is None:
+        impact = random.choices([1, 2, 3, 4, 5], weights=[30, 30, 15, 15, 10], k=1)[0]
+    return str(_FP_IPS_SEVERITY.get(priority, {}).get(impact, 5)), priority, impact
+
+last_threat_event_time = 0
 
 # Cisco FTD built-in Intrusion Policy names (shown in cs6 on IPS events)
 _IPS_POLICIES = [
@@ -498,10 +515,21 @@ def _format_firepower_cef(config, fields, cef_name):
 
     fields['dvchost']          = firepower_conf.get('hostname',   'Cisco-FTD')
     fields['deviceExternalId'] = firepower_conf.get('device_id', 'ftd-01')
-    fields.setdefault('externalId', random.randint(100_000_000, 999_999_999))
+    # File (500/502) and malware (125) records carry no eventId in eNcore's CEF
+    # mapping, so they have no externalId; eNcore also writes keys in sorted order.
+    _no_external_id = fields.pop('_no_external_id', False)
+    _sorted = fields.pop('_encore_sorted', False)
+    if not _no_external_id:
+        fields.setdefault('externalId', random.randint(100_000_000, 999_999_999))
 
     sig_id  = fields.pop('_sig_id', 'RNA:1003:1')
-    cef_sev = str(fields.get('cefSeverity', '3'))
+    # eNcore carries severity only in the header, never as an extension key.
+    cef_sev = str(fields.pop('cefSeverity', '3'))
+    if sig_id == SIG_IDS["CONNECTION"]:
+        # eNcore record 71: severity = 3 if ruleAction < 4 else 7. FMC rule-action ids:
+        # 1 Pending, 2 Allow, 3 Trust, 4 Block, 5 Block with Reset, 6 Monitor,
+        # 7 Interactive Block, 8 Interactive Block with Reset, 14 FastPath.
+        cef_sev = "3" if fields.get("act") in _FP_RULE_ACTIONS_LOW_SEVERITY else "7"
 
     # Event time: real FTD CEF carries rt (deviceReceiptTime, ms epoch) and XSIAM keys
     # _time off it. The modeling rule does NOT map start/end to _time, so without rt
@@ -535,7 +563,8 @@ def _format_firepower_cef(config, fields, cef_name):
 
     timestamp  = datetime.fromtimestamp(fields['rt'] / 1000, timezone.utc).strftime('%b %d %H:%M:%S')
     cef_header = f"CEF:0|Cisco|Firepower|6.0|{sig_id}|{cef_name}|{cef_sev}|"
-    extension  = " ".join(f"{k}={_cef_escape(v)}" for k, v in fields.items() if v is not None)
+    items      = sorted(fields.items()) if _sorted else fields.items()
+    extension  = " ".join(f"{k}={_cef_escape(v)}" for k, v in items if v is not None)
 
     return f"<13>{timestamp} {fields['dvchost']} {cef_header}{extension}"
 
@@ -1214,7 +1243,7 @@ def _generate_benign_vpn_failure_event(config, src_ip, user, shost=None):
         "cs1": _ac_policy(config),        "cs1Label": "fwPolicy",
         "cs2": "VPN_Remote_Access",       "cs2Label": "fwRule",
         "cs5": "VPN Authentication",      "cs5Label": "secIntelCategory",
-        "cefSeverity": "5",
+        "cefSeverity": "7",
         "bytesOut": random.randint(200, 1_000),
         "bytesIn":  random.randint(200, 1_000),
         "outcome": "FAILURE",
@@ -1256,7 +1285,15 @@ def _generate_benign_ftp_event(config, src_ip, user, shost=None):
         "msg": f"Scheduled FTP download from {dest_ip}:21 to {server_ip}",
         "start": start_ms, "end": end_ms,
     })
-    return fields, "CONNECTION STATISTICS"
+    logs = [_format_firepower_cef(config, fields, "CONNECTION STATISTICS")]
+    # The pulled file crosses the FTD in the clear, so the file policy records it.
+    fname, _ext = threat_files.document_name(random.choice(["document", "archive"]))
+    logs += _fp_file_events(
+        config, src=server_ip, dst=dest_ip, spt=random.randint(49152, 65535),
+        dpt=random.randint(50000, 51000), app="FTP Data", user="SVC_FTP_TRANSFER",
+        fname=fname, size=min(fields["bytesIn"], random.randint(10_000, 5_000_000)),
+        direction=FP_DIRECTION_DOWNLOAD, start_ms=start_ms + random.randint(500, 3_000))
+    return logs
 
 
 def _generate_benign_log(config, session_context=None):
@@ -1355,8 +1392,7 @@ def _generate_benign_log(config, session_context=None):
         return _format_firepower_cef(config, fields, cef_name)
 
     elif roll < 0.99:  # 1% — scheduled FTP transfer (UEBA baseline)
-        fields, cef_name = _generate_benign_ftp_event(config, src_ip, user, shost)
-        return _format_firepower_cef(config, fields, cef_name)
+        return _generate_benign_ftp_event(config, src_ip, user, shost)
 
     else:  # 1% — AD auth (LDAP/Kerberos to DC) baseline for LDAP-recon detection
         fields, cef_name = _generate_ldap_kerberos_benign(config, src_ip, user, shost)
@@ -1404,6 +1440,7 @@ def _generate_ips_event(config):
 
     gen_id  = random.choice([1, 1, 1, 129])  # 1=Snort text rules, 129=preprocessor
     rule_id = random.randint(10000, 99999)
+    ips_sev, _prio, impact = _fp_ips_rating()
     fields.update({
         "_sig_id": f"INTRUSION:400:{gen_id}:{rule_id}",
         "act": "Blocked",
@@ -1413,8 +1450,9 @@ def _generate_ips_event(config):
         "cs2": rule_name,          "cs2Label": "fwRule",
         "cs5": ips_policy,         "cs5Label": "ipsPolicy",
         "cs6": str(rule_id),       "cs6Label": "ruleId",
+        "cn2": impact,             "cn2Label": "impact",
         "cat": category,
-        "cefSeverity": random.choice(['7', '8', '9', '10']),
+        "cefSeverity": ips_sev,
         "bytesOut": random.randint(200, 5_000),   # attacker's exploit payload
         "bytesIn":  random.randint(100, 1_000),  # partial response before IPS block
         "outcome": "FAILURE", "reason": "Intrusion Policy Violation",
@@ -1425,116 +1463,214 @@ def _generate_ips_event(config):
     return fields, "INTRUSION EVENT"
 
 
+# File and malware events (eStreamer records 500 / 502 / 125)
+#
+# Firepower's CEF keys are fixed by Cisco's eStreamer eNcore client (the CEF path the
+# Cortex Cisco Firepower pack documents), estreamer/adapters/cef.py:
+#   500 File Event          sig File:500:1         name "File Event"
+#   502 File Malware Event  sig FileMalware:502:1  name "File Malware Event"
+#   125 Malware event       sig FireAMP:125:1      name "FireAMP Event"
+# Severity is threatScore / 10. eNcore writes keys sorted and drops empty and zero
+# values. Values resolved through FMC metadata (estreamer/metadata/cache.py):
+#   direction        1 = Download, 2 = Upload  (written raw to deviceDirection)
+#   file action      Detect, Block, Malware Cloud Lookup, Malware Block, ...
+#   disposition      N/A, Clean, Unknown, Malware, Unavailable, Custom signature
+#   malware type     1 = "Threat Detected in Network File Transfer"
+# On 500/502 the file action is resolved (act=Malware Block). On 125 eNcore writes
+# the raw action byte (act=4), because that record has no file-action lookup.
+#
+# FMC records a network malware detection twice: as a File Malware Event (502) and as
+# a malware event (125) whose type is "Threat Detected in Network File Transfer". A
+# network detection has no endpoint path or parent process. Those fields (filePath,
+# sproc) belong to AMP for Endpoints events only.
+
+FP_DIRECTION_DOWNLOAD = 1
+FP_DIRECTION_UPLOAD = 2
+_FP_FILE_ACTION_ID = {"Detect": 1, "Block": 2, "Malware Cloud Lookup": 3, "Malware Block": 4}
+
+# File types the FTD file policy identifies. MSEXE, MSOLE2 (legacy Office) and
+# NEW_OFFICE (Office Open XML) are confirmed in Cisco documentation and community
+# answers; PDF, ZIP, RAR, 7Z and ISO are Snort file-type names. A file whose type is
+# not identified (lnk, js, hta, csv, txt, images) gets no file event: the policy
+# never matched it. Not verified against an FMC file-type catalogue.
+_FP_FILE_TYPE = {
+    "exe": "MSEXE", "dll": "MSEXE", "scr": "MSEXE", "sys": "MSEXE",
+    "doc": "MSOLE2", "xls": "MSOLE2", "ppt": "MSOLE2", "msi": "MSOLE2",
+    "docx": "NEW_OFFICE", "xlsx": "NEW_OFFICE", "pptx": "NEW_OFFICE",
+    "docm": "NEW_OFFICE", "xlsm": "NEW_OFFICE", "pptm": "NEW_OFFICE", "xlsb": "NEW_OFFICE",
+    "pdf": "PDF", "zip": "ZIP", "rar": "RAR", "7z": "7Z", "iso": "ISO",
+}
+
+# Firepower client-application names (what eNcore resolves clientApplicationId to).
+_FP_HTTP_CLIENTS = ["Chrome", "Firefox", "Microsoft Edge", "Internet Explorer"]
+
+
+def _fp_file_type(fname):
+    """Firepower file-type name for a file name, or None if the policy would not identify it."""
+    ext = str(fname or "").rsplit(".", 1)[-1].lower() if "." in str(fname or "") else ""
+    return _FP_FILE_TYPE.get(ext)
+
+
+def _fp_file_size(fname, cap):
+    """Plausible size for a file of this type, never more than `cap` bytes.
+
+    Office documents and PDFs stay in the tens of megabytes at most; only archives and
+    disk images carry the bulk of a large transfer.
+    """
+    ftype = _fp_file_type(fname)
+    if ftype in ("ZIP", "RAR", "7Z", "ISO"):
+        lo, hi = 1_048_576, max(cap // 2, 1_048_577)
+    elif ftype == "MSEXE":
+        lo, hi = 51_200, 20_971_520
+    else:
+        lo, hi = 20_480, 26_214_400
+    return max(1, min(cap, random.randint(lo, hi)))
+
+
+def _fp_file_events(config, *, src, dst, spt, dpt, app, user, fname, size, direction,
+                    start_ms=None, request=None, client_app=None, malware=None,
+                    sha256=None, shost=None, require_type=True):
+    """CEF lines for one file seen by the FTD file policy, per eNcore's mapping.
+
+    Returns [] when Firepower would not identify the file type. Clean or unknown files
+    give one File Event (500). With `malware` ({"threatname", "threat_score"}) the
+    file is blocked: a File Malware Event (502) plus the matching network malware
+    event (125).
+    """
+    ftype = _fp_file_type(fname)
+    if not ftype and require_type:
+        return []
+    if start_ms is None:
+        start_ms, _ = _conn_timing(random.randint(1_000, 30_000))
+    sha256 = sha256 or hashlib.sha256(f"{fname}{size}{time.time()}".encode()).hexdigest()
+    rt_ms = start_ms + random.randint(200, 5_000)
+    dvcpid = random.randint(1, 4_000)
+    policy = _ac_policy(config)
+    common = {
+        "_no_external_id": True, "_encore_sorted": True,
+        "src": src, "dst": dst, "spt": spt, "dpt": dpt, "proto": "6",
+        "app": app, "suser": user, "fname": fname, "fsize": size,
+        "fileHash": sha256, "fileType": ftype, "deviceDirection": direction,
+        "dvcpid": dvcpid, "request": request, "requestClientApplication": client_app,
+        "rt": rt_ms, "start": start_ms,
+    }
+    logs = []
+    if malware:
+        score = int(malware.get("threat_score") or random.randint(70, 100))
+        # 502: the file policy's own record of the block.
+        f502 = dict(common)
+        f502.update({
+            "_sig_id": "FileMalware:502:1", "cefSeverity": str(score // 10),
+            "act": "Malware Block",
+            "cs1": policy,    "cs1Label": "filePolicy",
+            "cs2": "Malware", "cs2Label": "disposition",
+            "cs3": "Malware" if ftype == "MSEXE" else "N/A", "cs3Label": "speroDisposition",
+        })
+        if ftype:   # an unidentified type never reaches the file policy, so no 502
+            logs.append(_format_firepower_cef(config, f502, "File Malware Event"))
+        # 125: the malware event FMC raises for the same network transfer.
+        f125 = dict(common)
+        f125.update({
+            "_sig_id": SIG_IDS["MALWARE"], "cefSeverity": str(score // 10),
+            "act": _FP_FILE_ACTION_ID["Malware Block"],
+            "outcome": "Threat Detected in Network File Transfer",
+            "cs1": policy,                    "cs1Label": "policy",
+            "cs2": malware.get("threatname"), "cs2Label": "virusName",
+            "cs3": "Malware",                 "cs3Label": "disposition",
+            "cs4": "N/A",                     "cs4Label": "speroDisposition",
+            "cs5Label": "eventDescription",
+        })
+        logs.append(_format_firepower_cef(config, f125, "FireAMP Event"))
+        return logs
+    f500 = dict(common)
+    f500.update({
+        "_sig_id": SIG_IDS["FILE"], "cefSeverity": "0",
+        "act": "Malware Cloud Lookup",
+        "cs1": policy, "cs1Label": "filePolicy",
+        "cs2": random.choices(["Clean", "Unknown"], weights=[80, 20], k=1)[0],
+        "cs2Label": "disposition",
+        "cs3": "N/A", "cs3Label": "speroDisposition",
+    })
+    logs.append(_format_firepower_cef(config, f500, "File Event"))
+    return logs
+
+
+def _malicious_network_file():
+    """A malware file whose type the FTD file policy identifies (see _FP_FILE_TYPE).
+
+    threat_files mixes in lnk / js / hta / html / one / img lures. Those reach users
+    by mail, but an FTD file policy does not identify them, so a network malware
+    block can't name them. Draw until the type is one Firepower inspects.
+    """
+    for _ in range(12):
+        try:
+            info = threat_files.malicious_file_info()
+        except Exception:
+            break
+        if _fp_file_type(info.get("fname")):
+            return info
+    return {"fname": f"Invoice_{random.randint(100000, 999999)}_documents.zip",
+            "threatname": "Win32.Trojan.Agent"}
+
+
+def _fp_upload_files(config, src, dst, user, app, dpt, total_bytes, start_ms, kinds):
+    """File Events for 1-3 files a session uploads (direction 2), sized within its bytes.
+
+    Files whose type the policy doesn't identify (csv, txt, gz, sql ...) produce no
+    event, as on a real FTD, so an upload session can name fewer files than it moved.
+    """
+    logs = []
+    budget = max(total_bytes, 1)
+    for kind in random.sample(list(kinds), k=min(len(kinds), random.randint(1, 3))):
+        fname, _ext = threat_files.document_name(kind)
+        size = _fp_file_size(fname, budget)
+        logs += _fp_file_events(
+            config, src=src, dst=dst, spt=random.randint(49152, 65535),
+            dpt=dpt or random.randint(50000, 51000), app=app, user=user, fname=fname,
+            size=size, direction=FP_DIRECTION_UPLOAD,
+            start_ms=start_ms + random.randint(1_000, 120_000))
+    return logs
+
+
 def _generate_file_malware_event(config, src_ip, user, shost=None):
-    """AMP file/malware detection — internal host downloading malware.
+    """Network malware block: an internal host downloads malware over HTTP.
 
-    Conversation-complete: DNS resolution of the malware delivery domain
-    precedes the HTTP download + AMP block, matching real FTD log sequences.
+    Conversation-complete: DNS resolution of the delivery domain, then the FTD file
+    policy blocks the download, recorded as a File Malware Event (502) and the
+    matching network malware event (125, "Threat Detected in Network File
+    Transfer"). See _fp_file_events for the eNcore field mapping.
 
-    Hunt fields:
-      cs1/cs1Label  = SHA256 hash (not policy — malware events use cs1 for SHA256)
-      cs6/cs6Label  = DispositionSource (AMP Cloud / Threat Grid / Local)
-      sproc         = source process (browser or suspicious process)
-      filePath      = full path where file was written on the endpoint
-      fileSize      = file size in bytes (for DLP/data volume correlation)
-      dhost         = malware delivery domain (for domain-based hunting)
-      requestMethod = "GET" (HTTP download)
-
-    Uses MD5 hash for fileHash to match XIF: xdm.target.file.md5 = fileHash (32 hex chars).
-    SHA256 is stored separately in cs1 — both hashes are available for hunting.
-
-    Triggers XSIAM: Malware / File Threat analytics detection.
+    Triggers XSIAM: Malware / File Threat analytics and the "Malicious File
+    Transferred" correlation rule (cefName "FireAMP Event").
     Returns list of CEF log strings (multi-event).
     """
-    firepower_conf  = _get_config(config)
-    malicious_files = firepower_conf.get('malicious_files', [])
-
-    # Generated rather than one of six fixed dicts: file name and hash cardinality
-    # is exactly what an AMP retrospective-detection rule keys on. The curated
-    # malicious_files pool stays as the offline fallback.
-    try:
-        file_info = threat_files.malicious_file_info()
-    except Exception:
-        file_info = (random.choice(malicious_files) if malicious_files else
-                     {"fname": "payload.exe", "fileType": "PE32",
-                      "threatname": "Trojan.Generic"})
-
-    fname      = file_info.get("fname", "payload.exe")
-    threatname = file_info.get("threatname", "Generic.Malware")
-    ftype      = file_info.get("fileType", "PE32")
-
-    # Unique seed per event ensures different hashes each time
-    seed      = f"{src_ip}{time.time()}{fname}"
-    file_hash = hashlib.md5(seed.encode()).hexdigest()   # 32 chars (unused, kept for compat)
-    sha256    = hashlib.sha256(seed.encode()).hexdigest() # 64 chars -> fileHash (Cisco uses SHA-256)
-
-    # Realistic file size by type
-    if ftype in ("PE32", "EXE", "DLL"):
-        file_size = random.randint(51_200, 10_485_760)      # 50 KB - 10 MB
-    elif ftype in ("ZIP", "RAR", "7Z"):
-        file_size = random.randint(1_048_576, 104_857_600)  # 1 MB - 100 MB
+    info = _malicious_network_file()
+    fname = info["fname"]
+    ftype = _fp_file_type(fname)
+    if ftype == "MSEXE":
+        size = random.randint(51_200, 10_485_760)        # 50 KB - 10 MB
+    elif ftype in ("ZIP", "RAR", "7Z", "ISO"):
+        size = random.randint(1_048_576, 104_857_600)    # 1 MB - 100 MB
     else:
-        file_size = random.randint(51_200, 5_242_880)       # 50 KB - 5 MB
-
-    # Source process — browsers for drive-by downloads, suspicious for second-stage drops
-    sproc = random.choice(_BROWSER_PROCESSES + _SUSPICIOUS_PROCESSES[:3])
-
-    # File path on the endpoint
-    user_dir   = user.split("@")[0] if "@" in user else user
-    file_paths = [
-        f"C:/Users/{user_dir}/Downloads/{fname}",
-        f"C:/Users/{user_dir}/AppData/Local/Temp/{fname}",
-        f"C:/Windows/Temp/{fname}",
-        f"C:/ProgramData/{fname}",
-    ]
-    file_path  = random.choice(file_paths)
+        size = random.randint(51_200, 5_242_880)         # 50 KB - 5 MB
 
     # Three curated domains meant every AMP event in a run named one of three
     # delivery hosts. family "malware_distro" keeps the token a rule could match.
     mal_domain = threat_domains.pick(config, family="malware_distro",
                                      pool_key="malicious_dns_domains",
                                      section="firepower_config")
-    dest_ip    = _random_external_ip()
+    dest_ip = _random_external_ip()
+    start_ms, _end_ms = _conn_timing(random.randint(1_000, 30_000))
 
-    start_ms, end_ms = _conn_timing(random.randint(1_000, 30_000))
-
-    logs = []
-
-    # Log 1: DNS resolution of the malware delivery domain
-    logs.append(_dns_precursor_log(config, src_ip, user, mal_domain, shost))
-
-    # Log 2: AMP malware block event
-    fields = _base_fields(config, src_ip, user, shost)
-    fields.update({
-        "_sig_id": SIG_IDS["MALWARE"],
-        "act": "Malware Block", "app": "HTTP",
-        "dst": dest_ip, "dpt": 80,
-        "dhost": mal_domain,
-        "fname":    fname,
-        "fileHash": sha256,     # Cisco eStreamer puts SHA-256 in fileHash
-        "fileType": ftype,
-        "fsize": file_size,
-        "filePath": file_path,
-        "sproc":    sproc,
-        # Malware (Record 125) cs fields per Cisco eStreamer:
-        "cs1": _ac_policy(config), "cs1Label": "policy",
-        "cs2": threatname,         "cs2Label": "virusName",
-        "cs3": "Malware",          "cs3Label": "disposition",
-        "cs4": "N/A",              "cs4Label": "speroDisposition",
-        "cs5": f"Malware detected: {threatname}", "cs5Label": "eventDescription",
-        "cefSeverity": "10",
-        "request": f"http://{mal_domain}/{fname}",
-        "requestMethod": "GET",
-        "requestClientApplication": random.choice(_BROWSER_PROCESSES),
-        "bytesOut": random.randint(200, 2_000),
-        "bytesIn":  file_size,
-        "dvcpid":   random.randint(1000, 9999),
-        "outcome": "FAILURE",
-        "reason":  f"File Blacklisted: {threatname}",
-        "msg":     f"Malware detected: {threatname} in file {fname}",
-        "start":   start_ms, "end": end_ms,
-    })
-    logs.append(_format_firepower_cef(config, fields, "FireAMP Event"))
+    logs = [_dns_precursor_log(config, src_ip, user, mal_domain, shost)]
+    logs += _fp_file_events(
+        config, src=src_ip, dst=dest_ip, spt=random.randint(49152, 65535), dpt=80,
+        app="HTTP", user=user, fname=fname, size=size,
+        direction=FP_DIRECTION_DOWNLOAD, start_ms=start_ms,
+        request=f"http://{mal_domain}/{fname}",
+        client_app=random.choice(_FP_HTTP_CLIENTS),
+        malware={"threatname": info.get("threatname") or "Win32.Trojan.Agent",
+                 "threat_score": random.randint(70, 100)})
     return logs
 
 
@@ -1887,7 +2023,15 @@ def _generate_smb_rare_file_transfer(config, src_ip, user, shost=None):
         "msg": f"Large SMB transfer ({file_size // (1024 * 1024)}MB) from {dst_ip}: possible data staging",
         "start": start_ms, "end": end_ms,
     })
-    return fields, "CONNECTION STATISTICS"
+    logs = [_format_firepower_cef(config, fields, "CONNECTION STATISTICS")]
+    # Reads from the share are downloads to the client (direction 1).
+    for kind in random.sample(["document", "pii", "archive", "document"], k=random.randint(1, 3)):
+        fname, _ext = threat_files.document_name(kind)
+        logs += _fp_file_events(
+            config, src=src_ip, dst=dst_ip, spt=fields["spt"], dpt=445, app="SMB",
+            user=user, fname=fname, size=_fp_file_size(fname, file_size),
+            direction=FP_DIRECTION_DOWNLOAD, start_ms=start_ms + random.randint(1_000, 60_000))
+    return logs
 
 
 def _generate_smb_share_enumeration(config, src_ip, user, shost=None):
@@ -2272,7 +2416,7 @@ def _generate_rdp_lateral_event(config, src_ip, user, session_context=None, shos
         "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
         "cs2": "Allow_Internal_Admin",   "cs2Label": "fwRule",
         "cs5": "Lateral Movement",       "cs5Label": "secIntelCategory",
-        "cefSeverity": "5",
+        "cefSeverity": "3",
         "bytesOut": random.randint(5_000, 50_000),
         "bytesIn":  random.randint(5_000, 50_000),
         "outcome": "SUCCESS", "reason": "Traffic Allowed",
@@ -2382,7 +2526,7 @@ def _generate_new_admin_behavior(config, src_ip, user, shost=None, session_conte
             "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
             "cs2": "Allow_Internal_Admin", "cs2Label": "fwRule",
             "cs5": "Lateral Movement",     "cs5Label": "secIntelCategory",
-            "cefSeverity": "5",
+            "cefSeverity": "3",
             "bytesOut": random.randint(1_000, 40_000),
             "bytesIn":  random.randint(1_000, 60_000),
             "outcome": "SUCCESS", "reason": "Traffic Allowed",
@@ -2439,7 +2583,7 @@ def _generate_abnormal_rdp_rare_host(config, src_ip, user, shost=None, session_c
         "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
         "cs2": "Allow_Internal_Admin", "cs2Label": "fwRule",
         "cs5": "Lateral Movement",     "cs5Label": "secIntelCategory",
-        "cefSeverity": "5",
+        "cefSeverity": "3",
         "bytesOut": random.randint(20_000, 400_000),
         "bytesIn":  random.randint(50_000, 3_000_000),
         "outcome": "SUCCESS", "reason": "Traffic Allowed",
@@ -2539,7 +2683,7 @@ def _fp_vpn_auth(config, vpn_src_ip, user, start_ms, success, reason=None):
         dur = random.randint(300, 2_000)
         fields.update({"outcome": "FAILURE",
                        "reason": reason or "VPN Authentication Failed - Invalid Credentials",
-                       "cefSeverity": "5",
+                       "cefSeverity": "7",
                        "bytesOut": random.randint(300, 2_000), "bytesIn": random.randint(200, 1_500),
                        "msg": f"VPN authentication failed for {vpn_username(user)} from {vpn_src_ip}"})
     fields.update({
@@ -2936,6 +3080,11 @@ def _generate_smtp_large_exfil(config, src_ip, user, shost=None):
         "start": start_ms, "end": end_ms,
     })
     logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
+    # 587 is submission with STARTTLS: the FTD sees no attachment without decryption.
+    # Port 25 relay here is plaintext, so the file policy records each attachment.
+    if smtp_port == 25:
+        logs += _fp_upload_files(config, src_ip, dest_ip, user, "SMTP", smtp_port,
+                                 bytes_out, start_ms, kinds=("document", "pii", "archive"))
     return logs
 
 
@@ -2982,6 +3131,8 @@ def _generate_ftp_large_exfil(config, src_ip, user, shost=None):
         "start": start_ms, "end": end_ms,
     })
     logs.append(_format_firepower_cef(config, fields, "CONNECTION STATISTICS"))
+    logs += _fp_upload_files(config, src_ip, dest_ip, user, "FTP Data", None, bytes_out,
+                             start_ms, kinds=("archive", "pii", "document"))
     return logs
 
 
@@ -3179,6 +3330,7 @@ def _generate_network_anomaly(config):
 
     gen_id  = 129   # preprocessor
     rule_id = random.randint(1, 999)
+    ips_sev, _prio, impact = _fp_ips_rating(priority=random.choice([1, 1, 2]))
     fields = _base_fields(config, attacker_ip, "EXTERNAL_ATTACKER")
     fields['cs3']             = "Internet-Zone"
     fields['cs4']             = "Server-Zone"
@@ -3194,8 +3346,9 @@ def _generate_network_anomaly(config):
         "cs2": protection_name,     "cs2Label": "fwRule",
         "cs5": random.choice(_IPS_POLICIES), "cs5Label": "ipsPolicy",
         "cs6": str(rule_id),        "cs6Label": "ruleId",
+        "cn2": impact,              "cn2Label": "impact",
         "cat": "Network Anomaly",
-        "cefSeverity": random.choice(["7", "8", "9"]),
+        "cefSeverity": ips_sev,
         "bytesOut": random.randint(40, 200),
         "bytesIn":  random.randint(40, 200),
         "outcome": "FAILURE", "reason": "Network Analysis Policy",
@@ -3226,7 +3379,6 @@ def _generate_scenario_log(config, scenario, session_context=None):
         "cs2": "Scenario_Rule",     "cs2Label": "fwRule",
         "request": f"https://{scenario.get('dest_domain', 'scenario.com')}/",
         "requestMethod": "GET",
-        "cefSeverity": "5",
         "outcome": "FAILURE" if scenario.get('action', 'Block') == "Block" else "SUCCESS",
         "deviceInboundInterface":  _get_config(config).get('inbound_interface',  'inside'),
         "deviceOutboundInterface": _get_config(config).get('outbound_interface', 'outside'),
@@ -3254,25 +3406,22 @@ def _generate_scenario_log(config, scenario, session_context=None):
         fields["cs6Label"]        = "ruleId"
         fields["cat"]             = scenario.get("threat_category", "Exploit Kit")
         fields["deviceDirection"] = 0
+        # Intrusion act is eNcore's blocked flag: Alerted / Blocked / Would Be Blocked.
+        fields["act"] = "Alerted" if fields["act"] == "Allow" else "Blocked"
+        fields["cefSeverity"], _prio, fields["cn2"] = _fp_ips_rating()
+        fields["cn2Label"] = "impact"
         cef_name = "INTRUSION EVENT"
     elif log_type == "malware":
-        fields["_sig_id"] = SIG_IDS["MALWARE"]
         fname = scenario.get("filename", "bad.exe")
-        seed  = fname
-        threatname = scenario.get("threat_category", "Trojan.Generic")
-        fields["fname"]      = fname
-        fields["fileHash"]   = hashlib.sha256(seed.encode()).hexdigest()
-        fields["cs1"]        = _ac_policy(config)
-        fields["cs1Label"]   = "policy"
-        fields["cs2"]        = threatname
-        fields["cs2Label"]   = "virusName"
-        fields["cs3"]        = "Malware"
-        fields["cs3Label"]   = "disposition"
-        fields["cs4"]        = "N/A"
-        fields["cs4Label"]   = "speroDisposition"
-        fields["cs5"]        = f"Malware detected: {threatname}"
-        fields["cs5Label"]   = "eventDescription"
-        cef_name = "FireAMP Event"
+        return _fp_file_events(
+            config, src=fields["src"], dst=fields["dst"], spt=fields["spt"],
+            dpt=scenario.get("dest_port", 80), app="HTTP", user=user, fname=fname,
+            size=random.randint(51_200, 5_242_880), direction=FP_DIRECTION_DOWNLOAD,
+            start_ms=start_ms, sha256=hashlib.sha256(fname.encode()).hexdigest(),
+            request=f"http://{scenario.get('dest_domain', 'scenario.com')}/{fname}",
+            client_app=random.choice(_FP_HTTP_CLIENTS), require_type=False,
+            malware={"threatname": scenario.get("threat_category", "Trojan.Generic"),
+                     "threat_score": 90})
     elif log_type == "url_filtering":
         fields["_sig_id"] = SIG_IDS["URL"]
         fields["cs5"]        = scenario.get("threat_category", "Phishing")
@@ -3511,7 +3660,7 @@ def _fp_conn(config, src, dst, dpt, app, act="Allow", user=None, shost=None,
         "proto": proto, "act": act, "app": app, "dst": dst, "dpt": dpt,
         "cs1": _ac_policy(config), "cs1Label": "fwPolicy",
         "cs2": rule, "cs2Label": "fwRule",
-        "cefSeverity": "3" if act == "Allow" else "5",
+        "cefSeverity": "3" if act == "Allow" else "7",
         "bytesOut": out_b if out_b is not None else random.randint(200, 5000),
         "bytesIn": in_b if in_b is not None else random.randint(2000, 50000),
         "outcome": "SUCCESS" if act == "Allow" else "FAILURE",
@@ -3896,7 +4045,7 @@ def _generate_threat_log(config, session_context=None, forced_event=None):
     elif chosen == 'internal_smb':
         fields, cef_name = _generate_internal_smb_event(config, src_ip, user, shost)
     elif chosen == 'smb_rare_file_transfer':
-        fields, cef_name = _generate_smb_rare_file_transfer(config, src_ip, user, shost)
+        return (_generate_smb_rare_file_transfer(config, src_ip, user, shost), chosen)
     elif chosen == 'app_control':
         fields, cef_name = _generate_app_control(config, src_ip, user, shost)
     elif chosen == 'network_anomaly':
@@ -3932,7 +4081,7 @@ def generate_log(config, scenario=None, threat_level="Realistic",
 
     Threat event fallback weights (used when event_mix absent from config):
       ips               18  - inbound IPS drop (external attacker -> internal server)
-      malware           15  - AMP file/malware block (SHA256, fname, fileType, filePath)
+      malware           15  - network malware block: File Malware Event (502) + FireAMP Event (125)
       url_filtering     10  - URL category block (cs5 = category -> xdm.alert.category)
       security_intel     8  - Security Intelligence DNS block (UDP/53, single block event)
       port_scan         10  - external port scan (20-50 blocked CONNECTIONs, multi-event)
