@@ -248,6 +248,52 @@ def scenario_threat_intel_risk(config=None):
     return _risk_threat(config, "investigationsThreatIntelligence", "high", loc=ac.rare_asn_loc())
 
 
+def scenario_anomalous_token_risk(config=None):
+    """Token with abnormal lifetime / characteristics (replayed or forged access token) ->
+    anomalousToken (high)."""
+    return _risk_threat(config, "anomalousToken", "high", loc=ac.rare_asn_loc())
+
+
+def scenario_unfamiliar_features_risk(config=None):
+    """Sign-in with properties unfamiliar for the user (new device/location/ASN pattern) ->
+    unfamiliarFeatures."""
+    return _risk_threat(config, "unfamiliarFeatures", "medium", loc=ac.rare_asn_loc())
+
+
+def scenario_admin_confirmed_compromised_risk(config=None):
+    """Admin manually confirmed the account compromised in Identity Protection ->
+    adminConfirmedUserCompromised (high, offline)."""
+    return _risk_threat(config, "adminConfirmedUserCompromised", "high",
+                        detail="adminConfirmedUserCompromised", timing="offline")
+
+
+def scenario_mcas_impossible_travel_risk(config=None):
+    """Defender for Cloud Apps impossible-travel detection across two distant sign-ins ->
+    mcasImpossibleTravel (source MicrosoftCloudAppSecurity, offline)."""
+    return _risk_threat(config, "mcasImpossibleTravel", "medium", loc=ac.rare_asn_loc(),
+                        source="MicrosoftCloudAppSecurity", timing="offline")
+
+
+def scenario_anomalous_user_activity_risk(config=None):
+    """Identity Protection correlated abnormal account activity across signals ->
+    anomalousUserActivity (high, offline)."""
+    return _risk_threat(config, "anomalousUserActivity", "high", activity="user", timing="offline")
+
+
+def scenario_aitm_token_theft_risk(config=None):
+    """Adversary-in-the-middle session/token theft detected on the account ->
+    attackerinTheMiddle (high, offline)."""
+    return _risk_threat(config, "attackerinTheMiddle", "high", loc=ac.rare_asn_loc(),
+                        timing="offline")
+
+
+def scenario_suspicious_inbox_forwarding_risk(config=None):
+    """Defender for Cloud Apps flagged suspicious inbox forwarding on the mailbox ->
+    suspiciousInboxForwarding (source MicrosoftCloudAppSecurity, offline)."""
+    return _risk_threat(config, "suspiciousInboxForwarding", "medium", activity="user",
+                        source="MicrosoftCloudAppSecurity", timing="offline")
+
+
 SCENARIOS = {
     "leaked_credentials": scenario_leaked_credentials,
     "malicious_ip_signin": scenario_malicious_ip_signin,
@@ -260,6 +306,13 @@ SCENARIOS = {
     "suspicious_browser_risk": scenario_suspicious_browser_risk,
     "inbox_manipulation_risk": scenario_inbox_manipulation_risk,
     "threat_intel_risk": scenario_threat_intel_risk,
+    "anomalous_token_risk": scenario_anomalous_token_risk,
+    "unfamiliar_features_risk": scenario_unfamiliar_features_risk,
+    "admin_confirmed_compromised_risk": scenario_admin_confirmed_compromised_risk,
+    "mcas_impossible_travel_risk": scenario_mcas_impossible_travel_risk,
+    "anomalous_user_activity_risk": scenario_anomalous_user_activity_risk,
+    "aitm_token_theft_risk": scenario_aitm_token_theft_risk,
+    "suspicious_inbox_forwarding_risk": scenario_suspicious_inbox_forwarding_risk,
     # wip_ aliases for the on-demand catalog (see ANALYTIC_ALERTS note).
     "wip_leaked_credentials": scenario_leaked_credentials,
     "wip_malicious_ip_signin": scenario_malicious_ip_signin,
@@ -272,6 +325,13 @@ SCENARIOS = {
     "wip_suspicious_browser_risk": scenario_suspicious_browser_risk,
     "wip_inbox_manipulation_risk": scenario_inbox_manipulation_risk,
     "wip_threat_intel_risk": scenario_threat_intel_risk,
+    "wip_anomalous_token_risk": scenario_anomalous_token_risk,
+    "wip_unfamiliar_features_risk": scenario_unfamiliar_features_risk,
+    "wip_admin_confirmed_compromised_risk": scenario_admin_confirmed_compromised_risk,
+    "wip_mcas_impossible_travel_risk": scenario_mcas_impossible_travel_risk,
+    "wip_anomalous_user_activity_risk": scenario_anomalous_user_activity_risk,
+    "wip_aitm_token_theft_risk": scenario_aitm_token_theft_risk,
+    "wip_suspicious_inbox_forwarding_risk": scenario_suspicious_inbox_forwarding_risk,
 }
 
 # WIP / prerequisite-gated. The records are field-correct and ingest into msft_azure_raw as
@@ -293,6 +353,13 @@ ANALYTIC_ALERTS = {
     "wip_suspicious_browser_risk": "Azure AD suspicious browser risk detection",
     "wip_inbox_manipulation_risk": "Azure AD suspicious inbox manipulation rules",
     "wip_threat_intel_risk": "Azure AD threat intelligence risk detection",
+    "wip_anomalous_token_risk": "Azure AD anomalous token risk detection",
+    "wip_unfamiliar_features_risk": "Azure AD unfamiliar sign-in properties",
+    "wip_admin_confirmed_compromised_risk": "Azure AD admin confirmed user compromised",
+    "wip_mcas_impossible_travel_risk": "Azure AD impossible travel (Defender for Cloud Apps)",
+    "wip_anomalous_user_activity_risk": "Azure AD anomalous user activity",
+    "wip_aitm_token_theft_risk": "Azure AD adversary-in-the-middle token theft",
+    "wip_suspicious_inbox_forwarding_risk": "Azure AD suspicious inbox forwarding",
 }
 
 
