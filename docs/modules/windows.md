@@ -607,20 +607,32 @@ unverifiable:
 `Subject*` block removed (a real `4898` carries none), `TemplateContent`
 rendered in the CA's text format with `msPKI-Certificate-Name-Flag = 0x1` /
 `CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT` for ESC1, and a domain-SID SDDL plus ACE
-table in place of the `O:DAG:DAD:PAI(...)` placeholder. What remains unverified
-is only whether the analytic parses this text layout — the field names and the
-shape are no longer guesses. No delivery has been judged against the rebuilt
-builder yet.
+table in place of the `O:DAG:DAD:PAI(...)` placeholder. The field names and the
+shape are no longer guesses.
 
-**`4886`/`4887` were wrong in four ways.** The captured siblings show that
-`Attributes` is a cdc/rmd/ccm host triple (not `CertificateTemplate:…`), the
-template name is its own `CertificateTemplate` field, a request-supplied SAN
-appears as `Other Name:\n     Principal Name=user@domain` in
-`SubjectAlternativeName`, and both events are Version `1`. The builders now emit
-the captured field set and order, share `RequestId` across the request/issue
-pair, and derive a Windows-style 38-hex serial (`16` + random + zero-padded
-request id) from that id. `4888` mirrors the captured pair but has never been
-observed here.
+The rebuilt `4898` has now been delivered twice with the full chain (2026-11-22
+01:27Z and 02:20Z), verified in `xdr_data` with `TemplateContent` intact, and
+"Suspicious privileged certificate request" fired from the same 02:20Z batch.
+"Vulnerable certificate template loaded" stayed silent both times, as it has
+across every earlier delivery, so the detector remains WIP: the layout is right
+but the tenant does not evaluate it (or parses something outside the captured
+fields).
+
+**`4886`/`4887`: the captured fields were right, but `Attributes` had to change.**
+The captured siblings show `Attributes` as a cdc/rmd/ccm host triple, the
+template name as its own `CertificateTemplate` field, a request-supplied SAN as
+`Other Name:\n     Principal Name=user@domain` in `SubjectAlternativeName`, and
+both events at Version `1`. The builders emit that field set and order, share
+`RequestId` across the pair, and derive a Windows-style 38-hex serial (`16` +
+random + zero-padded request id).
+
+The captured `Attributes` value, however, is not the only real one, and it is
+the wrong one for the tenant: the privileged-certificate analytic parses
+`CertificateTemplate:<name>` out of `Attributes`, so the cdc/rmd/ccm-only shape
+is silent (01:27Z) while the request-attribute block a `certreq -submit -attrib`
+or Certify enrollment produces fires (02:20Z, alert 826337). The builders
+therefore default to that block and keep `captured=True` for the triple.
+`4888` mirrors the same field set but has never been observed here.
 
 
 **"Discovery of misconfigured certificate templates using LDAP" — blocked by data
