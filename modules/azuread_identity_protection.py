@@ -164,7 +164,8 @@ def generate_benign(config=None, context=None):
 _ANON_IPS = ["185.220.101.34", "45.148.10.92", "193.218.118.158", "171.25.193.78"]  # TOR / anonymizer exits
 
 
-def _risk_threat(config, etype, level, *, loc=None, activity="signin", detail="none"):
+def _risk_threat(config, etype, level, *, loc=None, activity="signin", detail="none",
+                 source="IdentityProtection", timing="realtime"):
     u = ac.pick_user(config)
     loc = loc or ac.egress(u)
     props = {"id": uuid.uuid4().hex, "correlationId": str(uuid.uuid4()),
@@ -173,7 +174,7 @@ def _risk_threat(config, etype, level, *, loc=None, activity="signin", detail="n
              "detectedDateTime": _ts(-random.randint(5, 60)),
              "ipAddress": loc.get("ip", ""), "riskEventType": etype,
              "riskState": "atRisk", "riskLevel": level, "riskDetail": detail,
-             "source": "IdentityProtection", "detectionTimingType": "realtime",
+             "source": source, "detectionTimingType": timing,
              "userId": ac.user_oid(u["username"]), "userPrincipalName": u["upn"],
              "userDisplayName": u.get("display_name"), "userType": "member",
              "location": {"city": loc.get("city", ""), "state": loc.get("state", ""),
@@ -214,18 +215,63 @@ def scenario_password_spray_risk(config=None):
     return _risk_threat(config, "passwordSpray", "medium", loc=ac.rare_asn_loc())
 
 
+def scenario_new_country_risk(config=None):
+    """Sign-in from a country the user (and often the tenant) has not signed in from -> newCountry."""
+    return _risk_threat(config, "newCountry", "medium", loc=ac.rare_asn_loc())
+
+
+def scenario_malware_ip_risk(config=None):
+    """Sign-in from an IP in a known malware/botnet network -> malwareInfectedIPAddress."""
+    return _risk_threat(config, "malwareInfectedIPAddress", "medium", loc=ac.rare_asn_loc())
+
+
+def scenario_token_issuer_anomaly_risk(config=None):
+    """SAML token issuer anomaly (forged / Golden-SAML-style token) -> tokenIssuerAnomaly (high)."""
+    return _risk_threat(config, "tokenIssuerAnomaly", "high", loc=ac.rare_asn_loc())
+
+
+def scenario_suspicious_browser_risk(config=None):
+    """Anomalous browser fingerprint across sign-ins from one session -> suspiciousBrowser."""
+    return _risk_threat(config, "suspiciousBrowser", "medium", loc=ac.rare_asn_loc())
+
+
+def scenario_inbox_manipulation_risk(config=None):
+    """Defender for Cloud Apps flagged suspicious inbox-manipulation rules on the mailbox ->
+    mcasSuspiciousInboxManipulationRules (source MicrosoftCloudAppSecurity, offline detection)."""
+    return _risk_threat(config, "mcasSuspiciousInboxManipulationRules", "medium",
+                        activity="user", source="MicrosoftCloudAppSecurity", timing="offline")
+
+
+def scenario_threat_intel_risk(config=None):
+    """Microsoft Threat Intelligence correlated the account/IP with known malicious activity ->
+    investigationsThreatIntelligence (high)."""
+    return _risk_threat(config, "investigationsThreatIntelligence", "high", loc=ac.rare_asn_loc())
+
+
 SCENARIOS = {
     "leaked_credentials": scenario_leaked_credentials,
     "malicious_ip_signin": scenario_malicious_ip_signin,
     "anonymous_ip_signin": scenario_anonymous_ip_signin,
     "impossible_travel_risk": scenario_impossible_travel_risk,
     "password_spray_risk": scenario_password_spray_risk,
+    "new_country_risk": scenario_new_country_risk,
+    "malware_ip_risk": scenario_malware_ip_risk,
+    "token_issuer_anomaly_risk": scenario_token_issuer_anomaly_risk,
+    "suspicious_browser_risk": scenario_suspicious_browser_risk,
+    "inbox_manipulation_risk": scenario_inbox_manipulation_risk,
+    "threat_intel_risk": scenario_threat_intel_risk,
     # wip_ aliases for the on-demand catalog (see ANALYTIC_ALERTS note).
     "wip_leaked_credentials": scenario_leaked_credentials,
     "wip_malicious_ip_signin": scenario_malicious_ip_signin,
     "wip_anonymous_ip_signin": scenario_anonymous_ip_signin,
     "wip_impossible_travel_risk": scenario_impossible_travel_risk,
     "wip_password_spray_risk": scenario_password_spray_risk,
+    "wip_new_country_risk": scenario_new_country_risk,
+    "wip_malware_ip_risk": scenario_malware_ip_risk,
+    "wip_token_issuer_anomaly_risk": scenario_token_issuer_anomaly_risk,
+    "wip_suspicious_browser_risk": scenario_suspicious_browser_risk,
+    "wip_inbox_manipulation_risk": scenario_inbox_manipulation_risk,
+    "wip_threat_intel_risk": scenario_threat_intel_risk,
 }
 
 # WIP / prerequisite-gated. The records are field-correct and ingest into msft_azure_raw as
@@ -241,6 +287,12 @@ ANALYTIC_ALERTS = {
     "wip_anonymous_ip_signin": "Azure AD sign-in from an anonymized IP address",
     "wip_impossible_travel_risk": "Azure AD impossible travel risk detection",
     "wip_password_spray_risk": "Azure AD password spray risk detection",
+    "wip_new_country_risk": "Azure AD sign-in from a new country",
+    "wip_malware_ip_risk": "Azure AD sign-in from a malware-linked IP address",
+    "wip_token_issuer_anomaly_risk": "Azure AD token issuer anomaly",
+    "wip_suspicious_browser_risk": "Azure AD suspicious browser risk detection",
+    "wip_inbox_manipulation_risk": "Azure AD suspicious inbox manipulation rules",
+    "wip_threat_intel_risk": "Azure AD threat intelligence risk detection",
 }
 
 
