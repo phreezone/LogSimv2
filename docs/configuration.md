@@ -355,7 +355,7 @@ On by default. While `enabled` is `true`, the set of busy users changes every UT
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Turns rotation on. Set it to `false`, output is byte-identical to a build without rotation (no extra random draws are made). |
+| `enabled` | `true` | Turns rotation on. Set it to `false` for output byte-identical to a build without rotation (no extra random draws are made). |
 | `core_pct` | `40` | Share of users (a stable hash of the username) who are active every month: the regulars. |
 | `monthly_pct` | `50` | Share of the remaining users who are active in a given month. Each month is drawn afresh from `seed` and the year-month, so every restart within a month gets the same set. |
 | `quiet_share` | `0.1` | Share of benign picks that still come from the whole roster. Users who rotate out keep a light trickle of activity, so they never look like dormant accounts when they rotate back in. |
