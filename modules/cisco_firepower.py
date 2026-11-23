@@ -1425,7 +1425,7 @@ def _generate_ips_event(config):
     if ips_rules:
         rule_name, category = random.choice(list(ips_rules.items()))
     else:
-        rule_name, category = "ET-WEB-SQL-INJECTION", "Web Attack"
+        rule_name, category = "SQL union select - possible sql injection attempt - GET parameter", "Web Application Attack"
 
     ips_policy = random.choice(_IPS_POLICIES)
     start_ms, end_ms = _conn_timing(random.randint(0, 200))  # blocked nearly instantly
@@ -1438,7 +1438,7 @@ def _generate_ips_event(config):
     fields['deviceInboundInterface']  = firepower_conf.get('outbound_interface', 'outside')
     fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
 
-    gen_id  = random.choice([1, 1, 1, 129])  # 1=Snort text rules, 129=preprocessor
+    gen_id  = 1   # text (signature) rules; preprocessor/decoder events are _generate_network_anomaly
     rule_id = random.randint(10000, 99999)
     ips_sev, _prio, impact = _fp_ips_rating()
     fields.update({
@@ -1460,7 +1460,8 @@ def _generate_ips_event(config):
         "msg":   f"Intrusion Event: {rule_name} - {category}",
         "start": start_ms, "end": end_ms,
     })
-    return fields, "INTRUSION EVENT"
+    # eNcore names an intrusion event after the rule's message (@computed.message).
+    return fields, rule_name
 
 
 # File and malware events (eStreamer records 500 / 502 / 125)
@@ -3310,26 +3311,32 @@ def _generate_network_anomaly(config):
     attacker_ip    = _random_external_ip()
     victim_ip      = random.choice(config.get('internal_servers', ['10.0.10.50']))
 
+    # Snort 3 built-in rules (decoder / stream / inspector), named the way FMC shows
+    # them: "(module) message". gid:sid and message strings are from the snort3
+    # source (codecs/ip/cd_tcp.cc, cd_icmp4.cc, stream/tcp/tcp_module.cc,
+    # stream/ip/ip_module.cc, service_inspectors/http_inspect, dns).
+    # (gid, sid, message, description, proto, dport; 0 = any common port)
     protections = [
-        ("SYN Flood",             "Consecutive SYN packets without completing handshake", "6",  80),
-        ("IP Spoofing",           "Source IP address spoofing detected",                  "6",  443),
-        ("TCP NULL Scan",         "TCP segment with no flags set",                        "6",  22),
-        ("FIN Scan",              "TCP FIN without prior SYN/ACK",                        "6",  22),
-        ("Xmas Scan",             "TCP segment with FIN/PSH/URG flags",                   "6",  22),
-        ("DNS Protocol Anomaly",  "Malformed DNS query structure",                        "17", 53),
-        ("HTTP Protocol Anomaly", "HTTP request violates RFC compliance checks",          "6",  80),
-        ("ICMP Flood",            "ICMP echo request rate exceeds threshold",             "1",  0),
-        ("Fragmentation Attack",  "Overlapping fragmented IP packets",                    "17", 0),
-        ("Connection Rate Limit", "Connection rate from source exceeds threshold",        "6",  443),
+        (129, 1,   "(stream_tcp) SYN on established session",       "SYN on an already-established TCP session",  "6",  80),
+        (129, 2,   "(stream_tcp) data on SYN packet",               "Payload carried on the initial SYN",          "6",  443),
+        (129, 15,  "(stream_tcp) reset outside window",             "TCP RST with an out-of-window sequence",      "6",  443),
+        (116, 400, "(tcp) XMAS attack detected",                    "TCP segment with FIN/PSH/URG flags",          "6",  22),
+        (116, 401, "(tcp) Nmap XMAS attack detected",               "Nmap Xmas-tree scan probe",                   "6",  22),
+        (116, 420, "(tcp) TCP SYN with FIN",                        "SYN and FIN set together",                    "6",  22),
+        (116, 423, "(tcp) TCP has no SYN, ACK, or RST",             "TCP segment without SYN/ACK/RST (NULL/FIN scan)", "6", 22),
+        (116, 433, "(tcp) DDOS shaft SYN flood",                    "Shaft DDoS agent SYN flood",                  "6",  80),
+        (116, 434, "(icmp4) ICMP ping Nmap",                        "Zero-payload ICMP echo from Nmap",            "1",  0),
+        (123, 8,   "(stream_ip) fragmentation overlap",             "Overlapping IP fragments",                    "17", 0),
+        (123, 2,   "(stream_ip) teardrop attack",                   "Teardrop overlapping-fragment attack",        "17", 0),
+        (119, 11,  "(http_inspect) URI path contains /../ pattern moving up a directory", "Directory traversal in the URI", "6", 80),
+        (131, 3,   "(dns) DNS client rdata txt overflow",           "Oversized TXT rdata in a DNS response",       "17", 53),
     ]
 
-    protection_name, description, proto_num, dport = random.choice(protections)
+    gen_id, rule_id, protection_name, description, proto_num, dport = random.choice(protections)
     if dport == 0:
         dport = random.choice([22, 80, 443, 445])
     start_ms, end_ms = _conn_timing(random.randint(0, 100))
 
-    gen_id  = 129   # preprocessor
-    rule_id = random.randint(1, 999)
     ips_sev, _prio, impact = _fp_ips_rating(priority=random.choice([1, 1, 2]))
     fields = _base_fields(config, attacker_ip, "EXTERNAL_ATTACKER")
     fields['cs3']             = "Internet-Zone"
@@ -3355,7 +3362,7 @@ def _generate_network_anomaly(config):
         "msg": f"Network anomaly: {protection_name} from {attacker_ip} to {victim_ip} - {description}",
         "start": start_ms, "end": end_ms,
     })
-    return fields, "INTRUSION EVENT"
+    return fields, protection_name
 
 
 # Scenario log generator
@@ -3410,7 +3417,7 @@ def _generate_scenario_log(config, scenario, session_context=None):
         fields["act"] = "Alerted" if fields["act"] == "Allow" else "Blocked"
         fields["cefSeverity"], _prio, fields["cn2"] = _fp_ips_rating()
         fields["cn2Label"] = "impact"
-        cef_name = "INTRUSION EVENT"
+        cef_name = scenario.get("signature") or "SERVER-OTHER Apache Log4j logging remote code execution attempt"
     elif log_type == "malware":
         fname = scenario.get("filename", "bad.exe")
         return _fp_file_events(

@@ -47,6 +47,18 @@ extension key:
 Rule-action ids come from the FMC eStreamer Integration Guide, *Access Control Rule Action
 Record Metadata*.
 
+### Intrusion event names
+
+eNcore sets an intrusion event's CEF name to the rule's message, not a fixed label, and
+the signature ID is `INTRUSION:400:<gid>:<sid>`. Filter intrusion events with
+`cefDeviceEventClassId ~= "^INTRUSION:400:"`.
+
+| Generator | gid | `cefName` |
+|---|---|---|
+| `ips` | 1 (text rule) | The rule message from `firepower_config.ips_rules`, e.g. `ET SCAN NMAP OS Detection Probe`; fallback `SQL union select - possible sql injection attempt - GET parameter` |
+| `network_anomaly` | 116 / 119 / 123 / 129 / 131 | A Snort 3 built-in rule shown as `(module) message`, e.g. `(stream_tcp) SYN on established session` (129:1), `(tcp) Nmap XMAS attack detected` (116:401), `(stream_ip) teardrop attack` (123:2) |
+| scenario `log_type=ips` | 1 | The scenario's `signature`, else `SERVER-OTHER Apache Log4j logging remote code execution attempt` |
+
 ### File and malware events (eNcore records 500 / 502 / 125)
 
 Firepower's CEF keys are fixed by Cisco's eStreamer eNcore client
