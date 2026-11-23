@@ -122,10 +122,11 @@ The Windows Events module generates native Windows Security Event XML targeting 
 | `sensitive_password_reset` | Sensitive account password reset attempt for the first time | Medium | T1098 |
 | `password_never_expires` | Sensitive account modified to password never expires | Low | T1098 |
 | `priv_cert_request` | Suspicious privileged certificate request via certificate template | Low | T1078.002 |
+| `esc4_template_modification` | Certificate template was updated with a misconfiguration configuration | Low | T1649 |
 
 `as_rep_roasting`, `dmsa_privesc`, `sensitive_password_reset`,
-`password_never_expires` and `priv_cert_request` were previously `wip_`-prefixed.
-The old names still work.
+`password_never_expires`, `priv_cert_request` and `esc4_template_modification`
+were previously `wip_`-prefixed. The old names still work.
 
 `dnshostname_spoofing` was verified on 2026-11-18 (alerts 803275/803276 and
 803488/803489). It takes its spoof target from `windows_events.spoof_dc_fqdn`,
