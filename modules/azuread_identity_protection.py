@@ -294,26 +294,49 @@ def scenario_suspicious_inbox_forwarding_risk(config=None):
                         source="MicrosoftCloudAppSecurity", timing="offline")
 
 
+def scenario_risky_ip_risk(config=None):
+    """Sign-in from an IP with a high volume of failed sign-ins across tenants -> riskyIPAddress."""
+    return _risk_threat(config, "riskyIPAddress", "medium", loc=ac.rare_asn_loc())
+
+
+def scenario_user_reported_suspicious_risk(config=None):
+    """User reported a sign-in / MFA prompt as suspicious (fraud report) ->
+    userReportedSuspiciousActivity (high, offline)."""
+    return _risk_threat(config, "userReportedSuspiciousActivity", "high", activity="user",
+                        timing="offline")
+
+
+def scenario_suspicious_api_traffic_risk(config=None):
+    """Anomalous Graph / API traffic from the account (post-compromise automation) ->
+    suspiciousAPITraffic (offline)."""
+    return _risk_threat(config, "suspiciousAPITraffic", "medium", activity="user",
+                        timing="offline")
+
+
+def scenario_suspicious_sending_patterns_risk(config=None):
+    """Defender for Cloud Apps flagged abnormal outbound mail volume/pattern (spam/exfil) ->
+    suspiciousSendingPatterns (source MicrosoftCloudAppSecurity, offline)."""
+    return _risk_threat(config, "suspiciousSendingPatterns", "medium", activity="user",
+                        source="MicrosoftCloudAppSecurity", timing="offline")
+
+
+def scenario_inbox_manipulation_rules_risk(config=None):
+    """Suspicious inbox-manipulation rules (legacy non-MCAS-prefixed variant) ->
+    suspiciousInboxManipulationRules (source MicrosoftCloudAppSecurity, offline)."""
+    return _risk_threat(config, "suspiciousInboxManipulationRules", "medium", activity="user",
+                        source="MicrosoftCloudAppSecurity", timing="offline")
+
+
+def scenario_generic_risk(config=None):
+    """Generic Identity Protection risk detection (unclassified risky activity) -> generic (offline)."""
+    return _risk_threat(config, "generic", "low", timing="offline")
+
+
+# Every scenario in this module is WIP and is exposed ONLY under its wip_ key: the Entra Identity
+# Protection risk detectors are prerequisite-gated (see the ANALYTIC_ALERTS note below), so none has
+# a confirmed fire -> alert yet. A scenario graduates to a plain (non-wip_) key here only once a
+# working, verified analytics rule OR a correlation rule has fired on it in the tenant.
 SCENARIOS = {
-    "leaked_credentials": scenario_leaked_credentials,
-    "malicious_ip_signin": scenario_malicious_ip_signin,
-    "anonymous_ip_signin": scenario_anonymous_ip_signin,
-    "impossible_travel_risk": scenario_impossible_travel_risk,
-    "password_spray_risk": scenario_password_spray_risk,
-    "new_country_risk": scenario_new_country_risk,
-    "malware_ip_risk": scenario_malware_ip_risk,
-    "token_issuer_anomaly_risk": scenario_token_issuer_anomaly_risk,
-    "suspicious_browser_risk": scenario_suspicious_browser_risk,
-    "inbox_manipulation_risk": scenario_inbox_manipulation_risk,
-    "threat_intel_risk": scenario_threat_intel_risk,
-    "anomalous_token_risk": scenario_anomalous_token_risk,
-    "unfamiliar_features_risk": scenario_unfamiliar_features_risk,
-    "admin_confirmed_compromised_risk": scenario_admin_confirmed_compromised_risk,
-    "mcas_impossible_travel_risk": scenario_mcas_impossible_travel_risk,
-    "anomalous_user_activity_risk": scenario_anomalous_user_activity_risk,
-    "aitm_token_theft_risk": scenario_aitm_token_theft_risk,
-    "suspicious_inbox_forwarding_risk": scenario_suspicious_inbox_forwarding_risk,
-    # wip_ aliases for the on-demand catalog (see ANALYTIC_ALERTS note).
     "wip_leaked_credentials": scenario_leaked_credentials,
     "wip_malicious_ip_signin": scenario_malicious_ip_signin,
     "wip_anonymous_ip_signin": scenario_anonymous_ip_signin,
@@ -332,6 +355,12 @@ SCENARIOS = {
     "wip_anomalous_user_activity_risk": scenario_anomalous_user_activity_risk,
     "wip_aitm_token_theft_risk": scenario_aitm_token_theft_risk,
     "wip_suspicious_inbox_forwarding_risk": scenario_suspicious_inbox_forwarding_risk,
+    "wip_risky_ip_risk": scenario_risky_ip_risk,
+    "wip_user_reported_suspicious_risk": scenario_user_reported_suspicious_risk,
+    "wip_suspicious_api_traffic_risk": scenario_suspicious_api_traffic_risk,
+    "wip_suspicious_sending_patterns_risk": scenario_suspicious_sending_patterns_risk,
+    "wip_inbox_manipulation_rules_risk": scenario_inbox_manipulation_rules_risk,
+    "wip_generic_risk": scenario_generic_risk,
 }
 
 # WIP / prerequisite-gated. The records are field-correct and ingest into msft_azure_raw as
@@ -360,6 +389,12 @@ ANALYTIC_ALERTS = {
     "wip_anomalous_user_activity_risk": "Azure AD anomalous user activity",
     "wip_aitm_token_theft_risk": "Azure AD adversary-in-the-middle token theft",
     "wip_suspicious_inbox_forwarding_risk": "Azure AD suspicious inbox forwarding",
+    "wip_risky_ip_risk": "Azure AD sign-in from a risky IP address",
+    "wip_user_reported_suspicious_risk": "Azure AD user-reported suspicious activity",
+    "wip_suspicious_api_traffic_risk": "Azure AD suspicious API traffic",
+    "wip_suspicious_sending_patterns_risk": "Azure AD suspicious sending patterns",
+    "wip_inbox_manipulation_rules_risk": "Azure AD suspicious inbox manipulation rules (legacy)",
+    "wip_generic_risk": "Azure AD generic risk detection",
 }
 
 
