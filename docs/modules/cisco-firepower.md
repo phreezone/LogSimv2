@@ -22,12 +22,13 @@ These fields are not modeled by `CiscoFirepower_1_3.xif` but are preserved in th
 
 | Field | Description |
 |---|---|
-| `msg` | Human-readable event description; key field for free-text hunting searches |
+| `msg` | Human-readable event description on connection events; key field for free-text hunting searches. Intrusion (400) events carry none, as eNcore emits none: the rule message is `cefName` |
 | `cs1` / `cs1Label` | Access Control Policy name: `fwPolicy` on connection/IPS/URL/secintel/SMB events, `filePolicy` on File / File Malware events, `policy` on FireAMP events |
-| `cs6` / `cs6Label` | URL Reputation string on connection/URL/upload/SMB events (`cs6Label="URLReputation"`); Intrusion Policy name on IPS events (`cs6Label="IntrusionPolicy"`); Disposition source on malware events (`cs6Label="DispositionSource"`) |
+| `cs2` / `cs2Label` | Access-control rule (`fwRule`) on connection and intrusion events. On intrusion events it is the rule that passed the flow to the intrusion policy (`Allow_Inbound_Published_Services`), not the signature; XDM maps it to `xdm.network.rule` |
+| `cs6` / `cs6Label` | URL Reputation string on connection/URL/upload/SMB events (`cs6Label="URLReputation"`); Snort rule id (the sid) on intrusion events (`cs6Label="ruleId"`, with the intrusion policy in `cs5`/`ipsPolicy`); Disposition source on malware events (`cs6Label="DispositionSource"`) |
 | `start` / `end` | Connection start and end times in epoch milliseconds |
-| `deviceDirection` | Traffic direction: `1`=outbound (LAN→WAN, default); `0`=inbound (WAN→LAN, set on IPS and inbound_block events) |
-| `cnt` | Always `1` for individual (non-aggregated) events |
+| `reason` | Connection events only: eNcore's rule reason. `N/A` for a plain access-control match; a named reason such as `IP Block` or `File Block`; or the raw number for reasons eNcore has no name for (`2048` = DNS Block on Security Intelligence DNS blocks) |
+| `deviceDirection` | File (500/502) and FireAMP (125) events only: `1`=Download, `2`=Upload. Connection and intrusion events carry none |
 | `requestMethod` | HTTP method on HTTP/HTTPS events: `GET` (browsing/malware/URL), `POST`/`PUT` (uploads) |
 | `shost` | Source hostname when available from session context |
 | `dhost` | Destination hostname: malware delivery domain, blocked URL domain, or C2 domain |
@@ -47,11 +48,27 @@ extension key:
 Rule-action ids come from the FMC eStreamer Integration Guide, *Access Control Rule Action
 Record Metadata*.
 
+### Fields per record
+
+eNcore writes a fixed key set for each record type, and the formatter
+(`_fp_encore_fields`) trims every event to it, whatever a generator built:
+
+| Record | Not sent |
+|---|---|
+| Connection (71) | `outcome`, `deviceDirection`, `cnt`. `reason` is forced to an eNcore value (`N/A` unless a generator sets a Cisco reason) |
+| Intrusion (400) | `outcome`, `reason`, `bytesIn`, `bytesOut`, `end`, `deviceDirection`, `cnt`, `msg` |
+| File / File Malware / FireAMP | `cnt` |
+
+`xdm.event.outcome` is therefore empty on connection and intrusion events, as with
+real eNcore data; `act` (`xdm.observer.action`) carries the action. `cnt` is in no
+eNcore record.
+
 ### Intrusion event names
 
 eNcore sets an intrusion event's CEF name to the rule's message, not a fixed label, and
 the signature ID is `INTRUSION:400:<gid>:<sid>`. Filter intrusion events with
-`cefDeviceEventClassId ~= "^INTRUSION:400:"`.
+`cefDeviceEventClassId ~= "^INTRUSION:400:"`. Read the signature from `cefName`; `cs2` is the
+access-control rule, and intrusion events have no `msg`.
 
 | Generator | gid | `cefName` |
 |---|---|---|
@@ -112,13 +129,13 @@ XIF mapping: `xdm.source.interface = deviceOutboundInterface`; `xdm.target.inter
 
 ## Benign Events
 
-Benign events are dispatched from `_generate_benign_log` with roll-based proportions. The `_base_fields` helper sets `cnt=1`, `deviceDirection=1` (outbound), and zone/interface defaults for all events. `_conn_timing` generates `start`/`end` epoch-millisecond timestamps.
+Benign events are dispatched from `_generate_benign_log` with roll-based proportions. The `_base_fields` helper sets the zone/interface defaults for all events. `_conn_timing` generates `start`/`end` epoch-millisecond timestamps.
 
 | Event Type | Description | Key Fields | Weight |
 |---|---|---|---|
 | `connection` | Outbound web browsing (85%) or blocked suspicious port (15%). Browsing: Allow on TCP/80 or 443, 0.5–15 KB request, 20–500 KB response. Blocked: non-standard port (23/137/138/666/4444/31337), Block, cefSeverity=7. | `_syslog_id=430002`, `act=Allow or Block`, `dpt=80/443 or suspicious`, `app=HTTPS/HTTP or UNKNOWN`, `cs2=Allow_Outbound_Web or Block_Suspicious_Ports`, `bytesOut=500–15000`, `bytesIn=20000–500000`, `cs6=url_rep`, `requestMethod=GET` (browsing only), `cefSeverity=3` (Allow) or `7` (Block) | 50% |
 | `internal_app_tier` | Two-event chain: user→app-server HTTPS (TCP/443), then app-server→database MSSQL (TCP/1433). Both are internal sessions (both interfaces = inside). May return a list of 2 events. | `_syslog_id=430002`, `act=Allow`, user→app: `dpt=443`, `app=HTTPS`, `cs4=App-Server-Zone`; app→db: `dpt=1433`, `app=MSSQL`, `cs3=App-Server-Zone`, `cs4=DB-Zone`, both `cefSeverity=3` | 13% |
-| `inbound_block` | External probe blocked at perimeter. `deviceDirection=0`, zones/interfaces reversed. Ports: 22/23/80/443/445/1433/3389/8080/8443. Duration 0–50 ms (blocked at first SYN). | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt=probe_port`, `cs3=Internet-Zone`, `cs4=Server-Zone`, `deviceDirection=0`, `deviceInboundInterface=outside`, `deviceOutboundInterface=inside`, `bytesOut=0`, `bytesIn=40–100`, `cefSeverity=7` | 22% |
+| `inbound_block` | External probe blocked at perimeter. zones/interfaces reversed. Ports: 22/23/80/443/445/1433/3389/8080/8443. Duration 0–50 ms (blocked at first SYN). | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt=probe_port`, `cs3=Internet-Zone`, `cs4=Server-Zone`, `deviceInboundInterface=outside`, `deviceOutboundInterface=inside`, `bytesOut=0`, `bytesIn=40–100`, `cefSeverity=7` | 22% |
 | `dns_query` | Benign outbound DNS resolution. UDP/53 to a public resolver (8.8.8.8, 8.8.4.4, 1.1.1.1, 9.9.9.9, 208.67.222.222). Small bytes (~40–100 query, ~80–400 response). | `_syslog_id=430002`, `act=Allow`, `app=DNS`, `dpt=53`, `proto=17`, `cs2=Allow_Outbound_DNS`, `cs6=Trustworthy`, `bytesOut=40–100`, `bytesIn=80–400`, `cefSeverity=3` | 5% |
 | `email_traffic` | Outbound email client connection — IMAPS/993 (50%), SMTPS/465 (30%), or SMTP/587 (20%). IMAPS has large bytesIn (downloading mail); SMTP* has large bytesOut (sending). Duration 5–120 seconds. | `_syslog_id=430002`, `act=Allow`, `app=IMAPS/SMTPS/SMTP`, `dpt=993/465/587`, `proto=6`, `cs2=Allow_IMAPS/Allow_SMTPS/Allow_SMTP`, `cs6=Trustworthy`, `cefSeverity=3`, `bytesIn=1000–300000` (IMAPS) or `bytesOut=1000–300000` (SMTP*) | 5% |
 | `ntp_sync` | NTP time synchronisation. UDP/123 to a public NTP server (pool.ntp.org cluster). Tiny payload (~48–76 bytes each direction). Duration under 100 ms. | `_syslog_id=430002`, `act=Allow`, `app=NTP`, `dpt=123`, `proto=17`, `cs2=Allow_NTP_Outbound`, `cs6=Trustworthy`, `bytesOut=48–76`, `bytesIn=48–76`, `cefSeverity=3` | 3% |
@@ -134,12 +151,12 @@ The **effective** weights are those in `config.json` → `firepower_config.event
 
 | Threat Key | Category | Description | Syslog ID / Key Fields | Weight |
 |---|---|---|---|---|
-| `ips` | Intrusion Prevention | Inbound IPS event: external attacker targeting an internal server. `deviceDirection=0`, zones/interfaces reversed. Picks from `firepower_config.ips_rules` or falls back to `ET-WEB-SQL-INJECTION`. | `_syslog_id=430001` (Intrusion Event), `act=Blocked`, `src=external`, `dst=internal_server`, `dpt=80/443/445/1433/3389/8080/8443`, `cs5=category/cs5Label=ThreatCategory`, `cs6=ips_policy/cs6Label=IntrusionPolicy`, `cn2=impact` (1–5), `cefSeverity` from priority × impact (see *Severity*), `deviceDirection=0`, `bytesIn=0`, `reason=Intrusion Policy Violation` | 30 |
+| `ips` | Intrusion Prevention | Inbound IPS event: external attacker targeting an internal server. zones/interfaces reversed. Picks from `firepower_config.ips_rules` (the message becomes `cefName`). | `INTRUSION:400:1:<sid>`, `act=Blocked`, `src=external`, `dst=internal_server`, `dpt=80/443/445/1433/3389/8080/8443`, `cs2=Allow_Inbound_Published_Services` (fwRule), `cs5=ips_policy` (ipsPolicy), `cs6=<sid>` (ruleId), `cat=classification`, no `msg`, `cn2=impact` (1–5), `cefSeverity` from priority × impact (see *Severity*), `bytesIn=0`, `reason=Intrusion Policy Violation` | 30 |
 | `malware` | AMP File Malware | Internal host downloads malware over HTTP; the FTD file policy blocks it. Emits the DNS lookup, a File Malware Event (502) and the matching FireAMP Event (125). File name from `threat_files`, redrawn until Firepower identifies the type. See *File and malware events* above. | `FileMalware:502:1` + `FireAMP:125:1`, `dpt=80`, `app=HTTP`, `fname`, `fileHash=sha256`, `fileType` (Firepower name), `fsize`, `deviceDirection=1`, `request=http://domain/fname` | 25 |
 | `url_filtering` | URL Category Block | Internal user blocked from accessing a prohibited URL category. Picks from `firepower_config.blocked_url_categories`. | `_syslog_id=410001` (URL logging), `act=Block`, `dpt=443`, `app=HTTPS`, `dhost=blocked_domain`, `request=https://domain/`, `cs5=category/cs5Label=URLCategory`, `cs6=url_rep/cs6Label=URLReputation`, `cefSeverity=7`, `bytesOut=200–800`, `bytesIn=0`, `requestMethod=GET` | 20 |
 | `security_intel` | Security Intelligence | DNS query to a known-malicious domain blocked by the Security Intelligence feed. UDP/53. Near-instant block (0–100 ms). | `_syslog_id=430005` (Security Intelligence Event), `act=Block`, `dpt=53`, `proto=17`, `dst=8.8.8.8`, `dhost=malicious_domain`, `request=malicious_domain`, `cs5=SecurityIntelligence`, `cs6=DNS Block List/cs6Label=SecurityIntelligenceCategory`, `cefSeverity=7`, `bytesOut=50–150`, `bytesIn=0` | 15 |
-| `port_scan` | Reconnaissance | External attacker scanning sequential ports on an internal server. 20–50 blocked CONNECTION events from the same source IP. `deviceDirection=0`. Returns list. | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt` varies (sorted sample from 21/22/23/25/53/80/110/135/139/443/445/1433/1521/3306/3389/5900/8080/8443), `cs6=Suspicious`, `cefSeverity=7`, `bytesOut=0`, `bytesIn=40–60`, `deviceDirection=0` | 10 |
-| `brute_force` | Credential Attack | External IP making 20–60 blocked TCP connection attempts to the same service port on an internal server. `deviceDirection=0`. Services: SSH/22, RDP/3389, SMB/445, WinRM/5985, WinRM/5986. Returns list. | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt=22/3389/445/5985/5986`, `app=SSH/RDP/SMB/WinRM`, `cefSeverity=7`, `deviceDirection=0`, `bytesOut=0`, `bytesIn=40–80` | 8 |
+| `port_scan` | Reconnaissance | External attacker scanning sequential ports on an internal server. 20–50 blocked CONNECTION events from the same source IP. . Returns list. | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt` varies (sorted sample from 21/22/23/25/53/80/110/135/139/443/445/1433/1521/3306/3389/5900/8080/8443), `cs6=Suspicious`, `cefSeverity=7`, `bytesOut=0`, `bytesIn=40–60`, | 10 |
+| `brute_force` | Credential Attack | External IP making 20–60 blocked TCP connection attempts to the same service port on an internal server. . Services: SSH/22, RDP/3389, SMB/445, WinRM/5985, WinRM/5986. Returns list. | `_syslog_id=430002`, `act=Block`, `src=external`, `dst=internal_server`, `dpt=22/3389/445/5985/5986`, `app=SSH/RDP/SMB/WinRM`, `cefSeverity=7`, `bytesOut=0`, `bytesIn=40–80` | 8 |
 | `large_file_upload` | Data Exfiltration | Internal user uploading 100–500 MB to a file-sharing service (mega.nz, wetransfer.com, dropbox.com, etc.) on TCP/443. Duration 30 s–10 min. Single event. | `_syslog_id=430002`, `act=Allow`, `dpt=443`, `app=SSL`, `dhost=upload.domain`, `bytesOut=100MB–500MB`, `bytesIn=1000–5000`, `requestMethod=POST or PUT`, `cs5=File Sharing/cs5Label=URLCategory`, `cs6=Suspicious`, `cefSeverity=3`, long `start/end` window | 10 |
 | `ssh_over_https` | Protocol Anomaly | SSH protocol detected on TCP/443 — DPI reveals SSH inside an HTTPS port. Connection is allowed by web rule. Single event. | `_syslog_id=430002`, `act=Allow`, `dpt=443`, `app=SSH` (anomaly: SSH on 443 not HTTPS), `cs5=Secure Shell/cs5Label=ApplicationProtocol`, `cs6=Moderate Risk`, `cefSeverity=3`, `bytesOut=1000–50000`, `bytesIn=1000–50000` | 5 |
 | `workstation_smb` | Lateral Movement | Workstation-to-workstation SMB/445 blocked. Both interfaces = inside, both zones = User-Zone. Near-instant block (0–300 ms). Single event. | `_syslog_id=430002`, `act=Block`, `dpt=445`, `app=SMB`, `cs2=Block_Lateral_Movement`, `cs5=Lateral Movement`, `cs6=Suspicious`, `cefSeverity=7`, both interfaces = `inside`, `bytesOut=200–2000`, `bytesIn=0` | 5 |
@@ -171,10 +188,10 @@ The module's `_DEFAULT_THREAT_EVENTS` catalog marks these `analytic: False` — 
 
 | Threat Key | Purpose | Syslog ID / Key Fields | Weight |
 |---|---|---|---|
-| `vpn_brute_force` | RA-VPN credential stuffing — one external IP failing auth 20–50 times. FTD RA-VPN auth appears as connection events to the outside interface on 443, blocked with reason `VPN Authentication Failed`. Returns list. | `_syslog_id=430002`, `src=external attacker`, `dpt=443`, `cs3=Internet-Zone`, `cs4=VPN-Zone`, `deviceDirection=0`, `suser=EXTERNAL_ATTACKER`, 20–50 failures | 6 |
+| `vpn_brute_force` | RA-VPN credential stuffing — one external IP failing auth 20–50 times. FTD RA-VPN auth appears as connection events to the outside interface on 443, blocked (`reason=N/A`: eNcore has no VPN failure reason; real RA-VPN auth failures arrive as FTD syslog, not eStreamer connection events). Returns list. | `_syslog_id=430002`, `src=external attacker`, `dpt=443`, `cs3=Internet-Zone`, `cs4=VPN-Zone`, `suser=EXTERNAL_ATTACKER`, 20–50 failures | 6 |
 | `vpn_impossible_travel` | Same user authenticating from two impossibly-distant geos. Each location emits several **FAILED** auth events then a **SUCCESS** — the UEBA impossible-travel detector keys on a fail→success (compromised-credential) pattern, not on bare successful logins. Legitimate location back-dated 5–10 min; `rt`/`start` carry the gap. IPs from `impossible_travel_scenario`. Returns list. | `_syslog_id=430002`, `dpt=443`, `outcome=FAILURE` ×N then `outcome=SUCCESS`, per geo; `benign_ip` (default `68.185.12.14`) then `suspicious_ip` (default `175.45.176.10`), 5–10 min apart | 3 |
 | `app_control` | Application Control block — DPI identifies and blocks prohibited apps regardless of port (P2P, anonymizers, remote access, gaming). | `_syslog_id=430002`, `act=Block`, app ∈ {BitTorrent/6881, Tor Browser/9001, TeamViewer/5938, Skype/443, Dropbox/443, WhatsApp/443, uTorrent/6881, Freenet/9481, I2P/4444, Steam/27036, Psiphon/443, Remote Desktop/3389} with its category | 4 |
-| `network_anomaly` | Network-level anomaly / DoS drop by the FTD network-analysis engine, before the application layer — protocol anomalies, malformed packets, volume attacks. | `_syslog_id=430002`, protection ∈ {SYN Flood, IP Spoofing, TCP NULL Scan, FIN Scan, Xmas Scan, DNS Protocol Anomaly, HTTP Protocol Anomaly, ICMP Flood, Fragmentation Attack, Connection Rate Limit}, `proto=6/17/1`, `src=external`, `dst=internal_server` | 4 |
+| `network_anomaly` | Network-level anomaly / DoS drop by the FTD network-analysis engine, before the application layer — protocol anomalies, malformed packets, volume attacks. | `INTRUSION:400:<gid>:<sid>` with a Snort 3 built-in rule as `cefName` (see *Intrusion event names*), `cs2=Allow_Inbound_Published_Services`, `cs6=<sid>`, no `msg`, `proto=6/17/1`, `src=external`, `dst=internal_server` | 4 |
 
 ## Generated Values
 
