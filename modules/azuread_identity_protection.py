@@ -332,6 +332,75 @@ def scenario_generic_risk(config=None):
     return _risk_threat(config, "generic", "low", timing="offline")
 
 
+# ── ServicePrincipalRiskEvents (workload-identity risk) ───────────────────────────────
+# Identity Protection also flags service principals / app registrations, not just users. These land
+# as category=ServicePrincipalRiskEvents / Cloud Audit Log (verified 2026-11-23). The record is the
+# servicePrincipalRiskDetection resource: servicePrincipalId/servicePrincipalDisplayName/appId in
+# place of the user fields, activity "servicePrincipal", no userPrincipalName.
+_SP_APPS = ["Reporting Connector", "Mail Archive Utility", "Directory Sync Helper",
+            "Invoice Automation App", "Teams Notifier Bot", "SharePoint Backup Agent",
+            "Analytics Ingest Worker", "Expense Approval Bot"]
+
+
+def _sp_identity():
+    name = random.choice(_SP_APPS)
+    return {"display": name, "spid": ac._stable_guid("sprisk-sp:" + name), "appid": ac.app_id(name)}
+
+
+def _sp_risk_threat(config, etype, level, *, detail="none", source="IdentityProtection",
+                    timing="offline", loc=None):
+    sp = _sp_identity()
+    loc = loc or ac.rare_asn_loc()
+    props = {"id": uuid.uuid4().hex, "requestId": str(uuid.uuid4()),
+             "correlationId": str(uuid.uuid4()), "activity": "servicePrincipal",
+             "activityDateTime": _ts(-random.randint(30, 300)),
+             "detectedDateTime": _ts(-random.randint(5, 60)),
+             "ipAddress": loc.get("ip", ""), "riskEventType": etype,
+             "riskState": "atRisk", "riskLevel": level, "riskDetail": detail,
+             "source": source, "detectionTimingType": timing,
+             "servicePrincipalId": sp["spid"], "servicePrincipalDisplayName": sp["display"],
+             "appId": sp["appid"], "keyIds": [],
+             "location": {"city": loc.get("city", ""), "state": loc.get("state", ""),
+                          "countryOrRegion": loc.get("countryOrRegion", ""),
+                          "geoCoordinates": loc.get("geoCoordinates", {})},
+             "additionalInfo": "[]"}
+    return [_envelope("ServicePrincipalRiskEvents", "ServicePrincipalRiskDetection",
+                      props, caller_ip=loc.get("ip", ""))]
+
+
+def scenario_sp_leaked_credentials(config=None):
+    """Workload-identity credential (client secret/cert) found leaked -> leakedCredentials (high)."""
+    return _sp_risk_threat(config, "leakedCredentials", "high")
+
+
+def scenario_sp_malicious_application(config=None):
+    """App flagged malicious by Microsoft (disabled) -> maliciousApplication (high)."""
+    return _sp_risk_threat(config, "maliciousApplication", "high")
+
+
+def scenario_sp_suspicious_signins(config=None):
+    """Anomalous service-principal sign-in pattern -> suspiciousSignins (medium)."""
+    return _sp_risk_threat(config, "suspiciousSignins", "medium")
+
+
+def scenario_sp_anomalous_activity(config=None):
+    """Abnormal service-principal behaviour across signals -> anomalousServicePrincipalActivity."""
+    return _sp_risk_threat(config, "anomalousServicePrincipalActivity", "high")
+
+
+def scenario_sp_admin_confirmed_compromised(config=None):
+    """Admin confirmed the workload identity compromised ->
+    adminConfirmedServicePrincipalCompromised (high)."""
+    return _sp_risk_threat(config, "adminConfirmedServicePrincipalCompromised", "high",
+                           detail="adminConfirmedServicePrincipalCompromised")
+
+
+def scenario_sp_threat_intel(config=None):
+    """Microsoft threat intelligence correlated the workload identity with malicious activity ->
+    investigationsThreatIntelligence (high)."""
+    return _sp_risk_threat(config, "investigationsThreatIntelligence", "high")
+
+
 # Every scenario in this module is WIP and is exposed ONLY under its wip_ key: the Entra Identity
 # Protection risk detectors are prerequisite-gated (see the ANALYTIC_ALERTS note below), so none has
 # a confirmed fire -> alert yet. A scenario graduates to a plain (non-wip_) key here only once a
@@ -361,6 +430,13 @@ SCENARIOS = {
     "wip_suspicious_sending_patterns_risk": scenario_suspicious_sending_patterns_risk,
     "wip_inbox_manipulation_rules_risk": scenario_inbox_manipulation_rules_risk,
     "wip_generic_risk": scenario_generic_risk,
+    # ServicePrincipalRiskEvents (workload-identity risk).
+    "wip_sp_leaked_credentials": scenario_sp_leaked_credentials,
+    "wip_sp_malicious_application": scenario_sp_malicious_application,
+    "wip_sp_suspicious_signins": scenario_sp_suspicious_signins,
+    "wip_sp_anomalous_activity": scenario_sp_anomalous_activity,
+    "wip_sp_admin_confirmed_compromised": scenario_sp_admin_confirmed_compromised,
+    "wip_sp_threat_intel": scenario_sp_threat_intel,
 }
 
 # WIP / prerequisite-gated. The records are field-correct and ingest into msft_azure_raw as
@@ -395,6 +471,12 @@ ANALYTIC_ALERTS = {
     "wip_suspicious_sending_patterns_risk": "Azure AD suspicious sending patterns",
     "wip_inbox_manipulation_rules_risk": "Azure AD suspicious inbox manipulation rules (legacy)",
     "wip_generic_risk": "Azure AD generic risk detection",
+    "wip_sp_leaked_credentials": "Azure AD workload identity leaked credentials",
+    "wip_sp_malicious_application": "Azure AD malicious application detected",
+    "wip_sp_suspicious_signins": "Azure AD workload identity suspicious sign-ins",
+    "wip_sp_anomalous_activity": "Azure AD anomalous service principal activity",
+    "wip_sp_admin_confirmed_compromised": "Azure AD admin confirmed service principal compromised",
+    "wip_sp_threat_intel": "Azure AD workload identity threat intelligence risk",
 }
 
 
