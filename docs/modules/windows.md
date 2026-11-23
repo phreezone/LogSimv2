@@ -78,7 +78,7 @@ evaluated" below. `WIP_SCCM_CONTAINER_RECON` is therefore **not** presumed
 blocked by object type either.
 
 **On-demand firing** offers the threats in the module's `ANALYTIC_ALERTS` table: everything
-above plus the four remaining `WIP_` detections, which target published analytics. Not
+above plus the three remaining `WIP_` detections, which target published analytics. Not
 offered, background-only: `WIP_IRREGULAR_SERVICE_TGS`, `LSASS_HANDLE_ACCESS` (an XDR-agent
 detection, not a Windows Event Collector analytic) and `ACCOUNT_ACCESS_REMOVAL` (no
 matching published analytic).
