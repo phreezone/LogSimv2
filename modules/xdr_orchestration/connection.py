@@ -121,7 +121,8 @@ class WorkstationConnection:
 
     def __init__(self, *, host, transport="winrm", winrm_port=5985, winrm_scheme="http",
                  username=None, password=None, transport_auth="ntlm",
-                 overrides=None, stub_identity=None):
+                 overrides=None, stub_identity=None,
+                 agent_id="agent1", label=None, index=1, env_prefix="XDR_TARGET"):
         self.host = host
         self.transport = transport            # "winrm" | "stub"
         self.winrm_port = winrm_port
@@ -131,6 +132,15 @@ class WorkstationConnection:
         self.transport_auth = transport_auth  # pywinrm auth type: ntlm/basic/kerberos
         self.overrides = overrides or {}      # config forces specific fields (e.g. egress_ip)
         self._stub_identity = stub_identity   # for transport="stub" (no-box dev)
+
+        # Multi-agent identity: which configured box this connection is. Agent 1 is
+        # the unsuffixed XDR_TARGET_* block; agents 2.. are XDR_TARGET2_*, etc. The
+        # id is stable (slug of the label) so the console can select a box and a run
+        # summary can name the box its events hit. See agent_descriptors().
+        self.agent_id = agent_id
+        self.label = label or host or agent_id
+        self.index = index
+        self._prefix = env_prefix             # .env variable prefix for THIS agent
 
         self._session = None                  # lazily-built pywinrm Session
         self._identity_cache = None
@@ -153,16 +163,46 @@ class WorkstationConnection:
     ENV_EGRESS_IP = "XDR_TARGET_EGRESS_IP"      # optional override (org NAT/public IP)
     ENV_EMAIL_DOM = "XDR_EMAIL_DOMAIN"          # optional override (email domain)
 
+    # ---- multiple agents (fan-out) -------------------------------------------
+    # Agent 1 is the unsuffixed XDR_TARGET_* block (so a single-box .env is
+    # unchanged). Agents 2.. use a numeric prefix: XDR_TARGET2_HOST,
+    # XDR_TARGET2_WINRM_USER, ... (+ an optional XDR_TARGET2_LABEL). env field
+    # names for any agent are <prefix>_<FIELD>; the email domain also falls back
+    # to the global XDR_EMAIL_DOMAIN. At most this many agents are scanned.
+    MAX_AGENTS = 16
+
+    @staticmethod
+    def _agent_prefix(index):
+        """.env variable prefix for agent `index` (1 -> 'XDR_TARGET', 2 -> 'XDR_TARGET2')."""
+        return "XDR_TARGET" if index <= 1 else f"XDR_TARGET{index}"
+
+    @staticmethod
+    def _field(prefix, field):
+        """env variable name for a per-agent field, e.g. ('XDR_TARGET2','HOST') ->
+        'XDR_TARGET2_HOST'. Keeps agent 1 byte-identical to the legacy names."""
+        return f"{prefix}_{field}"
+
+    _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+    @classmethod
+    def _slug(cls, label, index):
+        """Stable, URL-safe id from a label; falls back to agent<index>."""
+        s = cls._SLUG_RE.sub("-", (label or "").strip().lower()).strip("-")
+        return s or f"agent{index}"
+
     # ---- .env settings check -------------------------------------------------
 
     _PLACEHOLDER = re.compile(r"<[^>]*>")
     _HOST_RE = re.compile(r"^(?:\d{1,3}(?:\.\d{1,3}){3}|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?)$")
 
     @classmethod
-    def env_checks(cls, env_file=None, transport=None):
+    def env_checks(cls, env_file=None, transport=None, prefix="XDR_TARGET"):
         """Preflight rows for the .env settings themselves, checked BEFORE anything
         touches the box, so a missing or still-placeholder value says exactly which
         variable to fix instead of surfacing as a WinRM/auth error.
+
+        `prefix` selects which agent's block to check (agent 1 -> 'XDR_TARGET',
+        agent 2 -> 'XDR_TARGET2', ...); the field names are <prefix>_<FIELD>.
 
         Row 1 (blocking): target host + WinRM user + password. Values are shown,
         except the password, which is only reported as set/unset.
@@ -173,22 +213,24 @@ class WorkstationConnection:
             return v.strip() if v and v.strip() else None
 
         where = f" in {env_file}" if env_file else " in .env"
-        transport = (transport or _env(cls.ENV_TRANSPORT) or "winrm").lower()
+        host_var = cls._field(prefix, "HOST")
+        pw_var = cls._field(prefix, "WINRM_PASSWORD")
+        transport = (transport or _env(cls._field(prefix, "TRANSPORT")) or "winrm").lower()
         rows = []
         if transport == "stub":
             rows.append(PreflightCheck(".env target settings", None,
                                        "stub transport — no live box, host/user not needed"))
         else:
             missing, bad, shown = [], [], []
-            for name in (cls.ENV_HOST, cls.ENV_USER, cls.ENV_PASSWORD):
+            for name in (host_var, cls._field(prefix, "WINRM_USER"), pw_var):
                 v = _env(name)
                 if not v:
                     missing.append(name)
                 elif cls._PLACEHOLDER.search(v):
                     bad.append(f"{name} still has the example placeholder")
-                elif name == cls.ENV_HOST and not cls._HOST_RE.match(v):
+                elif name == host_var and not cls._HOST_RE.match(v):
                     bad.append(f"{name}='{v}' is not an IP or hostname")
-                elif name == cls.ENV_PASSWORD:
+                elif name == pw_var:
                     shown.append("password set")
                 else:
                     shown.append(f"{name}={v}")
@@ -199,7 +241,7 @@ class WorkstationConnection:
                 rows.append(PreflightCheck(".env target settings", False,
                                            "; ".join(parts) + f"{where} (see .env.example)"))
             else:
-                port = _env(cls.ENV_PORT) or "5985"
+                port = _env(cls._field(prefix, "WINRM_PORT")) or "5985"
                 rows.append(PreflightCheck(".env target settings", True,
                                            ", ".join(shown) + f" (WinRM port {port})"))
 
@@ -220,19 +262,31 @@ class WorkstationConnection:
 
     @classmethod
     def from_config(cls, config):
-        """Build the connection. All deployment-specific values come from .env via
-        the fixed ENV_* names above; config.json only supplies structural defaults
-        and the dev-only stub identity, so a user never has to edit config.json.
+        """Build the connection for agent 1 — the default, unsuffixed XDR_TARGET_*
+        block. Backward-compatible single-box entry point (unchanged behaviour for a
+        one-box .env). Use connection_for(config, agent_id) to build any configured
+        agent, and agent_descriptors(config) to list them.
+        """
+        return cls._from_prefix(config, "XDR_TARGET", 1)
 
-        .env (the only file users touch):
+    @classmethod
+    def _from_prefix(cls, config, prefix, index, *, label=None, agent_id=None):
+        """Build one agent's connection from its <prefix>_* .env block. All
+        deployment-specific values come from .env; config.json only supplies
+        structural defaults and the dev-only stub identity.
+
+        .env (the only file users touch) — agent 1 (unsuffixed) shown; agents 2..
+        use XDR_TARGET2_*, XDR_TARGET3_*, ...:
             XDR_TARGET_HOST=192.168.0.60
             XDR_TARGET_WINRM_USER=labadmin
             XDR_TARGET_WINRM_PASSWORD=•••••
             # optional: XDR_TARGET_WINRM_{PORT,SCHEME,AUTH}, XDR_TARGET_TRANSPORT=stub,
-            #           XDR_TARGET_EGRESS_IP, XDR_EMAIL_DOMAIN
+            #           XDR_TARGET_EGRESS_IP, XDR_TARGET_EMAIL_DOMAIN (or global
+            #           XDR_EMAIL_DOMAIN), XDR_TARGET_LABEL (a friendly name)
 
-        config.json (optional `xdr_orchestration.connection` block, structural only):
-            { "transport": "winrm",              # env XDR_TARGET_TRANSPORT overrides
+        config.json (optional `xdr_orchestration.connection` block, structural only;
+        shared by every agent):
+            { "transport": "winrm",              # env <prefix>_TRANSPORT overrides
               "stub_identity": { ... } }         # used only when transport=="stub"
         """
         def _env(name):
@@ -242,30 +296,35 @@ class WorkstationConnection:
         block = (config or {}).get("xdr_orchestration", {}).get("connection", {}) or {}
 
         # Transport: env wins, then config default, then "winrm".
-        transport = (_env(cls.ENV_TRANSPORT) or block.get("transport") or "winrm").lower()
+        transport = (_env(cls._field(prefix, "TRANSPORT")) or block.get("transport") or "winrm").lower()
 
-        host = _env(cls.ENV_HOST)
+        host = _env(cls._field(prefix, "HOST"))
         if transport != "stub" and not host:
             raise ConnectionError(
-                f"{cls.ENV_HOST} is not set in .env — set the target box's IP/hostname there "
+                f"{cls._field(prefix, 'HOST')} is not set in .env — set the box's IP/hostname there "
                 "(config.json intentionally holds no target address).")
 
         # Structural WinRM settings: env first, then optional config defaults, then built-ins.
         winrm_cfg = block.get("winrm", {})
-        port   = int(_env(cls.ENV_PORT)   or winrm_cfg.get("port")   or 5985)
-        scheme = _env(cls.ENV_SCHEME)     or winrm_cfg.get("scheme") or "http"
-        auth   = _env(cls.ENV_AUTH)       or winrm_cfg.get("auth")   or "ntlm"
+        port   = int(_env(cls._field(prefix, "WINRM_PORT"))   or winrm_cfg.get("port")   or 5985)
+        scheme = _env(cls._field(prefix, "WINRM_SCHEME"))     or winrm_cfg.get("scheme") or "http"
+        auth   = _env(cls._field(prefix, "WINRM_AUTH"))       or winrm_cfg.get("auth")   or "ntlm"
 
-        username = _env(cls.ENV_USER)
-        password = _env(cls.ENV_PASSWORD)
+        username = _env(cls._field(prefix, "WINRM_USER"))
+        password = _env(cls._field(prefix, "WINRM_PASSWORD"))
 
-        # Optional identity overrides — env wins over any config block overrides.
+        # Optional identity overrides — env wins over any config block overrides. The
+        # email domain falls back to the shared global XDR_EMAIL_DOMAIN.
         overrides = dict(block.get("overrides", {}) or {})
-        if _env(cls.ENV_EGRESS_IP):
-            overrides["egress_ip"] = _env(cls.ENV_EGRESS_IP)
-        if _env(cls.ENV_EMAIL_DOM):
-            overrides["email_domain"] = _env(cls.ENV_EMAIL_DOM)
+        egress = _env(cls._field(prefix, "EGRESS_IP"))
+        if egress:
+            overrides["egress_ip"] = egress
+        email = _env(cls._field(prefix, "EMAIL_DOMAIN")) or _env(cls.ENV_EMAIL_DOM)
+        if email:
+            overrides["email_domain"] = email
 
+        lab = label or _env(cls._field(prefix, "LABEL")) or host or f"Agent {index}"
+        aid = agent_id or cls._slug(lab, index)
         return cls(
             host=host,
             transport=transport,
@@ -276,7 +335,69 @@ class WorkstationConnection:
             transport_auth=auth,
             overrides=overrides,
             stub_identity=block.get("stub_identity"),
+            agent_id=aid,
+            label=lab,
+            index=index,
+            env_prefix=prefix,
         )
+
+    @classmethod
+    def agent_descriptors(cls, config):
+        """List the configured agents (metadata only — NEVER secrets) for selection
+        and fan-out. Agent 1 is always listed (even if its .env is incomplete, so the
+        console can show exactly why it is RED); agents 2.. are listed when their
+        <prefix>_HOST is set (or a stub transport), and the scan stops at the first
+        gap. Each row: {index, id, label, host, transport, configured}. Ids are
+        unique and stable (slug of the label)."""
+        def _env(name):
+            v = os.getenv(name)
+            return v.strip() if v and v.strip() else None
+        block = (config or {}).get("xdr_orchestration", {}).get("connection", {}) or {}
+        default_transport = (block.get("transport") or "winrm").lower()
+        out, seen = [], {}
+        for index in range(1, cls.MAX_AGENTS + 1):
+            prefix = cls._agent_prefix(index)
+            host = _env(cls._field(prefix, "HOST"))
+            transport = (_env(cls._field(prefix, "TRANSPORT"))
+                         or (default_transport if index == 1 else "winrm")).lower()
+            if index > 1 and not host and transport != "stub":
+                break                                   # stop at the first unconfigured slot
+            label = _env(cls._field(prefix, "LABEL")) or host or f"Agent {index}"
+            base = cls._slug(label, index)
+            if base in seen:                             # keep ids unique for same-slug labels
+                seen[base] += 1
+                aid = f"{base}-{seen[base]}"
+            else:
+                seen[base] = 1
+                aid = base
+            out.append({
+                "index": index,
+                "id": aid,
+                "label": label,
+                "host": host or ("stub" if transport == "stub" else None),
+                "transport": transport,
+                "configured": bool(host) or transport == "stub",
+            })
+        return out
+
+    @classmethod
+    def connection_for(cls, config, agent_id=None):
+        """Build the connection for a selected agent id (default: agent 1). Raises
+        ConnectionError for an unknown id, or (via _from_prefix) for a live agent
+        with no host configured."""
+        descs = cls.agent_descriptors(config)
+        if agent_id is None:
+            if not descs:
+                return cls._from_prefix(config, "XDR_TARGET", 1)
+            desc = descs[0]
+        else:
+            desc = next((d for d in descs if d["id"] == agent_id), None)
+            if desc is None:
+                raise ConnectionError(
+                    f"unknown XDR agent '{agent_id}' — configured agents: "
+                    f"{[d['id'] for d in descs] or 'none'}")
+        return cls._from_prefix(config, cls._agent_prefix(desc["index"]), desc["index"],
+                                label=desc.get("label"), agent_id=desc["id"])
 
     # ---- low-level WinRM -----------------------------------------------------
 
@@ -570,7 +691,8 @@ class WorkstationConnection:
                 and now - self._preflight_cache_at < self.CACHE_TTL_SECONDS):
             return self._preflight_cache
 
-        checks = list(self.env_checks(getattr(self, "env_file", None), self.transport))
+        checks = list(self.env_checks(getattr(self, "env_file", None), self.transport,
+                                      prefix=getattr(self, "_prefix", "XDR_TARGET")))
         identity = None
 
         if self.transport == "stub":

@@ -1780,24 +1780,54 @@ def _console_lan_ip():
         return "127.0.0.1"
 
 
+@app.get("/api/attack/agents")
+def api_attack_agents():
+    """List the configured XDR agent boxes for selection / fan-out (metadata only,
+    never secrets). Agent 1 is the unsuffixed XDR_TARGET_* box; agents 2.. are
+    XDR_TARGET2_*, XDR_TARGET3_*, ... See WorkstationConnection.agent_descriptors."""
+    from modules.xdr_orchestration import WorkstationConnection
+    _refresh_xdr_env()
+    try:
+        agents = WorkstationConnection.agent_descriptors(CONFIG)
+    except Exception as e:
+        return jsonify({"agents": [], "error": str(e)}), 200
+    return jsonify({"agents": agents})
+
+
 @app.get("/api/attack/health")
 def api_attack_health():
-    """Run the orchestrator preflight and return the per-check report + the
-    discovered identity the run will carry (fail-closed gate for the tab)."""
+    """Run the orchestrator preflight for ONE agent and return the per-check report +
+    the discovered identity the run will carry (fail-closed gate for the tab). The
+    optional ?agent=<id> selects which configured box to preflight (default: agent 1);
+    the response also lists all configured agents so the console can offer the picker."""
     from modules.xdr_orchestration import WorkstationConnection
     env_file = _refresh_xdr_env()
+    agent_id = (request.args.get("agent") or "").strip() or None
     try:
-        conn = WorkstationConnection.from_config(CONFIG)
+        agents = WorkstationConnection.agent_descriptors(CONFIG)
+    except Exception:
+        agents = []
+    try:
+        conn = WorkstationConnection.connection_for(CONFIG, agent_id)
         conn.env_file = env_file
         report = conn.preflight(force=True)
-        return jsonify(report.to_dict())
+        out = report.to_dict()
+        out["agents"] = agents
+        out["agent"] = {"id": conn.agent_id, "label": conn.label,
+                        "index": conn.index, "host": conn.host}
+        return jsonify(out)
     except Exception as e:
-        # A config error (no block / no host) is a clear RED, not a 500 -- and the
-        # .env rows still say which variable is missing.
+        # A config error (unknown id / no host) is a clear RED, not a 500 -- and the
+        # .env rows still name the missing variable for the SELECTED agent's block.
+        desc = next((d for d in agents if d["id"] == agent_id), None) or (agents[0] if agents else None)
+        prefix = WorkstationConnection._agent_prefix(desc["index"]) if desc else "XDR_TARGET"
         rows = [{"name": c.name, "status": c.status, "detail": c.detail}
-                for c in WorkstationConnection.env_checks(env_file)]
+                for c in WorkstationConnection.env_checks(env_file, prefix=prefix)]
         return jsonify({"ok": False, "checks": rows + [
-            {"name": "connection", "status": "FAIL", "detail": str(e)}], "identity": None}), 200
+            {"name": "connection", "status": "FAIL", "detail": str(e)}],
+            "identity": None, "agents": agents,
+            "agent": ({"id": desc["id"], "label": desc["label"], "index": desc["index"],
+                       "host": desc.get("host")} if desc else None)}), 200
 
 
 def _refresh_xdr_env():
@@ -1894,25 +1924,70 @@ def api_attack_run():
     except (TypeError, ValueError):
         scorecard_wait = 0
 
-    cfg = copy.deepcopy(CONFIG)
+    # Multi-agent fan-out: run the SAME story against each selected box as an
+    # independent run (own preflight, identity, synthetic-log seed, run_id and
+    # scorecard), all started together. Body "agents": [ids] from the console's
+    # selection; omitted -> agent 1 (backward compatible). This is the "same event,
+    # prevent-box vs alert-box, at the same time" case — it is NOT a coordinated
+    # cross-host pivot (see docs/modules/xdr-two-agent-lateral-design.md).
+    from modules.xdr_orchestration import WorkstationConnection, run_story_id as _run_story_id
+    env_file = _refresh_xdr_env()
+    try:
+        descs = WorkstationConnection.agent_descriptors(CONFIG)
+    except Exception:
+        descs = []
+    sel = body.get("agents")
+    if isinstance(sel, list) and sel:
+        seen, want = set(), []
+        for a in sel:                                  # dedupe, preserve order
+            a = str(a)
+            if a not in seen:
+                seen.add(a); want.append(a)
+    elif descs:
+        want = [descs[0]["id"]]                        # default: agent 1
+    else:
+        want = [None]                                  # no inventory -> legacy single box
+
     modules = {name: state.module for name, state in MODULE_STATES.items()}
-    run_id = _new_run(f"attack:{story_id}", story.name)
 
-    def _func(mods, c):
-        from modules.xdr_orchestration import run_story_id
-        _ATTACK_SUMMARIES[run_id] = run_story_id(
-            mods, c, story_id, dry_run=dry_run, cleanup_prior_incidents=cleanup,
-            only_steps=only_steps, skip_steps=skip_steps, pace=pace,
-            domain_override=domain_override, fresh_domains=fresh_domains,
-            network_vendors=network_vendors,
-            anchor_dhcp=anchor_dhcp,
-            anchor_logon=anchor_logon, timing_profile=timing_profile, jitter=jitter,
-            prevention_probe=prevention_probe, on_prevention=on_prevention,
-            scorecard=scorecard, scorecard_wait=scorecard_wait)
+    def _start_one(aid):
+        """Build the selected agent's connection and launch one run; returns the row
+        or raises for an unknown/misconfigured agent (surfaced in `errors`)."""
+        conn = WorkstationConnection.connection_for(CONFIG, aid) if aid is not None else None
+        if conn is not None:
+            conn.env_file = env_file
+        rid = _new_run(f"attack:{story_id}", story.name)
+        cfg = copy.deepcopy(CONFIG)
 
-    t = threading.Thread(target=_run_scenario_and_flush, args=(_func, modules, cfg, run_id),
-                         daemon=True, name=f"attack-{story_id}-{run_id[:8]}")
-    t.start()
+        def _func(mods, c, _conn=conn, _rid=rid):
+            _ATTACK_SUMMARIES[_rid] = _run_story_id(
+                mods, c, story_id, dry_run=dry_run, cleanup_prior_incidents=cleanup,
+                only_steps=only_steps, skip_steps=skip_steps, pace=pace,
+                domain_override=domain_override, fresh_domains=fresh_domains,
+                network_vendors=network_vendors,
+                anchor_dhcp=anchor_dhcp,
+                anchor_logon=anchor_logon, timing_profile=timing_profile, jitter=jitter,
+                prevention_probe=prevention_probe, on_prevention=on_prevention,
+                scorecard=scorecard, scorecard_wait=scorecard_wait, connection=_conn)
+
+        t = threading.Thread(target=_run_scenario_and_flush, args=(_func, modules, cfg, rid),
+                             daemon=True, name=f"attack-{story_id}-{rid[:8]}")
+        t.start()
+        return {"run_id": rid,
+                "agent_id": (conn.agent_id if conn is not None else "agent1"),
+                "label": (conn.label if conn is not None else "agent 1")}
+
+    runs, errors = [], []
+    for aid in want:
+        try:
+            runs.append(_start_one(aid))
+        except Exception as e:
+            errors.append({"agent_id": aid, "error": str(e)})
+
+    if not runs:
+        return jsonify({"started": False, "story": story.name, "story_id": story_id,
+                        "errors": errors or [{"error": "no agent could be started"}]}), 400
+
     return jsonify({"started": True, "story": story.name, "story_id": story_id,
                     "dry_run": dry_run, "cleanup_prior_incidents": cleanup,
                     "only_steps": only_steps, "skip_steps": skip_steps, "pace": pace,
@@ -1921,7 +1996,8 @@ def api_attack_run():
                     "timing_profile": timing_profile,
                     "jitter": jitter, "prevention_probe": prevention_probe,
                     "scorecard": scorecard,
-                    "run_id": run_id}), 202
+                    "runs": runs, "errors": errors,
+                    "run_id": runs[0]["run_id"]}), 202    # back-compat: first run
 
 
 @app.get("/api/attack/coverage")
@@ -3480,6 +3556,7 @@ def _register_v1_aliases():
         ("/api/v1/timeline",                  "api_timeline",        ["GET"]),
         # XDR attack orchestration (purple-team console tab)
         ("/api/v1/attack/health",             "api_attack_health",       ["GET"]),
+        ("/api/v1/attack/agents",             "api_attack_agents",       ["GET"]),
         ("/api/v1/attack/stories",            "api_attack_stories",      ["GET"]),
         ("/api/v1/attack/run",                "api_attack_run",          ["POST"]),
         ("/api/v1/attack/runs/<run_id>",      "api_attack_run_result",   ["GET"]),

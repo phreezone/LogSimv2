@@ -230,6 +230,7 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
                             seed=timing_seed)
     selected = _select_steps(story.steps, only_steps, skip_steps)
     summary = {"story": story.name, "story_id": story_id, "ok": False, "identity": None,
+               "agent": None,          # which box this run targeted (set once connection resolves)
                "results": [], "emitted": 0, "aborted": None,
                "selected_steps": [i for (i, _s) in selected],
                "domain_override": domain_override or None,
@@ -305,6 +306,15 @@ def run_story(all_modules, config, story: Optional[Story] = None, *,
             summary["aborted"] = f"connection config error: {e}"
             print(f"[XDR] ABORT — {summary['aborted']}")
             return _finalize(summary)
+
+    # Record which agent (box) this run targets, so a fan-out of the same story
+    # across several boxes can be told apart in the console and the ledger.
+    summary["agent"] = {
+        "id": getattr(connection, "agent_id", "agent1"),
+        "label": getattr(connection, "label", None),
+        "index": getattr(connection, "index", 1),
+        "host": getattr(connection, "host", None),
+    }
 
     # 2) Preflight — fail-closed.
     print(f"\n=== XDR Orchestration: {story.name} ===")
@@ -523,12 +533,17 @@ def run_story_id(all_modules, config, story_id, *, dry_run=None,
                  timing_profile=None, jitter=None, prevention_probe=False,
                  on_prevention="warn", scorecard=False, scorecard_wait=0,
                  scorecard_minutes=None, ledger=True, fresh_domains=True,
-                 network_vendors=None):
+                 network_vendors=None, connection=None, cradle_url=None):
     """Run a story by id (used by the console /api/attack/run route). Falls back to
     the reference story when the id is unknown. Threads the per-run options through
-    to run_story (see its docstring)."""
+    to run_story (see its docstring).
+
+    `connection` targets a specific agent/box (from WorkstationConnection.connection_for);
+    when None, run_story builds agent 1 from config. Fan-out across several boxes is
+    one run_story_id call per selected agent, each with that agent's connection."""
     story = get_story(story_id) or get_reference_story()
     return run_story(all_modules, config, story, dry_run=dry_run,
+                     connection=connection, cradle_url=cradle_url,
                      cleanup_prior_incidents=cleanup_prior_incidents,
                      only_steps=only_steps, skip_steps=skip_steps, pace=pace,
                      domain_override=domain_override, fresh_domains=fresh_domains,

@@ -30,7 +30,9 @@ This closes the one gap synthetic feeds can't: the Cortex agent's own data model
 | `XDR_TARGET_WINRM_AUTH` | no | `ntlm` | `ntlm` \| `basic` \| `kerberos` |
 | `XDR_TARGET_TRANSPORT` | no | `winrm` | Set to `stub` for no-box development (uses `config.json` `stub_identity`) |
 | `XDR_TARGET_EGRESS_IP` | no | — | Org NAT/public IP that external-facing logs (Zscaler, perimeter FW) should carry; discovery only knows the internal IP |
-| `XDR_EMAIL_DOMAIN` | no | — | Derive user email when discovery can't |
+| `XDR_TARGET_LABEL` | no | the host | Friendly name shown in the console's agent picker (e.g. `Prevent-policy box`) |
+| `XDR_EMAIL_DOMAIN` | no | — | Derive user email when discovery can't (shared fallback for all agents) |
+| `XDR_TARGET2_*`, `XDR_TARGET3_*`, … | no | — | **Additional agents.** A second/third box uses the same field names with a numeric prefix (`XDR_TARGET2_HOST`, `XDR_TARGET2_WINRM_USER`, …). See [Multiple agents](#multiple-agents--select-a-box-or-fan-out). |
 | `XSIAM_API_BASE` / `XSIAM_API_KEY_ID` / `XSIAM_API_KEY` | read-back (optional) | — | Cortex `/public_api` **Standard** key. Powers the detection **scorecard + Re-score** (which expected alerts fired, endpoint↔network coalescence), the prevention probe + policy control (agent alert↔block), and the dashboard "XSIAM tenant" HEALTH rows. All three required together; the run itself works without them, but the scorecard then reports *unavailable*. Set them and the dashboard Health tab turns green for the **XSIAM API · Public API credentials (read-back)** check. |
 
 The variable *names* are defined once as `ENV_*` constants on `WorkstationConnection` in `connection.py`.
@@ -55,6 +57,41 @@ The variable *names* are defined once as `ENV_*` constants on `WorkstationConnec
 ```
 
 `transport` here is only a default — `XDR_TARGET_TRANSPORT` in `.env` overrides it. `stub_identity` is used only when transport is `stub`.
+
+---
+
+## Multiple agents — select a box, or fan out
+
+More than one Cortex-agent box can be configured, so a run can target **one box, several, or all at once**. The headline use case: fire the **same** story at a **prevent-policy** box and an **alert-policy** box **at the same time** and compare what XSIAM does with the identical event on each.
+
+**Configure** extra boxes in `.env` with a numeric prefix — agent 1 is the unsuffixed `XDR_TARGET_*` block (so a one-box `.env` is unchanged), agents 2.. are `XDR_TARGET2_*`, `XDR_TARGET3_*`, …:
+
+```
+XDR_TARGET_HOST=192.168.0.44
+XDR_TARGET_WINRM_USER=eric
+XDR_TARGET_WINRM_PASSWORD=•••••
+XDR_TARGET_LABEL=Alert-policy box
+
+XDR_TARGET2_HOST=192.168.0.55
+XDR_TARGET2_WINRM_USER=eric
+XDR_TARGET2_WINRM_PASSWORD=•••••
+XDR_TARGET2_LABEL=Prevent-policy box
+```
+
+Each agent supports the full per-agent field set (`_WINRM_PORT/SCHEME/AUTH`, `_TRANSPORT`, `_EGRESS_IP`, `_EMAIL_DOMAIN`, `_LABEL`); the email domain also falls back to the shared global `XDR_EMAIL_DOMAIN`. The scan stops at the first unconfigured slot. Creds stay in `.env` only — `config.json` holds no box values. Changes are picked up on the next preflight/run, no restart needed.
+
+**In the console** (⚔ XDR Attack tab), when more than one agent is configured:
+- the **Preflight** panel gains an agent dropdown — preflight each box on its own;
+- **Run a story** gains an **Agents** checkbox row — check one or several, and **each checked box runs the story in parallel** as an independent run (its own preflight, discovered identity, synthetic-log seed, `run_id` and scorecard). Results render as one card per box.
+
+**What this is — and isn't.** This is *N independent single-box runs started together* — the robust per-run path, reused. It is **not** a coordinated cross-host pivot (box A authenticating into box B): that is a separate, out-of-scope design captured in [Two-Agent Lateral Movement](xdr-two-agent-lateral-design.md).
+
+**API:**
+- `GET /api/attack/agents` → the configured agents (metadata only, never secrets): `{index, id, label, host, transport, configured}`.
+- `GET /api/attack/health?agent=<id>` → preflight one agent (default: agent 1); the response also lists all agents.
+- `POST /api/attack/run` with `{"agents": ["alert-policy-box", "prevent-policy-box"], ...}` → starts one run per agent and returns `runs: [{agent_id, label, run_id}]` (plus `run_id` = the first, for back-compat). Omit `agents` to run agent 1.
+
+`WorkstationConnection.agent_descriptors(config)` lists the agents and `connection_for(config, agent_id)` builds a selected one; `run_story` / `run_story_id` accept a `connection=` to target it, and stamp `summary["agent"]`.
 
 ---
 

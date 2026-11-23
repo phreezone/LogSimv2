@@ -504,7 +504,9 @@
         <h2 style="margin:0 0 2px;">⚔ XDR Attack Orchestration</h2>
         <div style="color:var(--text-muted);font-size:13px;">Real Atomic techniques on the Cortex-agent box + identity-aligned synthetic network logs → one XSIAM incident.</div>
       </div>
-      <div style="display:flex;gap:8px;">
+      <div style="display:flex;gap:8px;align-items:center;">
+        <select id="xdr-health-agent" onchange="xdrHealth()" title="Which configured box to preflight"
+                style="display:none;padding:6px 10px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;"></select>
         <button class="btn btn-ghost btn-sm" onclick="xdrKickstarter()">⬇ Generate workstation installer</button>
         <button class="btn btn-ghost btn-sm" onclick="xdrHealth()">↻ Re-check preflight</button>
       </div>
@@ -523,6 +525,15 @@
     <!-- Run a story -->
     <div class="metrics-table-wrap" style="margin-top:16px;padding:14px 16px;">
       <strong>Run a story</strong>
+      <!-- Multi-agent fan-out: each checked box runs the SAME story in parallel (own
+           preflight, identity, run_id, scorecard) — e.g. a prevent-policy box and an
+           alert-policy box side by side. Hidden when only one agent is configured. -->
+      <div id="xdr-agents-wrap" style="display:none;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap;font-size:13px;color:var(--text-muted);"
+           title="Which configured boxes this run fires on. Check several to send the same event to each at the same time.">
+        <span>Agents:</span>
+        <span id="xdr-agents" style="display:inline-flex;gap:14px;flex-wrap:wrap;"></span>
+        <span style="color:var(--text-muted);">— each checked box runs it in parallel</span>
+      </div>
       <div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap;">
         <select id="xdr-story-select" style="min-width:340px;padding:6px 10px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;">
           <option value="">loading…</option>
@@ -576,18 +587,8 @@
       <div id="xdr-story-techs" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>
     </div>
 
-    <!-- Result -->
-    <div id="xdr-result" class="metrics-table-wrap" style="margin-top:16px;padding:14px 16px;display:none;">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
-        <strong>Run result</strong>
-        <div style="display:flex;align-items:center;gap:10px;">
-          <button class="btn btn-sm" id="xdr-rescore-btn" onclick="xdrRescore()" style="display:none;"
-                  title="Re-pull alerts/incidents for this run without re-firing — use a few minutes after the run, once detectors have fired.">↻ Re-score</button>
-          <span id="xdr-result-status" style="font-weight:700;"></span>
-        </div>
-      </div>
-      <div id="xdr-result-body" style="margin-top:10px;font-size:13px;"></div>
-    </div>
+    <!-- Results — one card per agent run (built in JS by xdrRun). -->
+    <div id="xdr-results" style="margin-top:16px;display:flex;flex-direction:column;gap:12px;"></div>
   </div>
 </div>
 
@@ -1498,9 +1499,39 @@
 
   // ── XDR Attack tab ─────────────────────────────────────────────────────────
   let _xdrStoriesLoaded = false;
+  let xdrAgents = [];
   function xdrInit() {
-    xdrHealth();
+    xdrLoadAgents().finally(() => xdrHealth());
     if (!_xdrStoriesLoaded) { xdrLoadStories(); _xdrStoriesLoaded = true; }
+  }
+
+  // Configured agent boxes (for the preflight picker + fan-out checkboxes). Agent 1
+  // is the unsuffixed XDR_TARGET_* box; agents 2.. are XDR_TARGET2_*, ...
+  async function xdrLoadAgents() {
+    try {
+      const r = await api('/api/attack/agents');
+      xdrAgents = (r && r.agents) || [];
+    } catch (e) { xdrAgents = []; }
+    const multi = xdrAgents.length > 1;
+    // Preflight agent dropdown — only shown when there's more than one box.
+    const sel = document.getElementById('xdr-health-agent');
+    const prev = sel.value;
+    sel.innerHTML = xdrAgents.map(a =>
+      `<option value="${escHtml(a.id)}">${escHtml(a.label)}${a.host ? ' — ' + escHtml(a.host) : ''}</option>`).join('');
+    if (prev && xdrAgents.some(a => a.id === prev)) sel.value = prev;
+    sel.style.display = multi ? '' : 'none';
+    // Fan-out checkboxes — preserve the user's current selection across refreshes.
+    const row = document.getElementById('xdr-agents');
+    const before = new Set(Array.from(document.querySelectorAll('.xdr-agent:checked')).map(c => c.value));
+    row.innerHTML = xdrAgents.map((a, i) => {
+      const on = before.size ? before.has(a.id) : i === 0;
+      return `<label style="display:flex;align-items:center;gap:6px;">`
+           + `<input type="checkbox" class="xdr-agent" value="${escHtml(a.id)}"${on ? ' checked' : ''}>`
+           + `${escHtml(a.label)}${a.host ? ` <span style="color:var(--text-muted);">(${escHtml(a.host)})</span>` : ''}`
+           + (a.configured ? '' : ' <span style="color:var(--yellow);" title="not fully configured in .env">⚠</span>')
+           + `</label>`;
+    }).join('');
+    document.getElementById('xdr-agents-wrap').style.display = multi ? 'flex' : 'none';
   }
 
   async function xdrHealth() {
@@ -1510,7 +1541,9 @@
     badge.textContent = 'checking…'; badge.style.color = 'var(--text-muted)';
     checksEl.innerHTML = ''; idEl.textContent = '';
     try {
-      const r = await api('/api/attack/health');
+      const agSel = document.getElementById('xdr-health-agent');
+      const ag = agSel && agSel.value ? ('?agent=' + encodeURIComponent(agSel.value)) : '';
+      const r = await api('/api/attack/health' + ag);
       badge.textContent = r.ok ? 'GREEN — ready to fire' : 'RED — will refuse to fire';
       badge.style.color = r.ok ? 'var(--green)' : 'var(--red)';
       checksEl.innerHTML = (r.checks || []).map(c => {
@@ -1520,9 +1553,11 @@
              + `<span style="color:var(--text-muted);"> — ${escHtml(c.detail || c.status)}</span></div>`;
       }).join('');
       const i = r.identity;
-      idEl.innerHTML = i ? `Synthetic logs will carry: <strong>user=${escHtml(i.username)}</strong> `
+      const agTxt = r.agent ? `<span style="color:var(--text-muted);">Box:</span> <strong>${escHtml(r.agent.label || r.agent.id)}</strong>`
+             + (r.agent.host ? ` <span style="color:var(--text-muted);">(${escHtml(r.agent.host)})</span>` : '') + ' · ' : '';
+      idEl.innerHTML = i ? agTxt + `Synthetic logs will carry: <strong>user=${escHtml(i.username)}</strong> `
              + `<strong>host=${escHtml(i.hostname)}</strong> <strong>ip=${escHtml(i.ip)}</strong>`
-             + (i.egress_ip ? ` egress=${escHtml(i.egress_ip)}` : '') : '';
+             + (i.egress_ip ? ` egress=${escHtml(i.egress_ip)}` : '') : (agTxt || '');
     } catch (e) {
       badge.textContent = 'error'; badge.style.color = 'var(--red)';
       checksEl.textContent = e.message;
@@ -1551,10 +1586,72 @@
     } catch (e) { sel.innerHTML = `<option>Error: ${escHtml(e.message)}</option>`; }
   }
 
-  let xdrLastRunId = null, xdrLastResult = null;
+  // Build an empty result card for one agent run; returns {wrap, ctx}. ctx holds the
+  // card's own status/body/rescore elements + its lastResult, so several agent runs
+  // render independently and each can be re-scored on its own.
+  function xdrMakeCard(run) {
+    const wrap = document.createElement('div');
+    wrap.className = 'metrics-table-wrap';
+    wrap.style.cssText = 'padding:14px 16px;';
+    wrap.innerHTML =
+        `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">`
+      + `<strong>Run result — ${escHtml(run.label || run.agent_id || 'agent')}</strong>`
+      + `<div style="display:flex;align-items:center;gap:10px;">`
+      + `<button class="btn btn-sm xdr-rescore-btn" style="display:none;" `
+      + `title="Re-pull alerts/incidents for this run without re-firing — use a few minutes after the run, once detectors have fired.">↻ Re-score</button>`
+      + `<span class="xdr-card-status" style="font-weight:700;"></span></div></div>`
+      + `<div class="xdr-card-body" style="margin-top:10px;font-size:13px;"></div>`;
+    const ctx = {
+      runId: run.run_id,
+      statusEl: wrap.querySelector('.xdr-card-status'),
+      bodyEl: wrap.querySelector('.xdr-card-body'),
+      rescoreBtn: wrap.querySelector('.xdr-rescore-btn'),
+      lastResult: null,
+    };
+    ctx.rescoreBtn.onclick = () => xdrRescore(ctx);
+    return { wrap, ctx };
+  }
+
+  // Poll one run to completion and render into its card. Real techniques are slow (an
+  // LSASS dump alone took 161 s on 2026-11-18; the intrusion story ran 6 min), so the
+  // cap is 45 min; it shows elapsed time and rides out transient poll failures.
+  async function xdrWatchRun(ctx, opts) {
+    const { statusEl, bodyEl } = ctx;
+    statusEl.textContent = 'running…'; statusEl.style.color = 'var(--text-muted)';
+    const t0 = Date.now();
+    const elapsed = () => { const s = Math.round((Date.now() - t0) / 1000); return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`; };
+    let done = false, pollErrors = 0;
+    try {
+      while (!done && Date.now() - t0 < 45 * 60 * 1000) {
+        await new Promise(r => setTimeout(r, 3000));
+        let v;
+        try {
+          v = await api(`/api/attack/runs/${encodeURIComponent(ctx.runId)}`);
+          pollErrors = 0;
+        } catch (e) {
+          if (++pollErrors >= 10) throw e;          // ~30 s of consecutive failures
+          statusEl.textContent = `running… ${elapsed()} (console unreachable, retrying)`;
+          continue;
+        }
+        if (v.status === 'done' || v.status === 'error') {
+          done = true;
+          xdrRenderResult(v, ctx);
+        } else {
+          statusEl.textContent = `running… ${elapsed()}` + (opts.scorecard ? ' (scorecard pulls when the run ends)' : '');
+        }
+      }
+      if (!done) { statusEl.textContent = `still running after ${elapsed()} — stopped watching; run id ${ctx.runId}`; statusEl.style.color = 'var(--yellow)'; }
+      // A finished run can be re-scored once detectors have had time to fire.
+      if (done && !(ctx.lastResult && ctx.lastResult.attack && ctx.lastResult.attack.aborted)) {
+        ctx.rescoreBtn.style.display = '';
+      }
+    } catch (e) {
+      statusEl.textContent = 'error'; statusEl.style.color = 'var(--red)';
+      bodyEl.textContent = e.message;
+    }
+  }
 
   async function xdrRun() {
-    document.getElementById('xdr-rescore-btn').style.display = 'none';
     const story_id = document.getElementById('xdr-story-select').value;
     const dry_run = document.getElementById('xdr-dryrun').checked;
     const cleanup_prior_incidents = document.getElementById('xdr-cleanup').checked;
@@ -1566,14 +1663,19 @@
     const scorecard = document.getElementById('xdr-scorecard').checked;
     const skip_steps = document.getElementById('xdr-skip').value
       .split(',').map(x => parseInt(x.trim(), 10)).filter(n => Number.isInteger(n));
+    // Fan-out selection: the checked agent boxes (empty when only one agent exists,
+    // in which case the server defaults to agent 1).
+    const agents = Array.from(document.querySelectorAll('.xdr-agent:checked')).map(c => c.value);
     const btn = document.getElementById('xdr-run-btn');
-    const resWrap = document.getElementById('xdr-result');
-    const statusEl = document.getElementById('xdr-result-status');
-    const bodyEl = document.getElementById('xdr-result-body');
+    const results = document.getElementById('xdr-results');
     if (!story_id) return;
-    btn.disabled = true; resWrap.style.display = 'block';
-    statusEl.textContent = 'starting…'; statusEl.style.color = 'var(--text-muted)';
-    bodyEl.innerHTML = '';
+    if (xdrAgents.length > 1 && agents.length === 0) { alert('Select at least one agent box to run.'); return; }
+    btn.disabled = true;
+    results.innerHTML = '';
+    const banner = document.createElement('div');
+    banner.style.cssText = 'color:var(--text-muted);font-size:13px;';
+    banner.textContent = 'starting…';
+    results.appendChild(banner);
     try {
       const start = await api('/api/attack/run', 'POST', {
         story_id, dry_run, cleanup_prior_incidents, timing_profile,
@@ -1582,69 +1684,52 @@
         fresh_domains,
         network_vendors,
         skip_steps: skip_steps.length ? skip_steps : null,
+        agents: agents.length ? agents : null,
       });
-      statusEl.textContent = 'running…';
-      const runId = start.run_id;
-      xdrLastRunId = runId;
-      // Poll until the run finishes. Real techniques are slow (an LSASS dump alone
-      // took 161 s on 2026-11-18; the intrusion story ran 6 min), so the old 4-minute
-      // cap gave up on runs that then finished with no result shown. Cap at 45 min,
-      // show elapsed time, and ride out transient poll failures instead of aborting.
-      const t0 = Date.now();
-      const elapsed = () => { const s = Math.round((Date.now() - t0) / 1000); return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`; };
-      let done = false, pollErrors = 0;
-      while (!done && Date.now() - t0 < 45 * 60 * 1000) {
-        await new Promise(r => setTimeout(r, 3000));
-        let v;
-        try {
-          v = await api(`/api/attack/runs/${encodeURIComponent(runId)}`);
-          pollErrors = 0;
-        } catch (e) {
-          if (++pollErrors >= 10) throw e;          // ~30 s of consecutive failures
-          statusEl.textContent = `running… ${elapsed()} (console unreachable, retrying)`;
-          continue;
-        }
-        if (v.status === 'done' || v.status === 'error') {
-          done = true;
-          xdrRenderResult(v);
-        } else {
-          statusEl.textContent = `running… ${elapsed()}` + (scorecard ? ' (scorecard pulls when the run ends)' : '');
-        }
+      // Back-compat: an old server returns a single run_id; treat it as one run.
+      const runs = start.runs || (start.run_id ? [{ run_id: start.run_id, agent_id: 'agent1', label: 'agent 1' }] : []);
+      banner.remove();
+      if (start.errors && start.errors.length) {
+        const err = document.createElement('div');
+        err.style.cssText = 'color:var(--yellow);font-size:13px;';
+        err.innerHTML = start.errors.map(e => `⚠ ${escHtml(e.agent_id || 'agent')}: ${escHtml(e.error || 'could not start')}`).join('<br>');
+        results.appendChild(err);
       }
-      if (!done) { statusEl.textContent = `still running after ${elapsed()} — stopped watching; run id ${runId}`; statusEl.style.color = 'var(--yellow)'; }
-      // A finished run can be re-scored once detectors have had time to fire.
-      if (done && !(xdrLastResult && xdrLastResult.attack && xdrLastResult.attack.aborted)) {
-        document.getElementById('xdr-rescore-btn').style.display = '';
-      }
+      const ctxs = runs.map(run => {
+        const { wrap, ctx } = xdrMakeCard(run);
+        results.appendChild(wrap);
+        return ctx;
+      });
+      await Promise.all(ctxs.map(ctx => xdrWatchRun(ctx, { scorecard })));
     } catch (e) {
-      statusEl.textContent = 'error'; statusEl.style.color = 'var(--red)';
-      bodyEl.textContent = e.message;
+      banner.style.color = 'var(--red)';
+      banner.textContent = 'error: ' + e.message;
     } finally { btn.disabled = false; }
   }
 
-  // Re-pull the finished run's alerts/incidents without re-firing the story.
-  async function xdrRescore() {
-    if (!xdrLastRunId) return;
-    const btn = document.getElementById('xdr-rescore-btn');
+  // Re-pull one finished run's alerts/incidents without re-firing the story.
+  async function xdrRescore(ctx) {
+    if (!ctx || !ctx.runId) return;
+    const btn = ctx.rescoreBtn;
     const old = btn.textContent;
     btn.disabled = true; btn.textContent = '↻ scoring…';
     try {
-      const r = await api(`/api/attack/runs/${encodeURIComponent(xdrLastRunId)}/rescore`, 'POST', {});
-      if (xdrLastResult) {
-        xdrLastResult.attack = xdrLastResult.attack || {};
-        xdrLastResult.attack.scorecard = r.scorecard;
-        xdrLastResult._rescored_at = new Date();
-        xdrRenderResult(xdrLastResult);
+      const r = await api(`/api/attack/runs/${encodeURIComponent(ctx.runId)}/rescore`, 'POST', {});
+      if (ctx.lastResult) {
+        ctx.lastResult.attack = ctx.lastResult.attack || {};
+        ctx.lastResult.attack.scorecard = r.scorecard;
+        ctx.lastResult._rescored_at = new Date();
+        xdrRenderResult(ctx.lastResult, ctx);
       }
     } catch (e) {
       alert('Re-score failed: ' + e.message);
     } finally { btn.disabled = false; btn.textContent = old; }
   }
 
-  function xdrRenderResult(v) {
-    xdrLastResult = v;
-    const statusEl = document.getElementById('xdr-result-status');
-    const bodyEl = document.getElementById('xdr-result-body');
+  function xdrRenderResult(v, ctx) {
+    ctx.lastResult = v;
+    const statusEl = ctx.statusEl;
+    const bodyEl = ctx.bodyEl;
     const a = v.attack || {};
     const ok = v.status === 'done' && a.ok !== false && !a.aborted;
     statusEl.textContent = a.aborted ? 'ABORTED' : (v.status === 'error' ? 'ERROR' : (ok ? 'DONE' : 'DONE (with failures)'));
