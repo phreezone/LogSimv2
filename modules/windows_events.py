@@ -1082,43 +1082,45 @@ def _msg_4898(d):
 
 
 def _msg_4899(d):
-    # 4899 is the CA's "template updated" record. Message layout follows the published
-    # 4899 description: "%1 v%2 (Schema V%3)", the template DN, then an Old/New
-    # Template Content pair and the DC that performed the change.
+    # Layout from the published 4899 message template: "%1 v%2 (Schema V%3)",
+    # then %4 (template OID) and %5 (template DN) exactly as the captured 4898
+    # renders them, then the Old/New content pair and the DC.
     return (
         "A Certificate Services template was updated.\r\n\r\n"
-        f"\t{d.get('TemplateInternalName','')} "
-        f"v{d.get('TemplateVersion','')} "
+        f"{d.get('TemplateInternalName','')} v{d.get('TemplateVersion','')} "
         f"(Schema V{d.get('TemplateSchemaVersion','')})\r\n"
-        f"\t{d.get('TemplateDSObjectFQDN','')}\r\n"
-        f"\t{d.get('TemplateOID','')}\r\n"
-        f"Template Change Information:\r\n"
+        f"{d.get('TemplateOID','')}\r\n"
+        f"{d.get('TemplateDSObjectFQDN','')}\r\n"
+        "\r\n"
+        "Template Change Information:\r\n"
         f"\tOld Template Content:\t{d.get('OldTemplateContent','')}\r\n"
         f"\tNew Template Content:\t{d.get('NewTemplateContent','')}\r\n"
-        f"Additional Information:\r\n"
-        f"\tDomain Controller:\t{d.get('DomainController','')}"
+        "\r\n"
+        "Additional Information:\r\n"
+        f"\tDomain Controller:\t{d.get('DCDNSName','')} "
     )
 
 
 def _msg_4900(d):
     # 4900 is the CA's "template *security* updated" record — the ACL change on the
-    # template object. Published sample carries Old/New Template Content *and*
-    # Old/New Security Descriptor, which is exactly the before/after an ESC4
-    # analytic needs to see.
+    # template object. The published sample carries Old/New Template Content *and*
+    # Old/New Security Descriptor; the slot order is New content %7, New SD %8,
+    # Old content %9, Old SD %10.
     return (
         "Certificate Services template security was updated.\r\n\r\n"
-        f"\t{d.get('TemplateInternalName','')} "
-        f"v{d.get('TemplateVersion','')} "
+        f"{d.get('TemplateInternalName','')} v{d.get('TemplateVersion','')} "
         f"(Schema V{d.get('TemplateSchemaVersion','')})\r\n"
-        f"\t{d.get('TemplateDSObjectFQDN','')}\r\n"
-        f"\t{d.get('TemplateOID','')}\r\n"
-        f"Template Change Information:\r\n"
+        f"{d.get('TemplateOID','')}\r\n"
+        f"{d.get('TemplateDSObjectFQDN','')}\r\n"
+        "\r\n"
+        "Template Change Information:\r\n"
         f"\tOld Template Content:\t{d.get('OldTemplateContent','')}\r\n"
         f"\tNew Template Content:\t{d.get('NewTemplateContent','')}\r\n"
         f"\tOld Security Descriptor:\t{d.get('OldSecurityDescriptor','')}\r\n"
         f"\tNew Security Descriptor:\t{d.get('NewSecurityDescriptor','')}\r\n"
-        f"Additional Information:\r\n"
-        f"\tDomain Controller:\t{d.get('DomainController','')}"
+        "\r\n"
+        "Additional Information:\r\n"
+        f"\tDomain Controller:\t{d.get('DCDNSName','')} "
     )
 
 
@@ -4102,7 +4104,8 @@ def _ca_template_content(template_name, *, enrollee_supplies_subject,
     )
 
 
-def _ca_template_security_descriptor(config, *, enrollee_supplies_subject):
+def _ca_template_security_descriptor(config, *, enrollee_supplies_subject,
+                                     authenticated_users_full_control=False):
     """Render a template SecurityDescriptor: SDDL, blank line, ACE table.
 
     Captured shape for the built-in User template: owner/group Enterprise Admins
@@ -4110,6 +4113,9 @@ def _ca_template_security_descriptor(config, *, enrollee_supplies_subject):
     for DA and EA, and Read for Authenticated Users. ESC1's missing half is an
     object-specific Enroll ACE for Authenticated Users, which this adds when
     `enrollee_supplies_subject` is true.
+
+    `authenticated_users_full_control` is the ESC4 delta: AU is granted the same
+    full-control ACE DA/EA hold. That is the "before/after" pair a 4900 carries.
     """
     sid = _SYNTH_DOMAIN_SID
     domain = _get_domain(config)
@@ -4119,10 +4125,13 @@ def _ca_template_security_descriptor(config, *, enrollee_supplies_subject):
           f"(OA;;RPWPCR;{_CA_ENROLL_RIGHT};;{owner})"]
     if enrollee_supplies_subject:
         oa.append(f"(OA;;RPWPCR;{_CA_ENROLL_RIGHT};;AU)")
+    au_ace = ("(A;;CCDCLCSWRPWPDTLOSDRCWDWO;;;AU)"
+              if authenticated_users_full_control
+              else "(A;;LCRPLORC;;;AU)")
     sddl = (f"O:{owner}G:{owner}D:PAI" + "".join(oa) +
             "(A;;CCDCLCSWRPWPDTLOSDRCWDWO;;;DA)"
             f"(A;;CCDCLCSWRPWPDTLOSDRCWDWO;;;{owner})"
-            "(A;;LCRPLORC;;;AU)")
+            f"{au_ace}")
 
     table = [
         f"Allow\t{domain}\\Domain Admins\n\tEnroll\n",
@@ -4134,8 +4143,12 @@ def _ca_template_security_descriptor(config, *, enrollee_supplies_subject):
     table.extend([
         f"Allow(0x000f00ff)\t{domain}\\Domain Admins\n\tFull Control\n",
         f"Allow(0x000f00ff)\t{domain}\\Enterprise Admins\n\tFull Control\n",
-        "Allow(0x00020094)\tNT AUTHORITY\\Authenticated Users\n\tRead\n",
     ])
+    if authenticated_users_full_control:
+        table.append("Allow(0x000f00ff)\tNT AUTHORITY\\Authenticated Users\n"
+                     "\tFull Control\n")
+    else:
+        table.append("Allow(0x00020094)\tNT AUTHORITY\\Authenticated Users\n\tRead\n")
     return sddl + "\n\n" + "".join(table)
 
 
@@ -4194,7 +4207,7 @@ def _build_4898(user_info, config, *, template_name, enrollee_supplies_subject=T
 
 def _build_4899(user_info, config, *, template_name, old_content, new_content,
                 schema_version="2", template_version="100.2",
-                template_oid=None, logon_id=None, ts=None) -> dict:
+                template_oid=None, ts=None) -> dict:
     """4899 – A Certificate Services template was updated (CA event).
 
     This is the CA's record of a template *content* change: the before/after
@@ -4206,19 +4219,21 @@ def _build_4899(user_info, config, *, template_name, old_content, new_content,
     XSIAM's event-collection reference lists 4899 for "Suspicious certificate
     template modification" (the ESC4 detector) alongside 4900 and 4662.
 
-    Field names follow 4898's (TemplateInternalName / TemplateVersion /
-    TemplateSchemaVersion / TemplateOID / TemplateDSObjectFQDN) plus the
-    Old/New pair the published 4899 message template shows. Microsoft publishes
-    no per-event page for 4899, so treat the EventData names as inferred.
+    EventData follows 4898's captured six fields, then the slot order the
+    published 4899 message template addresses (`Old Template Content: %8`,
+    `New Template Content: %7`)::
+
+        TemplateInternalName, TemplateVersion, TemplateSchemaVersion, TemplateOID,
+        TemplateDSObjectFQDN, DCDNSName, NewTemplateContent, OldTemplateContent
+
+    The first six names are ground truth from the captured 4898; the Old/New pair
+    is inferred from that message template, since no 4899 has ever been emitted
+    here (see docs/modules/windows.md).
     """
     ca_host = _get_ca_hostname(config)
     dns_domain = _get_dns_domain(config)
     base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
     event_data = {
-        "SubjectUserSid":         _stable_user_sid(user_info["username"]),
-        "SubjectUserName":        user_info["username"],
-        "SubjectDomainName":      _get_domain(config),
-        "SubjectLogonId":         logon_id or _new_logon_id(),
         "TemplateInternalName":   template_name,
         "TemplateVersion":        template_version,
         "TemplateSchemaVersion":  schema_version,
@@ -4228,9 +4243,9 @@ def _build_4899(user_info, config, *, template_name, old_content, new_content,
         "TemplateDSObjectFQDN":   (f"CN={template_name},CN=Certificate Templates,"
                                    f"CN=Public Key Services,CN=Services,"
                                    f"CN=Configuration,{base_dn}"),
-        "OldTemplateContent":     old_content,
+        "DCDNSName":              _get_dc_hostname(config),
         "NewTemplateContent":     new_content,
-        "DomainController":       _get_dc_hostname(config),
+        "OldTemplateContent":     old_content,
     }
     return _build_event(4899, ca_host, event_data, success=True, ts=ts)
 
@@ -4238,7 +4253,7 @@ def _build_4899(user_info, config, *, template_name, old_content, new_content,
 def _build_4900(user_info, config, *, template_name, old_content, new_content,
                 old_security_descriptor, new_security_descriptor,
                 schema_version="2", template_version="100.2",
-                template_oid=None, logon_id=None, ts=None) -> dict:
+                template_oid=None, ts=None) -> dict:
     """4900 – Certificate Services template security was updated (CA event).
 
     Windows writes this when the *ACL* on a certificate template changes. It is
@@ -4247,18 +4262,21 @@ def _build_4900(user_info, config, *, template_name, old_content, new_content,
     what an ESC4 analytic needs in order to say a template was made exploitable
     rather than merely edited.
 
-    Field names as in _build_4899 plus OldSecurityDescriptor /
-    NewSecurityDescriptor; Microsoft publishes no per-event page for 4900, so
-    they are inferred from the published message template and 4898's names.
+    EventData follows the published 4900 message template's slot order
+    (`New Template Content: %7`, `New Security Descriptor: %8`,
+    `Old Template Content: %9`, `Old Security Descriptor: %10`)::
+
+        TemplateInternalName, TemplateVersion, TemplateSchemaVersion, TemplateOID,
+        TemplateDSObjectFQDN, DCDNSName, NewTemplateContent, NewSecurityDescriptor,
+        OldTemplateContent, OldSecurityDescriptor
+
+    Names after the captured 4898 six are inferred; Microsoft publishes no
+    per-event page for 4900.
     """
     ca_host = _get_ca_hostname(config)
     dns_domain = _get_dns_domain(config)
     base_dn = ",".join(f"DC={p}" for p in dns_domain.split("."))
     event_data = {
-        "SubjectUserSid":         _stable_user_sid(user_info["username"]),
-        "SubjectUserName":        user_info["username"],
-        "SubjectDomainName":      _get_domain(config),
-        "SubjectLogonId":         logon_id or _new_logon_id(),
         "TemplateInternalName":   template_name,
         "TemplateVersion":        template_version,
         "TemplateSchemaVersion":  schema_version,
@@ -4268,11 +4286,11 @@ def _build_4900(user_info, config, *, template_name, old_content, new_content,
         "TemplateDSObjectFQDN":   (f"CN={template_name},CN=Certificate Templates,"
                                    f"CN=Public Key Services,CN=Services,"
                                    f"CN=Configuration,{base_dn}"),
-        "OldTemplateContent":     old_content,
+        "DCDNSName":              _get_dc_hostname(config),
         "NewTemplateContent":     new_content,
-        "OldSecurityDescriptor":  old_security_descriptor,
         "NewSecurityDescriptor":  new_security_descriptor,
-        "DomainController":       _get_dc_hostname(config),
+        "OldTemplateContent":     old_content,
+        "OldSecurityDescriptor":  old_security_descriptor,
     }
     return _build_event(4900, ca_host, event_data, success=True, ts=ts)
 
@@ -7463,26 +7481,22 @@ def _threat_esc4_template_modification(config, session_context):
                     f"{random.randint(1000000, 9999999)}")
 
     # Before: subject is built from AD (0x0). After: enrollee supplies subject
-    # (0x1) — the ESC1 condition the new ACL lets the attacker set.
-    def _content(name_flag):
-        return (f"msPKI-Certificate-Name-Flag: {name_flag}\r\n"
-                f"msPKI-Enrollment-Flag: 0x0\r\n"
-                f"msPKI-Private-Key-Flag: 0x10\r\n"
-                f"msPKI-RA-Signature: 0\r\n"
-                f"pKIExtendedKeyUsage: 1.3.6.1.5.5.7.3.2\r\n"
-                f"msPKI-Certificate-Application-Policy: 1.3.6.1.5.5.7.3.2")
+    # (0x1) — the ESC1 condition the new ACL lets the attacker set. Both sides use
+    # the CA's captured text-dump format (the same renderer 4898 uses), because a
+    # real 4899/4900 old/new block is that dump with the flag flipped.
+    old_content = _ca_template_content(template, enrollee_supplies_subject=False,
+                                       schema_version="2")
+    new_content = _ca_template_content(template, enrollee_supplies_subject=True,
+                                       schema_version="2")
 
-    old_content = _content("0x0")
-    new_content = _content("0x1")
-
-    # The class's documented default descriptor, then the ESC4 delta: Authenticated
-    # Users receive the same write rights DA and SY already hold.
-    old_sd = ("O:DAG:DAD:PAI(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)"
-              "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;SY)"
-              "(A;;RPLCLORC;;;AU)")
-    new_sd = ("O:DAG:DAD:PAI(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)"
-              "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;SY)"
-              "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;AU)")
+    # Captured-style SDDL + ACE table. The ESC4 delta is the same full-control ACE
+    # DA/EA hold, granted to Authenticated Users.
+    old_sd = _ca_template_security_descriptor(
+        config, enrollee_supplies_subject=False,
+        authenticated_users_full_control=False)
+    new_sd = _ca_template_security_descriptor(
+        config, enrollee_supplies_subject=False,
+        authenticated_users_full_control=True)
 
     events = []
     t = time.time()
@@ -7523,14 +7537,12 @@ def _threat_esc4_template_modification(config, session_context):
     # The CA sees the change first: it holds the template definitions.
     events.append(json.dumps(_build_4899(
         u, config, template_name=template, old_content=old_content,
-        new_content=new_content, template_oid=template_oid,
-        logon_id=logon_id, ts=t)))
+        new_content=new_content, template_oid=template_oid, ts=t)))
     t += random.uniform(0.3, 1.0)
     events.append(json.dumps(_build_4900(
         u, config, template_name=template, old_content=old_content,
         new_content=new_content, old_security_descriptor=old_sd,
-        new_security_descriptor=new_sd, template_oid=template_oid,
-        logon_id=logon_id, ts=t)))
+        new_security_descriptor=new_sd, template_oid=template_oid, ts=t)))
     t += random.uniform(0.3, 1.0)
 
     # Directory-service access records: read the ACL, take WRITE_DAC, write the two
@@ -10754,7 +10766,7 @@ _THREAT_WEIGHTS = {
     "sms_admins_addition":         3,
     "sms_admins_add_remove":       3,
     "wip_sccm_container_recon":    3,
-    "wip_esc4_template_modification": 3,
+    "esc4_template_modification":  3,
     "dnshostname_spoofing":        3,
     "samaccountname_spoofing":     3,
     "delegation_change":           3,
@@ -10808,7 +10820,7 @@ _THREAT_GENERATORS = {
     "sms_admins_addition":              _threat_sms_admins_addition,
     "sms_admins_add_remove":            _threat_sms_admins_add_remove,
     "wip_sccm_container_recon":         _threat_sccm_container_recon,
-    "wip_esc4_template_modification":   _threat_esc4_template_modification,
+    "esc4_template_modification":       _threat_esc4_template_modification,
     "dnshostname_spoofing":             _threat_dnshostname_spoofing,
     "samaccountname_spoofing":          _threat_samaccountname_spoofing,
     "delegation_change":                _threat_delegation_change,
@@ -10865,7 +10877,7 @@ ANALYTIC_ALERTS = {
     "sms_admins_addition":         "User added to the SMS Admins local group",
     "sms_admins_add_remove":       "User added to the SMS Admins group and removed",
     "wip_sccm_container_recon":    "Suspicious access of the System Management Container",
-    "wip_esc4_template_modification": "Suspicious certificate template modification",
+    "esc4_template_modification":  "Suspicious certificate template modification",
     "dnshostname_spoofing":        "Suspicious dNSHostName attribute change to DC name",
     "samaccountname_spoofing":     "Service ticket request with a spoofed sAMAccountName",
     "delegation_change":           "User account delegation to KRBTGT",
@@ -11088,6 +11100,7 @@ def _generate_scenario_event(scenario_event, config, context):
         "SMS_ADMINS_ADDITION":              _threat_sms_admins_addition,
         "SMS_ADMINS_ADD_REMOVE":            _threat_sms_admins_add_remove,
         "WIP_SCCM_CONTAINER_RECON":         _threat_sccm_container_recon,
+        "ESC4_TEMPLATE_MODIFICATION":       _threat_esc4_template_modification,
         "WIP_ESC4_TEMPLATE_MODIFICATION":   _threat_esc4_template_modification,
         "DNSHOSTNAME_SPOOFING":             _threat_dnshostname_spoofing,
         "SAMACCOUNTNAME_SPOOFING":          _threat_samaccountname_spoofing,

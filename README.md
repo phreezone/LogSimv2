@@ -177,6 +177,19 @@ request-attribute block a `certreq -submit -attrib` enrollment produces
 from that shape. Whether "Vulnerable certificate template loaded" parses the new
 `4898` is still unverified.
 
+`esc4_template_modification` was verified on 2026-11-23 (Low alert 831316,
+`Certificate template was updated with a misconfiguration configuration`, host
+`CA01.examplecorp.local`). Attempts 1–3 (DC-side `5136`, then `+4662`, then
+`4899`/`4900` in the pre-capture content format) were silent. The detector reads
+the **CA-side 4899/4900 pair**, and it needs three things: the `TemplateContent`
+rendered as the CA's own text dump (the same renderer `4898` uses, with the
+`msPKI-Certificate-Name-Flag` flip `0x0` → `0x1`), EventData in the published
+message slot order (`NewTemplateContent` `%7`, `NewSecurityDescriptor` `%8`,
+`OldTemplateContent` `%9`, `OldSecurityDescriptor` `%10`) with `DCDNSName` for
+the DC and no `Subject*` fields, and a real 4900 SDDL before/after pair whose new
+descriptor grants Authenticated Users the same full-control ACE DA/EA hold. The
+old `WIP_` name still dispatches.
+
 **WIP Detections** (prefixed with `wip_` — they generate their events, but the detection depends on something the generator can't fully supply):
 
 | Generator | Reason |
@@ -184,7 +197,6 @@ from that shape. Whether "Vulnerable certificate template loaded" parses the new
 | `wip_adminsdholder_acl_modification` | 4 batches, 0 alerts. The canonical 5136/4662 shape is silent, container targets *are* evaluated, and retargeting to the real naming context (`DC=corp,DC=examplecorp,DC=com`) is disproven — its positive control also stayed silent, so 5136 analytics do not resolve that namespace at all (see `docs/modules/windows.md`) |
 | `wip_irregular_service_tgs` | Only ever raises the weak-encryption ticket alert that `multiple_service_tickets` owns; `irregular_tgt_burst` covers its intended detection. Background only — not offered on demand |
 | `wip_sccm_container_recon` | Full real shape (4662 reads + the DC's 1644 LDAP search naming the container) still silent; every real 1644 in the tenant is agent-collected, WEC lands as `EVENT_LOG_DOMAIN_CONTROLLER` (see `docs/modules/windows.md`) |
-| `wip_esc4_template_modification` | 3 batches (5136 only → +4662 legs → +CA 4899/4900) still silent. Real 4886/4887/4898 are now captured, but 4899/4900 have never been emitted: the built-in `User` template is schema V1, so the validity edit that should trigger 4899 is read-only. Requires a published schema-V4 duplicate; the 4899/4900 builders still carry the pre-capture content format (see `docs/modules/windows.md`) |
 | `wip_new_machine_delegation` | 3 batches (config-only → RBCD/constrained/unconstrained chains → same chains with a DC-side machine 4624 + TGT) still silent. A fresh `4741` by a first-time creator does not raise "Rare machine account creation", so `4741` does not drive machine-creation analytics here and the detector cannot see a "new" machine. Its 12-hour Test Period has since elapsed with no late alert (see `docs/modules/windows.md`) |
 
 Two former rows here were stale and have been removed: the key-credential and
