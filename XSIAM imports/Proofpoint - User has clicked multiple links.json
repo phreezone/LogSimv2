@@ -2,7 +2,7 @@
   {
     "name": "Proofpoint - User has clicked multiple links",
     "severity": "SEV_050_CRITICAL",
-    "xql_query": "dataset = proofpoint_tap_raw\r\n| filter _log_type in (\"click-permitted\", \"click-blocked\")\r\n| comp count() as click_count,\r\n        values(url) as urls_clicked\r\n        by recipient\r\n| filter click_count >= 2",
+    "xql_query": "dataset = proofpoint_tap_raw\r\n| filter _log_type in (\"click-permitted\", \"click-blocked\")\r\n| comp count() as click_count,\r\n        values(url) as urls_clicked\r\n        by recipient\r\n| filter click_count >= 2\r\n// fw_url_domain takes the host, not the full URL\r\n| alter url_domain = arraydistinct(arraymap(urls_clicked, extract_url_host(\"@element\")))",
     "is_enabled": true,
     "description": "The same user clicked 2+ malicious/monitored links (permitted or blocked) within the window - repeated risky click behavior.",
     "alert_name": "Proofpoint - User has clicked bad links multiple times in a week",
@@ -11,7 +11,7 @@
     "alert_description": "What fired: one user clicked >=2 links flagged by Proofpoint URL Defense in the window.\n\nWhy it matters: repeated clicking on flagged links indicates a highly susceptible or actively-targeted user; if any click was PERMITTED they reached a malicious site.\n\nInvestigate:\n  - Review the mapped recipient and the list of clicked URLs on this alert.\n  - Determine which clicks were permitted vs blocked; check web proxy/EDR for successful connections.\n  - Review the user's authentication for compromise.\n\nMITRE ATT&CK: T1566.002 - Spearphishing Link (TA0001 - Initial Access).",
     "alert_domain": "DOMAIN_SECURITY",
     "alert_fields": {
-      "fw_url_domain": "urls_clicked",
+      "fw_url_domain": "url_domain",
       "fw_email_recipient": "recipient",
       "xdm_email_recipients": "recipient",
       "actor_effective_username": "recipient"

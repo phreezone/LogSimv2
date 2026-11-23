@@ -35,6 +35,7 @@ import random
 import time
 import json
 import hashlib
+import uuid
 from datetime import datetime, timezone, timedelta
 
 try:
@@ -267,11 +268,9 @@ def _random_external_ip():
 
 
 def _make_guid():
-    return (f"{{{random.randint(0x10000000, 0xFFFFFFFF):08X}-"
-            f"{random.randint(0x1000, 0xFFFF):04X}-"
-            f"{random.randint(0x1000, 0xFFFF):04X}-"
-            f"{random.randint(0x1000, 0xFFFF):04X}-"
-            f"{random.randint(0x100000000000, 0xFFFFFFFFFFFF):012X}}}")
+    """TAP GUID: lowercase 8-4-4-4-12 hex, no braces (SIEM API sample
+    "c26dbea0-80d5-463b-b93c-4e8b708219ce"), not a Windows-style {UPPER} GUID."""
+    return str(uuid.uuid4())
 
 
 def _make_message_id(local_part="user", domain=None, sender=None):
@@ -1165,6 +1164,7 @@ def _generate_click_blocked(config, session_context=None, guid_override=None,
     event = {
         "_log_type":      "click-blocked",
         "GUID":           guid,
+        "id":             str(uuid.uuid4()),      # unique click id per SIEM API click schema
         "messageID":      _make_message_id(_sender.split("@")[0], sender=_sender),
         "clickTime":      _now_iso(),
         "clickIP":        click_ip,
@@ -1181,15 +1181,6 @@ def _generate_click_blocked(config, session_context=None, guid_override=None,
         "cluster":        _cluster_id(config),
         "sender":         _sender,
         "senderIP":       sender_ip_override or _random_external_ip(),
-        "fromAddress":    [_sender],              # ARRAY per official SIEM API
-        "subject":        subject_override or _format_subject(random.choice(_PHISHING_SUBJECTS)),
-        "phishScore":     random.randint(80, 100),
-        "malwareScore":   random.randint(0, 30),
-        "spamScore":      random.randint(40, 80),
-        "impostorScore":  0,
-        "policyRoutes":   ["default_inbound"],
-        "modulesRun":     ["urldefense"],
-        "messageTime":    _offset_iso(random.randint(60, 900)),  # Message arrived earlier
     }
     return json.dumps(event, default=str)
 
@@ -1236,6 +1227,7 @@ def _generate_click_permitted(config, session_context=None, guid_override=None,
     event = {
         "_log_type":      "click-permitted",
         "GUID":           guid,
+        "id":             str(uuid.uuid4()),      # unique click id per SIEM API click schema
         "messageID":      _make_message_id(_sender.split("@")[0], sender=_sender),
         "clickTime":      _click_t,
         "clickIP":        click_ip,
@@ -1252,15 +1244,6 @@ def _generate_click_permitted(config, session_context=None, guid_override=None,
         "cluster":        _cluster_id(config),
         "sender":         _sender,
         "senderIP":       sender_ip_override or _random_external_ip(),
-        "fromAddress":    [_sender],              # ARRAY per official SIEM API
-        "subject":        subject_override or _format_subject(random.choice(_PHISHING_SUBJECTS)),
-        "phishScore":     random.randint(60, 90),
-        "malwareScore":   random.randint(0, 20),
-        "spamScore":      random.randint(30, 70),
-        "impostorScore":  0,
-        "policyRoutes":   ["default_inbound"],
-        "modulesRun":     ["urldefense"],
-        "messageTime":    _offset_iso(random.randint(120, 420)),  # Delivered a few min before the click (keeps parser _time recent — _time=coalesce(messageTime,clickTime))
     }
     return json.dumps(event, default=str)
 

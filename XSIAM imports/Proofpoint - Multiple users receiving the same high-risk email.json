@@ -2,7 +2,7 @@
   {
     "name": "Proofpoint - Multiple users receiving the same high-risk email",
     "severity": "SEV_030_MEDIUM",
-    "xql_query": "dataset = proofpoint_tap_raw \r\n| filter _log_type = \"message-blocked\"\r\n| filter classification = \"PHISHING\"\r\n| comp count_distinct(recipient) as target_count,\r\n        values(recipient) as all_recipients\r\n        by senderIP, campaignId, subject\r\n| filter target_count >= 4",
+    "xql_query": "dataset = proofpoint_tap_raw \r\n| filter _log_type = \"message-blocked\"\r\n| filter classification = \"PHISHING\"\r\n// Message events carry recipient as a JSON array string; one row per recipient so the\r\n// user field is a single address, not [\"a@x\",\"b@x\"] (alert user showed as a mangled fragment).\r\n| alter recipient_list = json_extract_scalar_array(recipient, \"$\")\r\n| arrayexpand recipient_list\r\n| alter recipient_email = to_string(recipient_list)\r\n| comp count_distinct(recipient_email) as target_count,\r\n        values(recipient_email) as all_recipients\r\n        by senderIP, campaignId, subject\r\n| filter target_count >= 4",
     "is_enabled": true,
     "description": "The same phishing email (same sender IP, campaign and subject) was blocked for 4+ distinct recipients - a coordinated phishing campaign against multiple users.",
     "alert_name": "Proofpoint - Multiple users receiving the same high-risk email",
