@@ -503,7 +503,16 @@ def baseline_apps_for(user, interactive=True, k=None):
     pool = APPS_INTERACTIVE if interactive else APPS_NONINTERACTIVE
     un = user["username"] if isinstance(user, dict) else str(user)
     k = k or (7 if interactive else 6)
-    return _stable_subset(f"appset:{interactive}:{un}", pool, k)
+    apps = _stable_subset(f"appset:{interactive}:{un}", pool, k)
+    if interactive and _su is not None:
+        nv = _su.novelty_for(un)
+        if nv:
+            # Monthly rotation: a newly active user picks up one app they have never used
+            # (org-known, first-seen for them) and keeps it for the month.
+            outside = [a for a in sorted(pool) if a not in apps]
+            if outside:
+                apps = apps + [outside[nv["seed"] % len(outside)]]
+    return apps
 
 
 def pick_baseline_app(user, interactive=True):
@@ -992,6 +1001,8 @@ def _pick_user_any(config=None, context=None, include_reserved=False):
     profiles = (config or {}).get("user_profiles") or {}
     if profiles:
         names = list(profiles) if include_reserved else _active_profile_names(profiles)
+        if not include_reserved and _su is not None:
+            names = _su.rotation_pool(names)          # monthly rotation (no-op when off)
         uname = random.choice(names)
         p = profiles[uname]
         dev = (p.get("devices") or [{}])[0]
@@ -1441,6 +1452,8 @@ def egress(user, remote_prob=0.25, mobile_prob=0.08):
     if fi and fi["username"] == un:
         return focus_loc()
     site = office_for(user)
+    if _su is not None and _su.on_trip(un):
+        return trip_egress(user)                          # monthly rotation: visiting another office
     if not has_phone(user):
         mobile_prob = 0.0                                 # no phone, no carrier egress
     r = random.random()
@@ -1460,6 +1473,25 @@ def egress(user, remote_prob=0.25, mobile_prob=0.08):
         ip = f'{block.rsplit(".", 1)[0]}.{(n >> 8) % 250 + 3}'
         return _loc(city, state, site["countryOrRegion"], lat, lon, ip, asn, isp)
     return office_egress(user)
+
+
+def trip_egress(user):
+    """Egress while a newly active user (monthly rotation) visits an office in another
+    country: that office's NAT pool -- a country first seen for this user, but one the
+    org already knows (a named network), so it reads as a business trip, not an anonymizer.
+    Phone and laptop both use the visited office's network for the whole trip, so the
+    user never appears in two countries at once."""
+    un = user["username"]
+    home = office_for(user)
+    abroad = sorted((o for o in OFFICES if o["countryOrRegion"] != home["countryOrRegion"]),
+                    key=lambda o: o["city"])
+    nv = _su.novelty_for(un) if _su is not None else None
+    if not abroad or not nv:
+        return office_egress(user)
+    site = abroad[(nv["seed"] >> 16) % len(abroad)]
+    ip = site["ips"][_h("tripip:" + un) % len(site["ips"])]
+    return _loc(site["city"], site["state"], site["countryOrRegion"],
+                site["lat"], site["lon"], ip, site["asn"], site["isp"])
 
 
 def office_egress(user):

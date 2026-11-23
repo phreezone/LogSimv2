@@ -299,7 +299,7 @@ def _gcp_user(session_context):
         return su.get_random_user(session_context)
     if not hit[3]:
         return None
-    return su.get_user_by_name(session_context, random.choice(hit[3]))
+    return su.get_user_by_name(session_context, random.choice(su.rotation_pool(hit[3])))
 
 
 def _get_random_principal(config, context=None, force_service_account=False):

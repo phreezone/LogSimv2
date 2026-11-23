@@ -79,13 +79,21 @@ try:
                                         publish_activity, pick_active_session, CORRELATE_PROB,
                                         carry_focus as _carry_focus, focus_user as _focus_user,
                                         is_onboarded as _is_onboarded, is_new_hire as _is_new_hire,
-                                        site_dc as _site_dc, user_rid as _user_rid)
+                                        site_dc as _site_dc, user_rid as _user_rid,
+                                        rotation_enabled as _rotation_enabled,
+                                        rotation_pool as _rotation_pool,
+                                        novelty_for as _novelty_for,
+                                        novelty_host_prob as _novelty_host_prob)
 except ImportError:
     from session_utils import (get_random_user, get_user_by_name, get_random_anon_ip_ctx,
                                publish_activity, pick_active_session, CORRELATE_PROB,
                                carry_focus as _carry_focus, focus_user as _focus_user,
                                is_onboarded as _is_onboarded, is_new_hire as _is_new_hire,
-                               site_dc as _site_dc, user_rid as _user_rid)
+                               site_dc as _site_dc, user_rid as _user_rid,
+                               rotation_enabled as _rotation_enabled,
+                               rotation_pool as _rotation_pool,
+                               novelty_for as _novelty_for,
+                               novelty_host_prob as _novelty_host_prob)
 
 
 def _publish_logon(u):
@@ -2405,9 +2413,35 @@ def _get_windows_users(session_context):
 
 
 def _pick_windows_user(session_context):
-    """Return a random user_info for a user with a Windows primary device."""
+    """Return a random user_info for a user with a Windows primary device.
+    With monthly rotation on, mostly from this month's active subset; a newly active user
+    sometimes works at a colleague's workstation (a first-seen host for them)."""
     users = _get_windows_users(session_context)
-    return random.choice(users) if users else None
+    if not users:
+        return None
+    if not _rotation_enabled():
+        return random.choice(users)
+    u = random.choice(_rotation_pool(users, key=lambda x: x["username"]))
+    return _novelty_desk(u, users)
+
+
+def _novelty_desk(u, users):
+    """Monthly rotation: a newly active user with a host novelty logs on, now and then, to
+    one colleague's workstation (same department when possible, fixed for the month) --
+    the user's identity on that colleague's host, IP and OS."""
+    nv = _novelty_for(u["username"])
+    if not nv or not nv["host"] or random.random() >= _novelty_host_prob():
+        return u
+    others = [x for x in users if x["username"] != u["username"] and x.get("hostname")]
+    peers = [x for x in others if x.get("department") == u.get("department")] or others
+    if not peers:
+        return u
+    peers.sort(key=lambda x: x["username"])
+    desk = peers[(nv["seed"] >> 32) % len(peers)]
+    out = dict(u)
+    for k in ("ip", "hostname", "os_type", "os_version", "device_type"):
+        out[k] = desk.get(k)
+    return out
 
 
 def _get_threat_interval(threat_level, config):

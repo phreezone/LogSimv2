@@ -349,6 +349,52 @@ These sections build the "world" your simulated logs live in. They provide reali
 
 The people, devices, offices and servers (`user_profiles`, `sites`, `domain_controller_hosts`, `file_server_sites`, `server_roles`, `internal_servers`, `okta_config.app_entitlements`) were generated for a 5,000-person company by a local estate generator (not in the repo). New hires carry a `start_date` and stay inactive until that day (about 50 start each day until 2027-02-18); set `user_behavior.onboarding.enabled` to `false` to make every user active at once.
 
+### Monthly user rotation (`user_behavior.monthly_rotation`)
+
+On by default. While `enabled` is `true`, the set of busy users changes every UTC calendar month, so the logs keep showing a fresh mix of people. Every user still comes from `user_profiles`. No users are invented.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Turns rotation on. Set it to `false`, output is byte-identical to a build without rotation (no extra random draws are made). |
+| `core_pct` | `40` | Share of users (a stable hash of the username) who are active every month: the regulars. |
+| `monthly_pct` | `50` | Share of the remaining users who are active in a given month. Each month is drawn afresh from `seed` and the year-month, so every restart within a month gets the same set. |
+| `quiet_share` | `0.1` | Share of benign picks that still come from the whole roster. Users who rotate out keep a light trickle of activity, so they never look like dormant accounts when they rotate back in. |
+| `new_hire_grace_days` | `60` | A new hire (`start_date`) stays active for this many days after starting, whatever the rotation says. |
+| `seed` | `"logsim-rotation-v1"` | Change it to get a different sequence of monthly sets. |
+| `month` | `null` | Pins the period (`"YYYY-MM"`). Use it for testing only. |
+| `novelty.enabled` | `true` | Gives newly active users month-specific "new things" (below). |
+| `novelty.host_pct` / `host_prob` | `50` / `0.1` | Share of newly active users who also work at a colleague's Windows workstation this month (same department when possible, fixed for the month), and the share of their Windows picks that land there. |
+| `novelty.trip_pct` / `trip_days` | `20` / `4` | Share of newly active users who visit an office in another country (Dublin, London, Toronto or a US office) for `trip_days` consecutive days of the month. |
+
+**What rotates.** The general benign pickers are rotated:
+
+- `session_utils.get_random_user`, used by the firewalls, proxy, DNS, Okta, AWS and Proofpoint feeds.
+- `azure_common.pick_user`, used by the Entra and O365 feeds.
+- The GCP user picker.
+- The Windows `_pick_windows_user`.
+
+The activity correlation bus follows automatically, because its sessions are published by those picks.
+
+**What stays put:**
+
+- Role pools (`pick_by_role`, admins and app owners) and the lifecycle cohorts. Dormant and departed accounts stay reserved, and pending new hires stay inactive.
+- Threat-scenario actor choices.
+- The CIE identity map.
+- Every user's baseline: devices, home and office egress, and habitual apps.
+
+**Doing new things.** A user who is active this month, was not active last month, and is neither core nor a new hire in grace gets month-specific novelty, chosen deterministically from the month and username:
+
+- **App:** one interactive Entra app outside their habitual set. The org already knows the app, but this user has never used it, and they keep it for the month.
+- **Host:** sometimes a colleague's workstation, as described above.
+- **Country:** sometimes a short trip. During the trip, the user's Entra and Okta egress, phone included, is that office's NAT. The country is new for this user but already known to the org, and the user is never in two countries at once.
+
+Because the novelty goes to whoever rotated in, the noisy users change every month. Org-level first-seen pools are not consumed: the onboarded-app drift and the VPN reserve countries are unaffected.
+
+Limits:
+
+- A trip changes only cloud sign-in egress. On-prem and firewall records still place the user's laptop in their home office.
+- In the first month after you enable rotation, "newly active" is judged against what last month's rotation would have chosen, not against what actually ran.
+
 ### Curated pools vs generated values
 
 Most of the pools in this section are a **head, not the whole population**. Threat

@@ -149505,6 +149505,23 @@
     "onboarding": {
       "_comment": "Profiles with a start_date are pre-provisioned new hires: they exist in the directory but generate no activity before that date (UTC), so the estate grows ~50 genuinely first-seen users a day. enabled: false makes everyone active at once.",
       "enabled": true
+    },
+    "monthly_rotation": {
+      "_comment": "Rotates which users are busy each UTC calendar month, always from user_profiles. core_pct% of users are active every month; of the rest, monthly_pct% are drawn afresh each month (seeded by seed + YYYY-MM, so restarts within a month give the same set). quiet_share of picks still come from the whole roster so rotated-out users never look dormant. New hires stay active for new_hire_grace_days after start_date. novelty gives users newly rotated in a first-seen app, sometimes a colleague's workstation (host_pct, used on host_prob of their Windows picks) and a trip_days trip to an office in another country (trip_pct). month pins the period (\"YYYY-MM\") for testing. Set enabled to false for output byte-identical to before rotation existed.",
+      "enabled": true,
+      "core_pct": 40,
+      "monthly_pct": 50,
+      "quiet_share": 0.1,
+      "new_hire_grace_days": 60,
+      "seed": "logsim-rotation-v1",
+      "month": null,
+      "novelty": {
+        "enabled": true,
+        "host_pct": 50,
+        "host_prob": 0.1,
+        "trip_pct": 20,
+        "trip_days": 4
+      }
     }
   },
   "domain_corpus": {

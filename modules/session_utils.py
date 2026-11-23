@@ -7,6 +7,7 @@
 import random
 import collections
 import contextvars
+import functools
 import hashlib
 import json
 import os
@@ -629,7 +630,7 @@ def get_random_user(session_context, preferred_device_type=None):
     """
     if not session_context:
         return None
-    username = random.choice(pickable_users(session_context))
+    username = random.choice(rotation_pool(pickable_users(session_context)))
     return get_user_by_name(session_context, username, preferred_device_type)
 
 
@@ -678,6 +679,7 @@ def load_estate(config):
                 _USER_START[u] = (d - _dt.date(1970, 1, 1)).days
             except ValueError:
                 pass
+    configure_rotation(config)
     for name, h in sorted((config.get('domain_controller_hosts') or {}).items()):
         if isinstance(h, dict) and h.get('site'):
             _SITE_DCS.setdefault(h['site'], []).append(name)
@@ -722,6 +724,178 @@ def pickable_users(session_context):
     names = [u for u in session_context if is_onboarded(u)] or list(session_context)
     _PICKABLE[id(session_context)] = (session_context, len(session_context), day, names)
     return names
+
+
+# --- Monthly roster rotation -----------------------------------------------------------
+# Switch: user_behavior.monthly_rotation.enabled (on in the shipped config). When on, the benign pickers draw
+# mostly from THIS calendar month's active subset of the roster, so the busy people change
+# every month -- always users from config['user_profiles'], never invented ones.
+#
+#   core       core_pct% of users (stable hash) are active every month: the regulars.
+#   flex       everyone else is active in a month when hash(seed, YYYY-MM, user) falls under
+#              monthly_pct -- a fresh, independent draw each month, the same on every
+#              restart within the month (pure function of the UTC year-month).
+#   quiet      quiet_share of picks still come from the whole roster, so a rotated-out user
+#              keeps a light trickle of activity and never reads as a dormant account when
+#              they rotate back in (the dormant/departed lifecycle cohorts stay reserved).
+#   new hires  a user whose start_date is within new_hire_grace_days is always active.
+#
+# Users rotated in this month who were out last month (and are not core) are "newly
+# active": novelty_for() hands each a month-specific first-seen app, sometimes a first-seen
+# host (a colleague's workstation) and a short trip to another country's office -- so the
+# people doing new things change month to month, while everyone's baseline (devices, apps,
+# egress) stays exactly where it was. Role pools (admins, owners) are not rotated.
+_ROTATION = {"on": False}
+_ROTATION_POOL: dict = {}       # id(names) -> (names, len, month, rotated-in subset)
+ROTATION_DEFAULTS = {
+    "core_pct": 40, "monthly_pct": 50, "quiet_share": 0.1, "new_hire_grace_days": 60,
+    "seed": "logsim-rotation-v1", "month": None,
+    "novelty": {"enabled": True, "host_pct": 50, "host_prob": 0.1,
+                "trip_pct": 20, "trip_days": 4},
+}
+
+
+def configure_rotation(config):
+    """Read user_behavior.monthly_rotation (load_estate calls this)."""
+    rc = ((config or {}).get('user_behavior') or {}).get('monthly_rotation') or {}
+    cfg = {k: rc.get(k, v) for k, v in ROTATION_DEFAULTS.items() if k != "novelty"}
+    nov = dict(ROTATION_DEFAULTS["novelty"])
+    nov.update({k: v for k, v in (rc.get("novelty") or {}).items() if not k.startswith("_")})
+    cfg["novelty"] = nov
+    cfg["on"] = bool(rc.get("enabled", False))
+    _ROTATION.clear()
+    _ROTATION.update(cfg)
+    _ROTATION_POOL.clear()
+    _rot_hash.cache_clear()
+
+
+def rotation_enabled():
+    return bool(_ROTATION.get("on"))
+
+
+def rotation_month(ts=None):
+    """The rotation period, 'YYYY-MM' (UTC), or the configured override."""
+    if _ROTATION.get("month"):
+        return str(_ROTATION["month"])
+    return time.strftime("%Y-%m", time.gmtime(time.time() if ts is None else ts))
+
+
+def _prev_month(month):
+    y, m = (int(x) for x in month.split("-"))
+    return f"{y - 1}-12" if m == 1 else f"{y}-{m - 1:02d}"
+
+
+@functools.lru_cache(maxsize=200000)
+def _rot_hash(seed, tag, username):
+    return int(hashlib.sha256(f"{seed}|{tag}|{username}".encode()).hexdigest(), 16)
+
+
+def _is_core(username):
+    return _rot_hash(_ROTATION["seed"], "core", username) % 100 < int(_ROTATION["core_pct"])
+
+
+def _in_grace(username, month):
+    s = _USER_START.get(username)
+    if s is None:
+        return False
+    y, m = (int(x) for x in month.split("-"))
+    import datetime as _dt
+    first = (_dt.date(y, m, 1) - _dt.date(1970, 1, 1)).days
+    return first - s < int(_ROTATION["new_hire_grace_days"])
+
+
+def is_rotated_in(username, month=None):
+    """True when the user belongs to the month's active subset (always True when off)."""
+    if not _ROTATION.get("on"):
+        return True
+    month = month or rotation_month()
+    if _is_core(username) or _in_grace(username, month):
+        return True
+    return _rot_hash(_ROTATION["seed"], month, username) % 100 < int(_ROTATION["monthly_pct"])
+
+
+def is_newly_active(username, month=None):
+    """Rotated in this month but not last month (and not core / a new hire in grace):
+    the users who get month-specific novelty."""
+    if not _ROTATION.get("on"):
+        return False
+    month = month or rotation_month()
+    if _is_core(username) or _in_grace(username, month):
+        return False
+    return is_rotated_in(username, month) and not is_rotated_in(username, _prev_month(month))
+
+
+def rotation_subset(names, month=None):
+    """The rotated-in part of `names` (all of them when off, or if none would remain)."""
+    if not _ROTATION.get("on"):
+        return names
+    month = month or rotation_month()
+    return [u for u in names if is_rotated_in(u, month)] or names
+
+
+def rotation_pool(names, key=None):
+    """The list a benign picker draws one user from: `names` unchanged when rotation is off
+    (no random draw is consumed, so output stays byte-identical); otherwise the month's
+    rotated-in subset, or the whole list for the quiet_share of picks. Cached per list
+    object and month. `key` maps an item to its username (for lists of user dicts; those
+    are not cached)."""
+    if not _ROTATION.get("on"):
+        return names
+    if random.random() < float(_ROTATION["quiet_share"]):
+        return names
+    month = rotation_month()
+    if key is not None:
+        return [x for x in names if is_rotated_in(key(x), month)] or names
+    hit = _ROTATION_POOL.get(id(names))
+    if hit and hit[0] is names and hit[1] == len(names) and hit[2] == month:
+        return hit[3]
+    sub = rotation_subset(names, month)
+    _ROTATION_POOL[id(names)] = (names, len(names), month, sub)
+    return sub
+
+
+def _nov_roll(username, month, tag, pct):
+    return _rot_hash(_ROTATION["seed"], f"{month}|nov|{tag}", username) % 100 < int(pct)
+
+
+def novelty_for(username, month=None):
+    """This month's 'new things' for a newly active user, or None. A dict with:
+    seed  -- int, for callers choosing their own first-seen item (app) deterministically;
+    host  -- True if they also work from a colleague's workstation this month;
+    trip  -- (first_day, last_day) epoch days of a trip to another country's office, or None.
+    Deterministic per (seed, month, user)."""
+    if not _ROTATION.get("on") or not _ROTATION["novelty"].get("enabled", True):
+        return None
+    month = month or rotation_month()
+    if not is_newly_active(username, month):
+        return None
+    nov = _ROTATION["novelty"]
+    trip = None
+    if _nov_roll(username, month, "trip", nov.get("trip_pct", 0)):
+        import calendar as _cal
+        import datetime as _dt
+        y, m = (int(x) for x in month.split("-"))
+        ndays = _cal.monthrange(y, m)[1]
+        span = max(1, min(int(nov.get("trip_days", 4)), ndays))
+        start = 1 + _rot_hash(_ROTATION["seed"], f"{month}|nov|tripday", username) % (ndays - span + 1)
+        d0 = (_dt.date(y, m, start) - _dt.date(1970, 1, 1)).days
+        trip = (d0, d0 + span - 1)
+    return {"seed": _rot_hash(_ROTATION["seed"], f"{month}|nov|seed", username),
+            "host": _nov_roll(username, month, "host", nov.get("host_pct", 0)),
+            "trip": trip}
+
+
+def on_trip(username, ts=None):
+    """True while a newly active user's trip window covers today (UTC)."""
+    nv = novelty_for(username)
+    if not nv or not nv["trip"]:
+        return False
+    d = _epoch_day(ts)
+    return nv["trip"][0] <= d <= nv["trip"][1]
+
+
+def novelty_host_prob():
+    return float(_ROTATION.get("novelty", {}).get("host_prob", 0.0))
 
 
 def site_dc(username):
