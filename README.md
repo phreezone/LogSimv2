@@ -519,7 +519,7 @@ confirm they fire, then disable or delete the originals.
 
 | New rule | Replaces | Why the original could not fire |
 |---|---|---|
-| `Cisco Firepower - IPS Event with Critical Severity (v2)` | rule id **72** | Filtered `cefName = "Intrusion Detected"`. Real FTD/FMC CEF carries the eStreamer eNcore name `INTRUSION EVENT`. |
+| `Cisco Firepower - IPS Event with Critical Severity (v2)` | rule id **72** | Filtered `cefName = "Intrusion Detected"`. eNcore names an intrusion event after its Snort rule message, so the rule matches the signature ID prefix `INTRUSION:400:`. |
 | `Cisco Firepower - Malicious File Transferred (v2)` | rule id **75** | Filtered `cefName = "Malicious File Detected"`. FTD emits `FireAMP Event`. |
 | `Cisco ASA - High Volume of Failed Inbound Connections from One IP (v2)` | `... Denied Inbound Connections ...` | ANDed a `106023` raw match with `xdm.observer.action = "Deny"`. The ASA parser never sets that value; it produces only `Built`, `Teardown` and null. |
 | `DNS C2 Kill Chain - NXDOMAIN Storm + Outbound Firewall Activity (v2)` | same name | Suppression named a column its own `fields` stage dropped, so it errored on every run; and it matched ASA `dst_interface = "inside"`, i.e. traffic *inbound* to the host, in a rule about outbound activity. |
