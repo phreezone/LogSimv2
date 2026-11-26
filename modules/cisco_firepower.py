@@ -24,19 +24,21 @@
 #                 xdm.source.application.name (requestClientApplication)
 #   File/Malware: xdm.target.file.filename (fname), xdm.target.file.md5 (fileHash,
 #                 a SHA-256 as eNcore sends it), xdm.target.file.file_type (fileType)
-#   Process:      xdm.source.process.pid (dvcpid, file and malware events)
+#   Process:      xdm.source.process.pid (dvcpid, the Snort instance number)
 #
 # Additional hunt-relevant fields (not in XIF model, preserved in raw dataset):
-#   msg             - Human-readable event description; key field for threat hunting searches
+#   msg             - Human-readable description on connection events (kept for hunting;
+#                     not an eNcore key)
 #   cs1/cs1Label    - Access Control Policy name (connection/IPS: cs1Label="fwPolicy")
 #                     AMP policy name (malware events: cs1Label="policy")
 #   cs6/cs6Label    - IPS Snort rule ID (IPS events only: cs6Label="ruleId")
-#   start/end       - Connection start and end times in epoch milliseconds
-#   cnt             - Event aggregation count; 1 for individual events
-#   requestMethod   - HTTP method (GET/POST/PUT) on HTTP/HTTPS events
-#   shost           - Source hostname when available from session context
-#   dhost           - Destination hostname (malware domain, blocked URL, C2 domain)
+#   start/end       - eStreamer first/last packet times (whole seconds, in ms)
+#   destinationDnsDomain - queried name on DNS connections
 #   fsize           - File size in bytes (file and malware events)
+#
+# Only the keys eNcore writes for a record reach the wire (_FP_ENCORE_KEYS): generators
+# may still build shost, dhost, cs6 URL reputation or requestMethod, and the formatter
+# drops them.
 #
 # File events follow eNcore records 500 (File Event), 502 (File Malware Event) and
 # 125 (FireAMP Event, network detection). See _fp_file_events for the mapping;
@@ -265,6 +267,49 @@ _FP_IPS_SEVERITY = {
 # xdm.network.rule). The rule message is the CEF name, and 400 carries no msg.
 _FP_IPS_AC_RULE = "Allow_Inbound_Published_Services"
 
+# Snort 3 classifications (snort3 lua/snort_defaults.lua, default_classifications):
+# classtype -> (priority, description). eNcore writes the description as `cat`, and
+# the rule's priority (from its classtype) drives the severity matrix above.
+_SNORT_CLASSTYPES = {
+    "attempted-recon":         (2, "Attempted Information Leak"),
+    "attempted-user":          (1, "Attempted User Privilege Gain"),
+    "attempted-admin":         (1, "Attempted Administrator Privilege Gain"),
+    "web-application-attack":  (1, "Web Application Attack"),
+    "protocol-command-decode": (3, "Generic Protocol Command Decode"),
+}
+
+# Talos text rules (gid 1) from the public Snort 3 community ruleset
+# (snort.org snort3-community.rules), all inbound $EXTERNAL_NET -> $HOME_NET:
+# (sid, classtype, message, destination ports).
+_FP_TALOS_RULES = [
+    (58722, "attempted-user",         "SERVER-OTHER Apache Log4j logging remote code execution attempt", (80, 443, 8080, 8443)),
+    (26925, "web-application-attack", "SQL generic convert injection attempt - GET parameter",        (80, 443, 8080)),
+    (1002,  "web-application-attack", "SERVER-IIS cmd.exe access",                                    (80, 443)),
+    (1122,  "attempted-recon",        "SERVER-WEBAPP /etc/passwd file access attempt",                (80, 443, 8080)),
+    (31975, "attempted-admin",        "OS-OTHER Bash CGI environment variable injection attempt",     (80, 443)),
+    (41978, "attempted-admin",        "OS-WINDOWS Microsoft Windows SMB remote code execution attempt", (445,)),
+    (1447,  "protocol-command-decode", "POLICY-OTHER Microsoft Windows Terminal server RDP attempt",   (3389,)),
+    (630,   "attempted-recon",        "INDICATOR-SCAN synscan portscan",                              (22, 80, 443, 445, 3389)),
+]
+_FP_TALOS_BY_MSG = {r[2]: r for r in _FP_TALOS_RULES}
+_FP_PORT_APP = {80: "HTTP", 8080: "HTTP", 443: "HTTPS", 8443: "HTTPS",
+                445: "NetBIOS-ssn (SMB)", 3389: "RDP", 22: "SSH"}
+
+
+def _fp_ips_rules(config):
+    """Talos rules to draw IPS events from. firepower_config.ips_rules may override with
+    {message: {"sid": n, "classtype": name, "ports": [..]}}; other shapes are ignored."""
+    custom = []
+    for msg, spec in (_get_config(config).get("ips_rules") or {}).items():
+        if isinstance(spec, dict) and spec.get("sid") and spec.get("classtype") in _SNORT_CLASSTYPES:
+            custom.append((int(spec["sid"]), spec["classtype"], msg, tuple(spec.get("ports") or (80, 443))))
+    return custom or _FP_TALOS_RULES
+
+
+def _fp_instance_id():
+    """eStreamer instanceId / connectionInstance: the Snort instance number (dvcpid)."""
+    return random.randint(1, 8)
+
 
 def _fp_ips_rating(priority=None, impact=None):
     """Pick (or take) a Snort rule priority and impact level and return the eNcore
@@ -302,17 +347,6 @@ def _get_threat_interval(threat_level, config):
     if threat_level == "Benign Traffic Only":
         return 86400 * 365
     return config.get('threat_generation_levels', {}).get(threat_level, 7200)
-
-
-def _cef_escape(v):
-    """Escapes a CEF extension value per ArcSight CEF spec.
-    Backslash must be escaped first, then '=' and newlines."""
-    s = str(v)
-    s = s.replace("\\", "\\\\")
-    s = s.replace("=",  "\\=")
-    s = s.replace("\n", "\\n")
-    s = s.replace("\r", "\\r")
-    return s
 
 
 def _random_external_ip():
@@ -443,7 +477,6 @@ def _dns_precursor_log(config, src_ip, user, dest_hostname, shost=None):
         "destinationDnsDomain": dest_hostname,   # genuine FTD DNS field (dnsQuery.data)
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_DNS", "cs2Label": "fwRule",
-        "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(60, 120),
         "bytesIn":  random.randint(80, 300),
@@ -482,7 +515,6 @@ def _grid_recursion_event(config):
         "cs3": "Server-Zone",
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_DNS", "cs2Label": "fwRule",
-        "cs6": "Trustworthy",        "cs6Label": "URLReputation",
         "cefSeverity": "3",
         "bytesOut": random.randint(40, 100),
         "bytesIn":  random.randint(80, 400),
@@ -514,38 +546,156 @@ _FP_RULE_REASON_CODES = {"SSL Block": "1024", "DNS Block": "2048", "DNS Monitor"
                          "URL Block": "8192"}
 _FP_RULE_REASON_ALIASES = {"Domain Blacklisted by Security Intelligence": "DNS Block"}
 
-# Keys LogSim builds that eNcore never writes for a record. cnt is in no eNcore record;
-# outcome exists only on FireAMP (125) and deviceDirection only on file/malware records.
-_FP_NOT_IN_CONNECTION = ("cnt", "outcome", "deviceDirection")
-_FP_NOT_IN_INTRUSION = ("cnt", "outcome", "deviceDirection", "reason", "bytesIn", "bytesOut", "end")
+# CEF keys eNcore can write per record (estreamer/adapters/cef.py MAPPING: fields,
+# constants, lambdas and viewdata). Anything else a generator builds is dropped. msg is
+# not eNcore's but is kept on connection events for hunting, by choice.
+_FP_ENCORE_KEYS = {
+    "71": frozenset((
+        "act", "app", "bytesIn", "bytesOut", "c6a2", "c6a3", "cs1", "cs1Label", "cs2",
+        "cs2Label", "cs3", "cs3Label", "cs4", "cs4Label", "cs5", "cs5Label",
+        "destinationDnsDomain", "deviceExternalId", "deviceInboundInterface",
+        "deviceOutboundInterface", "dpt", "dst", "dvchost", "dvcpid", "end", "externalId",
+        "proto", "reason", "request", "requestClientApplication", "rt", "spt", "src",
+        "start", "suser", "msg")),
+    "400": frozenset((
+        "act", "app", "c6a2", "c6a3", "cat", "cn1", "cn1Label", "cn2", "cn2Label", "cs1",
+        "cs1Label", "cs2", "cs2Label", "cs3", "cs3Label", "cs4", "cs4Label", "cs5",
+        "cs5Label", "cs6", "cs6Label", "deviceExternalId", "deviceInboundInterface",
+        "deviceOutboundInterface", "dpt", "dst", "dvchost", "dvcpid", "externalId", "proto",
+        "request", "requestClientApplication", "rt", "spt", "src", "start", "suser")),
+    "500": frozenset((
+        "act", "app", "c6a2", "c6a3", "cs1", "cs1Label", "cs2", "cs2Label", "cs3",
+        "cs3Label", "cs4", "deviceDirection", "deviceExternalId", "dpt", "dst", "dvchost",
+        "dvcpid", "fileHash", "fileType", "fname", "fsize", "proto", "request",
+        "requestClientApplication", "rt", "spt", "src", "start", "suser")),
+    "125": frozenset((
+        "act", "app", "c6a2", "c6a3", "cs1", "cs1Label", "cs2", "cs2Label", "cs3",
+        "cs3Label", "cs4", "cs4Label", "cs5", "cs5Label", "deviceDirection",
+        "deviceExternalId", "dpt", "dst", "duser", "dvchost", "dvcpid", "fileCreateTime",
+        "fileHash", "filePath", "fileType", "fname", "fsize", "outcome", "proto", "request",
+        "requestClientApplication", "rt", "sproc", "spt", "src", "start", "suser")),
+}
+# eNcore "constants": written on every event of the record, value or not.
+_FP_ENCORE_LABELS = {
+    "71": {"cs1Label": "fwPolicy", "cs2Label": "fwRule", "cs3Label": "ingressZone",
+           "cs4Label": "egressZone", "cs5Label": "secIntelCategory"},
+    "400": {"cs1Label": "fwPolicy", "cs2Label": "fwRule", "cs3Label": "ingressZone",
+            "cs4Label": "egressZone", "cs5Label": "ipsPolicy", "cs6Label": "ruleId",
+            "cn1Label": "vlan", "cn2Label": "impact"},
+    "500": {"cs1Label": "filePolicy", "cs2Label": "disposition", "cs3Label": "speroDisposition"},
+    "125": {"cs1Label": "policy", "cs2Label": "virusName", "cs3Label": "disposition",
+            "cs4Label": "speroDisposition", "cs5Label": "eventDescription"},
+}
+
+# Application-protocol names as Cisco's detector list spells them (appid.cisco.com).
+_FP_APP_NAMES = {
+    "SMB": "NetBIOS-ssn (SMB)", "NetBIOS": "NetBIOS-ssn (SMB)", "DCE_RPC": "DCE/RPC",
+    "MSSQL": "SQL Server", "TELNET": "Telnet", "Remote Desktop": "RDP",
+    "SSL VPN": "AnyConnect", "WinRM": "Microsoft WSMan", "Tor Browser": "Tor",
+    "UNKNOWN": "Unknown", "TCP": "Unknown",
+}
+# Applications Cisco's detector list also has a client detector of the same name for.
+_FP_CLIENT_SAME_AS_APP = frozenset((
+    "RDP", "SSH", "SMTP", "IMAP", "Kerberos", "BitTorrent", "uTorrent", "Tor",
+    "TeamViewer", "Dropbox", "Psiphon", "Skype", "DCE/RPC", "NetBIOS-ns"))
+_FP_CLIENT_NAMES = frozenset(("Chrome", "Firefox", "Safari", "Edge", "Internet Explorer",
+                              "cURL", "Wget", "Python urllib", "AnyConnect SSL Client")
+                             ) | _FP_CLIENT_SAME_AS_APP
+# Placeholder identities LogSim uses for traffic FMC has no user for. eNcore resolves
+# userId 0 (and application / client id 0) to "Unknown".
+_FP_NO_USER = frozenset(("EXTERNAL_ATTACKER", "SERVER_PROCESS", "SVC_FTP_TRANSFER", "unknown.user"))
+# Cisco Talos Security Intelligence feed categories (FMC 7.4 device configuration guide).
+_FP_SI_CATEGORIES = frozenset((
+    "Attackers", "Banking_fraud", "Bogon", "Bots", "CnC", "Cryptomining", "Dga",
+    "Exploitkit", "Malware", "Open_proxy", "Open_relay", "Phishing", "Response", "Spam",
+    "Spyware", "Suspicious", "Tor_exit_node"))
+
+
+def _fp_record(sig_id):
+    if sig_id == SIG_IDS["CONNECTION"]:
+        return "71"
+    if sig_id.startswith("INTRUSION:400:"):
+        return "400"
+    if sig_id.startswith(("File:500:", "FileMalware:502:")):
+        return "500"
+    if sig_id.startswith("FireAMP:125:"):
+        return "125"
+    return None
+
+
+def _fp_client_app(value, app):
+    """FMC client-application name for a user agent / client value."""
+    if value:
+        v = str(value)
+        if v in _FP_CLIENT_NAMES:
+            return v
+        if v == "Microsoft Edge":
+            return "Edge"
+        for marker, name in (("Edg/", "Edge"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"),
+                             ("MSIE ", "Internet Explorer"), ("Trident/", "Internet Explorer"),
+                             ("Safari/", "Safari"), ("curl/", "cURL"), ("Wget/", "Wget"),
+                             ("Python-urllib/", "Python urllib")):
+            if marker in v:
+                return name
+        return "Unknown"
+    if app == "AnyConnect":
+        return "AnyConnect SSL Client"
+    return app if app in _FP_CLIENT_SAME_AS_APP else "Unknown"
 
 
 def _fp_encore_fields(sig_id, fields):
-    """Trim a fields dict to what eNcore emits for its record type (in place)."""
-    if sig_id == SIG_IDS["CONNECTION"]:
-        for key in _FP_NOT_IN_CONNECTION:
-            fields.pop(key, None)
+    """Bring a fields dict to what eNcore writes for its record type (in place)."""
+    rec = _fp_record(sig_id)
+    if rec is None:
+        return
+    si_category = fields.pop("_si_category", None)
+    if "app" in fields or rec in ("71", "400", "500"):
+        fields["app"] = _FP_APP_NAMES.get(fields.get("app"), fields.get("app")) or "Unknown"
+    if rec in ("71", "400", "500"):
+        fields["requestClientApplication"] = _fp_client_app(
+            fields.get("requestClientApplication"), fields.get("app"))
+        if not fields.get("suser") or fields.get("suser") in _FP_NO_USER:
+            fields["suser"] = "Unknown"
+    if rec == "71":
         reason = _FP_RULE_REASON_ALIASES.get(fields.get("reason"), fields.get("reason"))
         if reason in _FP_RULE_REASON_CODES:
             fields["reason"] = _FP_RULE_REASON_CODES[reason]
         elif reason not in _FP_RULE_REASON_NAMES:
             fields["reason"] = "N/A"
-    elif sig_id.startswith("INTRUSION:400:"):
-        for key in _FP_NOT_IN_INTRUSION:
-            fields.pop(key, None)
-    else:
-        fields.pop("cnt", None)
+        # cs5 is the Security Intelligence list, set only on an SI hit.
+        fields["cs5"] = si_category if si_category in _FP_SI_CATEGORIES else None
+        # connectionCounter is a 16-bit per-instance counter.
+        fields["externalId"] = random.randint(1, 65_535)
+    if rec in ("71", "400"):
+        fields.setdefault("dvcpid", _fp_instance_id())
+    for key in [k for k in fields if not k.startswith("_") and k not in _FP_ENCORE_KEYS[rec]]:
+        del fields[key]
+    fields.update(_FP_ENCORE_LABELS[rec])
+    # eNcore timestamps are eStreamer seconds * 1000.
+    for key in ("rt", "start", "end"):
+        if isinstance(fields.get(key), (int, float)):
+            fields[key] = int(fields[key]) // 1000 * 1000
+    # eNcore drops empty strings and zero values.
+    for key in [k for k, v in fields.items() if v is None or v == "" or (v == 0 and not isinstance(v, bool))]:
+        del fields[key]
+
+
+def _encore_sanitize(v):
+    """eNcore's CEF value escaping (Cef.__sanitize): backslash, double quote, ] and |."""
+    s = str(v)
+    for a, b in (("\\", "\\\\"), ('"', '\\"'), ("]", "\\]"), ("|", "\\|")):
+        s = s.replace(a, b)
+    return s
 
 
 def _format_firepower_cef(config, fields, cef_name):
-    """Format a fields dict into a Cisco FTD CEF syslog string.
+    """Format a fields dict into the CEF line Cisco's eStreamer eNcore client writes.
 
-    CEF header: CEF:0|Cisco|Firepower|6.0|<sigId>|<cefName>|<cefSeverity>|
-    Syslog PRI <13> = facility user (1<<3=8) + notice (5) = 13.
-    (Cisco eStreamer default: SYSLOG_FACILITY_USER=1, SYSLOG_PRIORITY_NOTICE=5)
-
-    XSIAM auto-parses cefDeviceVendor ("Cisco") and cefDeviceProduct ("Firepower")
-    from the CEF header.  All XIF-mapped fields come from the extension string.
+    Line: <13>{now} {eNcore host} CEF:0|Cisco|Firepower|6.0|<sigId>|<name>|<severity>|<ext>
+    The syslog header is eNcore's own: the time it wrote the line and the eNcore
+    server's hostname (socket.gethostname()), not the firewall. PRI 13 = user.notice.
+    Extension keys are sorted, empty and zero values dropped, and only the keys eNcore
+    maps for the record are kept (see _FP_ENCORE_KEYS).
 
     The internal key '_sig_id' is popped before building the extension string
     so it appears only in the CEF header (position 4), not in extensions.
@@ -554,11 +704,12 @@ def _format_firepower_cef(config, fields, cef_name):
     fields = dict(fields)  # work on a copy
 
     fields['dvchost']          = firepower_conf.get('hostname',   'Cisco-FTD')
-    fields['deviceExternalId'] = firepower_conf.get('device_id', 'ftd-01')
+    # eStreamer deviceId: the FMC's numeric id for the managed device.
+    fields['deviceExternalId'] = firepower_conf.get('device_id', 1)
     # File (500/502) and malware (125) records carry no eventId in eNcore's CEF
-    # mapping, so they have no externalId; eNcore also writes keys in sorted order.
+    # mapping, so they have no externalId.
     _no_external_id = fields.pop('_no_external_id', False)
-    _sorted = fields.pop('_encore_sorted', False)
+    fields.pop('_encore_sorted', None)
     if not _no_external_id:
         fields.setdefault('externalId', random.randint(100_000_000, 999_999_999))
 
@@ -570,7 +721,6 @@ def _format_firepower_cef(config, fields, cef_name):
         # 1 Pending, 2 Allow, 3 Trust, 4 Block, 5 Block with Reset, 6 Monitor,
         # 7 Interactive Block, 8 Interactive Block with Reset, 14 FastPath.
         cef_sev = "3" if fields.get("act") in _FP_RULE_ACTIONS_LOW_SEVERITY else "7"
-    _fp_encore_fields(sig_id, fields)
 
     # Event time: real FTD CEF carries rt (deviceReceiptTime, ms epoch) and XSIAM keys
     # _time off it. The modeling rule does NOT map start/end to _time, so without rt
@@ -579,6 +729,7 @@ def _format_firepower_cef(config, fields, cef_name):
     # to the connection start so back-dated events land at the correct _time.
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     fields.setdefault('rt', fields.get('start') or now_ms)
+    _fp_encore_fields(sig_id, fields)
 
     # AD domain-qualify bare usernames so XSIAM Identity can stitch
     # firewall users (EXAMPLECORP\user) with cloud/SaaS users (user@examplecorp.com).
@@ -586,28 +737,32 @@ def _format_firepower_cef(config, fields, cef_name):
     # local account "labuser"), which XSIAM normalizes to the same identity the endpoint
     # case uses — qualifying it to a fictional AD domain would break that stitch.
     #
-    # EXCEPT RA-VPN authentication (app "SSL VPN"). Identity Analytics reduces a
+    # EXCEPT RA-VPN authentication (app "AnyConnect"). Identity Analytics reduces a
     # domain-prefixed user to the DOMAIN, collapsing every VPN user into one identity
     # (proven by A/B on ASA 2026-07-28). Measured 2026-09-17: 100% of Firepower's 5,132
     # weekly SSL VPN events carried the prefix and no Firepower VPN analytic had ever
-    # fired. VPN events are forced bare, prefix stripped.
-    if fields.get("app") == "SSL VPN":
+    # fired. VPN events are forced bare, prefix stripped. "Unknown" (no FMC user) is
+    # never qualified.
+    if fields.get("app") == "AnyConnect":
         fields.pop('_no_user_qualify', None)
         for _ufield in ("suser", "duser"):
-            if fields.get(_ufield):
+            if fields.get(_ufield) and fields[_ufield] != "Unknown":
                 fields[_ufield] = vpn_username(fields[_ufield])
     elif not fields.pop('_no_user_qualify', False):
         for _ufield in ("suser", "duser"):
             _uval = fields.get(_ufield)
-            if _uval and "\\" not in _uval and "@" not in _uval:
+            if _uval and _uval != "Unknown" and "\\" not in _uval and "@" not in _uval:
                 fields[_ufield] = f"EXAMPLECORP\\{_uval}"
+    for _k in [k for k in fields if k.startswith("_")]:
+        fields.pop(_k)
 
-    timestamp  = datetime.fromtimestamp(fields['rt'] / 1000, timezone.utc).strftime('%b %d %H:%M:%S')
+    timestamp  = datetime.now(timezone.utc).strftime('%b %d %H:%M:%S')
+    encore_host = firepower_conf.get('encore_hostname', 'encore-01')
     cef_header = f"CEF:0|Cisco|Firepower|6.0|{sig_id}|{cef_name}|{cef_sev}|"
-    items      = sorted(fields.items()) if _sorted else fields.items()
-    extension  = " ".join(f"{k}={_cef_escape(v)}" for k, v in items if v is not None)
+    extension  = " ".join(f"{k}={_encore_sanitize(v)}" for k, v in sorted(fields.items())
+                          if v is not None)
 
-    return f"<13>{timestamp} {fields['dvchost']} {cef_header}{extension}"
+    return f"<13>{timestamp} {encore_host} {cef_header}{extension}"
 
 
 def _base_fields(config, src_ip, user, shost=None):
@@ -707,7 +862,6 @@ def _generate_connection_event(config, src_ip, user, shost=None):
         "act": act, "app": app, "dst": dest_ip, "dpt": dest_port,
         "cs1": _ac_policy(config), "cs1Label": "fwPolicy",
         "cs2": rule,               "cs2Label": "fwRule",
-        "cs6": url_rep,            "cs6Label": "URLReputation",
         "cefSeverity": cef_sev,
         "bytesOut": bytes_out, "bytesIn": bytes_in,
         "reason": reason,
@@ -790,7 +944,6 @@ def _generate_user_to_app_server_event(config, src_ip, user, shost=None, session
         "bytesOut": random.randint(1_000, 5_000),
         "bytesIn":  random.randint(5_000, 25_000),
         "reason": "N/A",
-        "requestMethod":           "GET",
         "requestClientApplication": get_user_agent(session_context, user),
         "msg":   "Internal HTTPS connection to application server allowed",
         "start": start_ms, "end": end_ms,
@@ -877,7 +1030,6 @@ def _generate_inbound_block_event(config):
         "dst": dest_ip, "dpt": dpt,
         "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
         "cs2": "Block_Inbound_Default", "cs2Label": "fwRule",
-        "cs6": "Suspicious",            "cs6Label": "URLReputation",
         "cefSeverity": "7",  # Cisco: Block → severity 7
         "bytesOut": 0,
         "bytesIn":  random.randint(40, 100),
@@ -910,7 +1062,6 @@ def _generate_dns_benign_event(config, src_ip, user, shost=None):
         "act": "Allow", "app": "DNS",
         "dpt": 53,
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
-        "cs6": "Trustworthy",        "cs6Label": "URLReputation",
         "cefSeverity": "3",
         "bytesOut": random.randint(40, 100),
         "bytesIn":  random.randint(80, 400),
@@ -951,7 +1102,6 @@ def _generate_email_traffic_event(config, src_ip, user, shost=None):
         "dst": mail_ip, "dpt": dest_port,
         "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
         "cs2": f"Allow_{app_name}",      "cs2Label": "fwRule",
-        "cs6": "Trustworthy",            "cs6Label": "URLReputation",
         "cefSeverity": "3",
         # IMAPS = mostly downloading (large bytesIn); SMTP* = mostly sending (large bytesOut)
         "bytesOut": random.randint(1_000, 300_000) if dest_port in (465, 587) else random.randint(500, 5_000),
@@ -982,7 +1132,6 @@ def _generate_ntp_sync_event(config, src_ip, user, shost=None):
         "dst": ntp_ip, "dpt": 123,
         "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
         "cs2": "Allow_NTP_Outbound",    "cs2Label": "fwRule",
-        "cs6": "Trustworthy",           "cs6Label": "URLReputation",
         "cefSeverity": "3",
         "bytesOut": random.randint(48, 76),
         "bytesIn":  random.randint(48, 76),
@@ -1019,10 +1168,8 @@ def _generate_software_update_event(config, src_ip, user, shost=None):
         "_sig_id": SIG_IDS["CONNECTION"],
         "act": "Allow", "app": "HTTPS",
         "dst": server_ip, "dpt": 443,
-        "dhost": domain,
         "cs1": _ac_policy(config),         "cs1Label": "fwPolicy",
         "cs2": "Allow_Software_Updates",   "cs2Label": "fwRule",
-        "cs6": "Trustworthy",              "cs6Label": "URLReputation",
         "cefSeverity": "3",
         "bytesOut": random.randint(300, 2_000),
         "bytesIn":  random.randint(5_000_000, 200_000_000),
@@ -1061,7 +1208,6 @@ def _generate_benign_smb_event(config, src_ip, user, shost=None):
         "dst": dest_ip, "dpt": 445,
         "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
         "cs2": "Allow_Internal_SMB",     "cs2Label": "fwRule",
-        "cs6": "Trustworthy",            "cs6Label": "URLReputation",
         "cefSeverity": "3",
         "bytesOut": random.randint(200, 10_000),
         "bytesIn":  random.randint(1_000, 100_000),
@@ -1095,7 +1241,6 @@ def _generate_benign_ssh_event(config, src_ip, user, shost=None):
         "dst": dest_ip, "dpt": 22,
         "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
         "cs2": "Allow_Internal_SSH",     "cs2Label": "fwRule",
-        "cs6": "Trustworthy",            "cs6Label": "URLReputation",
         "cefSeverity": "3",
         "bytesOut": random.randint(1_000, 20_000),
         "bytesIn":  random.randint(1_000, 20_000),
@@ -1129,7 +1274,6 @@ def _generate_benign_rdp_event(config, src_ip, user, shost=None):
         "dst": dest_ip, "dpt": 3389,
         "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
         "cs2": "Allow_Internal_RDP",     "cs2Label": "fwRule",
-        "cs6": "Trustworthy",            "cs6Label": "URLReputation",
         "cefSeverity": "3",
         "bytesOut": random.randint(5_000, 100_000),
         "bytesIn":  random.randint(50_000, 1_000_000),
@@ -1162,11 +1306,10 @@ def _generate_benign_vpn_event(config, src_ip, user, shost=None):
     fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
     fields.update({
         "_sig_id": SIG_IDS["CONNECTION"],
-        "act": "Allow", "app": "SSL VPN",
+        "act": "Allow", "app": "AnyConnect",
         "dst": gateway_ip, "dpt": 443,
         "cs1": _ac_policy(config),        "cs1Label": "fwPolicy",
         "cs2": "VPN_Remote_Access",       "cs2Label": "fwRule",
-        "cs5": "VPN Authentication",      "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(100_000, 10_000_000),
         "bytesIn":  random.randint(500_000, 50_000_000),
@@ -1223,11 +1366,10 @@ def _generate_vpn_new_country_login(config, src_ip, user, shost=None):
     fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
     fields.update({
         "_sig_id": SIG_IDS["CONNECTION"],
-        "act": "Allow", "app": "SSL VPN",
+        "act": "Allow", "app": "AnyConnect",
         "dst": gateway_ip, "dpt": 443,
         "cs1": _ac_policy(config),        "cs1Label": "fwPolicy",
         "cs2": "VPN_Remote_Access",       "cs2Label": "fwRule",
-        "cs5": "VPN Authentication",      "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(100_000, 10_000_000),
         "bytesIn":  random.randint(500_000, 50_000_000),
@@ -1268,11 +1410,10 @@ def _generate_benign_vpn_failure_event(config, src_ip, user, shost=None):
     fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
     fields.update({
         "_sig_id": SIG_IDS["CONNECTION"],
-        "act": "Block", "app": "SSL VPN",
+        "act": "Block", "app": "AnyConnect",
         "dst": gateway_ip, "dpt": 443,
         "cs1": _ac_policy(config),        "cs1Label": "fwPolicy",
         "cs2": "VPN_Remote_Access",       "cs2Label": "fwRule",
-        "cs5": "VPN Authentication",      "cs5Label": "secIntelCategory",
         "cefSeverity": "7",
         "bytesOut": random.randint(200, 1_000),
         "bytesIn":  random.randint(200, 1_000),
@@ -1307,7 +1448,6 @@ def _generate_benign_ftp_event(config, src_ip, user, shost=None):
         "dst": dest_ip, "dpt": 21,
         "cs1": _ac_policy(config),         "cs1Label": "fwPolicy",
         "cs2": "Allow_FTP_Transfers",      "cs2Label": "fwRule",
-        "cs5": "File Transfer",            "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(1_000, 50_000),          # small: FTP commands + ACKs
         "bytesIn":  random.randint(10_000, 5_000_000),      # large: downloaded file data
@@ -1445,17 +1585,14 @@ def _generate_ips_event(config):
     """
     print("    - Firepower Module simulating: IPS (inbound external -> internal server)")
     firepower_conf = _get_config(config)
-    ips_rules      = firepower_conf.get('ips_rules', {})
+    rule_id, classtype, rule_name, ports = random.choice(_fp_ips_rules(config))
+    priority, category = _SNORT_CLASSTYPES[classtype]
 
     internal_servers = config.get('internal_servers', ['10.0.10.50'])
     victim_ip    = random.choice(internal_servers)
     attacker_ip  = _random_external_ip()
-    dest_port    = random.choice([80, 443, 445, 1433, 3389, 8080, 8443])
-
-    if ips_rules:
-        rule_name, category = random.choice(list(ips_rules.items()))
-    else:
-        rule_name, category = "SQL union select - possible sql injection attempt - GET parameter", "Web Application Attack"
+    dest_port    = random.choice(ports)
+    app          = _FP_PORT_APP.get(dest_port, "Unknown")
 
     ips_policy = random.choice(_IPS_POLICIES)
     start_ms, end_ms = _conn_timing(random.randint(0, 200))  # blocked nearly instantly
@@ -1468,12 +1605,11 @@ def _generate_ips_event(config):
     fields['deviceOutboundInterface'] = firepower_conf.get('inbound_interface',  'inside')
 
     gen_id  = 1   # text (signature) rules; preprocessor/decoder events are _generate_network_anomaly
-    rule_id = random.randint(10000, 99999)
-    ips_sev, _prio, impact = _fp_ips_rating()
+    ips_sev, _prio, impact = _fp_ips_rating(priority=priority)
     fields.update({
         "_sig_id": f"INTRUSION:400:{gen_id}:{rule_id}",
         "act": "Blocked",
-        "app": random.choice(["HTTP", "HTTPS", "SMB", "RDP"]),
+        "app": app,
         "dst": victim_ip, "dpt": dest_port,
         "cs1": _ac_policy(config), "cs1Label": "fwPolicy",
         "cs2": _FP_IPS_AC_RULE,    "cs2Label": "fwRule",
@@ -1482,7 +1618,10 @@ def _generate_ips_event(config):
         "cn2": impact,             "cn2Label": "impact",
         "cat": category,
         "cefSeverity": ips_sev,
-        "requestClientApplication": random.choice(_IPS_TOOL_USER_AGENTS),
+        # FMC resolves the HTTP client from its detector list; the formatter maps a
+        # tool user agent to that name (curl -> cURL) or "Unknown".
+        "requestClientApplication": (random.choice(_IPS_TOOL_USER_AGENTS)
+                                     if app in ("HTTP", "HTTPS") else None),
         "start": start_ms, "end": end_ms,
     })
     # eNcore names an intrusion event after the rule's message (@computed.message).
@@ -1527,8 +1666,9 @@ _FP_FILE_TYPE = {
     "pdf": "PDF", "zip": "ZIP", "rar": "RAR", "7z": "7Z", "iso": "ISO",
 }
 
-# Firepower client-application names (what eNcore resolves clientApplicationId to).
-_FP_HTTP_CLIENTS = ["Chrome", "Firefox", "Microsoft Edge", "Internet Explorer"]
+# Firepower client-application names (what eNcore resolves clientApplicationId to),
+# as named in Cisco's application detector list (appid.cisco.com).
+_FP_HTTP_CLIENTS = ["Chrome", "Firefox", "Edge", "Internet Explorer"]
 
 
 def _fp_file_type(fname):
@@ -1570,7 +1710,7 @@ def _fp_file_events(config, *, src, dst, spt, dpt, app, user, fname, size, direc
         start_ms, _ = _conn_timing(random.randint(1_000, 30_000))
     sha256 = sha256 or hashlib.sha256(f"{fname}{size}{time.time()}".encode()).hexdigest()
     rt_ms = start_ms + random.randint(200, 5_000)
-    dvcpid = random.randint(1, 4_000)
+    dvcpid = _fp_instance_id()
     policy = _ac_policy(config)
     common = {
         "_no_external_id": True, "_encore_sorted": True,
@@ -1749,7 +1889,6 @@ def _generate_large_file_upload_event(config, src_ip, user, shost=None, session_
         "_sig_id": SIG_IDS["CONNECTION"],
         "act": "Allow", "app": "SSL",
         "dst": dest_ip, "dpt": 443,
-        "dhost": upload_host,
         "request": upload_url,
         "requestMethod": random.choice(["POST", "PUT"]),
         "requestClientApplication": get_user_agent(session_context, user),
@@ -1758,8 +1897,6 @@ def _generate_large_file_upload_event(config, src_ip, user, shost=None, session_
         # A tail destination is a random registrable domain, not a named storage
         # service; labelling it File Sharing is the mislabel exfil_destination's
         # docstring warns about, and would make the event untrainable.
-        "cs5": "Uncategorized" if is_tail else "File Sharing",
-        "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": bytes_out,
         "bytesIn":  random.randint(1_000, 5_000),
@@ -1800,13 +1937,10 @@ def _generate_url_filtering_event(config, src_ip, user, shost=None, session_cont
         "_sig_id": SIG_IDS["URL"],
         "act": "Block", "app": "HTTPS",
         "dst": _random_external_ip(), "dpt": 443,
-        "dhost": domain,
         "request": f"https://{domain}/",
-        "requestMethod": "GET",
         "requestClientApplication": get_user_agent(session_context, user),
         "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
         "cs2": "Block_URL_Categories", "cs2Label": "fwRule",
-        "cs5": cat,                    "cs5Label": "secIntelCategory",
         "cefSeverity": "7",  # Cisco: Block → severity 7
         "bytesOut": random.randint(200, 800),
         "bytesIn":  0,
@@ -1823,8 +1957,9 @@ def _generate_security_intel_event(config, src_ip, user, shost=None):
     The FTD's Security Intelligence feed matches the domain before DNS resolution.
     Protocol is UDP/53 (DNS).
 
-    Hunt fields: dhost (C2 domain), cs6 (feed category "DNS Block List"),
-                 msg, start/end (very fast — DNS block happens in microseconds).
+    eNcore writes the queried name to destinationDnsDomain (dnsQuery), the SI category
+    to cs5 (securityIntelligenceList1, a Cisco Talos feed category such as CnC) and
+    reason 2048 (DNS Block).
 
     Triggers XSIAM: Security Intelligence / C2 Domain analytics detection.
     """
@@ -1841,11 +1976,10 @@ def _generate_security_intel_event(config, src_ip, user, shost=None):
         "_sig_id": SIG_IDS["SECINTEL"],
         "act": "Block", "app": "DNS",
         "dst": "8.8.8.8", "dpt": 53,   # query destined for resolver; blocked before leaving
-        "dhost": bad_domain,
-        "request": bad_domain,
+        "destinationDnsDomain": bad_domain,
+        "_si_category": random.choice(["CnC", "Malware"]),
         "cs1": _ac_policy(config),           "cs1Label": "fwPolicy",
         "cs2": "Security_Intelligence_DNS",  "cs2Label": "fwRule",
-        "cs5": "SecurityIntelligence",       "cs5Label": "secIntelCategory",
         "cefSeverity": "7",  # Cisco: Block → severity 7
         "bytesOut": random.randint(50, 150),       # DNS query bytes
         "bytesIn":  random.randint(60, 200),     # DNS NXDOMAIN/block response
@@ -1934,7 +2068,6 @@ def _generate_workstation_smb_event(config, src_ip, user, session_context=None, 
         "act": "Block", "app": "SMB", "dst": dest_ip, "dpt": 445,
         "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
         "cs2": "Block_Lateral_Movement", "cs2Label": "fwRule",
-        "cs5": "Lateral Movement",       "cs5Label": "secIntelCategory",
         "cefSeverity": "7",  # Cisco: Block → severity 7
         "bytesOut": random.randint(200, 2_000),
         "bytesIn":  0,
@@ -1991,7 +2124,6 @@ def _generate_smb_new_host_lateral(config, src_ip, user, session_context=None, s
             "act": "Allow", "app": "SMB", "dst": dst_ip, "dpt": 445,
             "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
             "cs2": "Allow_Internal_SMB",     "cs2Label": "fwRule",
-            "cs5": "Lateral Movement",       "cs5Label": "secIntelCategory",
             "cefSeverity": "3",  # Cisco: Allow → severity 3
             "bytesOut": random.randint(200, 5000),
             "bytesIn":  random.randint(2000, 50000),
@@ -2041,7 +2173,6 @@ def _generate_smb_rare_file_transfer(config, src_ip, user, shost=None):
         "act": "Allow", "app": "SMB", "dst": dst_ip, "dpt": 445,
         "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
         "cs2": "Allow_Internal_SMB",     "cs2Label": "fwRule",
-        "cs5": "Data Staging",           "cs5Label": "secIntelCategory",
         "cefSeverity": "3",  # Cisco: Allow → severity 3
         "bytesOut": random.randint(1000, 50000),
         "bytesIn":  file_size,  # large read from file share = data staging
@@ -2099,7 +2230,6 @@ def _generate_smb_share_enumeration(config, src_ip, user, shost=None):
             "act": "Allow", "app": "SMB", "dst": dst_ip, "dpt": 445,
             "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
             "cs2": "Allow_Internal_SMB",     "cs2Label": "fwRule",
-            "cs5": "Network Scan",           "cs5Label": "secIntelCategory",
             "cefSeverity": "3",  # Cisco: Allow -> severity 3
             "bytesOut": random.randint(100, 500),    # SMB negotiation + tree connect request
             "bytesIn":  random.randint(500, 5_000),  # share listing response (much larger)
@@ -2181,7 +2311,6 @@ def _generate_port_scan_event(config, src_ip=None, user=None, shost=None,
             "dst": victim_ip, "dpt": dpt,
             "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
             "cs2": "Block_EastWest_Default", "cs2Label": "fwRule",
-            "cs6": "Suspicious",            "cs6Label": "URLReputation",
             "cefSeverity": "7",  # Cisco: Block -> severity 7
             "bytesOut": random.randint(40, 60),   # SYN probe bytes from the scanner
             "bytesIn":  random.randint(40, 60),   # RST/SYN-ACK before block
@@ -2207,7 +2336,6 @@ def _generate_port_scan_event(config, src_ip=None, user=None, shost=None,
             "dst": victim_ip, "dpt": dpt,
             "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
             "cs2": "Allow_Internal_Services", "cs2Label": "fwRule",
-            "cs6": "Benign",                "cs6Label": "URLReputation",
             "cefSeverity": "3",
             "bytesOut": random.randint(500, 5000),
             "bytesIn":  random.randint(500, 5000),
@@ -2261,7 +2389,6 @@ def _generate_brute_force_event(config):
             "dst": victim_ip, "dpt": dpt,
             "cs1": _ac_policy(config),      "cs1Label": "fwPolicy",
             "cs2": "Block_Inbound_Default", "cs2Label": "fwRule",
-            "cs6": "Suspicious",            "cs6Label": "URLReputation",
             "cefSeverity": "7",  # Cisco: Block -> severity 7
             "bytesOut": random.randint(100, 500),  # auth attempt payload from attacker
             "bytesIn":  random.randint(40, 200),   # reject/RST from server
@@ -2303,10 +2430,8 @@ def _generate_tor_event(config, src_ip, user, shost=None):
         "_sig_id": SIG_IDS["CONNECTION"],
         "act": "Allow", "app": "Tor",
         "dst": dest_ip, "dpt": dpt,
-        "dhost": tor_hostname,
         "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_Web",   "cs2Label": "fwRule",
-        "cs5": "Tor",                  "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(10_240, 102_400),
         "bytesIn":  random.randint(51_200, 512_000),
@@ -2354,15 +2479,12 @@ def _generate_server_outbound_http(config):
         "_sig_id": SIG_IDS["CONNECTION"],
         "act": "Allow", "app": "HTTP",
         "dst": dest_ip, "dpt": 80,
-        "dhost": dest_host,
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
-        "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(200, 5_000),
         "bytesIn":  random.randint(500, 50_000),
         "reason": "N/A",
-        "requestMethod": "GET",
         "msg":   f"Anomalous outbound HTTP from internal server {server_ip}",
         "start": start_ms, "end": end_ms,
     })
@@ -2415,7 +2537,6 @@ def _generate_rdp_lateral_event(config, src_ip, user, session_context=None, shos
             "dst": dest_ip, "dpt": 3389,
             "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
             "cs2": "Block_Lateral_Movement", "cs2Label": "fwRule",
-            "cs5": "Lateral Movement",       "cs5Label": "secIntelCategory",
             "cefSeverity": "7",
             "bytesOut": random.randint(200, 2_000),
             "bytesIn":  0,
@@ -2438,7 +2559,6 @@ def _generate_rdp_lateral_event(config, src_ip, user, session_context=None, shos
         "dst": dest_ip, "dpt": 3389,
         "cs1": _ac_policy(config),       "cs1Label": "fwPolicy",
         "cs2": "Allow_Internal_Admin",   "cs2Label": "fwRule",
-        "cs5": "Lateral Movement",       "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(5_000, 50_000),
         "bytesIn":  random.randint(5_000, 50_000),
@@ -2548,7 +2668,6 @@ def _generate_new_admin_behavior(config, src_ip, user, shost=None, session_conte
             "dst": dest_ip, "dpt": dport,
             "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
             "cs2": "Allow_Internal_Admin", "cs2Label": "fwRule",
-            "cs5": "Lateral Movement",     "cs5Label": "secIntelCategory",
             "cefSeverity": "3",
             "bytesOut": random.randint(1_000, 40_000),
             "bytesIn":  random.randint(1_000, 60_000),
@@ -2605,7 +2724,6 @@ def _generate_abnormal_rdp_rare_host(config, src_ip, user, shost=None, session_c
         "dst": dest_ip, "dpt": 3389,
         "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
         "cs2": "Allow_Internal_Admin", "cs2Label": "fwRule",
-        "cs5": "Lateral Movement",     "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(20_000, 400_000),
         "bytesIn":  random.randint(50_000, 3_000_000),
@@ -2667,10 +2785,8 @@ def _generate_dns_c2_beacon(config, src_ip, user, shost=None):
             "dst": c2_resolver, "dpt": 53,
             # resolver is addressed by IP and has no name; the beacon domain is the
             # QUERY (destinationDnsDomain), not the destination host.
-            "dhost": None,
             "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
             "cs2": "Allow_Outbound_DNS", "cs2Label": "fwRule",
-            "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
             "cefSeverity": "3",  # Cisco: Allow → severity 3
             "bytesOut": random.randint(40, 100),
             "bytesIn":  random.randint(60, 200),
@@ -2710,11 +2826,10 @@ def _fp_vpn_auth(config, vpn_src_ip, user, start_ms, success, reason=None):
                        "msg": f"VPN authentication failed for {vpn_username(user)} from {vpn_src_ip}"})
     fields.update({
         "_sig_id": SIG_IDS["CONNECTION"],
-        "act": "Allow" if success else "Block", "app": "SSL VPN",
+        "act": "Allow" if success else "Block", "app": "AnyConnect",
         "dst": gateway_ip, "dpt": 443,
         "cs1": _ac_policy(config),  "cs1Label": "fwPolicy",
         "cs2": "VPN_Remote_Access", "cs2Label": "fwRule",
-        "cs5": "VPN Authentication", "cs5Label": "secIntelCategory",
         "start": start_ms, "end": start_ms + dur,
     })
     return _format_firepower_cef(config, fields, "CONNECTION STATISTICS")
@@ -2833,7 +2948,6 @@ def _generate_vpn_tor_login(config, src_ip, user, shost=None):
         "dst": gateway_ip, "dpt": 443,
         "cs1": _ac_policy(config),        "cs1Label": "fwPolicy",
         "cs2": "VPN_Remote_Access",       "cs2Label": "fwRule",
-        "cs5": "Tor",                     "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(500, 3_000),   # TLS Client Hello + handshake
         "bytesIn":  random.randint(1_000, 5_000), # TLS Server Hello + cert
@@ -2856,11 +2970,10 @@ def _generate_vpn_tor_login(config, src_ip, user, shost=None):
     vpn_fields['deviceOutboundInterface'] = internal_iface
     vpn_fields.update({
         "_sig_id": SIG_IDS["CONNECTION"],
-        "act": "Allow", "app": "SSL VPN",
+        "act": "Allow", "app": "AnyConnect",
         "dst": gateway_ip, "dpt": 443,
         "cs1": _ac_policy(config),        "cs1Label": "fwPolicy",
         "cs2": "VPN_Remote_Access",       "cs2Label": "fwRule",
-        "cs5": "Tor",                     "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": bytes_out,
         "bytesIn":  bytes_in,
@@ -2901,7 +3014,6 @@ def _generate_vpn_tor_login(config, src_ip, user, shost=None):
             "dst": target_ip, "dpt": action["dpt"],
             "cs1": _ac_policy(config),  "cs1Label": "fwPolicy",
             "cs2": action["rule"],      "cs2Label": "fwRule",
-            "cs5": action["cat"],       "cs5Label": "secIntelCategory",
             "cefSeverity": "3",
             "bytesOut": random.randint(500, 50_000),
             "bytesIn":  random.randint(1_000, 200_000),
@@ -2946,10 +3058,8 @@ def _generate_rare_external_rdp(config, src_ip, user, shost=None):
         "_sig_id": SIG_IDS["CONNECTION"],
         "act": "Allow", "app": "RDP",
         "dst": dest_ip, "dpt": 3389,
-        "dhost": dest_host,
         "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_Web",   "cs2Label": "fwRule",
-        "cs5": "Remote Access",        "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": bytes_out,
         "bytesIn":  bytes_in,
@@ -2988,10 +3098,8 @@ def _generate_rare_ssh(config, src_ip, user, shost=None):
         "_sig_id": SIG_IDS["CONNECTION"],
         "act": "Allow", "app": "SSH",
         "dst": dest_ip, "dpt": 22,
-        "dhost": dest_host,
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
-        "cs5": "Secure Shell",       "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(1_000, 50_000),
         "bytesIn":  random.randint(1_000, 50_000),
@@ -3034,7 +3142,6 @@ def _generate_smtp_spray(config, src_ip, user, shost=None):
             "dst": dst_ip, "dpt": smtp_port,
             "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
             "cs2": "Allow_Outbound_Web",   "cs2Label": "fwRule",
-            "cs5": "Email",                "cs5Label": "secIntelCategory",
             "cefSeverity": "3",
             "bytesOut": bytes_out,
             "bytesIn":  bytes_in,
@@ -3088,10 +3195,8 @@ def _generate_smtp_large_exfil(config, src_ip, user, shost=None):
         "_sig_id": SIG_IDS["CONNECTION"],
         "act": "Allow", "app": "SMTP",
         "dst": dest_ip, "dpt": smtp_port,
-        "dhost": mx_domain,
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_SMTP_Relay",   "cs2Label": "fwRule",
-        "cs5": "Email",              "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": bytes_out,
         "bytesIn":  bytes_in,
@@ -3139,10 +3244,8 @@ def _generate_ftp_large_exfil(config, src_ip, user, shost=None):
         "_sig_id": SIG_IDS["CONNECTION"],
         "act": "Allow", "app": "FTP",
         "dst": dest_ip, "dpt": 21,
-        "dhost": dest_host,
         "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_Web",   "cs2Label": "fwRule",
-        "cs5": "File Transfer",        "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": bytes_out,
         "bytesIn":  bytes_in,
@@ -3190,10 +3293,8 @@ def _generate_ddns_connection(config, src_ip, user, shost=None):
         "_sig_id": SIG_IDS["CONNECTION"],
         "act": "Allow", "app": "DNS",
         "dst": "8.8.8.8", "dpt": 53,
-        "dhost": ddns_hostname,
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_DNS", "cs2Label": "fwRule",
-        "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(60, 120),
         "bytesIn":  random.randint(80, 300),
@@ -3211,10 +3312,8 @@ def _generate_ddns_connection(config, src_ip, user, shost=None):
         "_sig_id": SIG_IDS["CONNECTION"],
         "act": "Allow", "app": "SSL",
         "dst": resolved_ip, "dpt": 443,
-        "dhost": ddns_hostname,
         "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_Web",   "cs2Label": "fwRule",
-        "cs5": "Dynamic DNS",          "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(1_000, 100_000),
         "bytesIn":  random.randint(5_000, 500_000),
@@ -3262,7 +3361,6 @@ def _generate_app_control(config, src_ip, user, shost=None):
         "dst": dest_ip, "dpt": dport,
         "cs1": _ac_policy(config),                  "cs1Label": "fwPolicy",
         "cs2": "Block_Unauthorized_Applications",   "cs2Label": "fwRule",
-        "cs5": app_category,                        "cs5Label": "secIntelCategory",
         "cefSeverity": "7",
         "bytesOut": random.randint(100, 1_000),
         "bytesIn":  0,
@@ -3305,7 +3403,6 @@ def _generate_torrent_client(config, src_ip, user, shost=None):
             "dst": peer, "dpt": random.choice(_BT_PORTS),
             "cs1": _ac_policy(config),     "cs1Label": "fwPolicy",
             "cs2": "Allow_Outbound_Any",   "cs2Label": "fwRule",
-            "cs5": "Peer-to-Peer",         "cs5Label": "secIntelCategory",
             "cefSeverity": "3",
             "bytesOut": random.randint(20_000, 4_000_000),
             "bytesIn":  random.randint(50_000, 12_000_000),
@@ -3372,7 +3469,8 @@ def _generate_network_anomaly(config):
         "cs5": random.choice(_IPS_POLICIES), "cs5Label": "ipsPolicy",
         "cs6": str(rule_id),        "cs6Label": "ruleId",
         "cn2": impact,              "cn2Label": "impact",
-        "cat": "Network Anomaly",
+        # Built-in (decoder/stream/inspector) rules carry no classtype in Snort 3, so
+        # there is no classification for eNcore to write (unverified against FMC).
         "cefSeverity": ips_sev,
         "start": start_ms, "end": end_ms,
     })
@@ -3399,7 +3497,6 @@ def _generate_scenario_log(config, scenario, session_context=None):
         "cs1": _ac_policy(config),  "cs1Label": "fwPolicy",
         "cs2": "Scenario_Rule",     "cs2Label": "fwRule",
         "request": f"https://{scenario.get('dest_domain', 'scenario.com')}/",
-        "requestMethod": "GET",
         "deviceInboundInterface":  _get_config(config).get('inbound_interface',  'inside'),
         "deviceOutboundInterface": _get_config(config).get('outbound_interface', 'outside'),
         "cs3": "User-Zone",     "cs3Label": "ingressZone",
@@ -3416,19 +3513,18 @@ def _generate_scenario_log(config, scenario, session_context=None):
     cef_name = "CONNECTION STATISTICS"
 
     if log_type == "ips":
-        _rule_id = random.randint(10000, 99999)
+        cef_name = scenario.get("signature") or "SERVER-OTHER Apache Log4j logging remote code execution attempt"
+        talos = _FP_TALOS_BY_MSG.get(cef_name)
+        _rule_id = talos[0] if talos else random.randint(10000, 99999)
+        priority = None
         fields["_sig_id"]      = f"INTRUSION:400:1:{_rule_id}"
         fields["cs5"]             = random.choice(_IPS_POLICIES)
-        fields["cs5Label"]        = "ipsPolicy"
         fields["cs6"]             = str(_rule_id)
-        fields["cs6Label"]        = "ruleId"
-        fields["cat"]             = scenario.get("threat_category", "Exploit Kit")
+        if talos:   # classification only for a rule we know; otherwise eNcore has none
+            priority, fields["cat"] = _SNORT_CLASSTYPES[talos[1]]
         # Intrusion act is eNcore's blocked flag: Alerted / Blocked / Would Be Blocked.
         fields["act"] = "Alerted" if fields["act"] == "Allow" else "Blocked"
-        fields["cefSeverity"], _prio, fields["cn2"] = _fp_ips_rating()
-        fields["cn2Label"] = "impact"
-        fields.pop("msg", None)   # eNcore 400 has no msg
-        cef_name = scenario.get("signature") or "SERVER-OTHER Apache Log4j logging remote code execution attempt"
+        fields["cefSeverity"], _prio, fields["cn2"] = _fp_ips_rating(priority=priority)
     elif log_type == "malware":
         fname = scenario.get("filename", "bad.exe")
         return _fp_file_events(
@@ -3441,9 +3537,7 @@ def _generate_scenario_log(config, scenario, session_context=None):
             malware={"threatname": scenario.get("threat_category", "Trojan.Generic"),
                      "threat_score": 90})
     elif log_type == "url_filtering":
-        fields["_sig_id"] = SIG_IDS["URL"]
-        fields["cs5"]        = scenario.get("threat_category", "Phishing")
-        fields["cs5Label"]   = "secIntelCategory"
+        fields["_sig_id"] = SIG_IDS["URL"]   # URL category block: no Security Intelligence list
     else:  # default to connection
         fields["_sig_id"] = SIG_IDS["CONNECTION"]
         cef_name = "CONNECTION STATISTICS"
@@ -3490,12 +3584,9 @@ def _generate_large_download(config, src_ip, user, shost=None, session_context=N
         "_sig_id": SIG_IDS["CONNECTION"], "act": "Allow", "app": "SSL",
         "dst": dest_ip, "dpt": 443, "dhost": dl_host,
         "request": dl_url,
-        "requestMethod": "GET",
         "requestClientApplication": get_user_agent(session_context, user),
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
-        "cs5": "Uncategorized" if is_tail else "File Sharing",
-        "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(2_000, 40_000),
         "bytesIn":  bytes_in,
@@ -3540,7 +3631,6 @@ def _generate_dns_tunneling(config, src_ip, user, shost=None):
             "destinationDnsDomain": qname,   # genuine FTD DNS field (dnsQuery.data)
             "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
             "cs2": "Allow_Outbound_DNS", "cs2Label": "fwRule",
-            "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
             "cefSeverity": "3",
             "bytesOut": random.randint(180, 512),   # oversized encoded queries
             "bytesIn":  random.randint(200, 4_000), # large TXT/NULL answers
@@ -3577,7 +3667,6 @@ def _generate_reverse_ssh_tunnel(config, src_ip, user, shost=None):
             "dst": ext_ip, "dpt": 22, "dhost": None,
             "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
             "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
-            "cs5": "Remote Access",      "cs5Label": "secIntelCategory",
             "cefSeverity": "3",
             "bytesOut": random.randint(5, 80) * 1_048_576,
             "bytesIn":  random.randint(5, 80) * 1_048_576,
@@ -3609,7 +3698,6 @@ def _generate_ldap_recon(config, src_ip, user, shost=None):
                 "dst": dc, "dpt": port, "dhost": None,
                 "cs1": _ac_policy(config),    "cs1Label": "fwPolicy",
                 "cs2": "Allow_Internal_LDAP", "cs2Label": "fwRule",
-                "cs5": "Reconnaissance",      "cs5Label": "secIntelCategory",
                 "cefSeverity": "3",
                 "bytesOut": random.randint(2_000, 40_000),    # large search requests
                 "bytesIn":  random.randint(20_000, 400_000),  # bulk directory results
@@ -3638,7 +3726,6 @@ def _generate_ldap_kerberos_benign(config, src_ip, user, shost=None):
         "dst": dc, "dpt": port, "dhost": None,
         "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
         "cs2": "Allow_Internal_AD",  "cs2Label": "fwRule",
-        "cs5": "Authentication",     "cs5Label": "secIntelCategory",
         "cefSeverity": "3",
         "bytesOut": random.randint(500, 4_000),
         "bytesIn":  random.randint(1_000, 20_000),
@@ -4160,7 +4247,6 @@ def generate_log(config, scenario=None, threat_level="Realistic",
                 "dst": dest_ip, "dpt": 443,
                 "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
                 "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
-                "cs6": "Suspicious",         "cs6Label": "URLReputation",
                 "cefSeverity": "3",  # Cisco: Allow → severity 3
                 "bytesOut": bytes_sent,
                 "bytesIn":  random.randint(1_000, 5_000),
@@ -4193,14 +4279,14 @@ def generate_log(config, scenario=None, threat_level="Realistic",
                     "_no_user_qualify": True,   # keep the exact box user (bare) for the stitch
                     "_sig_id": SIG_IDS["CONNECTION"],
                     "act": "Allow", "app": app,
-                    "dst": dst_ip, "dpt": port, "dhost": domain,
+                    "dst": dst_ip, "dpt": port,
+                    # eNcore carries the host only in the URL (clientUrl -> request).
+                    "request": f"{'https' if port == 443 else 'http'}://{domain}/",
                     "cs1": _ac_policy(config),   "cs1Label": "fwPolicy",
                     "cs2": "Allow_Outbound_Web", "cs2Label": "fwRule",
-                    "cs5": "Uncategorized",      "cs5Label": "secIntelCategory",
-                    "cs6": "Suspicious",         "cs6Label": "URLReputation",
                     "cefSeverity": "3",
                     "bytesOut": random.randint(200, 900), "bytesIn": random.randint(120, 400),
-                    "reason": "N/A", "requestMethod": "GET",
+                    "reason": "N/A",
                     "msg": f"Recurring outbound to uncommon domain {domain}",
                     "start": start_ms, "end": end_ms,
                 })

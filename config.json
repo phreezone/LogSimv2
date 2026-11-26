@@ -14227,7 +14227,8 @@
   "firepower_config": {
     "hostname": "DC1-FTD-01",
     "management_ip": "10.0.30.12",
-    "device_id": "ftd-9a8b7c6d-5e4f-3a2b-1c0d",
+    "device_id": 3,
+    "encore_hostname": "encore-01",
     "access_control_policy": "Default_Access_Control_Policy",
     "inbound_interface": "inside",
     "outbound_interface": "outside",
@@ -14468,9 +14469,11 @@
       ]
     },
     "ips_rules": {
-      "ET EXPLOIT Possible CVE-2021-44228 Log4Shell Log4j scanning": "Web Server",
-      "ET POLICY SMB2 NT Create AndX Request For an Executable File": "Policy Violation",
-      "ET SCAN NMAP OS Detection Probe": "Reconnaissance"
+      "SERVER-OTHER Apache Log4j logging remote code execution attempt": {"sid": 58722, "classtype": "attempted-user", "ports": [80, 443, 8080, 8443]},
+      "OS-WINDOWS Microsoft Windows SMB remote code execution attempt": {"sid": 41978, "classtype": "attempted-admin", "ports": [445]},
+      "SQL generic convert injection attempt - GET parameter": {"sid": 26925, "classtype": "web-application-attack", "ports": [80, 443, 8080]},
+      "SERVER-WEBAPP /etc/passwd file access attempt": {"sid": 1122, "classtype": "attempted-recon", "ports": [80, 443, 8080]},
+      "INDICATOR-SCAN synscan portscan": {"sid": 630, "classtype": "attempted-recon", "ports": [22, 80, 443, 445, 3389]}
     },
     "blocked_url_categories": {
       "Gambling": "www.online-casino-world.com",

@@ -2,37 +2,67 @@
 
 **Dataset:** `cisco_firepower_raw`
 **Transport:** Syslog (TCP)
-**Format:** CEF (ArcSight Common Event Format)
+**Format:** CEF, as written by Cisco's eStreamer eNcore client
 
-Simulates Cisco FTD/FMC (Firepower Threat Defense / Firepower Management Center) CEF syslog events for the XSIAM `cisco_firepower_raw` dataset. XSIAM auto-parses `cefDeviceVendor="Cisco"` and `cefDeviceProduct="Firepower"` from the CEF header. The `CiscoFirepower_1_3.xif` XIF rule then maps CEF extension fields to XDM. Syslog PRI is `<13>` (facility local0 + informational). The CEF SignatureID (position 4) carries the FTD syslog ID.
+Simulates the CEF that Cisco's eStreamer eNcore client writes for FMC events, which the
+Cortex Cisco Firepower pack ingests into `cisco_firepower_raw` (the pack's "CEF via
+eStreamer" path; its other path, raw FTD syslog, is a different format). The reference is
+eNcore's CEF adapter, `estreamer/adapters/cef.py` in `CiscoSecurity/fp-05-firepower-cef-connector-arcsight`.
+The pack's modeling rule `CiscoFirepower_2_11` maps the extension keys to XDM.
 
-### CEF Syslog IDs
+### Line format
 
-| Syslog ID | Event Type |
+`<13>{now} {eNcore host} CEF:0|Cisco|Firepower|6.0|<sig id>|<name>|<severity>|<extension>`
+
+- The syslog header is eNcore's own: the time it wrote the line and the eNcore server's
+  hostname (`firepower_config.encore_hostname`, default `encore-01`), not the FTD. The
+  FTD's name is `dvchost`.
+- Extension keys are sorted. Empty and zero values are dropped. Values are escaped the
+  way eNcore does it: backslash, `"`, `]` and `|`.
+- `rt`, `start` and `end` are whole seconds × 1000 (eStreamer timestamps are seconds).
+- `deviceExternalId` is the FMC's numeric device id (`firepower_config.device_id`).
+
+| Record | Sig id | Name |
+|---|---|---|
+| Connection (71) | `RNA:1003:1` | `CONNECTION STATISTICS` |
+| Intrusion (400) | `INTRUSION:400:<gid>:<sid>` | The rule message |
+| File (500) | `File:500:1` | `File Event` |
+| File Malware (502) | `FileMalware:502:1` | `File Malware Event` |
+| Malware (125) | `FireAMP:125:1` | `FireAMP Event` |
+
+### Fields per record
+
+The formatter (`_fp_encore_fields`) keeps only the keys eNcore can write for the record
+(`_FP_ENCORE_KEYS`) and always writes eNcore's constant labels, whatever a generator
+built:
+
+| Record | Keys | Always-present labels |
+|---|---|---|
+| Connection (71) | `src dst spt dpt proto act reason app requestClientApplication suser cs1`–`cs5 deviceInbound/OutboundInterface bytesIn bytesOut rt start end request destinationDnsDomain externalId dvcpid dvchost deviceExternalId`, plus `msg` (kept for hunting; not an eNcore key) | `cs1Label=fwPolicy cs2Label=fwRule cs3Label=ingressZone cs4Label=egressZone cs5Label=secIntelCategory` |
+| Intrusion (400) | `src dst spt dpt proto act app requestClientApplication suser cat cn2 cs1`–`cs6 deviceInbound/OutboundInterface rt start externalId dvcpid dvchost deviceExternalId` | `cs1Label=fwPolicy cs2Label=fwRule cs3Label=ingressZone cs4Label=egressZone cs5Label=ipsPolicy cs6Label=ruleId cn1Label=vlan cn2Label=impact` |
+| File / File Malware (500/502) | `src dst spt dpt proto act app requestClientApplication suser fname fileHash fileType fsize deviceDirection request cs1`–`cs3 rt start dvcpid dvchost deviceExternalId` | `cs1Label=filePolicy cs2Label=disposition cs3Label=speroDisposition` |
+| Malware (125) | as eNcore 125, incl. `outcome` (malware event type) and `deviceDirection` | `cs1Label=policy cs2Label=virusName cs3Label=disposition cs4Label=speroDisposition cs5Label=eventDescription` |
+
+Not in eNcore, so never sent: `shost`, `dhost`, `requestMethod`, `cs6` URL reputation,
+`cnt`, `outcome` and `deviceDirection` on connections, `duser` outside 125, `msg` on
+intrusion events. `xdm.event.outcome` and `xdm.source.host.hostname` are therefore empty.
+
+### Field values
+
+| Field | Value |
 |---|---|
-| `430002` | Connection Statistics (allow/block) |
-| `430001` | Intrusion Prevention System (IPS) |
-| `411002` | AMP File / Malware detection |
-| `410001` | URL Filtering block |
-| `430005` | Security Intelligence (DNS block) |
-
-### Hunt-Relevant Extra Fields
-
-These fields are not modeled by `CiscoFirepower_1_3.xif` but are preserved in the raw dataset and available for custom detection rules and threat hunting:
-
-| Field | Description |
-|---|---|
-| `msg` | Human-readable event description on connection events; key field for free-text hunting searches. Intrusion (400) events carry none, as eNcore emits none: the rule message is `cefName` |
-| `cs1` / `cs1Label` | Access Control Policy name: `fwPolicy` on connection/IPS/URL/secintel/SMB events, `filePolicy` on File / File Malware events, `policy` on FireAMP events |
-| `cs2` / `cs2Label` | Access-control rule (`fwRule`) on connection and intrusion events. On intrusion events it is the rule that passed the flow to the intrusion policy (`Allow_Inbound_Published_Services`), not the signature; XDM maps it to `xdm.network.rule` |
-| `cs6` / `cs6Label` | URL Reputation string on connection/URL/upload/SMB events (`cs6Label="URLReputation"`); Snort rule id (the sid) on intrusion events (`cs6Label="ruleId"`, with the intrusion policy in `cs5`/`ipsPolicy`); Disposition source on malware events (`cs6Label="DispositionSource"`) |
-| `start` / `end` | Connection start and end times in epoch milliseconds |
-| `reason` | Connection events only: eNcore's rule reason. `N/A` for a plain access-control match; a named reason such as `IP Block` or `File Block`; or the raw number for reasons eNcore has no name for (`2048` = DNS Block on Security Intelligence DNS blocks) |
-| `deviceDirection` | File (500/502) and FireAMP (125) events only: `1`=Download, `2`=Upload. Connection and intrusion events carry none |
-| `requestMethod` | HTTP method on HTTP/HTTPS events: `GET` (browsing/malware/URL), `POST`/`PUT` (uploads) |
-| `shost` | Source hostname when available from session context |
-| `dhost` | Destination hostname: malware delivery domain, blocked URL domain, or C2 domain |
-| `fsize` | File size in bytes on File, File Malware and FireAMP events |
+| `app` | Application-protocol name as Cisco's detector list spells it ([appid.cisco.com](https://appid.cisco.com/home)): `NetBIOS-ssn (SMB)`, `DCE/RPC`, `SQL Server`, `Telnet`, `AnyConnect` (RA VPN), `Microsoft WSMan` (WinRM), `RDP`, `DNS`, `HTTPS`, ... `Unknown` when FMC identified none |
+| `requestClientApplication` | FMC client name, not a user agent: `Chrome`, `Firefox`, `Safari`, `Edge`, `Internet Explorer`, `cURL`, `AnyConnect SSL Client`, or the protocol client for apps Cisco has a same-name client detector for (`SSH`, `RDP`, `SMTP`, ...). Tools Cisco has no detector for (sqlmap, Nikto, gobuster) and everything else: `Unknown` |
+| `suser` | The FMC user (`EXAMPLECORP\user`; Cisco: the username is preceded by the realm). `Unknown` when FMC has no user for the traffic (external attackers, server processes), as eNcore resolves user id 0 |
+| `reason` (71) | eNcore's rule reason: `N/A` for a plain access-control match; the number for reasons eNcore has no name for (`2048` = DNS Block on Security Intelligence DNS blocks) |
+| `cs5` (71) | Security Intelligence list, only on an SI hit: a Cisco Talos feed category (`CnC`, `Malware`, ...) |
+| `cs2` | Access-control rule on connection and intrusion events (`xdm.network.rule`); on intrusion events, the rule that passed the flow to the intrusion policy |
+| `cat` (400) | Snort classification description (`Web Application Attack`, `Attempted Information Leak`, ...). None on built-in decoder/stream rules, which carry no classtype in Snort 3 (unverified against FMC) |
+| `cs6` (400) | The Snort rule id (sid) |
+| `request` | The URL (`clientUrl`); a Security Intelligence DNS block has `destinationDnsDomain` instead |
+| `externalId` (71) | eStreamer connection counter, 16-bit |
+| `dvcpid` | Snort instance number (1–8) |
+| `deviceDirection` (500/502/125) | `1`=Download, `2`=Upload |
 
 ### Severity
 
@@ -42,26 +72,11 @@ extension key:
 | Record | Rule |
 |---|---|
 | Connection (71, `RNA:1003:1`) | `3` when the FMC rule-action id is below 4 (Pending=1, Allow=2, Trust=3), otherwise `7` (Block=4, Block with Reset=5, Interactive Block=7/8). No other value occurs. |
-| Intrusion (400) | Snort rule priority × impact level, carried as `cn2` / `cn2Label=impact`: High 10/9/7/8/9, Medium 7/6/4/5/6, Low 3/2/0/1/2 for impact 1 (Red) to 5 (Gray). |
+| Intrusion (400) | Snort rule priority × impact level, carried as `cn2` / `cn2Label=impact`: High 10/9/7/8/9, Medium 7/6/4/5/6, Low 3/2/0/1/2 for impact 1 (Red) to 5 (Gray). The priority is the rule's classtype priority (Snort 3 `default_classifications`). |
 | File (500), File Malware (502), FireAMP (125) | Threat score ÷ 10 (`0` for a clean file). |
 
 Rule-action ids come from the FMC eStreamer Integration Guide, *Access Control Rule Action
 Record Metadata*.
-
-### Fields per record
-
-eNcore writes a fixed key set for each record type, and the formatter
-(`_fp_encore_fields`) trims every event to it, whatever a generator built:
-
-| Record | Not sent |
-|---|---|
-| Connection (71) | `outcome`, `deviceDirection`, `cnt`. `reason` is forced to an eNcore value (`N/A` unless a generator sets a Cisco reason) |
-| Intrusion (400) | `outcome`, `reason`, `bytesIn`, `bytesOut`, `end`, `deviceDirection`, `cnt`, `msg` |
-| File / File Malware / FireAMP | `cnt` |
-
-`xdm.event.outcome` is therefore empty on connection and intrusion events, as with
-real eNcore data; `act` (`xdm.observer.action`) carries the action. `cnt` is in no
-eNcore record.
 
 ### Intrusion event names
 
@@ -72,9 +87,9 @@ access-control rule, and intrusion events have no `msg`.
 
 | Generator | gid | `cefName` |
 |---|---|---|
-| `ips` | 1 (text rule) | The rule message from `firepower_config.ips_rules`, e.g. `ET SCAN NMAP OS Detection Probe`; fallback `SQL union select - possible sql injection attempt - GET parameter` |
+| `ips` | 1 (text rule) | A Cisco Talos rule from the public Snort 3 community ruleset, with its real sid and classtype, e.g. `SERVER-OTHER Apache Log4j logging remote code execution attempt` (58722, attempted-user), `OS-WINDOWS Microsoft Windows SMB remote code execution attempt` (41978, attempted-admin). `firepower_config.ips_rules` may override: `{message: {"sid", "classtype", "ports"}}` |
 | `network_anomaly` | 116 / 119 / 123 / 129 / 131 | A Snort 3 built-in rule shown as `(module) message`, e.g. `(stream_tcp) SYN on established session` (129:1), `(tcp) Nmap XMAS attack detected` (116:401), `(stream_ip) teardrop attack` (123:2) |
-| scenario `log_type=ips` | 1 | The scenario's `signature`, else `SERVER-OTHER Apache Log4j logging remote code execution attempt` |
+| scenario `log_type=ips` | 1 | The scenario's `signature`, else the Talos Log4j rule; classification and sid when the message is a known Talos rule |
 
 ### File and malware events (eNcore records 500 / 502 / 125)
 
@@ -90,7 +105,8 @@ Firepower's CEF keys are fixed by Cisco's eStreamer eNcore client
 
 All three carry `fname`, `fileHash` (SHA-256), `fileType`, `fsize`, `deviceDirection`
 (eStreamer direction: `1`=Download, `2`=Upload), `dvcpid`, `src`/`dst`/`spt`/`dpt`,
-`app`, `suser`, `rt`, `start`, and `request`/`requestClientApplication` on HTTP.
+`app`, `suser`, `rt`, `start`, `requestClientApplication` (`Unknown` off HTTP) and
+`request` on HTTP.
 Severity is the threat score / 10, in the header only. Keys are written sorted, with
 no `externalId`, `msg`, zones or endpoint fields (`filePath`, `sproc`), as eNcore
 writes them. A network detection has no endpoint path or parent process.
@@ -128,6 +144,8 @@ XIF mapping: `xdm.source.interface = deviceOutboundInterface`; `xdm.target.inter
 ---
 
 ## Benign Events
+
+The *Key Fields* columns below describe what each generator builds; *Line format* and *Fields per record* above decide what is sent (for example `cs6`, `dhost` and `_syslog_id` never reach the wire, and `app=SMB` goes out as `NetBIOS-ssn (SMB)`).
 
 Benign events are dispatched from `_generate_benign_log` with roll-based proportions. The `_base_fields` helper sets the zone/interface defaults for all events. `_conn_timing` generates `start`/`end` epoch-millisecond timestamps.
 
